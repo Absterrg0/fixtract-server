@@ -2150,3 +2150,131 @@ export const sendWarrantyProposalSentEmail = async (
   });
 };
 
+const ADMIN_EMAIL_FALLBACK = (): string =>
+  process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
+
+// Cancellation request raised → admin + other party
+export const sendCancellationRequestRaisedEmail = async (params: {
+  bookingId: string;
+  requesterName: string;
+  requesterRole: 'customer' | 'professional';
+  reason: string;
+  otherPartyEmail?: string;
+  otherPartyName?: string;
+}): Promise<boolean> => {
+  const { bookingId, requesterName, requesterRole, reason, otherPartyEmail, otherPartyName } = params;
+  const link = buildBookingLink(bookingId);
+  const safeReason = escapeHtml(reason || 'No reason provided');
+  const adminEmail = ADMIN_EMAIL_FALLBACK();
+
+  const buildContent = (greeting: string, body: string) => `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Cancellation Request')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">${greeting}</h2>
+        <p style="color: #666; line-height: 1.6;">${body}</p>
+        <div style="background: #fff3cd; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${safeReason}</p>
+        </div>
+        ${buildEmailButton(link, 'View Booking', '#f59e0b')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+
+  const meta = { template: 'cancellation_request_raised', relatedBooking: bookingId };
+
+  if (!adminEmail) {
+    console.error(
+      '[cancellation_request_raised] ADMIN_NOTIFICATIONS_EMAIL/FROM_EMAIL not configured — admin will not be notified'
+    );
+    return false;
+  }
+
+  const adminContent = buildContent(
+    'A cancellation request needs review',
+    `<strong>${escapeHtml(requesterName)}</strong> (${escapeHtml(requesterRole)}) has requested cancellation of a booking. Please review and approve or deny.`
+  );
+  const adminSent = await sendEmail(
+    adminEmail,
+    'Cancellation Request - Fixera Admin Review',
+    adminContent,
+    meta
+  );
+
+  let otherSent = true;
+  if (otherPartyEmail) {
+    const otherContent = buildContent(
+      `Hello ${escapeHtml(otherPartyName || '')},`,
+      `<strong>${escapeHtml(requesterName)}</strong> has requested cancellation of your shared booking. Our team is reviewing the request.`
+    );
+    otherSent = await sendEmail(
+      otherPartyEmail,
+      'Cancellation Request Submitted - Fixera',
+      otherContent,
+      meta
+    );
+  }
+
+  return adminSent && otherSent;
+};
+
+// Refund denied → requester
+export const sendRefundDeniedEmail = async (params: {
+  requesterEmail: string;
+  requesterName: string;
+  bookingId: string;
+  denyReason: string;
+}): Promise<boolean> => {
+  const { requesterEmail, requesterName, bookingId, denyReason } = params;
+  const safeReason = escapeHtml(denyReason || 'No reason provided');
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Refund Request Denied')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(requesterName)},</h2>
+        <p style="color: #666; line-height: 1.6;">
+          After review, your cancellation/refund request has been denied. Your booking remains active.
+        </p>
+        <div style="background: #fee2e2; border-left: 4px solid #dc2626; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${safeReason}</p>
+        </div>
+        ${buildEmailButton(buildBookingLink(bookingId), 'View Booking', '#dc2626')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(requesterEmail, 'Refund Request Denied - Fixera', content, {
+    template: 'refund_denied',
+    relatedBooking: bookingId,
+  });
+};
+
+// Dispute SLA breached → admin only
+export const sendDisputeSlaBreachedEmail = async (params: {
+  bookingId: string;
+  raisedAt: Date;
+  hoursOverdue: number;
+}): Promise<boolean> => {
+  const { bookingId, raisedAt, hoursOverdue } = params;
+  const adminEmail = ADMIN_EMAIL_FALLBACK();
+  if (!adminEmail) return false;
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Dispute SLA Breached')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">A dispute has missed its SLA</h2>
+        <p style="color: #666; line-height: 1.6;">
+          A dispute raised on <strong>${escapeHtml(raisedAt.toISOString())}</strong> is now <strong>${escapeHtml(String(Math.floor(hoursOverdue)))}</strong> hour(s) past its resolution SLA and still unresolved.
+        </p>
+        ${buildEmailButton(buildBookingLink(bookingId), 'Resolve Dispute', '#dc2626')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(adminEmail, 'Dispute SLA Breached - Fixera Admin', content, {
+    template: 'dispute_sla_breached',
+    relatedBooking: bookingId,
+  });
+};
+

@@ -6,10 +6,15 @@ export interface IConversationLabel {
   color?: string;
 }
 
+export type ConversationType = "direct" | "support";
+
 export interface IConversation extends Document {
   _id: Types.ObjectId;
-  customerId: Types.ObjectId;
-  professionalId: Types.ObjectId;
+  type: ConversationType;
+  customerId?: Types.ObjectId;
+  professionalId?: Types.ObjectId;
+  supportAdminId?: Types.ObjectId;
+  supportTargetUserId?: Types.ObjectId;
   initiatedBy: Types.ObjectId;
   status: "active" | "archived";
   starredBy: Types.ObjectId[];
@@ -26,15 +31,39 @@ export interface IConversation extends Document {
 
 const ConversationSchema = new Schema<IConversation>(
   {
+    type: {
+      type: String,
+      enum: ["direct", "support"],
+      default: "direct",
+      required: true,
+    },
     customerId: {
       type: Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      required: function (this: IConversation) {
+        return this.type === "direct";
+      },
     },
     professionalId: {
       type: Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      required: function (this: IConversation) {
+        return this.type === "direct";
+      },
+    },
+    supportAdminId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: function (this: IConversation) {
+        return this.type === "support";
+      },
+    },
+    supportTargetUserId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: function (this: IConversation) {
+        return this.type === "support";
+      },
     },
     initiatedBy: {
       type: Schema.Types.ObjectId,
@@ -95,11 +124,32 @@ const ConversationSchema = new Schema<IConversation>(
   { timestamps: true }
 );
 
+ConversationSchema.pre("validate", function (next) {
+  if (
+    this.type === "support" &&
+    this.supportAdminId &&
+    this.supportTargetUserId &&
+    this.supportAdminId.toString() === this.supportTargetUserId.toString()
+  ) {
+    this.invalidate(
+      "supportTargetUserId",
+      "supportAdminId and supportTargetUserId must be different users"
+    );
+  }
+  next();
+});
+
 ConversationSchema.index({ customerId: 1, lastMessageAt: -1 });
 ConversationSchema.index({ professionalId: 1, lastMessageAt: -1 });
 ConversationSchema.index(
   { customerId: 1, professionalId: 1 },
-  { unique: true }
+  { unique: true, partialFilterExpression: { type: "direct" } }
+);
+ConversationSchema.index({ supportTargetUserId: 1, lastMessageAt: -1 });
+ConversationSchema.index({ supportAdminId: 1, lastMessageAt: -1 });
+ConversationSchema.index(
+  { supportAdminId: 1, supportTargetUserId: 1 },
+  { unique: true, partialFilterExpression: { type: "support" } }
 );
 ConversationSchema.index({ starredBy: 1 });
 ConversationSchema.index({ archivedBy: 1 });

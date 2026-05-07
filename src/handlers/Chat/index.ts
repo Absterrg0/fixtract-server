@@ -37,6 +37,11 @@ const getIdString = (value: unknown): string => {
 };
 
 const isConversationParticipant = (conversation: any, userId: string) => {
+  if (conversation.type === "support") {
+    const supportAdminId = getIdString(conversation.supportAdminId);
+    const targetUserId = getIdString(conversation.supportTargetUserId);
+    return supportAdminId === userId || targetUserId === userId;
+  }
   const customerId = getIdString(conversation.customerId);
   const professionalId = getIdString(conversation.professionalId);
   return customerId === userId || professionalId === userId;
@@ -202,12 +207,17 @@ export const listMyConversations = async (
   const filter = typeof req.query.filter === "string" ? req.query.filter : "all";
 
   const userOid = toObjectId(userId);
-  const baseQuery: Record<string, any> =
-    userRole === "customer"
-      ? { customerId: userOid }
-      : { professionalId: userOid };
+  const directParticipantField = userRole === "customer" ? "customerId" : "professionalId";
+  const baseQuery: Record<string, any> = {
+    $or: [
+      { [directParticipantField]: userOid },
+      { type: "support", supportTargetUserId: userOid },
+    ],
+  };
 
   const unreadField = userRole === "customer" ? "customerUnreadCount" : "professionalUnreadCount";
+  // Support chats route the targeted user to the customer-side counter regardless of their role
+  const supportUnreadField = "customerUnreadCount";
 
   if (filter === "archived") {
     baseQuery.archivedBy = userOid;
@@ -215,7 +225,9 @@ export const listMyConversations = async (
     baseQuery.starredBy = userOid;
     baseQuery.archivedBy = { $ne: userOid };
   } else if (filter === "unread") {
-    baseQuery[unreadField] = { $gt: 0 };
+    baseQuery.$and = [
+      { $or: [{ [unreadField]: { $gt: 0 } }, { type: "support", [supportUnreadField]: { $gt: 0 } }] },
+    ];
     baseQuery.archivedBy = { $ne: userOid };
   } else if (filter.startsWith("label:")) {
     const labelName = filter.slice(6);
@@ -230,6 +242,8 @@ export const listMyConversations = async (
     Conversation.find(baseQuery)
       .populate("customerId", "name email username businessInfo profileImage")
       .populate("professionalId", "name email username businessInfo profileImage")
+      .populate("supportAdminId", "name email")
+      .populate("supportTargetUserId", "name email")
       .sort({ lastMessageAt: -1, updatedAt: -1 })
       .skip(skip)
       .limit(limit),
@@ -275,7 +289,9 @@ export const getConversationMessages = async (
 
   const conversation = await Conversation.findById(conversationId)
     .populate("customerId", "name email username businessInfo profileImage")
-    .populate("professionalId", "name email username businessInfo profileImage");
+    .populate("professionalId", "name email username businessInfo profileImage")
+    .populate("supportAdminId", "name email")
+    .populate("supportTargetUserId", "name email");
 
   if (!conversation) {
     return res.status(404).json({ success: false, msg: "Conversation not found" });
@@ -413,10 +429,10 @@ export const sendMessage = async (req: Request, res: Response) => {
     return res.status(400).json({ success: false, msg: "A message can include at most 5 images" });
   }
 
-  if (userRole !== "customer" && userRole !== "professional") {
+  if (userRole !== "customer" && userRole !== "professional" && userRole !== "admin") {
     return res.status(403).json({
       success: false,
-      msg: "Only customers and professionals can send chat messages",
+      msg: "Only customers, professionals, and admins can send chat messages",
     });
   }
 
@@ -431,11 +447,16 @@ export const sendMessage = async (req: Request, res: Response) => {
 
   const professionalId = getIdString(conversation.professionalId);
   const customerId = getIdString(conversation.customerId);
-  let senderRole: "professional" | "customer";
-  if (userId === professionalId) {
+  const supportAdminId = getIdString(conversation.supportAdminId);
+  let senderRole: "professional" | "customer" | "admin";
+  if (conversation.type === "support" && userId === supportAdminId) {
+    senderRole = "admin";
+  } else if (userId === professionalId) {
     senderRole = "professional";
   } else if (userId === customerId) {
     senderRole = "customer";
+  } else if (conversation.type === "support") {
+    senderRole = userRole === "professional" ? "professional" : "customer";
   } else {
     console.warn(`sendMessage: userId ${userId} does not match conversation participants (customer: ${customerId}, professional: ${professionalId}), falling back to userRole`);
     senderRole = userRole === "professional" ? "professional" : "customer";
@@ -466,7 +487,10 @@ export const sendMessage = async (req: Request, res: Response) => {
   });
 
   const preview = buildMessagePreview(text, images, attachments);
-  const isCustomerSender = customerId === userId;
+  const targetUserId = getIdString(conversation.supportTargetUserId);
+  const isUserSenderInSupport = conversation.type === "support" && userId === targetUserId;
+  const isCustomerSender =
+    conversation.type === "support" ? isUserSenderInSupport : customerId === userId;
 
   const updateSet: Record<string, unknown> = {
     lastMessageAt: new Date(),
@@ -520,7 +544,9 @@ export const markConversationRead = async (
     return res.status(403).json({ success: false, msg: "Not allowed to access this conversation" });
   }
 
-  const isCustomer = conversation.customerId.toString() === userId;
+  const isCustomer = conversation.type === "support"
+    ? getIdString(conversation.supportTargetUserId) === userId
+    : conversation.customerId?.toString() === userId;
   const fieldToReset = isCustomer ? "customerUnreadCount" : "professionalUnreadCount";
   await Conversation.findByIdAndUpdate(conversationId, {
     $set: { [fieldToReset]: 0 },
@@ -638,7 +664,9 @@ export const getConversationInfo = async (req: Request, res: Response) => {
 
   const conversation = await Conversation.findById(conversationId)
     .populate("customerId", "name email username businessInfo profileImage createdAt")
-    .populate("professionalId", "name email username businessInfo profileImage createdAt");
+    .populate("professionalId", "name email username businessInfo profileImage createdAt")
+    .populate("supportAdminId", "name email")
+    .populate("supportTargetUserId", "name email");
 
   if (!conversation) {
     return res.status(404).json({ success: false, msg: "Conversation not found" });
@@ -646,6 +674,16 @@ export const getConversationInfo = async (req: Request, res: Response) => {
 
   if (!isConversationParticipant(conversation, userId)) {
     return res.status(403).json({ success: false, msg: "Not allowed to access this conversation" });
+  }
+
+  if (conversation.type === "support") {
+    return res.status(200).json({
+      success: true,
+      data: {
+        conversation,
+        stats: null,
+      },
+    });
   }
 
   const customerId = getIdString(conversation.customerId);

@@ -70,6 +70,7 @@ import {
 } from "../../handlers/Admin/favoritesAdmin";
 import { runWarrantyClaimChecks } from "../../utils/warrantyClaimScheduler";
 import { runRfqDeadlineCheck } from "../../utils/rfqDeadlineScheduler";
+import { runDisputeSlaCheck } from "../../utils/disputeSlaScheduler";
 import {
   listCmsContent,
   getCmsContentById,
@@ -99,6 +100,21 @@ import {
   adminUpdateMeetingRequest,
 } from "../../handlers/Admin/support";
 import { listEmailLogs } from "../../handlers/Admin/emailLogs";
+import {
+  listCancellationRequests,
+  getCancellationRequest,
+  approveCancellationRequest,
+  denyCancellationRequest,
+} from "../../handlers/Admin/cancellationRequests";
+import {
+  listChatReports,
+  getChatReport,
+  resolveChatReport,
+  adminGetConversation,
+  adminGetConversationMessages,
+  adminStartSupportChat,
+} from "../../handlers/Admin/chatModeration";
+import { getAdminBookingDetail } from "../../handlers/Admin/bookingDetail";
 
 const adminRouter = Router();
 
@@ -204,6 +220,23 @@ adminRouter.route('/cms/:id').get(getCmsContentById).put(updateCmsContent).delet
 // Email logs
 adminRouter.route('/email-logs').get(listEmailLogs);
 
+// Cancellation requests
+adminRouter.route('/cancellation-requests').get(listCancellationRequests);
+adminRouter.route('/cancellation-requests/:id').get(getCancellationRequest);
+adminRouter.route('/cancellation-requests/:id/approve').post(approveCancellationRequest);
+adminRouter.route('/cancellation-requests/:id/deny').post(denyCancellationRequest);
+
+// Booking detail (consolidated)
+adminRouter.route('/bookings/:id/full').get(getAdminBookingDetail);
+
+// Chat moderation
+adminRouter.route('/chat-reports').get(listChatReports);
+adminRouter.route('/chat-reports/:id').get(getChatReport);
+adminRouter.route('/chat-reports/:id/resolve').post(resolveChatReport);
+adminRouter.route('/conversations/:id').get(adminGetConversation);
+adminRouter.route('/conversations/:id/messages').get(adminGetConversationMessages);
+adminRouter.route('/chat/start-support').post(adminStartSupportChat);
+
 // Manual scheduler triggers
 adminRouter.route('/run-warranty-checks').post(async (_req, res) => {
   try {
@@ -222,6 +255,16 @@ adminRouter.route('/run-rfq-checks').post(async (_req, res) => {
   } catch (error: any) {
     console.error('[Admin] Manual RFQ check failed:', error);
     return res.status(500).json({ success: false, msg: 'RFQ deadline check failed' });
+  }
+});
+
+adminRouter.route('/run-dispute-sla-check').post(async (_req, res) => {
+  try {
+    const result = await runDisputeSlaCheck();
+    return res.json({ success: true, data: result });
+  } catch (error: any) {
+    console.error('[Admin] Manual dispute SLA check failed:', error);
+    return res.status(500).json({ success: false, msg: 'Dispute SLA check failed' });
   }
 });
 

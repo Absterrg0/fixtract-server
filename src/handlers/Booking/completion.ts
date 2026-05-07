@@ -27,6 +27,7 @@ import {
   sendCustomerConfirmedCompletionEmail,
   sendDisputeRaisedEmail,
 } from '../../utils/emailService';
+import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 
 const ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
@@ -765,6 +766,7 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
     }
 
     const disputedAt = new Date();
+    const slaDeadline = new Date(disputedAt.getTime() + DISPUTE_SLA_HOURS * 60 * 60 * 1000);
     const disputedBooking = await Booking.findOneAndUpdate(
       { _id: booking._id, status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
       {
@@ -776,6 +778,7 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
             reason,
             description: description || '',
             raisedAt: disputedAt,
+            slaDeadline,
           }
         },
         $push: {

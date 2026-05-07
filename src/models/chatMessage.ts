@@ -47,7 +47,7 @@ export interface IChatMessage extends Document {
   _id: Types.ObjectId;
   conversationId: Types.ObjectId;
   senderId: Types.ObjectId;
-  senderRole: "customer" | "professional" | "system";
+  senderRole: "customer" | "professional" | "system" | "admin";
   messageType: ChatMessageType;
   text?: string;
   images: string[];
@@ -76,7 +76,7 @@ const ChatMessageSchema = new Schema<IChatMessage>(
     },
     senderRole: {
       type: String,
-      enum: ["customer", "professional", "system"],
+      enum: ["customer", "professional", "system", "admin"],
       required: true,
     },
     messageType: {

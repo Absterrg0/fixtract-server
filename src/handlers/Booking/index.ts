@@ -10,7 +10,8 @@ import {
 } from "../../utils/scheduleEngine";
 import { presignS3Url, uploadToS3, generateFileName } from "../../utils/s3Upload";
 import { resolveSubprojectIndex } from "../../utils/bookingHelpers";
-import { sendBookingCancelledEmail } from "../../utils/emailService";
+import { sendBookingCancelledEmail, sendCancellationRequestRaisedEmail } from "../../utils/emailService";
+import CancellationRequest from "../../models/cancellationRequest";
 
 const presignMaybeS3Url = async (url?: string | null) => {
   if (!url) return url;
@@ -1230,84 +1231,128 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
   }
 };
 
-// Cancel booking
+// Cancel booking — creates a pending CancellationRequest. Admin must approve to actually cancel + refund.
 export const cancelBooking = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user?._id ? req.user._id.toString() : undefined;
     const { bookingId } = req.params;
     const { reason } = req.body;
 
-    if (!reason) {
+    if (!userId) {
+      return res.status(401).json({ success: false, msg: "Authentication required" });
+    }
+
+    if (typeof reason !== 'string' || !reason.trim() || reason.trim().length > 1000) {
       return res.status(400).json({
         success: false,
-        msg: "Cancellation reason is required"
+        msg: "Cancellation reason is required (max 1000 characters)"
       });
     }
+    const trimmedReason = reason.trim();
 
     const booking = await Booking.findById(bookingId);
     if (!booking) {
-      return res.status(404).json({
-        success: false,
-        msg: "Booking not found"
-      });
+      return res.status(404).json({ success: false, msg: "Booking not found" });
     }
 
-    // Check authorization
     const isCustomer = booking.customer.toString() === userId;
     const isProfessional = booking.professional?.toString() === userId;
 
     if (!isCustomer && !isProfessional) {
       return res.status(403).json({
         success: false,
-        msg: "You do not have permission to cancel this booking"
+        msg: "You do not have permission to request cancellation for this booking"
       });
     }
 
-    // Cannot cancel completed bookings
-    if (booking.status === 'completed') {
+    if (['completed', 'cancelled', 'refunded'].includes(booking.status)) {
       return res.status(400).json({
         success: false,
-        msg: "Cannot cancel completed bookings"
+        msg: `Cannot request cancellation for booking with status '${booking.status}'`
       });
     }
 
-    booking.cancellation = {
-      cancelledBy: new mongoose.Types.ObjectId(userId),
-      reason,
-      cancelledAt: new Date()
-    };
+    const existingPending = await CancellationRequest.findOne({
+      booking: booking._id,
+      status: { $in: ['pending', 'processing'] },
+    });
+    if (existingPending) {
+      return res.status(409).json({
+        success: false,
+        msg: "A cancellation request is already pending admin review for this booking"
+      });
+    }
 
-    await (booking as any).updateStatus('cancelled', userId, `Booking cancelled: ${reason}`);
+    const requestedRole: 'customer' | 'professional' = isCustomer ? 'customer' : 'professional';
+    const cancellationRequest = await CancellationRequest.create({
+      booking: booking._id,
+      requestedBy: new mongoose.Types.ObjectId(userId),
+      requestedRole,
+      reason: trimmedReason,
+      status: 'pending',
+    });
 
     try {
       const [customerUser, professionalUser] = await Promise.all([
         booking.customer ? User.findById(booking.customer).select('email name').lean() : null,
         booking.professional ? User.findById(booking.professional).select('email name').lean() : null,
       ]);
-      if (customerUser?.email && professionalUser?.email) {
-        const cancelledBy: 'customer' | 'professional' = isCustomer ? 'customer' : 'professional';
-        await sendBookingCancelledEmail(
-          customerUser.email,
-          professionalUser.email,
-          customerUser.name || 'Customer',
-          professionalUser.name || 'Professional',
-          reason,
-          cancelledBy,
-          String(booking._id)
-        );
-      }
+      const requesterName = isCustomer
+        ? customerUser?.name || 'Customer'
+        : professionalUser?.name || 'Professional';
+      const otherPartyEmail = isCustomer ? professionalUser?.email : customerUser?.email;
+      const otherPartyName = isCustomer
+        ? professionalUser?.name || 'Professional'
+        : customerUser?.name || 'Customer';
+
+      await sendCancellationRequestRaisedEmail({
+        bookingId: String(booking._id),
+        requesterName,
+        requesterRole: requestedRole,
+        reason: trimmedReason,
+        otherPartyEmail: otherPartyEmail || undefined,
+        otherPartyName,
+      });
     } catch (emailError: any) {
-      console.error('Failed to send booking-cancelled email:', emailError?.message || emailError);
+      console.error('Failed to send cancellation-request-raised email:', emailError?.message || emailError);
     }
 
-    return res.status(200).json({
+    return res.status(201).json({
       success: true,
-      msg: "Booking cancelled successfully",
-      booking
+      msg: "Cancellation request submitted for admin review",
+      cancellationRequest,
     });
-
   } catch (error: any) {
     console.error('Cancel booking error:', error);
+    next(error);
+  }
+};
+
+// List disputes raised by or against the current user
+export const getMyDisputes = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user?._id ? req.user._id.toString() : undefined;
+    if (!userId) {
+      return res.status(401).json({ success: false, msg: "Unauthorized" });
+    }
+
+    const objectUserId = new mongoose.Types.ObjectId(userId);
+    const bookings = await Booking.find({
+      status: { $in: ['dispute', 'completed', 'cancelled', 'refunded'] },
+      'dispute.raisedAt': { $exists: true },
+      $or: [{ customer: objectUserId }, { professional: objectUserId }],
+    })
+      .select('bookingNumber status dispute customer professional project payment scheduledStartDate')
+      .populate('customer', 'name')
+      .populate('professional', 'name')
+      .populate('project', 'title')
+      .sort({ 'dispute.raisedAt': -1 })
+      .limit(100)
+      .lean();
+
+    return res.json({ success: true, data: { items: bookings } });
+  } catch (error: any) {
+    console.error('Get my disputes error:', error);
     next(error);
   }
 };

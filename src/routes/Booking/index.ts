@@ -3,6 +3,7 @@ import {
   createBooking,
   getMyBookings,
   getMyPayments,
+  getMyDisputes,
   getBookingById,
   submitPostBookingAnswers,
   submitQuote,
@@ -46,6 +47,9 @@ router.get('/my-bookings', getMyBookings);
 
 // Get payment history for current customer
 router.get('/my-payments', getMyPayments);
+
+// Get disputes for the current user (customer or professional party)
+router.get('/disputes/mine', getMyDisputes);
 
 // Get single booking by ID
 router.get('/:bookingId', getBookingById);

@@ -1,0 +1,1 @@
+export const MAX_RESCHEDULES_PER_BOOKING = 3;
