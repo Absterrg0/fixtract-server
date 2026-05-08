@@ -68,7 +68,6 @@ export const auditAdmin = (req: Request, res: Response, next: NextFunction): voi
       if ((req as any).__auditLogged) return;
 
       const statusCode = res.statusCode;
-      if (statusCode >= 500) return;
       if (statusCode === 404) return;
 
       const actorUser = (req as any).user || (req as any).admin;
