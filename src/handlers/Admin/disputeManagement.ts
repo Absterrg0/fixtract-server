@@ -13,6 +13,7 @@ import {
   markMilestonesCompleted,
 } from '../../utils/bookingHelpers';
 import { sendDisputeResolvedEmail } from '../../utils/emailService';
+import { auditLog } from '../../utils/auditLogger';
 
 const ACTIVE_DISPUTE_STATUS: BookingStatus = 'dispute';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
@@ -365,6 +366,23 @@ export const resolveDispute = async (req: Request, res: Response) => {
       console.error('Failed to send dispute-resolved email:', emailError?.message || emailError);
     }
 
+    await auditLog({
+      req,
+      action: 'admin.disputes.resolve',
+      targetType: 'Booking',
+      targetId: resolvedBooking._id,
+      details: {
+        action,
+        resolution,
+        adjustedAmount: typeof adjustedAmount === 'number' ? adjustedAmount : undefined,
+        finalExtraCostAmount,
+        before: { status: ACTIVE_DISPUTE_STATUS },
+        after: { status: COMPLETED_BOOKING_STATUS },
+      },
+      status: 'success',
+      statusCode: 200,
+    });
+
     return res.json({
       success: true,
       data: {
@@ -374,6 +392,15 @@ export const resolveDispute = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error resolving dispute:', error);
+    await auditLog({
+      req,
+      action: 'admin.disputes.resolve',
+      targetType: 'Booking',
+      targetId: req.params.bookingId,
+      status: 'failure',
+      statusCode: 500,
+      errorMessage: error?.message || 'unknown',
+    });
     return res.status(500).json({
       success: false,
       error: { code: 'SERVER_ERROR', message: 'Failed to resolve dispute' }
