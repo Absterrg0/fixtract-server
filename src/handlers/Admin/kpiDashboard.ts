@@ -5,6 +5,9 @@ import User from '../../models/user';
 import WarrantyClaim from '../../models/warrantyClaim';
 import ServiceView from '../../models/serviceView';
 import { buildCsv } from '../../utils/csv';
+import { STRIPE_CONFIG } from '../../services/stripe';
+
+const REPORTING_CURRENCY = STRIPE_CONFIG.defaultCurrency || 'EUR';
 
 interface DateRange { from: Date; to: Date; }
 
@@ -90,12 +93,12 @@ export const getKpiSummary = async (req: Request, res: Response) => {
             completedBookings: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
             grossRevenue: {
               $sum: {
-                $cond: [{ $eq: ['$status', 'completed'] }, { $ifNull: ['$payment.amount', 0] }, 0],
+                $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.amount', 0] }, 0],
               },
             },
             platformRevenue: {
               $sum: {
-                $cond: [{ $eq: ['$status', 'completed'] }, { $ifNull: ['$payment.platformCommission', 0] }, 0],
+                $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.platformCommission', 0] }, 0],
               },
             },
           },
@@ -151,6 +154,7 @@ export const getKpiSummary = async (req: Request, res: Response) => {
       success: true,
       data: {
         range: { from: from.toISOString(), to: to.toISOString() },
+        reportingCurrency: REPORTING_CURRENCY,
         signUps,
         totalBookings,
         completedBookings: bs.completedBookings || 0,
@@ -312,7 +316,7 @@ export const getKpiByRegion = async (req: Request, res: Response) => {
 
     rows.sort((a, b) => b.bookedValue - a.bookedValue || b.totalBookings - a.totalBookings);
 
-    return res.json({ success: true, data: { range: { from, to }, rows } });
+    return res.json({ success: true, data: { range: { from, to }, reportingCurrency: REPORTING_CURRENCY, rows } });
   } catch (error: any) {
     console.error('KPI by-region error:', error);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to compute KPI by region' } });
@@ -397,39 +401,29 @@ export const getKpiByService = async (req: Request, res: Response) => {
       },
     ]);
 
-    const byService = new Map<string, any>();
-    const ensure = (key: string) => {
-      if (!byService.has(key)) {
-        byService.set(key, {
-          service: key,
-          views: 0,
-          totalRfqs: 0,
-          quotedCount: 0,
-          bookingsCount: 0,
-          avgTtfqHours: null as number | null,
-        });
-      }
-      return byService.get(key);
-    };
+    const serviceViews = viewRows
+      .map((r: any) => ({ serviceId: String(r._id || ''), views: r.views }))
+      .sort((a, b) => b.views - a.views);
 
-    for (const r of viewRows) ensure(String(r._id || '').toLowerCase()).views = r.views;
-    for (const r of bookingRows) {
-      const row = ensure(String(r._id || '').toLowerCase());
-      row.totalRfqs = r.totalRfqs;
-      row.quotedCount = r.quotedCount;
-      row.bookingsCount = r.bookingsCount;
-      row.avgTtfqHours = r.avgTtfqHours != null ? Math.round(r.avgTtfqHours * 10) / 10 : null;
-    }
+    const serviceBookings = bookingRows
+      .map((r: any) => ({
+        serviceType: String(r._id || ''),
+        totalRfqs: r.totalRfqs,
+        quotedCount: r.quotedCount,
+        bookingsCount: r.bookingsCount,
+        avgTtfqHours: r.avgTtfqHours != null ? Math.round(r.avgTtfqHours * 10) / 10 : null,
+        quotationConversionRate: Math.round(safeRate(r.bookingsCount, r.quotedCount) * 10) / 10,
+      }))
+      .sort((a, b) => b.bookingsCount - a.bookingsCount || b.totalRfqs - a.totalRfqs);
 
-    const rows = Array.from(byService.values()).map((r) => ({
-      ...r,
-      viewsToBookingRate: Math.round(safeRate(r.bookingsCount, r.views) * 10) / 10,
-      quotationConversionRate: Math.round(safeRate(r.bookingsCount, r.quotedCount) * 10) / 10,
-    }));
-
-    rows.sort((a, b) => b.bookingsCount - a.bookingsCount || b.views - a.views);
-
-    return res.json({ success: true, data: { range: { from, to }, rows } });
+    return res.json({
+      success: true,
+      data: {
+        range: { from, to },
+        serviceViews,
+        serviceBookings,
+      },
+    });
   } catch (error: any) {
     console.error('KPI by-service error:', error);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to compute KPI by service' } });
@@ -533,9 +527,14 @@ export const exportKpiCsv = async (req: Request, res: Response) => {
       rows = data.map((r: any) => [r.city, r.signUps, r.views, r.totalBookings, r.completedBookings, r.bookedValue.toFixed(2), r.platformRevenue.toFixed(2), r.quotationConversionRate, r.disputeRate, r.warrantyClaimRate, r.refundRate]);
     } else if (section === 'service') {
       const proxyRes = await captureJson(getKpiByService, req);
-      const data = proxyRes?.data?.rows || [];
-      headers = ['Service', 'Views', 'RFQs', 'Quotes sent', 'Bookings', 'Views→bookings (%)', 'Quotation conversion (%)', 'Avg time to first quote (h)'];
-      rows = data.map((r: any) => [r.service, r.views, r.totalRfqs, r.quotedCount, r.bookingsCount, r.viewsToBookingRate, r.quotationConversionRate, r.avgTtfqHours ?? '']);
+      const data = proxyRes?.data?.serviceBookings || [];
+      headers = ['Service type', 'RFQs', 'Quotes sent', 'Bookings', 'Quotation conversion (%)', 'Avg time to first quote (h)'];
+      rows = data.map((r: any) => [r.serviceType, r.totalRfqs, r.quotedCount, r.bookingsCount, r.quotationConversionRate, r.avgTtfqHours ?? '']);
+    } else if (section === 'service-views') {
+      const proxyRes = await captureJson(getKpiByService, req);
+      const data = proxyRes?.data?.serviceViews || [];
+      headers = ['Service slug', 'Views'];
+      rows = data.map((r: any) => [r.serviceId, r.views]);
     } else if (section === 'response') {
       const proxyRes = await captureJson(getKpiProfessionalResponse, req);
       const data = proxyRes?.data?.rows || [];

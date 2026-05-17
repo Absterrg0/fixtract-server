@@ -3,6 +3,9 @@ import Booking from '../models/booking';
 import User from '../models/user';
 import WarrantyClaim from '../models/warrantyClaim';
 import ServiceView from '../models/serviceView';
+import { STRIPE_CONFIG } from '../services/stripe';
+
+const REPORTING_CURRENCY = STRIPE_CONFIG.defaultCurrency || 'EUR';
 
 interface KpiRange { from: Date; to: Date; }
 
@@ -20,8 +23,8 @@ async function aggregateSummary({ from, to }: KpiRange) {
         $group: {
           _id: null,
           completedBookings: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
-          grossRevenue: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, { $ifNull: ['$payment.amount', 0] }, 0] } },
-          platformRevenue: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, { $ifNull: ['$payment.platformCommission', 0] }, 0] } },
+          grossRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.amount', 0] }, 0] } },
+          platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.platformCommission', 0] }, 0] } },
         },
       },
     ]),
@@ -130,8 +133,8 @@ async function aggregateByRegion({ from, to }: KpiRange) {
         $group: {
           _id: normalizeBookingCityExpr,
           totalBookings: { $sum: 1 },
-          bookedValue: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, { $ifNull: ['$payment.amount', 0] }, 0] } },
-          platformRevenue: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, { $ifNull: ['$payment.platformCommission', 0] }, 0] } },
+          bookedValue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.amount', 0] }, 0] } },
+          platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.platformCommission', 0] }, 0] } },
           disputeCount: { $sum: { $cond: [{ $ifNull: ['$dispute.raisedAt', false] }, 1, 0] } },
           refundCount: { $sum: { $cond: [{ $eq: ['$status', 'refunded'] }, 1, 0] } },
           quotedCount: {
@@ -205,24 +208,21 @@ async function aggregateByService({ from, to }: KpiRange) {
     ]),
   ]);
 
-  const byService = new Map<string, any>();
-  const ensure = (key: string) => {
-    if (!byService.has(key)) byService.set(key, { service: key, views: 0, totalRfqs: 0, bookingsCount: 0 });
-    return byService.get(key);
-  };
-  for (const r of viewRows) ensure(String(r._id || '').toLowerCase()).views = r.views;
-  for (const r of bookingRows) {
-    const row = ensure(String(r._id || '').toLowerCase());
-    row.totalRfqs = r.totalRfqs;
-    row.bookingsCount = r.bookingsCount;
-  }
-  return Array.from(byService.values())
-    .map((r) => ({
-      ...r,
-      viewsToBookingRate: round1(safeRate(r.bookingsCount, r.views)),
-    }))
-    .sort((a, b) => b.bookingsCount - a.bookingsCount || b.views - a.views)
+  const serviceViews = viewRows
+    .map((r: any) => ({ serviceId: String(r._id || ''), views: r.views }))
+    .sort((a, b) => b.views - a.views)
     .slice(0, 50);
+
+  const serviceBookings = bookingRows
+    .map((r: any) => ({
+      serviceType: String(r._id || ''),
+      totalRfqs: r.totalRfqs,
+      bookingsCount: r.bookingsCount,
+    }))
+    .sort((a, b) => b.bookingsCount - a.bookingsCount || b.totalRfqs - a.totalRfqs)
+    .slice(0, 50);
+
+  return { serviceViews, serviceBookings };
 }
 
 async function aggregateResponseTimes({ from, to }: KpiRange) {
@@ -343,12 +343,21 @@ export async function generateKpiPdf(from: Date, to: Date): Promise<Buffer> {
       );
 
       if (doc.y > doc.page.height - 200) doc.addPage();
-      doc.fontSize(13).font('Helvetica-Bold').text('By Service');
+      doc.fontSize(13).font('Helvetica-Bold').text('Most-viewed service pages');
       doc.moveDown(0.5);
       drawTable(
         doc,
-        ['Service', 'Views', 'RFQs', 'Bookings', 'Views→Booking %'],
-        serviceRows.slice(0, 40).map((r: any) => [r.service, r.views, r.totalRfqs, r.bookingsCount, r.viewsToBookingRate])
+        ['Service slug', 'Views'],
+        serviceRows.serviceViews.slice(0, 40).map((r: any) => [r.serviceId, r.views])
+      );
+
+      if (doc.y > doc.page.height - 200) doc.addPage();
+      doc.fontSize(13).font('Helvetica-Bold').text('Top booked service types');
+      doc.moveDown(0.5);
+      drawTable(
+        doc,
+        ['Service type', 'RFQs', 'Bookings'],
+        serviceRows.serviceBookings.slice(0, 40).map((r: any) => [r.serviceType, r.totalRfqs, r.bookingsCount])
       );
 
       if (doc.y > doc.page.height - 200) doc.addPage();
