@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import mongoose from 'mongoose';
 import ServiceView from '../../models/serviceView';
 import User from '../../models/user';
+import CmsContent from '../../models/cmsContent';
 
 const hashVisitor = (ip: string, userAgent: string): string =>
   crypto.createHash('sha256').update(`${ip}|${userAgent}`).digest('hex').slice(0, 32);
@@ -16,6 +17,11 @@ export const recordServiceView = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: { code: 'INVALID_SERVICE_ID', message: 'Invalid service id' } });
     }
     const serviceId = rawServiceId.toLowerCase();
+
+    const knownLanding = await CmsContent.exists({ type: 'landing', slug: serviceId, status: 'published' });
+    if (!knownLanding) {
+      return res.json({ success: true, data: { recorded: false, reason: 'unknown_service' } });
+    }
 
     const viewerId = (req as any).user?._id ? new mongoose.Types.ObjectId((req as any).user._id) : undefined;
 
