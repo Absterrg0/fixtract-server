@@ -164,7 +164,8 @@ export const uploadBufferToS3 = async (
       ContentDisposition: contentDisposition,
     });
     await s3Client.send(command);
-    return `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION || 'us-east-1'}.amazonaws.com/${key}`;
+    const encodedKey = key.split('/').map(encodeURIComponent).join('/');
+    return `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION || 'us-east-1'}.amazonaws.com/${encodedKey}`;
   } catch (error) {
     console.error('S3 buffer upload failed:', error);
     throw new Error('Failed to upload buffer to S3');

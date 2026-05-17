@@ -82,18 +82,26 @@ const normalizeBookingCityExpr = {
 const normalizeUserCityExpr = {
   $let: {
     vars: {
-      a: { $ifNull: ['$location.city', null] },
-      b: { $ifNull: ['$companyAddress.city', null] },
-      c: { $ifNull: ['$businessInfo.city', null] },
+      candidates: {
+        $filter: {
+          input: [
+            { $trim: { input: { $ifNull: ['$location.city', ''] } } },
+            { $trim: { input: { $ifNull: ['$companyAddress.city', ''] } } },
+            { $trim: { input: { $ifNull: ['$businessInfo.city', ''] } } },
+          ],
+          as: 'c',
+          cond: { $and: [{ $ne: ['$$c', null] }, { $ne: ['$$c', ''] }] },
+        },
+      },
     },
     in: {
       $let: {
-        vars: { raw: { $ifNull: [{ $ifNull: ['$$a', '$$b'] }, '$$c'] } },
+        vars: { raw: { $arrayElemAt: ['$$candidates', 0] } },
         in: {
           $cond: [
             { $or: [{ $eq: ['$$raw', null] }, { $eq: ['$$raw', ''] }] },
             '__unknown__',
-            { $toLower: { $trim: { input: '$$raw' } } },
+            { $toLower: '$$raw' },
           ],
         },
       },
@@ -259,18 +267,22 @@ const drawTable = (doc: PDFKit.PDFDocument, headers: string[], rows: (string | n
   const pageWidth = doc.page.width - startX - 50;
   const colWidth = pageWidth / headers.length;
 
-  doc.fontSize(9).font('Helvetica-Bold');
-  let y = doc.y;
-  headers.forEach((h, i) => {
-    doc.text(h, startX + i * colWidth, y, { width: colWidth - 4, lineBreak: false, ellipsis: true });
-  });
-  doc.moveTo(startX, y + 14).lineTo(startX + pageWidth, y + 14).stroke();
-  doc.moveDown(1.2);
+  const renderHeader = () => {
+    doc.fontSize(9).font('Helvetica-Bold');
+    const y = doc.y;
+    headers.forEach((h, i) => {
+      doc.text(h, startX + i * colWidth, y, { width: colWidth - 4, lineBreak: false, ellipsis: true });
+    });
+    doc.moveTo(startX, y + 14).lineTo(startX + pageWidth, y + 14).stroke();
+    doc.moveDown(1.2);
+    doc.font('Helvetica').fontSize(8);
+  };
 
-  doc.font('Helvetica').fontSize(8);
+  renderHeader();
   for (const row of rows) {
     if (doc.y > doc.page.height - 80) {
       doc.addPage();
+      renderHeader();
     }
     const rowY = doc.y;
     row.forEach((cell, i) => {

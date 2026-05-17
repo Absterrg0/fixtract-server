@@ -42,18 +42,26 @@ const normalizeCityExpr = {
 const normalizeUserCityExpr = {
   $let: {
     vars: {
-      a: { $ifNull: ['$location.city', null] },
-      b: { $ifNull: ['$companyAddress.city', null] },
-      c: { $ifNull: ['$businessInfo.city', null] },
+      candidates: {
+        $filter: {
+          input: [
+            { $trim: { input: { $ifNull: ['$location.city', ''] } } },
+            { $trim: { input: { $ifNull: ['$companyAddress.city', ''] } } },
+            { $trim: { input: { $ifNull: ['$businessInfo.city', ''] } } },
+          ],
+          as: 'c',
+          cond: { $and: [{ $ne: ['$$c', null] }, { $ne: ['$$c', ''] }] },
+        },
+      },
     },
     in: {
       $let: {
-        vars: { raw: { $ifNull: [{ $ifNull: ['$$a', '$$b'] }, '$$c'] } },
+        vars: { raw: { $arrayElemAt: ['$$candidates', 0] } },
         in: {
           $cond: [
             { $or: [{ $eq: ['$$raw', null] }, { $eq: ['$$raw', ''] }] },
             '__unknown__',
-            { $toLower: { $trim: { input: '$$raw' } } },
+            { $toLower: '$$raw' },
           ],
         },
       },
@@ -178,10 +186,10 @@ export const getKpiByRegion = async (req: Request, res: Response) => {
     ]);
 
     const viewRows = await ServiceView.aggregate([
-      { $match: { createdAt: { $gte: from, $lte: to }, city: { $ne: null } } },
+      { $match: { createdAt: { $gte: from, $lte: to } } },
       {
         $group: {
-          _id: { $cond: [{ $or: [{ $eq: ['$city', null] }, { $eq: ['$city', ''] }] }, '__unknown__', { $toLower: { $trim: { input: '$city' } } }] },
+          _id: { $cond: [{ $or: [{ $eq: ['$city', null] }, { $eq: [{ $trim: { input: { $ifNull: ['$city', ''] } } }, ''] }] }, '__unknown__', { $toLower: { $trim: { input: '$city' } } }] },
           views: { $sum: 1 },
         },
       },
@@ -224,7 +232,6 @@ export const getKpiByRegion = async (req: Request, res: Response) => {
           },
           disputeCount: { $sum: { $cond: [{ $ifNull: ['$dispute.raisedAt', false] }, 1, 0] } },
           refundCount: { $sum: { $cond: [{ $eq: ['$status', 'refunded'] }, 1, 0] } },
-          bookingIds: { $push: '$_id' },
         },
       },
     ]);
@@ -560,6 +567,10 @@ async function captureJson(handler: (req: Request, res: Response) => Promise<any
     send(payload: any) { captured = payload; return this; },
   };
   await handler(req, fakeRes);
+  if (fakeRes.statusCode >= 400 || (captured && captured.success === false)) {
+    const message = captured?.error?.message || captured?.msg || `KPI handler failed with status ${fakeRes.statusCode}`;
+    throw new Error(message);
+  }
   return captured;
 }
 

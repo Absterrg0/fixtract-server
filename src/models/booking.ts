@@ -1132,7 +1132,7 @@ BookingSchema.index({ professional: 1, status: 1, createdAt: 1 });
 BookingSchema.index({ professional: 1, 'payment.status': 1, createdAt: 1 });
 BookingSchema.index({ professional: 1, project: 1, createdAt: 1 });
 // KPI dashboard indexes
-BookingSchema.index({ 'location.city': 1, createdAt: 1, status: 1 });
+BookingSchema.index({ createdAt: 1, 'location.city': 1, status: 1 });
 BookingSchema.index({ 'dispute.raisedAt': 1 }, { sparse: true });
 
 // Helper to parse HH:mm to minutes for comparison
