@@ -123,11 +123,15 @@ import {
   exportKpiCsv,
   triggerKpiEmailReport,
 } from "../../handlers/Admin/kpiDashboard";
+import { listAuditLogs, getAuditLogStats } from "../../handlers/Admin/auditLogs";
+import { adminAnonymizeUser } from "../../handlers/Admin/userAnonymize";
+import { auditAdmin } from "../../middlewares/auditAdmin";
 
 const adminRouter = Router();
 
 // All admin routes require authentication and admin role
 adminRouter.use(requireAdmin);
+adminRouter.use(auditAdmin);
 
 // Professional management routes (must be before :professionalId param routes)
 adminRouter.route('/professionals/manage').get(listProfessionalManagement);
@@ -191,8 +195,9 @@ adminRouter.route('/disputes/analytics').get(getDisputeAnalytics);
 adminRouter.route('/disputes/:bookingId').get(getDisputeDetails);
 adminRouter.route('/disputes/:bookingId/resolve').post(resolveDispute);
 
-// User deletion route
+// User deletion route (hard delete) and GDPR anonymization
 adminRouter.route('/users/:userId').delete(deleteUser);
+adminRouter.route('/users/:userId/anonymize').put(adminAnonymizeUser);
 
 // Favorites admin routes
 adminRouter.route('/favorites/overview').get(getFavoritesOverview);
@@ -227,6 +232,10 @@ adminRouter.route('/cms/:id').get(getCmsContentById).put(updateCmsContent).delet
 
 // Email logs
 adminRouter.route('/email-logs').get(listEmailLogs);
+
+// Audit logs
+adminRouter.route('/audit-logs').get(listAuditLogs);
+adminRouter.route('/audit-logs/stats').get(getAuditLogStats);
 
 // Cancellation requests
 adminRouter.route('/cancellation-requests').get(listCancellationRequests);
