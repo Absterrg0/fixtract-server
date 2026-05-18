@@ -115,6 +115,14 @@ import {
   adminStartSupportChat,
 } from "../../handlers/Admin/chatModeration";
 import { getAdminBookingDetail } from "../../handlers/Admin/bookingDetail";
+import {
+  getKpiSummary,
+  getKpiByRegion,
+  getKpiByService,
+  getKpiProfessionalResponse,
+  exportKpiCsv,
+  triggerKpiEmailReport,
+} from "../../handlers/Admin/kpiDashboard";
 import { listAuditLogs, getAuditLogStats } from "../../handlers/Admin/auditLogs";
 import { adminAnonymizeUser } from "../../handlers/Admin/userAnonymize";
 import { auditAdmin } from "../../middlewares/auditAdmin";
@@ -276,5 +284,13 @@ adminRouter.route('/run-dispute-sla-check').post(async (_req, res) => {
     return res.status(500).json({ success: false, msg: 'Dispute SLA check failed' });
   }
 });
+
+// Monthly KPI dashboard
+adminRouter.route('/kpi/summary').get(getKpiSummary);
+adminRouter.route('/kpi/by-region').get(getKpiByRegion);
+adminRouter.route('/kpi/by-service').get(getKpiByService);
+adminRouter.route('/kpi/professional-response').get(getKpiProfessionalResponse);
+adminRouter.route('/kpi/export').get(exportKpiCsv);
+adminRouter.route('/kpi/email-report').post(triggerKpiEmailReport);
 
 export default adminRouter;
