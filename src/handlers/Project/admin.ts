@@ -103,7 +103,7 @@ export const getPendingProjects = async (req: Request, res: Response) => {
         const projectsWithProfessional = await Promise.all(
             pendingProjects.map(async (project) => {
                 const professional = await User.findById(project.professionalId).select(
-                    'name email phone businessInfo professionalStatus'
+                    'name email phone businessInfo professionalStatus username'
                 );
                 const base = {
                     ...project.toObject(),
@@ -419,7 +419,7 @@ export const getApprovedProjects = async (req: Request, res: Response) => {
         const withProfessional = await Promise.all(
             approved.map(async (project) => {
                 const professional = await User.findById(project.professionalId).select(
-                    'name email phone businessInfo professionalStatus'
+                    'name email phone businessInfo professionalStatus username'
                 );
                 const base = {
                     ...project.toObject(),

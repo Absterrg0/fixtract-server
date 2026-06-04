@@ -72,6 +72,7 @@ import {
 import { runWarrantyClaimChecks } from "../../utils/warrantyClaimScheduler";
 import { runRfqDeadlineCheck } from "../../utils/rfqDeadlineScheduler";
 import { runDisputeSlaCheck } from "../../utils/disputeSlaScheduler";
+import { runRefundNegotiationSlaCheck } from "../../utils/refundNegotiationScheduler";
 import {
   listCmsContent,
   getCmsContentById,
@@ -114,6 +115,9 @@ import {
   adminGetConversation,
   adminGetConversationMessages,
   adminStartSupportChat,
+  adminReplySupportChat,
+  adminCloseSupportChat,
+  adminGetBookingConversation,
 } from "../../handlers/Admin/chatModeration";
 import { getAdminBookingDetail } from "../../handlers/Admin/bookingDetail";
 import {
@@ -258,6 +262,9 @@ adminRouter.route('/chat-reports/:id').get(getChatReport);
 adminRouter.route('/chat-reports/:id/resolve').post(resolveChatReport);
 adminRouter.route('/conversations/:id').get(adminGetConversation);
 adminRouter.route('/conversations/:id/messages').get(adminGetConversationMessages);
+adminRouter.route('/conversations/:id/reply').post(adminReplySupportChat);
+adminRouter.route('/conversations/:id/close').post(adminCloseSupportChat);
+adminRouter.route('/bookings/:bookingId/conversation').get(adminGetBookingConversation);
 adminRouter.route('/chat/start-support').post(adminStartSupportChat);
 
 // Manual scheduler triggers
@@ -288,6 +295,16 @@ adminRouter.route('/run-dispute-sla-check').post(async (_req, res) => {
   } catch (error: any) {
     console.error('[Admin] Manual dispute SLA check failed:', error);
     return res.status(500).json({ success: false, msg: 'Dispute SLA check failed' });
+  }
+});
+
+adminRouter.route('/run-refund-sla-check').post(async (_req, res) => {
+  try {
+    const result = await runRefundNegotiationSlaCheck();
+    return res.json({ success: true, data: result });
+  } catch (error: any) {
+    console.error('[Admin] Manual refund SLA check failed:', error);
+    return res.status(500).json({ success: false, msg: 'Refund SLA check failed' });
   }
 });
 

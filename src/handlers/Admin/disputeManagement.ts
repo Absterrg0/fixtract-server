@@ -1,8 +1,10 @@
 import { Request, Response } from 'express';
 import Booking, { BookingStatus } from '../../models/booking';
 import User from '../../models/user';
+import WarrantyClaim from '../../models/warrantyClaim';
+import CancellationRequest from '../../models/cancellationRequest';
 import Conversation from '../../models/conversation';
-import { captureAndTransferPayment } from '../Stripe/payment';
+import { captureAndTransferPayment, executeRefund } from '../Stripe/payment';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
 import { generateIdempotencyKey, convertToStripeAmount } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
@@ -29,9 +31,8 @@ import {
 const ACTIVE_DISPUTE_STATUS: BookingStatus = 'dispute';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
 
-type DisputeResolutionAction = 'accept_professional' | 'reject_extra_costs' | 'adjust';
-type ForceBookingStatus = 'completed' | 'cancelled' | 'refunded' | 'in_progress';
-const FORCE_STATUS_VALUES: ForceBookingStatus[] = ['completed', 'cancelled', 'refunded', 'in_progress'];
+type ForceBookingStatus = 'completed' | 'cancelled' | 'refunded' | 'in_progress' | 'booked';
+const FORCE_STATUS_VALUES: ForceBookingStatus[] = ['completed', 'cancelled', 'refunded', 'in_progress', 'booked'];
 
 const buildDisputeFilter = (status?: string) => {
   if (status === 'resolved') {
@@ -43,31 +44,6 @@ const buildDisputeFilter = (status?: string) => {
   }
 
   return { 'dispute.raisedAt': { $exists: true } };
-};
-
-const applyExtraCostUpdate = (
-  resolvedBooking: any,
-  action: DisputeResolutionAction,
-  adjustedAmount?: number
-): number => {
-  const originalExtraCostAmount = Number(resolvedBooking.extraCostTotal || 0);
-  resolvedBooking.extraCostStatus = 'confirmed';
-
-  if (action === 'accept_professional') {
-    return originalExtraCostAmount;
-  }
-
-  if (action === 'reject_extra_costs') {
-    resolvedBooking.extraCostTotal = 0;
-    return 0;
-  }
-
-  const finalAdjustedAmount = Number(adjustedAmount);
-  resolvedBooking.extraCostTotal = finalAdjustedAmount;
-  if (resolvedBooking.dispute) {
-    resolvedBooking.dispute.adminAdjustedAmount = finalAdjustedAmount;
-  }
-  return finalAdjustedAmount;
 };
 
 const transferResolvedExtraCostIfNeeded = async (resolvedBooking: any, finalExtraCostAmount: number) => {
@@ -162,6 +138,88 @@ const transferResolvedExtraCostIfNeeded = async (resolvedBooking: any, finalExtr
   }
 };
 
+const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> => {
+  if (statusFilter === 'resolved') return [];
+
+  const [warrantyClaims, refundRequests] = await Promise.all([
+    WarrantyClaim.find({ status: { $in: ['open', 'proposal_sent', 'proposal_accepted', 'escalated'] } })
+      .populate({ path: 'booking', select: 'bookingNumber status payment project warrantyCoverage actualEndDate', populate: { path: 'project', select: 'title category service' } })
+      .populate('customer', 'name email')
+      .populate('professional', 'name email username')
+      .sort({ openedAt: -1 })
+      .limit(50)
+      .lean(),
+    CancellationRequest.find({ requestedRole: 'customer', status: 'escalated' })
+      .populate({ path: 'booking', select: 'bookingNumber status payment project actualStartDate scheduledStartDate cancellation', populate: { path: 'project', select: 'title category service' } })
+      .populate('requestedBy', 'name email')
+      .sort({ escalatedAt: -1 })
+      .limit(50)
+      .lean(),
+  ]);
+
+  const warrantyRows = warrantyClaims.map((claim: any) => {
+    const booking = claim.booking || {};
+    const hasProposal = !!claim.proposal?.proposedAt;
+    return {
+      _id: `warranty:${claim._id}`,
+      source: 'warranty',
+      readOnly: true,
+      resolveHref: '/admin/warranty-claims',
+      bookingNumber: booking.bookingNumber || claim.claimNumber || '(warranty claim)',
+      status: booking.status || 'completed',
+      customer: claim.customer,
+      professional: claim.professional,
+      project: booking.project,
+      payment: booking.payment,
+      warrantyCoverage: booking.warrantyCoverage,
+      actualEndDate: booking.actualEndDate,
+      dispute: {
+        raisedBy: claim.customer?._id || claim.customer,
+        reason: `Warranty claim: ${claim.reason}`,
+        description: claim.description,
+        raisedAt: claim.openedAt,
+        type: hasProposal ? 'warranty_resolve' : 'warranty_claim',
+        attachments: claim.evidence || [],
+        proposedResolveDate: claim.proposal?.resolveByDate,
+        resolution: claim.proposal?.message,
+      },
+      createdAt: claim.createdAt,
+    };
+  });
+
+  const refundRows = refundRequests.map((request: any) => {
+    const booking = request.booking || {};
+    return {
+      _id: `refund:${request._id}`,
+      source: 'refund',
+      readOnly: true,
+      resolveHref: '/admin/cancellation-requests',
+      bookingNumber: booking.bookingNumber || '(refund request)',
+      status: booking.status || '',
+      customer: request.requestedBy,
+      professional: undefined,
+      project: booking.project,
+      payment: booking.payment,
+      actualStartDate: booking.actualStartDate,
+      scheduledStartDate: booking.scheduledStartDate,
+      cancellation: booking.cancellation,
+      dispute: {
+        raisedBy: request.requestedBy?._id || request.requestedBy,
+        reason: 'Refund request (escalated)',
+        description: request.reason,
+        raisedAt: request.createdAt,
+        type: 'refund_request',
+        attachments: request.evidence || [],
+        negotiationDate: request.professionalRespondedAt,
+        negotiationAmount: request.counterOfferAmount,
+      },
+      createdAt: request.escalatedAt || request.createdAt,
+    };
+  });
+
+  return [...warrantyRows, ...refundRows];
+};
+
 export const getDisputes = async (req: Request, res: Response) => {
   try {
     const { status, page = '1', limit = '20' } = req.query;
@@ -185,14 +243,17 @@ export const getDisputes = async (req: Request, res: Response) => {
       Booking.countDocuments(filter),
     ]);
 
+    const externalRows = pageNum === 1 ? await buildExternalDisputeRows(typeof status === 'string' ? status : undefined) : [];
+    const mergedDisputes = pageNum === 1 ? [...externalRows, ...disputes] : disputes;
+
     return res.json({
       success: true,
       data: {
-        disputes,
+        disputes: mergedDisputes,
         pagination: {
           page: pageNum,
           limit: limitNum,
-          total,
+          total: total + externalRows.length,
           pages: Math.ceil(total / limitNum),
         }
       }
@@ -247,7 +308,7 @@ export const getDisputeDetails = async (req: Request, res: Response) => {
 
 export const resolveDispute = async (req: Request, res: Response) => {
   const { bookingId } = req.params;
-  const adminUser = (req as any).user;
+  const adminUser = (req as any).user || (req as any).admin;
   const { action, adjustedAmount, resolution, forceStatus, resolutionAttachments } = req.body || {};
 
   let resolvedBooking: any = null;
@@ -331,6 +392,21 @@ export const resolveDispute = async (req: Request, res: Response) => {
       setFields['dispute.resolutionAttachments'] = sanitizedAttachments;
     }
 
+    if (isExtraCostsDispute) {
+      const originalExtraCostAmount = Number(booking.extraCostTotal || 0);
+      setFields.extraCostStatus = 'confirmed';
+      if (action === 'accept_professional') {
+        finalExtraCostAmount = originalExtraCostAmount;
+      } else if (action === 'reject_extra_costs') {
+        finalExtraCostAmount = 0;
+        setFields.extraCostTotal = 0;
+      } else {
+        finalExtraCostAmount = Number(adjustedAmount);
+        setFields.extraCostTotal = finalExtraCostAmount;
+        setFields['dispute.adminAdjustedAmount'] = finalExtraCostAmount;
+      }
+    }
+
     resolvedBooking = await Booking.findOneAndUpdate(
       { _id: booking._id, status: ACTIVE_DISPUTE_STATUS },
       {
@@ -358,19 +434,18 @@ export const resolveDispute = async (req: Request, res: Response) => {
       });
     }
 
-    if (isExtraCostsDispute) {
-      finalExtraCostAmount = applyExtraCostUpdate(
-        resolvedBooking,
-        action as DisputeResolutionAction,
-        adjustedAmount
-      );
-    }
-
     if (targetStatus === COMPLETED_BOOKING_STATUS) {
-      markMilestonesCompleted(resolvedBooking, completionDate);
-      await ensureWarrantyCoverageSnapshot(resolvedBooking);
+      try {
+        markMilestonesCompleted(resolvedBooking, completionDate);
+        await ensureWarrantyCoverageSnapshot(resolvedBooking);
+        await resolvedBooking.save();
+      } catch (sideEffectError) {
+        console.error(
+          `Dispute ${resolvedBooking._id} resolved, but the post-resolution snapshot/save failed (resolution already persisted):`,
+          sideEffectError
+        );
+      }
     }
-    await resolvedBooking.save();
   } catch (error: any) {
     console.error('Error resolving dispute:', error);
     try {
@@ -428,6 +503,19 @@ export const resolveDispute = async (req: Request, res: Response) => {
         } else if (isExtraCostsDispute) {
           await transferResolvedExtraCostIfNeeded(resolvedBooking, finalExtraCostAmount);
         }
+      } else if (targetStatus === 'refunded') {
+        const customRefundAmount =
+          !isExtraCostsDispute && action === 'adjust' && Number.isFinite(adjustedAmount) && adjustedAmount > 0
+            ? Number(adjustedAmount)
+            : undefined;
+        try {
+          await executeRefund(resolvedBooking._id.toString(), {
+            amount: customRefundAmount,
+            reason: `Dispute resolution (${disputeType}): ${resolution}`,
+          });
+        } catch (refundError) {
+          console.error('Refund failed during dispute resolution:', refundError);
+        }
       }
     } catch (e) {
       console.error('Post-resolve Stripe step failed:', e);
@@ -459,7 +547,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
     try {
       const [customerUser, professionalUser] = await Promise.all([
         User.findById(resolvedBooking.customer).select('email name').lean(),
-        proId ? User.findById(proId).select('email name businessInfo').lean() : null,
+        proId ? User.findById(proId).select('email name username').lean() : null,
       ]);
       if (customerUser?.email && professionalUser?.email) {
         await sendDisputeResolvedEmail(
@@ -534,7 +622,7 @@ export const getDisputeAnalytics = async (_req: Request, res: Response) => {
 
 export const uploadDisputeResolutionAttachment = async (req: Request, res: Response) => {
   try {
-    const adminUser = (req as any).user;
+    const adminUser = (req as any).user || (req as any).admin;
     const adminId = adminUser?._id?.toString();
     if (!adminId) {
       return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });

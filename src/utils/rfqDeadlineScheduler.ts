@@ -20,7 +20,7 @@ export const runRfqDeadlineCheck = async () => {
     const expiredBookings = await Booking.find({
       status: 'rfq_accepted',
       rfqDeadline: { $exists: true, $lte: now },
-    }).populate('customer', 'name email').populate('professional', 'name email businessInfo');
+    }).populate('customer', 'name email').populate('professional', 'name email businessInfo username');
 
     console.log(`[RFQ Scheduler] Found ${expiredBookings.length} expired RFQ booking(s) to cancel`);
 
@@ -62,7 +62,7 @@ export const runRfqDeadlineCheck = async () => {
     const reminderBookings = await Booking.find({
       status: 'rfq_accepted',
       rfqDeadline: { $exists: true, $gt: now },
-    }).populate('professional', 'name email businessInfo');
+    }).populate('professional', 'name email businessInfo username');
 
     console.log(`[RFQ Scheduler] Found ${reminderBookings.length} active RFQ booking(s) to check for reminders`);
 
