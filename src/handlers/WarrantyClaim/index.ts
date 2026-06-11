@@ -1620,15 +1620,16 @@ export const adminAdjustWarrantyResolve = async (req: Request, res: Response) =>
       };
     }
 
+    const adjustSummary = trimmedDescription || claim.resolution?.summary || claim.proposal?.message?.trim();
+    if (!adjustSummary) {
+      return res.status(400).json({ success: false, msg: "A resolution description is required to resolve this claim" });
+    }
+
     const resolvedAt = new Date();
     const adjustAutoCloseDays = claim.sla?.customerAutoCloseDays || CUSTOMER_AUTO_CLOSE_DAYS;
     claim.resolution = {
       ...(claim.resolution || {}),
-      summary:
-        trimmedDescription ||
-        claim.resolution?.summary ||
-        claim.proposal?.message?.trim() ||
-        "Resolution adjusted by admin",
+      summary: adjustSummary,
       resolvedAt,
       resolvedBy: toObjectId(userId),
     };
@@ -1690,12 +1691,21 @@ export const adminSetWarrantyStatus = async (req: Request, res: Response) => {
     if (!claim) return res.status(404).json({ success: false, msg: "Warranty claim not found" });
 
     if (parsedStatus === "resolved" && !claim.resolution?.resolvedAt) {
+      const resolvedAt = new Date();
       claim.resolution = {
         ...(claim.resolution || {}),
         summary: claim.resolution?.summary || "Resolved by admin",
-        resolvedAt: new Date(),
+        resolvedAt,
         resolvedBy: toObjectId(userId),
       };
+      if (!claim.sla?.customerConfirmationDueAt) {
+        const setStatusAutoCloseDays = claim.sla?.customerAutoCloseDays || CUSTOMER_AUTO_CLOSE_DAYS;
+        claim.sla = {
+          ...(claim.sla || { customerAutoCloseDays: setStatusAutoCloseDays }),
+          customerAutoCloseDays: setStatusAutoCloseDays,
+          customerConfirmationDueAt: new Date(resolvedAt.getTime() + setStatusAutoCloseDays * 24 * 60 * 60 * 1000),
+        };
+      }
     }
 
     claim.status = parsedStatus;

@@ -20,6 +20,7 @@ import {
   buildPaymentMetadata,
   buildTransferMetadata,
   determineBookingCurrency,
+  computeGrossBookingAmount,
 } from '../../utils/payment';
 import { calculateVAT } from '../../utils/vat';
 import PlatformSettings from '../../models/platformSettings';
@@ -345,9 +346,7 @@ export const createPaymentIntent = async (
       }
     }
 
-    const fullBookingAmount = +(
-      booking.quote.amount * (1 + commissionPercent / 100) + commissionedExtraOptionsTotal
-    ).toFixed(2);
+    const fullBookingAmount = computeGrossBookingAmount(booking, commissionPercent);
 
     let codeInfo: any = null;
     if (discountCode) {
@@ -357,7 +356,7 @@ export const createPaymentIntent = async (
         customer._id.toString(),
         fullBookingAmount,
         customer.location?.country,
-        (booking as any).serviceType
+        (booking as any).rfqData?.serviceType
       );
       if (!validation.ok) {
         return { success: false, error: { code: 'INVALID_DISCOUNT_CODE', message: validation.error || 'Invalid discount code' } };

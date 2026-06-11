@@ -6,6 +6,7 @@
 import { Request, Response } from 'express';
 import Booking from '../../models/booking';
 import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
+import { computeGrossBookingAmount } from '../../utils/payment';
 import PlatformSettings from '../../models/platformSettings';
 
 /**
@@ -82,13 +83,7 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
       const parsed = Number.parseFloat(process.env.STRIPE_PLATFORM_COMMISSION_PERCENT || '0');
       commissionPercent = Number.isFinite(parsed) ? parsed : 0;
     }
-    const selectedExtraOptionsTotal = Array.isArray(booking.selectedExtraOptions)
-      ? booking.selectedExtraOptions.reduce(
-          (sum: number, entry: any) => (typeof entry?.bookedPrice === 'number' ? sum + entry.bookedPrice : sum),
-          0
-        )
-      : 0;
-    const grossAmount = +((booking.quote.amount + selectedExtraOptionsTotal) * (1 + commissionPercent / 100)).toFixed(2);
+    const grossAmount = computeGrossBookingAmount(booking, commissionPercent);
 
     let codeInfo = null as any;
     let codeError: string | undefined;

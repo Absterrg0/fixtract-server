@@ -176,6 +176,9 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
       if (isInProgress) {
         const existing = existingById.get(resourceId);
         const isUsed = existing && startOfDayUTC(existing.startDate) <= today;
+        if (isUsed && existing && startOfDayUTC(existing.startDate).getTime() !== startDate.getTime()) {
+          return res.status(400).json({ success: false, error: { code: 'START_LOCKED', message: 'A resource already in use cannot have its start date changed' } });
+        }
         if (isUsed && endDate < today) {
           return res.status(400).json({ success: false, error: { code: 'PAST_LOCKED', message: 'A resource already in use cannot end before today' } });
         }
