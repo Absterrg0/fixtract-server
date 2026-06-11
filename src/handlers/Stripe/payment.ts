@@ -346,7 +346,7 @@ export const createPaymentIntent = async (
     }
 
     const fullBookingAmount = +(
-      booking.quote.amount * (1 + commissionPercent / 100) + milestoneExtraOptionsCharge
+      booking.quote.amount * (1 + commissionPercent / 100) + commissionedExtraOptionsTotal
     ).toFixed(2);
 
     let codeInfo: any = null;

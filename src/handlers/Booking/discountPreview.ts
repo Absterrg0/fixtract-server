@@ -29,7 +29,7 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
 
     const booking = await Booking.findById(bookingId)
       .populate('customer', 'totalSpent points pointsExpiry location')
-      .populate('project', 'repeatBuyerDiscount professionalId');
+      .populate('project', 'repeatBuyerDiscount professionalId extraOptions');
 
     if (!booking) {
       return res.status(404).json({
@@ -82,7 +82,17 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
       const parsed = Number.parseFloat(process.env.STRIPE_PLATFORM_COMMISSION_PERCENT || '0');
       commissionPercent = Number.isFinite(parsed) ? parsed : 0;
     }
-    const grossAmount = +(booking.quote.amount * (1 + commissionPercent / 100)).toFixed(2);
+    const projectInfo = booking.project as any;
+    const selectedExtraOptionsTotal = Array.isArray(booking.selectedExtraOptions)
+      ? booking.selectedExtraOptions.reduce((sum: number, entry: any) => {
+          if (typeof entry?.bookedPrice === 'number') return sum + entry.bookedPrice;
+          if (typeof entry === 'number' && Array.isArray(projectInfo?.extraOptions) && entry >= 0 && entry < projectInfo.extraOptions.length) {
+            return sum + (projectInfo.extraOptions[entry]?.price || 0);
+          }
+          return sum;
+        }, 0)
+      : 0;
+    const grossAmount = +((booking.quote.amount + selectedExtraOptionsTotal) * (1 + commissionPercent / 100)).toFixed(2);
 
     let codeInfo = null as any;
     let codeError: string | undefined;

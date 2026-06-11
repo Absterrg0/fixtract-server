@@ -308,6 +308,13 @@ export interface IBooking extends Document {
   // Team members (for project bookings)
   assignedTeamMembers?: Types.ObjectId[]; // References to User (employees)
 
+  // Per-resource execution plan (professional-managed planning board)
+  resourcePlan?: {
+    resourceId: Types.ObjectId;
+    startDate: Date;
+    endDate: Date;
+  }[];
+
   customerBlocks?: {
     dates?: { date: Date; reason?: string }[];
     windows?: {
@@ -906,6 +913,17 @@ const BookingSchema = new Schema({
   assignedTeamMembers: [{
     type: Schema.Types.ObjectId,
     ref: 'User'
+  }],
+
+  // Per-resource execution plan (professional-managed planning board)
+  resourcePlan: [{
+    resourceId: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+      required: true
+    },
+    startDate: { type: Date, required: true },
+    endDate: { type: Date, required: true }
   }],
 
   // Messages

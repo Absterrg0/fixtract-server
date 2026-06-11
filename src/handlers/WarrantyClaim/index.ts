@@ -1394,6 +1394,322 @@ export const adminCloseWarrantyClaim = async (req: Request, res: Response) => {
   }
 };
 
+export const adminApproveWarrantyClaim = async (req: Request, res: Response) => {
+  try {
+    const userId = getRequestUserId(req);
+    if (!userId || !isAdmin(req)) {
+      return res.status(403).json({ success: false, msg: "Admin access required" });
+    }
+    const { claimId } = req.params;
+    const { note } = req.body as { note?: string };
+    if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
+      return res.status(400).json({ success: false, msg: "Invalid claimId" });
+    }
+
+    const claim = await WarrantyClaim.findById(claimId);
+    if (!claim) return res.status(404).json({ success: false, msg: "Warranty claim not found" });
+    if (claim.status === "closed") {
+      return res.status(400).json({ success: false, msg: "Claim is already closed" });
+    }
+    if (claim.status === "proposal_accepted") {
+      return res.status(400).json({ success: false, msg: "Claim is already approved" });
+    }
+
+    claim.status = "proposal_accepted";
+    claim.statusHistory.push({
+      status: "proposal_accepted",
+      timestamp: new Date(),
+      updatedBy: toObjectId(userId),
+      note: note?.trim() || "Admin approved warranty claim",
+    });
+    await claim.save();
+
+    await ensureWarrantyChatContext({
+      customerId: claim.customer,
+      professionalId: claim.professional,
+      claimId: claim._id,
+      claimNumber: claim.claimNumber,
+      bookingId: claim.booking,
+      status: claim.status,
+      text: `Warranty claim ${claim.claimNumber} was approved by admin and moved to resolution.`,
+    });
+
+    return res.status(200).json({
+      success: true,
+      msg: "Warranty claim approved by admin",
+      claim,
+    });
+  } catch (error: any) {
+    console.error("[WARRANTY] admin approve error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to approve claim" });
+  }
+};
+
+export const adminDeclineWarrantyClaim = async (req: Request, res: Response) => {
+  try {
+    const userId = getRequestUserId(req);
+    if (!userId || !isAdmin(req)) {
+      return res.status(403).json({ success: false, msg: "Admin access required" });
+    }
+    const { claimId } = req.params;
+    const { reason } = req.body as { reason?: string };
+    if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
+      return res.status(400).json({ success: false, msg: "Invalid claimId" });
+    }
+    if (!reason || reason.trim().length < 3) {
+      return res.status(400).json({ success: false, msg: "Decline reason is required" });
+    }
+
+    const claim = await WarrantyClaim.findById(claimId);
+    if (!claim) return res.status(404).json({ success: false, msg: "Warranty claim not found" });
+    if (claim.status === "closed") {
+      return res.status(400).json({ success: false, msg: "Claim is already closed" });
+    }
+
+    claim.status = "closed";
+    claim.resolution = {
+      ...(claim.resolution || {
+        resolvedAt: new Date(),
+        resolvedBy: toObjectId(userId),
+      }),
+      summary: `Declined by admin: ${reason.trim()}`,
+      resolvedAt: claim.resolution?.resolvedAt || new Date(),
+      resolvedBy: claim.resolution?.resolvedBy || toObjectId(userId),
+    };
+    claim.statusHistory.push({
+      status: "closed",
+      timestamp: new Date(),
+      updatedBy: toObjectId(userId),
+      note: `Admin declined claim: ${reason.trim()}`,
+    });
+    await claim.save();
+
+    await ensureWarrantyChatContext({
+      customerId: claim.customer,
+      professionalId: claim.professional,
+      claimId: claim._id,
+      claimNumber: claim.claimNumber,
+      bookingId: claim.booking,
+      status: claim.status,
+      text: `Warranty claim ${claim.claimNumber} was declined and closed by admin: ${reason.trim()}`,
+    });
+
+    return res.status(200).json({
+      success: true,
+      msg: "Warranty claim declined and closed by admin",
+      claim,
+    });
+  } catch (error: any) {
+    console.error("[WARRANTY] admin decline error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to decline claim" });
+  }
+};
+
+export const adminApproveWarrantyResolve = async (req: Request, res: Response) => {
+  try {
+    const userId = getRequestUserId(req);
+    if (!userId || !isAdmin(req)) {
+      return res.status(403).json({ success: false, msg: "Admin access required" });
+    }
+    const { claimId } = req.params;
+    if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
+      return res.status(400).json({ success: false, msg: "Invalid claimId" });
+    }
+
+    const claim = await WarrantyClaim.findById(claimId);
+    if (!claim) return res.status(404).json({ success: false, msg: "Warranty claim not found" });
+    if (claim.status === "closed") {
+      return res.status(400).json({ success: false, msg: "Claim is already closed" });
+    }
+    if (claim.status === "resolved") {
+      return res.status(400).json({ success: false, msg: "Claim is already resolved" });
+    }
+
+    const resolvedAt = new Date();
+    const proposalSummary = claim.proposal?.message?.trim();
+    claim.resolution = {
+      ...(claim.resolution || {}),
+      summary: claim.resolution?.summary || proposalSummary || "Resolution approved by admin",
+      resolvedAt,
+      resolvedBy: toObjectId(userId),
+    };
+    claim.status = "resolved";
+    claim.statusHistory.push({
+      status: "resolved",
+      timestamp: resolvedAt,
+      updatedBy: toObjectId(userId),
+      note: "Admin approved proposed resolution",
+    });
+    await claim.save();
+
+    await ensureWarrantyChatContext({
+      customerId: claim.customer,
+      professionalId: claim.professional,
+      claimId: claim._id,
+      claimNumber: claim.claimNumber,
+      bookingId: claim.booking,
+      status: claim.status,
+      text: `Warranty claim ${claim.claimNumber}: admin approved the proposed resolution.`,
+    });
+
+    return res.status(200).json({
+      success: true,
+      msg: "Proposed resolution approved by admin",
+      claim,
+    });
+  } catch (error: any) {
+    console.error("[WARRANTY] admin approve resolve error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to approve resolution" });
+  }
+};
+
+export const adminAdjustWarrantyResolve = async (req: Request, res: Response) => {
+  try {
+    const userId = getRequestUserId(req);
+    if (!userId || !isAdmin(req)) {
+      return res.status(403).json({ success: false, msg: "Admin access required" });
+    }
+    const { claimId } = req.params;
+    const { resolveDescription, resolveByDate } = req.body as {
+      resolveDescription?: string;
+      resolveByDate?: string;
+    };
+    if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
+      return res.status(400).json({ success: false, msg: "Invalid claimId" });
+    }
+
+    let parsedResolveByDate: Date | undefined;
+    if (resolveByDate !== undefined && resolveByDate !== null && resolveByDate !== "") {
+      const candidate = new Date(resolveByDate);
+      if (Number.isNaN(candidate.getTime())) {
+        return res.status(400).json({ success: false, msg: "resolveByDate is invalid" });
+      }
+      parsedResolveByDate = candidate;
+    }
+
+    const trimmedDescription =
+      typeof resolveDescription === "string" ? resolveDescription.trim() : undefined;
+    if (trimmedDescription !== undefined && trimmedDescription.length > 3000) {
+      return res.status(400).json({ success: false, msg: "resolveDescription is too long" });
+    }
+
+    const claim = await WarrantyClaim.findById(claimId);
+    if (!claim) return res.status(404).json({ success: false, msg: "Warranty claim not found" });
+    if (claim.status === "closed") {
+      return res.status(400).json({ success: false, msg: "Claim is already closed" });
+    }
+
+    if (trimmedDescription !== undefined || parsedResolveByDate !== undefined) {
+      claim.proposal = {
+        ...(claim.proposal || {
+          message: "",
+          proposedBy: toObjectId(userId),
+          proposedAt: new Date(),
+        }),
+        ...(trimmedDescription !== undefined ? { message: trimmedDescription } : {}),
+        ...(parsedResolveByDate !== undefined ? { resolveByDate: parsedResolveByDate } : {}),
+      };
+    }
+
+    const resolvedAt = new Date();
+    claim.resolution = {
+      ...(claim.resolution || {}),
+      summary:
+        trimmedDescription ||
+        claim.resolution?.summary ||
+        claim.proposal?.message?.trim() ||
+        "Resolution adjusted by admin",
+      resolvedAt,
+      resolvedBy: toObjectId(userId),
+    };
+    claim.status = "resolved";
+    claim.statusHistory.push({
+      status: "resolved",
+      timestamp: resolvedAt,
+      updatedBy: toObjectId(userId),
+      note: "Admin adjusted and approved resolution",
+    });
+    await claim.save();
+
+    await ensureWarrantyChatContext({
+      customerId: claim.customer,
+      professionalId: claim.professional,
+      claimId: claim._id,
+      claimNumber: claim.claimNumber,
+      bookingId: claim.booking,
+      status: claim.status,
+      text: `Warranty claim ${claim.claimNumber}: admin adjusted the resolution and marked it resolved.`,
+    });
+
+    return res.status(200).json({
+      success: true,
+      msg: "Resolution adjusted and resolved by admin",
+      claim,
+    });
+  } catch (error: any) {
+    console.error("[WARRANTY] admin adjust resolve error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to adjust resolution" });
+  }
+};
+
+export const adminSetWarrantyStatus = async (req: Request, res: Response) => {
+  try {
+    const userId = getRequestUserId(req);
+    if (!userId || !isAdmin(req)) {
+      return res.status(403).json({ success: false, msg: "Admin access required" });
+    }
+    const { claimId } = req.params;
+    const { status, note } = req.body as { status?: string; note?: string };
+    if (!claimId || !mongoose.Types.ObjectId.isValid(claimId)) {
+      return res.status(400).json({ success: false, msg: "Invalid claimId" });
+    }
+    const parsedStatus = parseClaimStatus(status);
+    if (!parsedStatus) {
+      return res.status(400).json({ success: false, msg: "Invalid status value" });
+    }
+
+    const claim = await WarrantyClaim.findById(claimId);
+    if (!claim) return res.status(404).json({ success: false, msg: "Warranty claim not found" });
+
+    if (parsedStatus === "resolved" && !claim.resolution?.resolvedAt) {
+      claim.resolution = {
+        ...(claim.resolution || {}),
+        summary: claim.resolution?.summary || "Resolved by admin",
+        resolvedAt: new Date(),
+        resolvedBy: toObjectId(userId),
+      };
+    }
+
+    claim.status = parsedStatus;
+    claim.statusHistory.push({
+      status: parsedStatus,
+      timestamp: new Date(),
+      updatedBy: toObjectId(userId),
+      note: note?.trim() || `Admin set status to ${parsedStatus}`,
+    });
+    await claim.save();
+
+    await ensureWarrantyChatContext({
+      customerId: claim.customer,
+      professionalId: claim.professional,
+      claimId: claim._id,
+      claimNumber: claim.claimNumber,
+      bookingId: claim.booking,
+      status: claim.status,
+      text: `Warranty claim ${claim.claimNumber} status was set to ${parsedStatus} by admin.`,
+    });
+
+    return res.status(200).json({
+      success: true,
+      msg: `Warranty claim status set to ${parsedStatus}`,
+      claim,
+    });
+  } catch (error: any) {
+    console.error("[WARRANTY] admin set status error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to set claim status" });
+  }
+};
+
 export const listAdminWarrantyClaims = async (req: Request, res: Response) => {
   try {
     if (!isAdmin(req)) {
