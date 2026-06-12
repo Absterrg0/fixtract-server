@@ -3076,9 +3076,10 @@ export const getUnbookableStartDates = async ({
   }
 
   let resolvedSubprojectIndex = subprojectIndex;
+  const projectExecutionValue = (project as any).executionDuration?.value;
   if (
     typeof resolvedSubprojectIndex !== "number" &&
-    !(project as any).executionDuration?.value &&
+    (projectExecutionValue == null || projectExecutionValue <= 0) &&
     Array.isArray((project as any).subprojects)
   ) {
     const daysSubIdx = (project as any).subprojects.findIndex(
