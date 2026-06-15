@@ -13,10 +13,15 @@ const startOfDayUTC = (value: Date): Date => {
   return d;
 };
 
-const parseDate = (value: unknown): Date | null => {
-  if (typeof value !== 'string' && !(value instanceof Date)) return null;
-  const d = value instanceof Date ? new Date(value.getTime()) : new Date(value);
-  return Number.isNaN(d.getTime()) ? null : d;
+const parseStrictUTCDate = (dateStr: string): Date | null => {
+  const yyyymmddRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!yyyymmddRegex.test(dateStr)) return null;
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const d = new Date(Date.UTC(year, month - 1, day));
+  if (Number.isNaN(d.getTime())) return null;
+  const expectedStr = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  if (expectedStr !== dateStr) return null;
+  return d;
 };
 
 const parseUTCDate = (dateStr: string): Date => {
@@ -28,6 +33,12 @@ const getDaysBetween = (start: Date, end: Date): string[] => {
   const dates: string[] = [];
   const curr = new Date(startOfDayUTC(start));
   const last = new Date(startOfDayUTC(end));
+
+  // Limit safeguard to prevent runaway loops (maximum 366 days)
+  const diffTime = Math.abs(last.getTime() - curr.getTime());
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  if (diffDays > 366) return [];
+
   while (curr <= last) {
     dates.push(curr.toISOString().slice(0, 10));
     curr.setUTCDate(curr.getUTCDate() + 1);
@@ -123,8 +134,11 @@ const getUnavailableDatesForUser = async (userId: string, currentBookingId: stri
     status: { $nin: ["completed", "cancelled", "refunded"] },
     $or: [
       { professional: new mongoose.Types.ObjectId(userId) },
+      { professional: userId.toString() },
       { assignedTeamMembers: new mongoose.Types.ObjectId(userId) },
-      { 'resourcePlan.resourceId': new mongoose.Types.ObjectId(userId) }
+      { assignedTeamMembers: userId.toString() },
+      { 'resourcePlan.resourceId': new mongoose.Types.ObjectId(userId) },
+      { 'resourcePlan.resourceId': userId.toString() }
     ]
   }).select('resourcePlan');
 
@@ -367,14 +381,20 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
         return res.status(400).json({ success: false, error: { code: 'INVALID_DATE_FORMAT', message: 'Dates must be in YYYY-MM-DD format strings' } });
       }
 
-      const rawStart = parseUTCDate(item.startDate);
-      const rawEnd = parseUTCDate(item.endDate);
-      if (Number.isNaN(rawStart.getTime()) || Number.isNaN(rawEnd.getTime())) {
+      const rawStart = parseStrictUTCDate(item.startDate);
+      const rawEnd = parseStrictUTCDate(item.endDate);
+      if (!rawStart || !rawEnd) {
         return res.status(400).json({ success: false, error: { code: 'INVALID_DATE', message: 'Each resource needs a valid start and end date' } });
       }
       
       const start = startOfDayUTC(rawStart);
       const end = startOfDayUTC(rawEnd);
+
+      const diffTime = Math.abs(end.getTime() - start.getTime());
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      if (diffDays > 90) {
+        return res.status(400).json({ success: false, error: { code: 'DATE_SPAN_TOO_LARGE', message: 'The planning date span cannot exceed 90 days.' } });
+      }
       
       if (start < bookingStart) {
         return res.status(400).json({ success: false, error: { code: 'BEFORE_START', message: 'A resource cannot start before the booking start date' } });
@@ -475,6 +495,83 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
       updatedBy: (req as any).user._id,
       note: `Planning updated: ${normalizedPlan.length} resource(s), end ${maxEnd.toISOString().slice(0, 10)}`,
     } as any);
+
+    // Final conflict recheck immediately before saving to prevent race conditions
+    const checkResourceIds = normalizedPlan.map(p => p.resourceId);
+    const activeOtherBookings = await Booking.find({
+      _id: { $ne: booking._id },
+      status: { $nin: ['completed', 'cancelled', 'refunded'] },
+      $or: [
+        { 'resourcePlan.resourceId': { $in: checkResourceIds } },
+        { assignedTeamMembers: { $in: checkResourceIds } },
+        { professional: { $in: checkResourceIds } },
+        { 'resourcePlan.resourceId': { $in: checkResourceIds.map(id => id.toString()) } },
+        { assignedTeamMembers: { $in: checkResourceIds.map(id => id.toString()) } },
+        { professional: { $in: checkResourceIds.map(id => id.toString()) } }
+      ]
+    }).select('resourcePlan scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate');
+
+    for (const entry of normalizedPlan) {
+      const rid = entry.resourceId.toString();
+      const start = startOfDayUTC(entry.startDate);
+      const end = startOfDayUTC(entry.endDate);
+      const entryDays = getDaysBetween(start, end);
+
+      for (const b of activeOtherBookings) {
+        const hasResourcePlanForUser = Array.isArray(b.resourcePlan) && b.resourcePlan.some((p: any) => 
+          (p.resourceId?._id || p.resourceId)?.toString() === rid
+        );
+
+        if (hasResourcePlanForUser) {
+          const otherPlan = b.resourcePlan || [];
+          for (const p of otherPlan) {
+            if ((p.resourceId?._id || p.resourceId)?.toString() === rid) {
+              if (p.startDate && p.endDate) {
+                const otherDays = getDaysBetween(new Date(p.startDate), new Date(p.endDate));
+                const overlap = entryDays.some(day => otherDays.includes(day));
+                if (overlap) {
+                  return res.status(409).json({
+                    success: false,
+                    error: {
+                      code: 'RESOURCE_CONFLICT_CONCURRENT',
+                      message: `Conflict detected: Resource was booked on overlapping days by a concurrent operation.`
+                    }
+                  });
+                }
+              }
+            }
+          }
+        } else {
+          // Legacy fallback
+          if (b.scheduledStartDate && b.scheduledExecutionEndDate) {
+            const otherDays = getDaysBetween(new Date(b.scheduledStartDate), new Date(b.scheduledExecutionEndDate));
+            const overlap = entryDays.some(day => otherDays.includes(day));
+            if (overlap) {
+              return res.status(409).json({
+                success: false,
+                error: {
+                  code: 'RESOURCE_CONFLICT_CONCURRENT',
+                  message: `Conflict detected: Resource is assigned to another booking on overlapping days.`
+                }
+              });
+            }
+          }
+          if (b.scheduledBufferStartDate && b.scheduledBufferEndDate) {
+            const otherDays = getDaysBetween(new Date(b.scheduledBufferStartDate), new Date(b.scheduledBufferEndDate));
+            const overlap = entryDays.some(day => otherDays.includes(day));
+            if (overlap) {
+              return res.status(409).json({
+                success: false,
+                error: {
+                  code: 'RESOURCE_CONFLICT_CONCURRENT',
+                  message: `Conflict detected: Resource is assigned to another booking buffer on overlapping days.`
+                }
+              });
+            }
+          }
+        }
+      }
+    }
 
     await booking.save();
 
