@@ -628,7 +628,6 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
                   if (overlap) {
                     if (dbSession) {
                       await dbSession.abortTransaction();
-                      dbSession.endSession();
                     }
                     return res.status(409).json({
                       success: false,
@@ -649,7 +648,6 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
               if (overlap) {
                 if (dbSession) {
                   await dbSession.abortTransaction();
-                  dbSession.endSession();
                 }
                 return res.status(409).json({
                   success: false,
@@ -666,7 +664,6 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
               if (overlap) {
                 if (dbSession) {
                   await dbSession.abortTransaction();
-                  dbSession.endSession();
                 }
                 return res.status(409).json({
                   success: false,
@@ -684,14 +681,14 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
       await booking.save({ session: dbSession });
       if (dbSession) {
         await dbSession.commitTransaction();
-        dbSession.endSession();
       }
       return null;
     };
 
     let transactionErrorOccurred = false;
+    let session: mongoose.ClientSession | null = null;
     try {
-      const session = await mongoose.startSession();
+      session = await mongoose.startSession();
       session.startTransaction();
       const result = await runPlanningSave(session);
       if (result) return result;
@@ -700,6 +697,14 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
         transactionErrorOccurred = true;
       } else {
         throw txError;
+      }
+    } finally {
+      if (session) {
+        try {
+          session.endSession();
+        } catch {
+          // Ignore cleanup errors
+        }
       }
     }
 
