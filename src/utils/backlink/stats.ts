@@ -14,7 +14,7 @@ export async function getUserBacklinkStats(userId: mongoose.Types.ObjectId) {
       .sort({ createdAt: -1 })
       .limit(50)
       .select(
-        'submittedUrl domain status rewardPoints rewardIssuedAt rejectionReason lastRejectedAt revokedAt createdAt',
+        'submittedUrl domain status rewardPoints rewardIssuedAt rejectionReason adminReviewReason lastRejectedAt revokedAt createdAt',
       ),
     BacklinkSubmission.countDocuments({ userId, status: 'verified' }),
     BacklinkSubmission.aggregate([
@@ -43,6 +43,7 @@ export async function getUserBacklinkStats(userId: mongoose.Types.ObjectId) {
       rewardPoints: s.rewardPoints,
       rewardIssuedAt: s.rewardIssuedAt,
       rejectionReason: s.rejectionReason,
+      adminReviewReason: s.adminReviewReason,
       lastRejectedAt: s.lastRejectedAt,
       revokedAt: s.revokedAt,
       createdAt: s.createdAt,

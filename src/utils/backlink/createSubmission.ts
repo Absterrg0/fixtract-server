@@ -18,7 +18,17 @@ export async function createBacklinkSubmission(
   ipAddress?: string,
 ): Promise<IBacklinkSubmission> {
   const config = await BacklinkConfig.getCurrentConfig();
-  const { normalizedUrl, domain } = normaliseSubmissionUrl(rawUrl);
+
+  let normalizedUrl: string;
+  let domain: string;
+  try {
+    ({ normalizedUrl, domain } = normaliseSubmissionUrl(rawUrl));
+  } catch (err) {
+    throw new BacklinkError(
+      err instanceof Error ? err.message : 'Invalid URL',
+      400,
+    );
+  }
 
   if (isFixeraDomain(domain, config)) {
     throw new BacklinkError(
