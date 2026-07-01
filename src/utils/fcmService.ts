@@ -175,6 +175,7 @@ function buildMulticastMessage(
         body: payload.body,
         icon: '/fixera-logo.png',
         badge: '/fixera-logo.png',
+        tag: payload.type || 'fixera-notification',
         data: { url: clickUrl },
       },
       fcmOptions: { link: clickUrl },
