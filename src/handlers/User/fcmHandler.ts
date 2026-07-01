@@ -1,5 +1,10 @@
 import { Request, Response } from 'express';
 import User from '../../models/user';
+import {
+  getOriginFromRequest,
+  isAllowedOrigin,
+  normalizeOrigin,
+} from '../../utils/fcmTokenUtils';
 
 // ------------------------------------------------------------------
 // Register / Unregister FCM tokens
@@ -9,9 +14,9 @@ const MAX_TOKENS_PER_USER = 10;
 
 /**
  * POST /api/user/fcm/token
- * Body: { token: string }
- * Registers an FCM device token for the authenticated user.
- * Deduplicates and caps at MAX_TOKENS_PER_USER.
+ * Body: { token: string, origin?: string }
+ * Registers an FCM device token for the authenticated user, scoped to the
+ * site origin (e.g. production vs localhost) so pushes don't cross environments.
  */
 export const registerFcmToken = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -27,52 +32,41 @@ export const registerFcmToken = async (req: Request, res: Response): Promise<voi
       return;
     }
 
+    const origin = getOriginFromRequest(req);
+    if (!isAllowedOrigin(origin)) {
+      res.status(400).json({ success: false, msg: 'origin is not allowed' });
+      return;
+    }
+
     const cleanToken = token.trim();
 
-    const userExists = await User.findById(userId).select('_id');
-    if (!userExists) {
+    const user = await User.findById(userId).select('+fcmTokens');
+    if (!user) {
       res.status(404).json({ success: false, msg: 'User not found' });
       return;
     }
 
     // Each device token belongs to one user at a time.
     await User.updateMany(
-      { _id: { $ne: userId }, fcmTokens: cleanToken },
-      { $pull: { fcmTokens: cleanToken } },
+      { _id: { $ne: userId } },
+      { $pull: { fcmTokens: { token: cleanToken } } },
     );
 
-    // Single atomic dedupe + append + recency cap (no read-modify-write).
-    await User.findByIdAndUpdate(
-      userId,
-      [
-        {
-          $set: {
-            fcmTokens: {
-              $let: {
-                vars: { existing: { $ifNull: ['$fcmTokens', []] } },
-                in: {
-                  $slice: [
-                    {
-                      $concatArrays: [
-                        {
-                          $filter: {
-                            input: '$$existing',
-                            as: 't',
-                            cond: { $ne: ['$$t', cleanToken] },
-                          },
-                        },
-                        [cleanToken],
-                      ],
-                    },
-                    -MAX_TOKENS_PER_USER,
-                  ],
-                },
-              },
-            },
-          },
-        },
-      ],
+    const now = new Date();
+    const existing = (user.fcmTokens ?? []).filter(
+      (entry) => entry && typeof entry === 'object' && entry.token,
     );
+
+    const sameOrigin = existing.filter(
+      (entry) => normalizeOrigin(entry.origin) === origin && entry.token !== cleanToken,
+    );
+
+    user.fcmTokens = [
+      ...sameOrigin,
+      { token: cleanToken, origin, updatedAt: now },
+    ].slice(-MAX_TOKENS_PER_USER);
+
+    await user.save();
 
     res.status(200).json({ success: true, msg: 'FCM token registered' });
   } catch (err) {
@@ -101,7 +95,7 @@ export const unregisterFcmToken = async (req: Request, res: Response): Promise<v
     }
 
     await User.findByIdAndUpdate(userId, {
-      $pull: { fcmTokens: token.trim() },
+      $pull: { fcmTokens: { token: token.trim() } },
     });
 
     res.status(200).json({ success: true, msg: 'FCM token removed' });

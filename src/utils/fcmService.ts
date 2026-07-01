@@ -8,6 +8,7 @@ import {
 } from 'firebase-admin/app';
 import { getMessaging, type BatchResponse } from 'firebase-admin/messaging';
 import User, { IUser } from '../models/user';
+import { getTokensForCurrentDeployment } from './fcmTokenUtils';
 
 // ------------------------------------------------------------------
 // Firebase Admin Initialisation (lazy singleton)
@@ -104,11 +105,12 @@ export async function sendPushToUser(
   payload: PushPayload,
 ): Promise<void> {
   const user = await User.findById(userId).select('+fcmTokens notificationPreferences');
-  if (!user?.fcmTokens?.length) return;
+  const tokens = getTokensForCurrentDeployment(user?.fcmTokens);
+  if (!tokens.length) return;
 
-  if (isPushDisabled(user.notificationPreferences, payload.type)) return;
+  if (isPushDisabled(user!.notificationPreferences, payload.type)) return;
 
-  await _dispatchTokens(user.fcmTokens, payload, userId);
+  await _dispatchTokens(tokens, payload, userId);
 }
 
 /**
@@ -127,10 +129,11 @@ export async function sendPushToUsers(
   const allTokensWithOwner: { token: string; userId: string }[] = [];
 
   for (const user of users) {
-    if (!user.fcmTokens?.length) continue;
+    const tokens = getTokensForCurrentDeployment(user.fcmTokens);
+    if (!tokens.length) continue;
     if (isPushDisabled(user.notificationPreferences, payload.type)) continue;
 
-    for (const token of user.fcmTokens) {
+    for (const token of tokens) {
       allTokensWithOwner.push({ token, userId: user._id.toString() });
     }
   }
@@ -162,9 +165,9 @@ function buildMulticastMessage(
     tokens,
     notification: { title: payload.title, body: payload.body },
     data: {
+      ...payload.data,
       type: payload.type,
       clickUrl,
-      ...payload.data,
     },
     webpush: {
       notification: {
@@ -213,7 +216,7 @@ async function _dispatchTokens(
 
   if (staleTokens.length) {
     await User.findByIdAndUpdate(userId, {
-      $pull: { fcmTokens: { $in: staleTokens } },
+      $pull: { fcmTokens: { token: { $in: staleTokens } } },
     });
   }
 }
@@ -250,7 +253,7 @@ async function _dispatchMulticast(
 
     for (const [userId, stale] of staleByUser) {
       await User.findByIdAndUpdate(userId, {
-        $pull: { fcmTokens: { $in: stale } },
+        $pull: { fcmTokens: { token: { $in: stale } } },
       });
     }
   } catch (err) {

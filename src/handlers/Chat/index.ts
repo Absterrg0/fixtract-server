@@ -8,6 +8,7 @@ import User from "../../models/user";
 import { generateFileName, uploadToS3, validateImageFile, validateFile, validateVideoFile, parseS3KeyFromUrl, getPresignedUrl } from "../../utils/s3Upload";
 import type { IChatAttachment } from "../../models/chatMessage";
 import { sendPushToUser } from "../../utils/fcmService";
+import { getFrontendUrl } from "../../utils/frontendUrl";
 
 const toObjectId = (value: string) =>
   mongoose.Types.ObjectId.createFromHexString(value);
@@ -535,7 +536,7 @@ export const sendMessage = async (req: Request, res: Response) => {
       title: `New message from ${senderName}`,
       body: previewText,
       type: 'messages',
-      clickUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/chat`,
+      clickUrl: `${getFrontendUrl()}/chat?conversationId=${conversationId}`,
       data: { conversationId },
     }).catch(() => { /* never block the response */ });
   }

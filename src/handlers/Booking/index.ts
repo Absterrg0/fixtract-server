@@ -15,6 +15,7 @@ import { getProfessionalDisplayName } from "../../utils/displayName";
 import CancellationRequest, { ACTIVE_CANCELLATION_STATUSES, CANCELLATION_REASON_CATEGORIES, CANCELLATION_REASON_LABELS, CancellationReasonCategory } from "../../models/cancellationRequest";
 import { addBusinessDays, REFUND_RESPONSE_BUSINESS_DAYS } from "../../utils/businessDays";
 import { sendPushToUser } from "../../utils/fcmService";
+import { getFrontendUrl } from "../../utils/frontendUrl";
 import { IUser } from "../../models/user";
 
 const presignMaybeS3Url = async (url?: string | null) => {
@@ -662,7 +663,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         title: '📋 New Booking Request',
         body: `${populated.customer.name} has sent you a new booking request`,
         type: 'booking_updates',
-        clickUrl: `${process.env.FRONTEND_URL ?? 'http://localhost:3000'}/dashboard`,
+        clickUrl: `${getFrontendUrl()}/bookings/${populated._id.toString()}`,
         data: { bookingId: populated._id.toString() },
       }).catch((err: unknown) => {
         console.warn('FCM notify professional failed (non-critical):', err);

@@ -157,7 +157,11 @@ export interface IUser extends Document {
     };
     username?: string;
     // FCM push notification fields
-    fcmTokens?: string[];
+    fcmTokens?: {
+        token: string;
+        origin: string;
+        updatedAt?: Date;
+    }[];
     notificationPreferences?: {
         booking_updates?: { push?: boolean; email?: boolean };
         messages?: { push?: boolean; email?: boolean };
@@ -605,7 +609,11 @@ const UserSchema = new Schema({
     },
     // FCM push notification fields
     fcmTokens: {
-        type: [String],
+        type: [{
+            token: { type: String, required: true },
+            origin: { type: String, required: true },
+            updatedAt: { type: Date, default: Date.now },
+        }],
         default: [],
         select: false,
     },
