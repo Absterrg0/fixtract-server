@@ -126,7 +126,7 @@ export async function adminRejectSubmission(
   reason: string,
 ): Promise<IBacklinkSubmission> {
   const updated = await BacklinkSubmission.findOneAndUpdate(
-    { _id: submissionId, status: { $nin: ['verified', 'verifying'] } },
+    { _id: submissionId, status: { $nin: ['verified', 'verifying', 'revoked'] } },
     {
       $set: {
         status: 'rejected',
@@ -151,6 +151,9 @@ export async function adminRejectSubmission(
   }
   if (existing.status === 'verifying') {
     throw new BacklinkError('Submission is being verified — wait for crawl to finish', 409);
+  }
+  if (existing.status === 'revoked') {
+    throw new BacklinkError('Cannot reject a revoked submission', 400);
   }
   throw new BacklinkError('Submission not found or already processed', 400);
 }
@@ -189,16 +192,17 @@ export async function adminRevokeSubmission(
   let unclawedPoints = 0;
 
   if (pointsToClawBack > 0) {
-    const user = await User.findById(claimed.userId).select('points');
-    const currentBalance = user?.points ?? 0;
-    actuallyDeducted = Math.min(pointsToClawBack, currentBalance);
-    unclawedPoints = pointsToClawBack - actuallyDeducted;
+    let remaining = pointsToClawBack;
+    while (remaining > 0) {
+      const user = await User.findById(claimed.userId).select('points');
+      const currentBalance = user?.points ?? 0;
+      if (currentBalance <= 0) break;
 
-    if (actuallyDeducted > 0) {
+      const toDeduct = Math.min(remaining, currentBalance);
       try {
         await deductPoints(
           claimed.userId,
-          actuallyDeducted,
+          toDeduct,
           'admin-adjustment',
           `Backlink reward revoked for ${claimed.domain}: ${reason}`,
           {
@@ -206,28 +210,27 @@ export async function adminRevokeSubmission(
               backlinkSubmissionId: claimed._id.toString(),
               revokedBy: adminId.toString(),
               originalReward: pointsToClawBack,
-              unclawedPoints,
             },
           },
         );
+        actuallyDeducted += toDeduct;
+        remaining -= toDeduct;
       } catch (err) {
         console.error(
           `${LOG_PREFIX} deductPoints failed during revoke of ${submissionId}:`,
           err,
         );
-        unclawedPoints = pointsToClawBack;
-        actuallyDeducted = 0;
+        break;
       }
     }
+    unclawedPoints = pointsToClawBack - actuallyDeducted;
   }
 
   const updated = await BacklinkSubmission.findByIdAndUpdate(
     submissionId,
-    {
-      $set: {
-        unclawedPoints: unclawedPoints > 0 ? unclawedPoints : undefined,
-      },
-    },
+    unclawedPoints > 0
+      ? { $set: { unclawedPoints } }
+      : { $unset: { unclawedPoints: '' } },
     { new: true },
   );
 

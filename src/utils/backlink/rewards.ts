@@ -172,3 +172,67 @@ export async function verifyAndReward(
     );
   }
 }
+
+/** Award points for verified submissions left without a transaction after a crash. */
+export async function reconcileVerifiedWithoutTransaction(): Promise<void> {
+  const unreconciled = await BacklinkSubmission.find({
+    status: 'verified',
+    pointTransactionId: { $exists: false },
+    rewardPoints: { $gt: 0 },
+    adminReviewReason: { $exists: false },
+  }).select('_id userId domain submittedUrl rewardPoints');
+
+  for (const submission of unreconciled) {
+    const rewardPoints = submission.rewardPoints ?? 0;
+    if (rewardPoints <= 0) continue;
+
+    try {
+      const { transaction } = await addPoints(
+        submission.userId,
+        rewardPoints,
+        'backlink',
+        `Backlink reward: verified link to Fixera on ${submission.domain}`,
+        {
+          metadata: {
+            backlinkSubmissionId: submission._id.toString(),
+            submittedUrl: submission.submittedUrl,
+            reconciled: true,
+          },
+        },
+      );
+
+      const updated = await BacklinkSubmission.findOneAndUpdate(
+        {
+          _id: submission._id,
+          status: 'verified',
+          pointTransactionId: { $exists: false },
+        },
+        { $set: { pointTransactionId: transaction._id } },
+      );
+
+      if (updated) {
+        console.log(
+          `${LOG_PREFIX} Reconciled submission ${submission._id} — awarded ${rewardPoints} pts`,
+        );
+        notifyVerified(submission.userId, submission._id, submission.domain, rewardPoints);
+      }
+    } catch (err) {
+      console.error(
+        `${LOG_PREFIX} reconcile addPoints failed for submission ${submission._id}:`,
+        err,
+      );
+      await BacklinkSubmission.findOneAndUpdate(
+        {
+          _id: submission._id,
+          status: 'verified',
+          pointTransactionId: { $exists: false },
+        },
+        {
+          $set: {
+            adminReviewReason: 'Points award failed — pending admin review',
+          },
+        },
+      );
+    }
+  }
+}

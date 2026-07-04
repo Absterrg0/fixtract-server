@@ -85,7 +85,6 @@ const backlinkSubmissionSchema = new Schema<IBacklinkSubmission>(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
-      index: true,
     },
     submittedUrl: {
       type: String,

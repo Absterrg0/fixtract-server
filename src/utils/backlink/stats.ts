@@ -33,18 +33,6 @@ export async function getUserBacklinkStats(userId: mongoose.Types.ObjectId) {
     resubmitCooldownHours: config.resubmitCooldownHours,
     verifiedCount,
     totalPointsEarned,
-    submissions: submissions.map((s) => ({
-      _id: s._id,
-      submittedUrl: s.submittedUrl,
-      domain: s.domain,
-      status: s.status,
-      rewardPoints: s.rewardPoints,
-      rewardIssuedAt: s.rewardIssuedAt,
-      rejectionReason: s.rejectionReason,
-      adminReviewReason: s.adminReviewReason,
-      lastRejectedAt: s.lastRejectedAt,
-      revokedAt: s.revokedAt,
-      createdAt: s.createdAt,
-    })),
+    submissions,
   };
 }

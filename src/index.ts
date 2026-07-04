@@ -81,8 +81,16 @@ const STUCK_VERIFY_SWEEP_MS = 10 * 60 * 1000;
 
 connectDB()
   .then(async () => {
-    await BacklinkSubmission.syncIndexes();
-    await recoverStuckVerifyingSubmissions();
+    try {
+      await BacklinkSubmission.syncIndexes();
+    } catch (error) {
+      console.error('BacklinkSubmission.syncIndexes failed:', error);
+    }
+    try {
+      await recoverStuckVerifyingSubmissions();
+    } catch (error) {
+      console.error('Initial stuck verification recovery failed:', error);
+    }
     const sweepTimer = setInterval(() => {
       void recoverStuckVerifyingSubmissions().catch((error) => {
         console.error('Stuck verification sweep failed:', error);

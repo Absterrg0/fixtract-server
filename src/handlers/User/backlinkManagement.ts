@@ -20,8 +20,7 @@ function getUserId(req: Request): mongoose.Types.ObjectId | null {
 }
 
 function extractIp(req: Request): string {
-  const forwarded = req.headers['x-forwarded-for']?.toString();
-  return (forwarded ? forwarded.split(',')[0].trim() : '') || req.ip || '';
+  return req.ip || req.socket?.remoteAddress || '';
 }
 
 // ------------------------------------------------------------------
@@ -173,7 +172,7 @@ export const getBacklinkById = async (
     const submission = await BacklinkSubmission.findOne({
       _id: id,
       userId,
-    }).select('-ipAddress');
+    }).select(BACKLINK_SUBMISSION_PUBLIC_FIELDS);
 
     if (!submission) {
       return res.status(404).json({ success: false, msg: 'Submission not found' });

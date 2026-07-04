@@ -4,7 +4,7 @@ import BacklinkSubmission from '../../models/backlinkSubmission';
 import { scrapePageForLinks, FirecrawlError } from '../firecrawlClient';
 import { extractFixeraLinks } from './verification';
 import { getEffectiveAllowedDomains } from './domains';
-import { rejectSubmission, verifyAndReward } from './rewards';
+import { rejectSubmission, verifyAndReward, reconcileVerifiedWithoutTransaction } from './rewards';
 
 const LOG_PREFIX = '[backlink]';
 const STUCK_VERIFYING_MS = 10 * 60 * 1000;
@@ -110,6 +110,8 @@ export async function recoverStuckVerifyingSubmissions(): Promise<void> {
       'Verification timed out — please resubmit',
     );
   }
+
+  await reconcileVerifiedWithoutTransaction();
 }
 
 export function scheduleVerification(
@@ -123,6 +125,11 @@ export function scheduleVerification(
     void rejectStuckVerifying(
       submissionId,
       'Verification failed unexpectedly — please try again later',
-    );
+    ).catch((cleanupErr) => {
+      console.error(
+        `${LOG_PREFIX} rejectStuckVerifying failed for ${submissionId}:`,
+        cleanupErr,
+      );
+    });
   });
 }
