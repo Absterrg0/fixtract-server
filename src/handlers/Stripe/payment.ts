@@ -24,6 +24,7 @@ import {
 } from '../../utils/payment';
 import { calculateVAT } from '../../utils/vat';
 import { calculateVatFromPricingLines } from '../../utils/vatLineCalculation';
+import { requiresVatRfqReview } from '../../utils/vatManagement';
 import PlatformSettings from '../../models/platformSettings';
 import { calculateAutoDiscount } from '../../utils/discountEngine';
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
@@ -434,7 +435,7 @@ export const createPaymentIntent = async (
     const quotePricingVatCalculation = getQuotePricingVatCalculation(booking, discountedQuoteAmount);
     const vatCalculation = quotePricingVatCalculation
       ? quotePricingVatCalculation
-      : configuredVatDecision?.action && configuredVatDecision.action !== "rfq"
+      : configuredVatDecision && !requiresVatRfqReview(configuredVatDecision)
         ? (() => {
             const vatRate = Number(configuredVatDecision.appliedRate) || 0;
             const vatAmount = Math.round(((discountedQuoteAmount * vatRate) / 100) * 100) / 100;

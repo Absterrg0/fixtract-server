@@ -23,26 +23,46 @@ export interface VatRateOption {
 }
 
 const COUNTRY_ALIASES: Record<string, string> = {
+  AUSTRIA: "AT",
   BELGIUM: "BE",
-  NETHERLANDS: "NL",
-  GERMANY: "DE",
-  FRANCE: "FR",
-  MONACO: "MC",
-  "UNITED KINGDOM": "GB",
-  UK: "GB",
-  IRELAND: "IE",
-  SPAIN: "ES",
-  PORTUGAL: "PT",
-  ITALY: "IT",
-  POLAND: "PL",
+  BULGARIA: "BG",
+  CROATIA: "HR",
+  CYPRUS: "CY",
   CZECHIA: "CZ",
   "CZECH REPUBLIC": "CZ",
+  DENMARK: "DK",
+  ESTONIA: "EE",
+  FINLAND: "FI",
+  FRANCE: "FR",
+  MONACO: "MC",
+  GERMANY: "DE",
+  GREECE: "GR",
+  HUNGARY: "HU",
+  IRELAND: "IE",
+  ITALY: "IT",
+  LATVIA: "LV",
+  LITHUANIA: "LT",
+  LUXEMBOURG: "LU",
+  MALTA: "MT",
+  NETHERLANDS: "NL",
+  "THE NETHERLANDS": "NL",
+  HOLLAND: "NL",
+  POLAND: "PL",
+  PORTUGAL: "PT",
+  ROMANIA: "RO",
+  SLOVAKIA: "SK",
   SLOVENIA: "SI",
-  CYPRUS: "CY",
+  SPAIN: "ES",
+  SWEDEN: "SE",
   SWITZERLAND: "CH",
   LIECHTENSTEIN: "LI",
   NORWAY: "NO",
-  GREECE: "GR",
+  "UNITED KINGDOM": "GB",
+  UK: "GB",
+  "GREAT BRITAIN": "GB",
+  ENGLAND: "GB",
+  SCOTLAND: "GB",
+  WALES: "GB",
   "UNITED STATES": "US",
   USA: "US",
   "UNITED STATES OF AMERICA": "US",
@@ -50,6 +70,13 @@ const COUNTRY_ALIASES: Record<string, string> = {
   AUSTRALIA: "AU",
   "NEW ZEALAND": "NZ",
   INDIA: "IN",
+  UKRAINE: "UA",
+  MOLDOVA: "MD",
+  ANDORRA: "AD",
+  "SAN MARINO": "SM",
+  TURKEY: "TR",
+  TÜRKIYE: "TR",
+  TURKIYE: "TR",
 };
 
 const STANDARD_RATES: Record<string, number> = {
@@ -65,12 +92,19 @@ export const B2B_VAT_EXEMPTION_NOTE =
   'Intra-Community supply, VAT exempt under Article 39bis of the VAT Directive';
 
 export const normalizeVatCountry = (country?: string | null): string => {
-  const raw = String(country || "BE").trim();
-  if (!raw) return "BE";
+  if (country == null || String(country).trim() === "") return "BE";
+  const raw = String(country).trim();
   const upper = raw.toUpperCase();
   if (/^[A-Z]{2}$/.test(upper)) return upper;
-  return COUNTRY_ALIASES[upper] || "BE";
+  if (COUNTRY_ALIASES[upper]) return COUNTRY_ALIASES[upper];
+  const normalizedName = upper.replace(/[.,']/g, "").replace(/\s+/g, " ");
+  if (COUNTRY_ALIASES[normalizedName]) return COUNTRY_ALIASES[normalizedName];
+  return "";
 };
+
+export const requiresVatRfqReview = (
+  decision?: Pick<VatDecision, "action" | "reverseCharge"> | null
+): boolean => decision?.action === "rfq" && !decision?.reverseCharge;
 
 export const getStandardVatRate = (country?: string | null): number => {
   const normalized = normalizeVatCountry(country);

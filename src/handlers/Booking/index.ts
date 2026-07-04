@@ -17,7 +17,7 @@ import { addBusinessDays, REFUND_RESPONSE_BUSINESS_DAYS } from "../../utils/busi
 import { sendPushToUser } from "../../utils/fcmService";
 import { getFrontendUrl } from "../../utils/frontendUrl";
 import { IUser } from "../../models/user";
-import { resolveVatDecisionFromConfig } from "../../utils/vatManagement";
+import { applyB2BInvoiceRule, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
 
 const presignMaybeS3Url = async (url?: string | null) => {
   if (!url) return url;
@@ -490,7 +490,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
 
       const wantsPaymentAtCheckout =
-        paymentAtCheckoutRequested && bookingData.vatDecision?.action !== "rfq";
+        paymentAtCheckoutRequested && !requiresVatRfqReview(bookingData.vatDecision);
       if (wantsPaymentAtCheckout) {
         if (
           typeof subprojectIndex !== "number" ||
@@ -1589,7 +1589,7 @@ export const proceedAtStandardVatRate = async (req: Request, res: Response, next
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate("customer", "customerType")
+      .populate("customer", "customerType vatNumber isVatVerified")
       .populate("project", "title subprojects extraOptions");
     if (!booking) {
       return res.status(404).json({ success: false, msg: "Booking not found" });
@@ -1610,13 +1610,15 @@ export const proceedAtStandardVatRate = async (req: Request, res: Response, next
       ? booking.vatDecision.standardRate!
       : booking.vatDecision.appliedRate ?? 21;
 
-    booking.vatDecision = {
+    const customer = booking.customer as any;
+    booking.vatDecision = applyB2BInvoiceRule({
       ...booking.vatDecision,
       action: "standard_rate",
       appliedRate: standardRate,
+      reverseCharge: false,
       explanation: `Customer chose to proceed at the standard VAT rate (${standardRate}%).`,
       matchedRuleText: undefined,
-    };
+    }, customer?.customerType, customer?.vatNumber, customer?.isVatVerified);
 
     const project = booking.project as any;
     const subprojectIndex = booking.selectedSubprojectIndex;
