@@ -1,19 +1,38 @@
 import mongoose from 'mongoose';
-import { sendPushToUser } from '../fcmService';
 
 const LOG_PREFIX = '[backlink]';
+
+type PushPayload = {
+  title: string;
+  body: string;
+  type: string;
+  clickUrl: string;
+  data?: Record<string, string>;
+};
 
 function benefitsClickUrl(): string {
   return `${process.env.FRONTEND_URL ?? ''}/dashboard/benefits`;
 }
 
+/** Push delivery is wired when the FCM notification service is present (separate PR). */
 function fireAndForget(
   userId: mongoose.Types.ObjectId | string,
-  payload: Parameters<typeof sendPushToUser>[1],
+  payload: PushPayload,
 ): void {
-  void sendPushToUser(userId.toString(), payload).catch((err) => {
-    console.warn(`${LOG_PREFIX} FCM notify failed (non-critical):`, err);
-  });
+  const fcmModulePath = '../fcmService';
+  void (async () => {
+    try {
+      // Variable path keeps this module independent of the FCM feature branch at compile time.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const sendPushToUser = require(fcmModulePath)?.sendPushToUser as
+        | ((id: string, p: PushPayload) => Promise<void>)
+        | undefined;
+      if (!sendPushToUser) return;
+      await sendPushToUser(userId.toString(), payload);
+    } catch (err: unknown) {
+      console.warn(`${LOG_PREFIX} FCM notify skipped (non-critical):`, err);
+    }
+  })();
 }
 
 export function notifyVerificationRejected(
