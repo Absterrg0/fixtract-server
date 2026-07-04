@@ -21,6 +21,7 @@ type PeppolProviderConfig = {
 };
 
 type PeppolDispatchPayload = {
+  documentType: "invoice" | "credit_note";
   invoiceNumber: string;
   peppolParticipantId?: string;
   supplierParticipantId?: string;
@@ -77,7 +78,7 @@ const buildProviderRequest = (
         "X-Idempotency-Key": payload.invoiceNumber,
       },
       body: JSON.stringify({
-        documentType: "invoice",
+        documentType: payload.documentType,
         format: "ubl",
         invoiceNumber: payload.invoiceNumber,
         supplierParticipantId: payload.supplierParticipantId,
@@ -102,6 +103,8 @@ const buildProviderRequest = (
         service: "peppol",
         method: "send_document",
         args: [{
+          document_type: payload.documentType,
+          is_credit_note: payload.documentType === "credit_note",
           invoice_number: payload.invoiceNumber,
           peppol_participant_id: payload.peppolParticipantId,
           customer_vat: payload.customerVatNumber,
@@ -232,6 +235,7 @@ export async function maybeDispatchPeppolInvoice(params: {
   invoiceNumber: string;
   ublXml: string;
   invoiceUblUrl: string;
+  documentType?: "invoice" | "credit_note";
 }): Promise<PeppolDispatchResult> {
   if (!isBelgianB2BBooking(params.booking)) {
     return { status: "skipped", reason: "Peppol dispatch is limited to Belgian B2B customers" };
@@ -260,6 +264,7 @@ export async function maybeDispatchPeppolInvoice(params: {
   }
 
   const payload: PeppolDispatchPayload = {
+    documentType: params.documentType || "invoice",
     invoiceNumber: params.invoiceNumber,
     peppolParticipantId: eInvoicing.peppolParticipantId,
     supplierParticipantId: eInvoicing.peppolParticipantId,

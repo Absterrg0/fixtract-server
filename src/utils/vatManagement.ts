@@ -95,6 +95,7 @@ export const normalizeVatCountry = (country?: string | null): string => {
   if (country == null || String(country).trim() === "") return "BE";
   const raw = String(country).trim();
   const upper = raw.toUpperCase();
+  if (upper === "EL") return "GR";
   if (/^[A-Z]{2}$/.test(upper)) return upper;
   if (COUNTRY_ALIASES[upper]) return COUNTRY_ALIASES[upper];
   const normalizedName = upper.replace(/[.,']/g, "").replace(/\s+/g, " ");
@@ -108,7 +109,8 @@ export const requiresVatRfqReview = (
 
 export const getStandardVatRate = (country?: string | null): number => {
   const normalized = normalizeVatCountry(country);
-  return STANDARD_RATES[normalized] ?? 21;
+  if (!normalized) return 0;
+  return STANDARD_RATES[normalized] ?? 0;
 };
 
 export const isB2BSameAsB2CCountry = (country?: string | null): boolean =>
@@ -260,6 +262,16 @@ export const resolveVatDecisionFromConfig = async (params: {
 }): Promise<VatDecision> => {
   const country = normalizeVatCountry(params.country);
   const fallbackRate = getStandardVatRate(country);
+  if (!country) {
+    return {
+      action: "rfq",
+      country,
+      standardRate: 0,
+      appliedRate: 0,
+      reverseCharge: false,
+      explanation: "Customer country could not be matched to a VAT jurisdiction. VAT review is required before checkout.",
+    };
+  }
   const fallback: VatDecision = {
     action: "standard_rate",
     country,

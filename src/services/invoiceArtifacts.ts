@@ -260,6 +260,7 @@ export async function ensureCreditInvoiceArtifacts(bookingId: string): Promise<C
     invoiceNumber: creditNoteNumber,
     ublXml,
     invoiceUblUrl: creditNoteUblUrl,
+    documentType: "credit_note",
   });
 
   const update = {

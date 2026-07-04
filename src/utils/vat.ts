@@ -31,7 +31,8 @@ const VAT_RATES: Record<string, number> = {
  * @returns True if country is in EU
  */
 export function isEUCountry(countryCode: string): boolean {
-  return EU_COUNTRIES.includes(countryCode.toUpperCase());
+  const normalized = normalizeVatCountry(countryCode);
+  return normalized ? EU_COUNTRIES.includes(normalized) : false;
 }
 
 /**

@@ -1606,6 +1606,13 @@ export const proceedAtStandardVatRate = async (req: Request, res: Response, next
       });
     }
 
+    if (booking.vatDecision.reverseCharge) {
+      return res.status(400).json({
+        success: false,
+        msg: "Standard-rate override is not available because this booking already qualifies for reverse-charge VAT.",
+      });
+    }
+
     const standardRate = Number.isFinite(booking.vatDecision.standardRate)
       ? booking.vatDecision.standardRate!
       : booking.vatDecision.appliedRate ?? 21;
