@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "vitest run",
+    "test:vat-e2e": "tsx src/scripts/e2eVatFlow.ts all",
     "dev": "nodemon --exec \"npx tsx src/index.ts\"",
     "build": "tsc",
     "start": "node dist/index.js",
