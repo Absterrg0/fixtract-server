@@ -6,6 +6,7 @@
   "scripts": {
     "test": "vitest run",
     "test:vat-e2e": "tsx src/scripts/e2eVatFlow.ts all",
+    "record:vat-e2e-video": "node src/scripts/recordVatE2eVideo.mjs",
     "dev": "nodemon --exec \"npx tsx src/index.ts\"",
     "build": "tsc",
     "start": "node dist/index.js",
@@ -59,6 +60,7 @@
     "@types/multer": "^2.0.0",
     "@types/pdfkit": "^0.17.3",
     "nodemon": "^3.1.10",
+    "playwright": "^1.61.1",
     "tsx": "^4.20.4",
     "typescript": "^5.9.2",
     "vitest": "^4.1.10"

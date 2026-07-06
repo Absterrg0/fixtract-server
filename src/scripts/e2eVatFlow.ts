@@ -11,6 +11,8 @@ import "dotenv/config";
 import mongoose from "mongoose";
 import bcrypt from "bcrypt";
 import { DateTime } from "luxon";
+import fs from "fs";
+import path from "path";
 import User from "../models/user";
 import ServiceConfiguration from "../models/serviceConfiguration";
 import Project from "../models/project";
@@ -383,6 +385,24 @@ function bookingDates(offsetDays = 1): { date: string; time: string } {
   return { date: dt.toISODate()!, time: "10:00" };
 }
 
+async function resolveValidBookingSlot(
+  projectId: string,
+  subprojectIndex = 0
+): Promise<{ date: string; time: string }> {
+  const res = await fetch(
+    `${API_BASE}/api/public/projects/${projectId}/schedule-proposals?subprojectIndex=${subprojectIndex}`
+  );
+  const json = await res.json();
+  const proposals = json?.proposals || json?.data?.proposals;
+  const earliest = proposals?.earliestBookableDate || proposals?.earliestProposal?.startDate;
+  if (!earliest) {
+    return bookingDates(5);
+  }
+  const date = DateTime.fromISO(String(earliest), { zone: "Europe/Brussels" }).toISODate();
+  if (!date) return bookingDates(5);
+  return { date, time: "10:00" };
+}
+
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(`ASSERTION FAILED: ${message}`);
 }
@@ -524,8 +544,9 @@ async function test(): Promise<void> {
   });
 
   let reducedBookingId = "";
+  let reducedPaymentId = "";
   await run("D1 — Create booking with reduced VAT at checkout", async () => {
-    const { date: startDate, time: startTime } = bookingDates(1);
+    const { date: startDate, time: startTime } = await resolveValidBookingSlot(ids.projectId, 0);
     const { status, json } = await api("POST", "/api/bookings/create", b2cToken, {
       bookingType: "project",
       projectId: ids.projectId,
@@ -566,7 +587,7 @@ async function test(): Promise<void> {
 
   let rfqVatBookingId = "";
   await run("E1 — Create booking with VAT RFQ review (no immediate checkout)", async () => {
-    const { date: startDate, time: startTime } = bookingDates(3);
+    const { date: startDate, time: startTime } = await resolveValidBookingSlot(ids.projectId, 0);
     const { status, json } = await api("POST", "/api/bookings/create", b2cToken, {
       bookingType: "project",
       projectId: ids.projectId,
@@ -720,6 +741,7 @@ async function test(): Promise<void> {
       `/api/admin/payments/${(await (async () => {
         await connectDB();
         const p = await Payment.findOne({ booking: reducedBookingId });
+        if (p) reducedPaymentId = String(p._id);
         await mongoose.disconnect();
         return p?._id;
       })())}/invoice`,
@@ -742,6 +764,30 @@ async function test(): Promise<void> {
     for (const f of failed) console.log(`  - ${f.scenario}: ${f.detail}`);
     process.exit(1);
   }
+
+  const statePath = process.env.VAT_E2E_STATE_PATH || "/opt/cursor/artifacts/vat-e2e-state.json";
+  const state = {
+    tag: TEST_TAG,
+    projectId: ids.projectId,
+    serviceConfigId: ids.serviceConfigId,
+    reducedBookingId,
+    reducedPaymentId,
+    rfqVatBookingId,
+    rfqPackageBookingId,
+    credentials: {
+      admin: "admin@vat-e2e.test",
+      b2c: "b2c@vat-e2e.test",
+      b2bDe: "b2b-de@vat-e2e.test",
+      pro: "pro@vat-e2e.test",
+      password: PASSWORD,
+    },
+    scenariosPassed: passed,
+    recordedAt: new Date().toISOString(),
+  };
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+  console.log("STATE_WRITTEN:", statePath);
+  console.log(JSON.stringify(state, null, 2));
 }
 
 const mode = process.argv[2] || "all";
