@@ -1,5 +1,6 @@
 import { Schema, model, Document, Types } from "mongoose";
 import { STRIPE_CONFIG } from "../services/stripe";
+import { VatBreakdownLine } from "../Types/stripe";
 
 export type PaymentStatus =
   | "pending"
@@ -36,15 +37,7 @@ export interface IPayment extends Document {
   vatRate?: number;
   totalWithVat?: number;
   reverseCharge?: boolean;
-  vatBreakdown?: {
-    description: string;
-    netAmount: number;
-    vatRate: number;
-    vatAmount: number;
-    totalAmount: number;
-    vatCountry?: string;
-    vatLabel?: string;
-  }[];
+  vatBreakdown?: VatBreakdownLine[];
   platformCommission?: number;
   professionalPayout?: number;
 
@@ -133,11 +126,11 @@ const PaymentSchema = new Schema<IPayment>(
     totalWithVat: { type: Number },
     reverseCharge: { type: Boolean },
     vatBreakdown: [{
-      description: { type: String },
-      netAmount: { type: Number },
-      vatRate: { type: Number },
-      vatAmount: { type: Number },
-      totalAmount: { type: Number },
+      description: { type: String, required: true },
+      netAmount: { type: Number, required: true },
+      vatRate: { type: Number, required: true },
+      vatAmount: { type: Number, required: true },
+      totalAmount: { type: Number, required: true },
       vatCountry: { type: String },
       vatLabel: { type: String },
     }],

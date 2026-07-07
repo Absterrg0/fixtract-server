@@ -52,6 +52,16 @@ export interface PaymentIntentMetadata {
 
 // ==================== Booking Payment Types ====================
 
+export interface VatBreakdownLine {
+  description: string;
+  netAmount: number;
+  vatRate: number;
+  vatAmount: number;
+  totalAmount: number;
+  vatCountry?: string;
+  vatLabel?: string;
+}
+
 export interface BookingPayment {
   // Core payment info
   amount: number;
@@ -74,15 +84,7 @@ export interface BookingPayment {
   vatAmount: number;
   vatRate: number;
   totalWithVat: number;
-  vatBreakdown?: {
-    description: string;
-    netAmount: number;
-    vatRate: number;
-    vatAmount: number;
-    totalAmount: number;
-    vatCountry?: string;
-    vatLabel?: string;
-  }[];
+  vatBreakdown?: VatBreakdownLine[];
 
   // Multi-currency support
   originalCurrency?: string;

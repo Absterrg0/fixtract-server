@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import PlatformSettings from "../../models/platformSettings";
 import connecToDatabase from "../../config/db";
 import { IUser } from "../../models/user";
+import { validateVATNumberFormat } from "../../utils/vatValidation";
 
 // Get current platform settings
 export const getPlatformSettings = async (req: Request, res: Response, next: NextFunction) => {
@@ -63,7 +64,11 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
     const config = await PlatformSettings.getCurrentConfig();
     config.commissionPercent = commissionPercent;
     if (typeof companyVatNumber === 'string') {
-      config.companyVatNumber = companyVatNumber.trim();
+      const trimmed = companyVatNumber.trim();
+      if (trimmed && !validateVATNumberFormat(trimmed)) {
+        return res.status(400).json({ success: false, msg: 'Invalid company VAT number format' });
+      }
+      config.companyVatNumber = trimmed;
     }
     if (companyAddress && typeof companyAddress === 'object') {
       config.companyAddress = {

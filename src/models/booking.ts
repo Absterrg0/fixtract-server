@@ -1,6 +1,7 @@
 import mongoose, { Schema, model, Document, Types } from "mongoose";
 import { getNextSequence } from "../utils/counterSequence";
 import { STRIPE_CONFIG } from "../services/stripe";
+import { VatBreakdownLine } from "../Types/stripe";
 
 const SUPPORTED_CURRENCIES = STRIPE_CONFIG.supportedCurrencies.length
   ? STRIPE_CONFIG.supportedCurrencies
@@ -250,15 +251,7 @@ export interface IBooking extends Document {
     vatRate?: number;
     totalWithVat?: number;
     reverseCharge?: boolean;
-    vatBreakdown?: {
-      description: string;
-      netAmount: number;
-      vatRate: number;
-      vatAmount: number;
-      totalAmount: number;
-      vatCountry?: string;
-      vatLabel?: string;
-    }[];
+    vatBreakdown?: VatBreakdownLine[];
 
     // Multi-currency support
     originalCurrency?: string;
@@ -735,26 +728,26 @@ const BookingSchema = new Schema({
     bookedPrice: { type: Number, required: true, min: 0 },
   }],
   checkoutSnapshot: {
-    pricingType: { type: String, enum: ['fixed', 'unit'] },
-    unitAmount: { type: Number, min: 0 },
-    quantity: { type: Number, min: 0 },
-    baseSubtotal: { type: Number, min: 0 },
-    extraOptionsTotal: { type: Number, min: 0 },
-    totalAmount: { type: Number, min: 0 },
-    currency: { type: String, default: 'EUR' },
+    pricingType: { type: String, enum: ['fixed', 'unit'], required: true },
+    unitAmount: { type: Number, required: true, min: 0 },
+    quantity: { type: Number, required: true, min: 0 },
+    baseSubtotal: { type: Number, required: true, min: 0 },
+    extraOptionsTotal: { type: Number, required: true, min: 0 },
+    totalAmount: { type: Number, required: true, min: 0 },
+    currency: { type: String, required: true, default: 'EUR' },
     selectedOptions: [{
       extraOptionId: { type: String, required: true },
-      name: { type: String },
+      name: { type: String, required: true },
       unitPrice: { type: Number, required: true, min: 0 },
       quantity: { type: Number, required: true, min: 0 },
       totalPrice: { type: Number, required: true, min: 0 },
     }],
   },
   vatDecision: {
-    action: { type: String, enum: ['standard_rate', 'reduced_rate', 'rfq'] },
-    country: { type: String },
-    standardRate: { type: Number, min: 0, max: 100 },
-    appliedRate: { type: Number, min: 0, max: 100 },
+    action: { type: String, enum: ['standard_rate', 'reduced_rate', 'rfq'], required: true },
+    country: { type: String, required: true },
+    standardRate: { type: Number, required: true, min: 0, max: 100 },
+    appliedRate: { type: Number, required: true, min: 0, max: 100 },
     reducedRate: { type: Number, min: 0, max: 100 },
     reverseCharge: { type: Boolean },
     explanation: { type: String, maxlength: 1000 },
@@ -832,11 +825,11 @@ const BookingSchema = new Schema({
     totalWithVat: { type: Number },
     reverseCharge: { type: Boolean },
     vatBreakdown: [{
-      description: { type: String },
-      netAmount: { type: Number },
-      vatRate: { type: Number },
-      vatAmount: { type: Number },
-      totalAmount: { type: Number },
+      description: { type: String, required: true },
+      netAmount: { type: Number, required: true },
+      vatRate: { type: Number, required: true },
+      vatAmount: { type: Number, required: true },
+      totalAmount: { type: Number, required: true },
       vatCountry: { type: String },
       vatLabel: { type: String },
     }],

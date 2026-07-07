@@ -27,7 +27,7 @@ async function fixInvoiceSequenceIndexes() {
     throw new Error("MongoDB connection is missing database handle");
   }
 
-  const collection = db.collection("invoicesequences");
+  const collection = InvoiceSequence.collection;
   const indexes = await collection.indexes();
   console.log("Existing invoice sequence indexes:");
   indexes.forEach((idx) => {
@@ -47,6 +47,12 @@ async function fixInvoiceSequenceIndexes() {
   } else {
     console.log("No legacy unique year-only index found — nothing to drop.");
   }
+
+  const backfill = await collection.updateMany(
+    { kind: { $exists: false } },
+    { $set: { kind: "invoice" } }
+  );
+  console.log(`Backfilled kind on ${backfill.modifiedCount} legacy sequence document(s).`);
 
   console.log("Ensuring schema indexes exist...");
   await InvoiceSequence.createIndexes();
