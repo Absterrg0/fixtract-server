@@ -7,6 +7,9 @@ import { generateBookingInvoice } from "./invoiceGenerator";
 import { maybeDispatchPeppolInvoice } from "./peppolDispatch";
 
 export const SELF_BILLING_NOTE = "Prepared and sent on behalf of the supplier.";
+const SELF_BILLING_CUSTOMIZATION_ID =
+  "urn:cen.eu:en16931:2017#compliant#urn:fdc:peppol.eu:2017:poacc:selfbilling:3.0";
+const SELF_BILLING_PROFILE_ID = "urn:fdc:peppol.eu:2017:poacc:selfbilling:01:1.0";
 
 type InvoiceArtifactResult = {
   invoiceNumber: string;
@@ -313,8 +316,8 @@ const buildUblCreditNoteXml = (
 <CreditNote xmlns="urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2"
   xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
   xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
-  <cbc:CustomizationID>urn:cen.eu:en16931:2017#compliant#urn:fdc:peppol.eu:2017:poacc:selfbilling:01:1.0</cbc:CustomizationID>
-  <cbc:ProfileID>urn:fdc:peppol.eu:2017:poacc:selfbilling:01:1.0</cbc:ProfileID>
+  <cbc:CustomizationID>${SELF_BILLING_CUSTOMIZATION_ID}</cbc:CustomizationID>
+  <cbc:ProfileID>${SELF_BILLING_PROFILE_ID}</cbc:ProfileID>
   <cbc:ID>${escapeXml(creditNoteNumber)}</cbc:ID>
   <cbc:IssueDate>${issuedAt.toISOString().slice(0, 10)}</cbc:IssueDate>
   <cbc:CreditNoteTypeCode>261</cbc:CreditNoteTypeCode>
@@ -370,8 +373,8 @@ const buildUblInvoiceXml = (
 <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
   xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
   xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
-  <cbc:CustomizationID>urn:cen.eu:en16931:2017</cbc:CustomizationID>
-  <cbc:ProfileID>urn:fdc:peppol.eu:2017:poacc:billing:01:1.0</cbc:ProfileID>
+  <cbc:CustomizationID>${SELF_BILLING_CUSTOMIZATION_ID}</cbc:CustomizationID>
+  <cbc:ProfileID>${SELF_BILLING_PROFILE_ID}</cbc:ProfileID>
   <cbc:ID>${escapeXml(invoiceNumber)}</cbc:ID>
   <cbc:IssueDate>${issuedAt.toISOString().slice(0, 10)}</cbc:IssueDate>
   <cbc:InvoiceTypeCode>${invoiceTypeCode}</cbc:InvoiceTypeCode>
