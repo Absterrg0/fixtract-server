@@ -4,6 +4,12 @@ import connecToDatabase from "../../config/db";
 import { IUser } from "../../models/user";
 import { validateVATNumberFormat } from "../../utils/vatValidation";
 
+const serializeEInvoicingSettings = (eInvoicing: any = {}) => ({
+  peppolEnabled: eInvoicing.peppolEnabled === true,
+  provider: eInvoicing.provider === 'odoo' ? 'odoo' : 'manual',
+  peppolParticipantId: eInvoicing.peppolParticipantId || '',
+});
+
 // Get current platform settings
 export const getPlatformSettings = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -21,7 +27,7 @@ export const getPlatformSettings = async (req: Request, res: Response, next: Nex
         commissionPercent: config.commissionPercent,
         companyVatNumber: config.companyVatNumber || '',
         companyAddress: config.companyAddress || {},
-        eInvoicing: config.eInvoicing || {},
+        eInvoicing: serializeEInvoicingSettings(config.eInvoicing),
         lastModified: config.lastModified,
         version: config.version,
       }
@@ -85,16 +91,16 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
       }
       if (
         eInvoicing.provider !== undefined &&
-        !['odoo', 'billit', 'manual'].includes(String(eInvoicing.provider))
+        !['odoo', 'manual'].includes(String(eInvoicing.provider))
       ) {
         return res.status(400).json({ success: false, msg: 'Invalid e-invoicing provider' });
       }
       const peppolEnabled = eInvoicing.peppolEnabled !== undefined
         ? eInvoicing.peppolEnabled === true
         : (config.eInvoicing?.peppolEnabled ?? false);
-      const provider = eInvoicing.provider !== undefined && ['odoo', 'billit', 'manual'].includes(String(eInvoicing.provider))
+      const provider = eInvoicing.provider !== undefined && ['odoo', 'manual'].includes(String(eInvoicing.provider))
         ? eInvoicing.provider
-        : (config.eInvoicing?.provider ?? 'manual');
+        : (config.eInvoicing?.provider === 'odoo' ? 'odoo' : 'manual');
       const peppolParticipantId = typeof eInvoicing.peppolParticipantId === 'string'
         ? eInvoicing.peppolParticipantId.trim()
         : config.eInvoicing?.peppolParticipantId;
@@ -104,6 +110,12 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
           return res.status(400).json({
             success: false,
             msg: 'A valid Peppol participant ID (scheme:identifier, e.g. 0208:BE0123456789) is required when Peppol is enabled with a provider',
+          });
+        }
+        if (provider === 'odoo' && (!process.env.ODOO_API_URL || !process.env.ODOO_API_KEY)) {
+          return res.status(400).json({
+            success: false,
+            msg: 'ODOO_API_URL and ODOO_API_KEY must be configured on the server when Odoo e-invoicing is enabled',
           });
         }
       }
@@ -124,7 +136,7 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
         commissionPercent: config.commissionPercent,
         companyVatNumber: config.companyVatNumber || '',
         companyAddress: config.companyAddress || {},
-        eInvoicing: config.eInvoicing || {},
+        eInvoicing: serializeEInvoicingSettings(config.eInvoicing),
         lastModified: config.lastModified,
         version: config.version,
       }
