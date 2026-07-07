@@ -150,6 +150,7 @@ export interface VATCalculationParams {
   amount: number;
   customerCountry: string;
   customerVATNumber: string | null;
+  customerVatVerified?: boolean;
   professionalCountry: string;
   customerType: 'individual' | 'business';
 }
