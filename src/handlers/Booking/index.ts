@@ -266,6 +266,16 @@ const presignBookingFiles = async (bookingDoc: any) => {
     );
   }
 
+  if (booking?.payment) {
+    booking.payment = {
+      ...booking.payment,
+      invoiceUrl: await presignMaybeS3Url(booking.payment.invoiceUrl),
+      invoiceUblUrl: await presignMaybeS3Url(booking.payment.invoiceUblUrl),
+      creditNoteUrl: await presignMaybeS3Url(booking.payment.creditNoteUrl),
+      creditNoteUblUrl: await presignMaybeS3Url(booking.payment.creditNoteUblUrl),
+    };
+  }
+
   return booking;
 };
 

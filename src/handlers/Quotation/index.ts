@@ -327,6 +327,32 @@ const resolveLinkedSubprojectIndex = (
 };
 
 /**
+ * Incomplete checkoutSnapshot docs (e.g. only currency) fail Mongoose nested
+ * required validators on any later save. Drop them so RFQ accept/reject can proceed.
+ */
+const sanitizeIncompleteCheckoutSnapshot = (booking: any) => {
+  const snapshot = booking?.checkoutSnapshot;
+  if (!snapshot) return;
+
+  const hasRequiredTotals =
+    typeof snapshot.pricingType === 'string' &&
+    Number.isFinite(Number(snapshot.unitAmount)) &&
+    Number.isFinite(Number(snapshot.quantity)) &&
+    Number.isFinite(Number(snapshot.baseSubtotal)) &&
+    Number.isFinite(Number(snapshot.extraOptionsTotal)) &&
+    Number.isFinite(Number(snapshot.totalAmount)) &&
+    typeof snapshot.currency === 'string' &&
+    snapshot.currency.length > 0;
+
+  if (!hasRequiredTotals) {
+    booking.checkoutSnapshot = undefined;
+    if (typeof booking.markModified === 'function') {
+      booking.markModified('checkoutSnapshot');
+    }
+  }
+};
+
+/**
  * Professional accept/reject RFQ
  * Accept sets rfqDeadline = addWorkingDays(now, 4), status → rfq_accepted
  */
@@ -365,6 +391,10 @@ export const respondToRFQ = async (req: Request, res: Response) => {
     const now = new Date();
     const customer = booking.customer as any;
     const professional = booking.professional as any;
+
+    // Legacy/partial RFQ bookings may carry an incomplete checkoutSnapshot that
+    // blocks save() via nested required validators.
+    sanitizeIncompleteCheckoutSnapshot(booking);
 
     if (action === 'accepted') {
       booking.rfqResponse = { action: 'accepted', respondedAt: now };
@@ -514,6 +544,8 @@ export const submitQuotation = async (req: Request, res: Response) => {
     if (!['rfq_accepted', 'draft_quote'].includes(booking.status)) {
       return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'Quotation can only be submitted when status is rfq_accepted or draft_quote' } });
     }
+
+    sanitizeIncompleteCheckoutSnapshot(booking);
 
     const pricingWithLegacyVat = await applyAllowedVatRateToLegacyPricingLines(booking, normalizedPricing);
     const vatValidation = await validatePricingLinesAgainstAllowedVat(booking, pricingWithLegacyVat.lines || []);

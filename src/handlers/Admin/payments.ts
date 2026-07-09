@@ -3,11 +3,39 @@ import mongoose from 'mongoose';
 import Payment from '../../models/payment';
 import { captureAndTransferPayment } from '../Stripe/payment';
 import { ensureBookingInvoiceArtifacts, ensureCreditInvoiceArtifacts } from '../../services/invoiceArtifacts';
+import { presignS3Url } from '../../utils/s3Upload';
 
 const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const isValidPaymentId = (paymentId: string | string[] | undefined): paymentId is string =>
   typeof paymentId === 'string' && mongoose.Types.ObjectId.isValid(paymentId);
+
+const presignMaybe = async (url?: string | null) => {
+  if (!url) return url;
+  return (await presignS3Url(url)) || url;
+};
+
+const withPresignedInvoiceUrls = async <T extends Record<string, any>>(payment: T): Promise<T> => {
+  const [
+    invoiceUrl,
+    invoiceUblUrl,
+    creditNoteUrl,
+    creditNoteUblUrl,
+  ] = await Promise.all([
+    presignMaybe(payment.invoiceUrl),
+    presignMaybe(payment.invoiceUblUrl),
+    presignMaybe(payment.creditNoteUrl),
+    presignMaybe(payment.creditNoteUblUrl),
+  ]);
+
+  return {
+    ...payment,
+    invoiceUrl,
+    invoiceUblUrl,
+    creditNoteUrl,
+    creditNoteUblUrl,
+  };
+};
 
 export const getPayments = async (req: Request, res: Response) => {
   try {
@@ -56,10 +84,14 @@ export const getPayments = async (req: Request, res: Response) => {
       ])
     ]);
 
+    const paymentsWithSignedUrls = await Promise.all(
+      payments.map((payment) => withPresignedInvoiceUrls(payment))
+    );
+
     res.json({
       success: true,
       data: {
-        payments,
+        payments: paymentsWithSignedUrls,
         pagination: {
           page: pageNumber,
           limit: limitNumber,
@@ -185,10 +217,15 @@ const withPaymentArtifact = async (req: Request, res: Response, options: Payment
       return res.status(400).json({ success: false, msg: options.failureMessage });
     }
 
+    const signedResult =
+      result && typeof result === 'object'
+        ? await withPresignedInvoiceUrls(result as Record<string, any>)
+        : result;
+
     return res.json({
       success: true,
       msg: options.successMessage,
-      data: result,
+      data: signedResult,
     });
   } catch (error: any) {
     console.error(`[ADMIN][PAYMENTS] ${options.logLabel}`, error);
