@@ -5,7 +5,8 @@
  *   - projects.renovationPlanning.fixeraManaged → fixtractManaged
  *   - bookings.payment.fxProvider "fixera" → "fixtract"
  *   - platform settings company name defaults
- *   - backlink config production domain seeds
+ *   - clear seeded backlink allowedTargetDomains (FRONTEND_URL is the runtime default;
+ *     admins re-add any extras in the admin UI)
  *
  * Usage:
  *   npx tsx src/scripts/migrateFixeraToFixtract.ts --dry-run
@@ -19,13 +20,6 @@ import path from "path";
 dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
 const DRY_RUN = process.argv.includes("--dry-run");
-
-const DOMAIN_REPLACEMENTS: Record<string, string> = {
-  "fixera-rho.vercel.app": "fixtract-rho.vercel.app",
-  "www.fixera-rho.vercel.app": "www.fixtract-rho.vercel.app",
-  "fixera.com": "fixtract.com",
-  "www.fixera.com": "www.fixtract.com",
-};
 
 async function runUpdate(
   label: string,
@@ -83,14 +77,6 @@ async function migrate() {
   );
   console.log(`  → modified ${bookingsModified}\n`);
 
-  const platformNameModified = await runUpdate(
-    "platformsettings.name",
-    "platformsettings",
-    { name: "Fixera" },
-    { $set: { name: "Fixtract" } }
-  );
-  console.log(`  → modified ${platformNameModified}\n`);
-
   const platformCompanyModified = await runUpdate(
     "platformsettings.companyAddress.name",
     "platformsettings",
@@ -99,34 +85,14 @@ async function migrate() {
   );
   console.log(`  → modified ${platformCompanyModified}\n`);
 
-  const backlinkCol = mongoose.connection.collection("backlinkconfigs");
-  const backlinkConfigs = await backlinkCol.find({}).toArray();
-  let backlinkDomainsUpdated = 0;
-
-  for (const doc of backlinkConfigs) {
-    const domains: string[] = Array.isArray(doc.allowedTargetDomains)
-      ? doc.allowedTargetDomains
-      : [];
-    const updated = domains.map(
-      (d: string) => DOMAIN_REPLACEMENTS[d.toLowerCase()] ?? d
-    );
-    const changed = JSON.stringify(domains) !== JSON.stringify(updated);
-
-    if (!changed) continue;
-
-    console.log(
-      `[backlinkconfigs] ${doc._id}: ${domains.join(", ")} → ${updated.join(", ")}`
-    );
-
-    if (!DRY_RUN) {
-      await backlinkCol.updateOne(
-        { _id: doc._id },
-        { $set: { allowedTargetDomains: updated } }
-      );
-    }
-    backlinkDomainsUpdated += 1;
-  }
-  console.log(`  → updated ${backlinkDomainsUpdated} backlink config(s)\n`);
+  // Drop hardcoded domain seeds. Runtime allow-list is FRONTEND_URL (+ admin extras).
+  const backlinkCleared = await runUpdate(
+    "backlinkconfigs.allowedTargetDomains → []",
+    "backlinkconfigs",
+    { allowedTargetDomains: { $exists: true, $not: { $size: 0 } } },
+    { $set: { allowedTargetDomains: [] } }
+  );
+  console.log(`  → modified ${backlinkCleared}\n`);
 
   console.log(DRY_RUN ? "Dry run complete." : "Migration complete.");
   await mongoose.disconnect();

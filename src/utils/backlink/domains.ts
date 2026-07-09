@@ -14,13 +14,14 @@ function domainsFromEnv(): string[] {
 }
 
 /**
- * Union of admin-configured domains and FRONTEND_URL host(s).
- * The env var is always included so the live domain matches even if the DB list is cleared.
+ * Allowed backlink target hosts = FRONTEND_URL host(s) plus any domains
+ * the admin added in config. FRONTEND_URL is always the baseline default;
+ * the DB list starts empty and is owned by admin.
  */
 export function getEffectiveAllowedDomains(config: IBacklinkConfig): string[] {
-  const fromDb = config.allowedTargetDomains.map((d) => d.toLowerCase());
+  const fromDb = (config.allowedTargetDomains ?? []).map((d) => d.toLowerCase());
   const fromEnv = domainsFromEnv();
-  return Array.from(new Set([...fromDb, ...fromEnv]));
+  return Array.from(new Set([...fromEnv, ...fromDb]));
 }
 
 /** True when the hostname is one of Fixtract's own domains (not a valid external submission). */

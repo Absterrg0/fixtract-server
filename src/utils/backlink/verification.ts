@@ -27,7 +27,7 @@ export interface FoundLink {
  * can be evaluated reliably.
  *
  * @param content        - Raw output from firecrawlClient.scrapePageForLinks
- * @param allowedDomains - Hostnames to accept (e.g. ['fixtract-rho.vercel.app'])
+ * @param allowedDomains - Hostnames to accept (e.g. from FRONTEND_URL + admin config)
  * @param requireFollow  - If true, links carrying rel="nofollow" are excluded
  */
 export function extractFixtractLinks(

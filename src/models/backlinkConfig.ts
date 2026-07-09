@@ -24,24 +24,15 @@ export interface IBacklinkConfigModel extends Model<IBacklinkConfig> {
 }
 
 /**
- * Known production hostname seeded into the DB on first upsert.
- * The service layer always unions this list with the FRONTEND_URL env var
- * at runtime, so dev/staging environments are covered automatically.
+ * Default backlink config. `allowedTargetDomains` stays empty — the live
+ * FRONTEND_URL host is always unioned at runtime (see getEffectiveAllowedDomains).
+ * Admins add any extra domains themselves in the admin UI.
  */
-// Include legacy fixera hostnames so existing DB seeds keep working until
-// migrate:fixera-to-fixtract rewrites allowedTargetDomains.
-const PROD_ALLOWED_DOMAINS = [
-  'fixtract-rho.vercel.app',
-  'www.fixtract-rho.vercel.app',
-  'fixera-rho.vercel.app',
-  'www.fixera-rho.vercel.app',
-];
-
 export const DEFAULT_BACKLINK_CONFIG = {
   isEnabled: false,
   customerRewardPoints: 50,
   professionalRewardPoints: 50,
-  allowedTargetDomains: PROD_ALLOWED_DOMAINS,
+  allowedTargetDomains: [] as string[],
   crawlTimeoutMs: 30_000,
   requireFollowLink: false,
   resubmitCooldownHours: 24,
