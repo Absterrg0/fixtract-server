@@ -1,5 +1,5 @@
 {
-  "name": "fixtract-server",
+  "name": "fixera-server",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -18,7 +18,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Absterrg0/fixtract-server.git"
+    "url": "git+https://github.com/pankaj3399/fixera-server.git"
   },
   "keywords": [],
   "author": "",
