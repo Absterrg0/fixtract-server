@@ -22,29 +22,6 @@ const createEmailAPI = () => {
   return api;
 };
 
-const DEFAULT_FROM_EMAIL = "noreply@fixtract.com";
-const DEFAULT_SUPPORT_EMAIL = "support@fixtract.com";
-
-const getFromEmail = () => process.env.FROM_EMAIL || DEFAULT_FROM_EMAIL;
-
-/** Monitored inbox for user replies (FROM may be noreply@). */
-const getSupportReplyTo = () => ({
-  email:
-    process.env.SUPPORT_EMAIL ||
-    process.env.REPLY_TO_EMAIL ||
-    DEFAULT_SUPPORT_EMAIL,
-  name: "Fixtract Support",
-});
-
-/** Shared From + Reply-To so "reply to this email" copy hits support, not noreply. */
-const applyEmailIdentity = (sendSmtpEmail: SendSmtpEmail) => {
-  sendSmtpEmail.sender = {
-    name: "Fixtract Team",
-    email: getFromEmail(),
-  };
-  sendSmtpEmail.replyTo = getSupportReplyTo();
-};
-
 // Generate a 6-digit OTP
 export const generateOTP = (): string => {
   return Math.floor(100000 + Math.random() * 900000).toString();
@@ -73,7 +50,7 @@ const getEmailHeader = (title: string) => `
 const getEmailFooter = () => `
   <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee;">
     <p style="color: #999; font-size: 12px; margin: 0;">
-      © ${new Date().getFullYear()} Fixtract. All rights reserved.
+      © 2025 Fixtract. All rights reserved.
     </p>
   </div>
 `;
@@ -125,7 +102,10 @@ export const sendOTPEmail = async (email: string, otp: string, userName: string)
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "Verify Your Fixtract Account";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = { 
+      name: "Fixtract Team", 
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
+    };
 
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
@@ -187,7 +167,10 @@ export const sendWelcomeEmail = async (email: string, userName: string): Promise
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "Welcome to Fixtract - Let's Complete Your Profile!";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = { 
+      name: "Fixtract Team", 
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
+    };
 
    await emailAPI.sendTransacEmail(sendSmtpEmail);
 
@@ -243,7 +226,10 @@ export const sendProfessionalWelcomeEmail = async (email: string, professionalNa
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "Welcome to Fixtract Professionals";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = {
+      name: "Fixtract Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
 
     await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
@@ -297,7 +283,10 @@ export const sendIdExpiredEmail = async (email: string, userName: string): Promi
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "Fixtract: Your ID Has Expired";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = {
+      name: "Fixtract Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
 
     await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
@@ -363,7 +352,10 @@ export const sendProfessionalApprovalEmail = async (email: string, professionalN
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "🎉 Your Fixtract Professional Profile is Approved!";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = { 
+      name: "Fixtract Team", 
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
+    };
 
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
 
@@ -437,7 +429,10 @@ export const sendProfessionalRejectionEmail = async (email: string, professional
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "Fixtract Profile Update Required - Please Review";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = { 
+      name: "Fixtract Team", 
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
+    };
 
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
 
@@ -487,7 +482,10 @@ export const sendProfessionalIdChangeRejectionEmail = async (
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "ID document rejected — account remains approved";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = { 
+      name: "Fixtract Team", 
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
+    };
 
     await emailAPI.sendTransacEmail(sendSmtpEmail);
 
@@ -535,7 +533,10 @@ export const sendProfessionalIdChangeApprovalEmail = async (
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "ID document update approved — account remains approved";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = {
+      name: "Fixtract Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
 
     await emailAPI.sendTransacEmail(sendSmtpEmail);
 
@@ -617,7 +618,10 @@ export const sendProfessionalSuspensionEmail = async (email: string, name: strin
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "Fixtract Account Suspended - Action Required";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = { 
+      name: "Fixtract Team", 
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
+    };
 
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
 
@@ -685,7 +689,10 @@ export const sendProfessionalReactivationEmail = async (email: string, name: str
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "Fixtract Account Reactivated - Welcome Back!";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = { 
+      name: "Fixtract Team", 
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
+    };
 
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
 
@@ -761,11 +768,15 @@ export const sendTeamMemberInvitationEmail = async (
       </div>
     `;
 
-    const sendSmtpEmail = new SendSmtpEmail();
-    sendSmtpEmail.to = [{ email: email, name: teamMemberName }];
-    sendSmtpEmail.subject = `Welcome to ${companyName} - Team Member Invitation`;
-    sendSmtpEmail.htmlContent = htmlContent;
-    applyEmailIdentity(sendSmtpEmail);
+    const sendSmtpEmail: SendSmtpEmail = {
+      to: [{ email: email, name: teamMemberName }],
+      subject: `Welcome to ${companyName} - Team Member Invitation`,
+      htmlContent: htmlContent,
+      sender: {
+        email: process.env.FROM_EMAIL || 'noreply@fixtract.com',
+        name: 'Fixtract Team'
+      },
+    };
 
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
@@ -839,7 +850,10 @@ export const sendProjectApprovalEmail = async (
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "🎉 Your Fixtract Project is Approved!";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = {
+      name: "Fixtract Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
 
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
@@ -911,7 +925,10 @@ export const sendProjectRejectionEmail = async (
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "Fixtract Project Update Required - Please Review";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = {
+      name: "Fixtract Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
 
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
@@ -988,7 +1005,10 @@ export const sendProjectDeletedEmail = async (
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "Fixtract Project Deleted - Important Notice";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = {
+      name: "Fixtract Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
 
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
@@ -1068,7 +1088,10 @@ export const sendProjectDeactivatedEmail = async (
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "Fixtract Project Temporarily Deactivated";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = {
+      name: "Fixtract Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
 
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
@@ -1143,7 +1166,10 @@ export const sendProjectReactivatedEmail = async (
     sendSmtpEmail.to = [{ email }];
     sendSmtpEmail.subject = "🎉 Your Fixtract Project is Reactivated!";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = {
+      name: "Fixtract Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
 
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
@@ -1228,7 +1254,10 @@ export const sendBookingNotificationEmail = async (
     sendSmtpEmail.to = [{ email: professionalEmail }];
     sendSmtpEmail.subject = "🎉 New Booking Request for Your Project!";
     sendSmtpEmail.htmlContent = emailContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = {
+      name: "Fixtract Team",
+      email: process.env.FROM_EMAIL || "anafariya@gmail.com"
+    };
 
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
@@ -1255,34 +1284,13 @@ const buildEmailButton = (href: string, label: string, color = '#667eea') => `
   </div>
 `;
 
+const EMAIL_DEV_NO_SEND = process.env.EMAIL_DEV_NO_SEND === 'true';
 const IS_DEV = process.env.NODE_ENV !== 'production';
-const IS_CI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
-/** Dev-only skip; never honor in production even if the env var is set. */
-const EMAIL_DEV_NO_SEND = IS_DEV && process.env.EMAIL_DEV_NO_SEND === 'true';
-/** Opt-in full body dumps — local only, never in CI. */
-const EMAIL_DEV_LOG_BODY =
-  IS_DEV && !IS_CI && process.env.EMAIL_DEV_LOG_BODY === 'true';
 
-const logDevEmail = (
-  outcome: string,
-  _to: string,
-  _subject: string,
-  template: string,
-  htmlContent: string,
-  errorMessage?: string
-) => {
+const logDevEmail = (outcome: string, to: string, subject: string, template: string, htmlContent: string, errorMessage?: string) => {
   if (!IS_DEV) return;
-  const bodyBytes = Buffer.byteLength(htmlContent, 'utf8');
-  const errorBit = errorMessage ? ' error=true' : '';
-  console.log(
-    `[EMAIL ${outcome}] template=${template} bodyBytes=${bodyBytes}${errorBit}`
-  );
-  if (EMAIL_DEV_LOG_BODY) {
-    const banner = '='.repeat(80);
-    console.log(
-      `\n${banner}\n[EMAIL ${outcome} BODY] template=${template}\n--- BODY ---\n${htmlContent}\n--- END ---\n${banner}`
-    );
-  }
+  const banner = '='.repeat(80);
+  console.log(`\n${banner}\n[EMAIL ${outcome}] template=${template}\n  to:      ${to}\n  subject: ${subject}${errorMessage ? `\n  error:   ${errorMessage}` : ''}\n--- BODY ---\n${htmlContent}\n--- END ---\n${banner}`);
 };
 
 const sendEmail = async (
@@ -1328,7 +1336,10 @@ const sendEmail = async (
     sendSmtpEmail.to = [{ email: to }];
     sendSmtpEmail.subject = subject;
     sendSmtpEmail.htmlContent = htmlContent;
-    applyEmailIdentity(sendSmtpEmail);
+    sendSmtpEmail.sender = {
+      name: 'Fixtract Team',
+      email: process.env.FROM_EMAIL || 'noreply@fixtract.com',
+    };
     await emailAPI.sendTransacEmail(sendSmtpEmail);
     logDevEmail('SENT', to, subject, template, htmlContent);
     logEmail({
