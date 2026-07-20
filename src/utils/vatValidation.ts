@@ -21,7 +21,7 @@ export function validateVATNumberFormat(vatNumber: string | null): boolean {
   const countryCode = cleaned.slice(0, 2);
   const perCountryPatterns: Record<string, RegExp> = {
     AT: /^ATU\d{8}$/,
-    BE: /^BE\d{10}$/,
+    BE: /^BE[01]\d{9}$/,
     BG: /^BG\d{9,10}$/,
     CY: /^CY\d{8}[A-Z]$/,
     CZ: /^CZ\d{8,10}$/,
