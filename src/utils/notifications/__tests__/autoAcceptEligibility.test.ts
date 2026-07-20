@@ -1,34 +1,5 @@
 import { describe, expect, it } from 'vitest';
-
-/**
- * Pure eligibility rules for completion auto-accept (mirrors runCompletionAutoAccept guards).
- */
-function isEligibleForAutoAccept(input: {
-  status: string;
-  professionalCompletedAt?: Date | null;
-  unpaidMilestoneCount: number;
-  extraCostTotal: number;
-  extraCostPaymentSucceeded: boolean;
-  now?: Date;
-}): { eligible: boolean; reason?: string } {
-  if (input.status !== 'professional_completed') {
-    return { eligible: false, reason: 'invalid_status' };
-  }
-  const completedAt = input.professionalCompletedAt;
-  if (!completedAt) return { eligible: false, reason: 'missing_completed_at' };
-  const now = input.now ?? new Date();
-  const ageMs = now.getTime() - completedAt.getTime();
-  if (ageMs < 10 * 24 * 60 * 60 * 1000) {
-    return { eligible: false, reason: 'too_recent' };
-  }
-  if (input.unpaidMilestoneCount > 0) {
-    return { eligible: false, reason: 'milestones_unpaid' };
-  }
-  if (input.extraCostTotal > 0 && !input.extraCostPaymentSucceeded) {
-    return { eligible: false, reason: 'extra_cost_unpaid' };
-  }
-  return { eligible: true };
-}
+import { isEligibleForAutoAccept } from '../autoAcceptEligibility';
 
 describe('completion auto-accept eligibility', () => {
   const now = new Date('2026-07-20T12:00:00.000Z');

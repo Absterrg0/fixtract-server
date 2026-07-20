@@ -733,16 +733,20 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
         User.findById(finalizedBooking.customer).select('email name').lean(),
         proId ? User.findById(proId).select('email name businessInfo').lean() : null,
       ]);
-      if (professionalUser?.email) {
-        await sendCustomerConfirmedCompletionEmail(
-          professionalUser.email,
-          getProfessionalDisplayName(professionalUser),
-          customerUser?.name || 'Customer',
-          String(finalizedBooking._id)
-        );
+      try {
+        if (professionalUser?.email) {
+          await sendCustomerConfirmedCompletionEmail(
+            professionalUser.email,
+            getProfessionalDisplayName(professionalUser),
+            customerUser?.name || 'Customer',
+            String(finalizedBooking._id)
+          );
+        }
+      } catch (emailError: any) {
+        console.error('Failed to send customer-confirmed-completion email:', emailError?.message || emailError);
       }
 
-      // Ask both parties for reviews
+      // Ask both parties for reviews (independent of email delivery)
       if (customerUser?._id) {
         notifyAsync({
           userId: customerUser._id.toString(),
@@ -761,8 +765,8 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
           context: { bookingId: String(finalizedBooking._id) },
         });
       }
-    } catch (emailError: any) {
-      console.error('Failed to send customer-confirmed-completion email:', emailError?.message || emailError);
+    } catch (notifyError: any) {
+      console.error('Failed to send review-request notifications:', notifyError?.message || notifyError);
     }
 
     return res.json({
@@ -889,12 +893,13 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
       });
     }
 
+    const proId = await getProfessionalId(disputedBooking);
+    const [customerUser, professionalUser] = await Promise.all([
+      User.findById(disputedBooking.customer).select('email name').lean(),
+      proId ? User.findById(proId).select('email name businessInfo').lean() : null,
+    ]);
+
     try {
-      const proId = await getProfessionalId(disputedBooking);
-      const [customerUser, professionalUser] = await Promise.all([
-        User.findById(disputedBooking.customer).select('email name').lean(),
-        proId ? User.findById(proId).select('email name businessInfo').lean() : null,
-      ]);
       if (professionalUser?.email && ADMIN_NOTIFICATIONS_EMAIL) {
         await sendDisputeRaisedEmail(
           professionalUser.email,
@@ -905,6 +910,11 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
           String(disputedBooking._id)
         );
       }
+    } catch (emailError: any) {
+      console.error('Failed to send dispute-raised email:', emailError?.message || emailError);
+    }
+
+    try {
       if (proId) {
         notifyAsync({
           userId: proId,
@@ -923,8 +933,8 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
           context: { bookingId: String(disputedBooking._id) },
         });
       }
-    } catch (emailError: any) {
-      console.error('Failed to send dispute-raised email:', emailError?.message || emailError);
+    } catch (notifyError: any) {
+      console.error('Failed to notify dispute_started:', notifyError?.message || notifyError);
     }
 
     return res.json({

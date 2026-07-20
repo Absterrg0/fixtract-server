@@ -699,57 +699,59 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         await ensureWarrantyCoverageSnapshot(booking);
         await booking.save();
 
-        // Process referral completion for the customer
-        try {
-          const bookingAmount = booking.payment?.amount || 0;
-          await processReferralCompletion(booking.customer, booking._id, bookingAmount);
-        } catch (e) {
-          console.error('Error processing referral completion:', e);
-        }
-
-        try {
-          const { updateUserLoyalty } = await import('../../utils/loyaltySystem');
-          await updateUserLoyalty(String(booking.customer), booking.payment?.amount || 0);
-        } catch (e) {
-          console.error('Error updating customer loyalty:', e);
-        }
-
-        // Update professional's level after booking completion
-        const proId = await getProfessionalId(booking);
-        try {
-          if (proId) await updateProfessionalLevel(proId);
-        } catch (e) {
-          console.error('Error updating professional level:', e);
-        }
-
-        try {
-          await awardBookingCompletionPoints(proId, booking.customer, booking._id);
-        } catch (e) {
-          console.error('Error awarding booking completion points:', e);
-        }
-
-        try {
-          const customerId = booking.customer?.toString?.() || String(booking.customer);
-          if (customerId) {
-            notifyAsync({
-              userId: customerId,
-              eventKey: 'customer.review_request',
-              entityType: 'booking',
-              entityId: String(booking._id),
-              context: { bookingId: String(booking._id) },
-            });
+        if (!finalizeResult.alreadyCompleted) {
+          // Process referral completion for the customer
+          try {
+            const bookingAmount = booking.payment?.amount || 0;
+            await processReferralCompletion(booking.customer, booking._id, bookingAmount);
+          } catch (e) {
+            console.error('Error processing referral completion:', e);
           }
-          if (proId) {
-            notifyAsync({
-              userId: proId,
-              eventKey: 'professional.review_request',
-              entityType: 'booking',
-              entityId: String(booking._id),
-              context: { bookingId: String(booking._id) },
-            });
+
+          try {
+            const { updateUserLoyalty } = await import('../../utils/loyaltySystem');
+            await updateUserLoyalty(String(booking.customer), booking.payment?.amount || 0);
+          } catch (e) {
+            console.error('Error updating customer loyalty:', e);
           }
-        } catch (e) {
-          console.error('Error sending review request notifications:', e);
+
+          // Update professional's level after booking completion
+          const proId = await getProfessionalId(booking);
+          try {
+            if (proId) await updateProfessionalLevel(proId);
+          } catch (e) {
+            console.error('Error updating professional level:', e);
+          }
+
+          try {
+            await awardBookingCompletionPoints(proId, booking.customer, booking._id);
+          } catch (e) {
+            console.error('Error awarding booking completion points:', e);
+          }
+
+          try {
+            const customerId = booking.customer?.toString?.() || String(booking.customer);
+            if (customerId) {
+              notifyAsync({
+                userId: customerId,
+                eventKey: 'customer.review_request',
+                entityType: 'booking',
+                entityId: String(booking._id),
+                context: { bookingId: String(booking._id) },
+              });
+            }
+            if (proId) {
+              notifyAsync({
+                userId: proId,
+                eventKey: 'professional.review_request',
+                entityType: 'booking',
+                entityId: String(booking._id),
+                context: { bookingId: String(booking._id) },
+              });
+            }
+          } catch (e) {
+            console.error('Error sending review request notifications:', e);
+          }
         }
 
         return res.json({

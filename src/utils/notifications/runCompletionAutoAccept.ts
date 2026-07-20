@@ -21,6 +21,7 @@ import { getProfessionalDisplayName } from '../displayName';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
 import User from '../../models/user';
 import { notifyAsync } from './notify';
+import { isEligibleForAutoAccept } from './autoAcceptEligibility';
 
 const PROFESSIONAL_COMPLETION_PENDING_STATUS: BookingStatus = 'professional_completed';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
@@ -270,7 +271,9 @@ export async function runCompletionAutoAccept(): Promise<{
 
   for (const booking of candidates) {
     try {
+      const unpaidMilestoneCount = getUnpaidMilestoneCount(booking.milestonePayments);
       const extraCostTotal = Number(booking.extraCostTotal || 0);
+      let extraCostPaymentSucceeded = extraCostTotal <= 0;
       if (extraCostTotal > 0) {
         const piId = booking.payment?.extraCostStripePaymentIntentId;
         if (!piId) {
@@ -278,10 +281,23 @@ export async function runCompletionAutoAccept(): Promise<{
           continue;
         }
         const pi = await stripe.paymentIntents.retrieve(piId);
-        if (pi.status !== 'succeeded') {
+        extraCostPaymentSucceeded = pi.status === 'succeeded';
+        if (!extraCostPaymentSucceeded) {
           result.skipped++;
           continue;
         }
+      }
+
+      const eligibility = isEligibleForAutoAccept({
+        status: String(booking.status),
+        professionalCompletedAt: booking.professionalCompletedAt,
+        unpaidMilestoneCount,
+        extraCostTotal,
+        extraCostPaymentSucceeded,
+      });
+      if (!eligibility.eligible) {
+        result.skipped++;
+        continue;
       }
 
       const finalize = await finalizeBookingCompletion({

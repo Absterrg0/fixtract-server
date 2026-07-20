@@ -3,6 +3,19 @@ import LoyaltyConfig, { ILoyaltyTier } from "../models/loyaltyConfig";
 
 type LoyaltyLevel = 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Diamond';
 const VALID_LOYALTY_LEVELS: Set<string> = new Set(['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond']);
+const LOYALTY_RANK: Record<LoyaltyLevel, number> = {
+  Bronze: 0,
+  Silver: 1,
+  Gold: 2,
+  Platinum: 3,
+  Diamond: 4,
+};
+
+function isLoyaltyUpgrade(oldLevel: string, newLevel: string): boolean {
+  const oldRank = LOYALTY_RANK[toValidLoyaltyLevel(oldLevel)];
+  const newRank = LOYALTY_RANK[toValidLoyaltyLevel(newLevel)];
+  return newRank > oldRank;
+}
 
 function toValidLoyaltyLevel(level: string): LoyaltyLevel {
   if (VALID_LOYALTY_LEVELS.has(level)) {
@@ -152,7 +165,7 @@ export const updateUserLoyalty = async (
           return { user: null, leveledUp: false, oldLevel: 'Unknown', newLevel: 'Unknown' };
         }
 
-        const overrideLeveledUp = oldLevel !== overrideLevel;
+        const overrideLeveledUp = isLoyaltyUpgrade(oldLevel, overrideLevel);
         if (overrideLeveledUp) {
           try {
             const { notifyAsync } = await import('./notifications/notify');
@@ -180,7 +193,7 @@ export const updateUserLoyalty = async (
 
       const newStatus = await calculateLoyaltyStatus(newTotalSpent);
       const newLevel = toValidLoyaltyLevel(newStatus.level);
-      const leveledUp = oldLevel !== newLevel;
+      const leveledUp = isLoyaltyUpgrade(oldLevel, newLevel);
 
       const result = await User.findOneAndUpdate(
         { _id: userId, __v: user.__v },

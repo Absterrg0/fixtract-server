@@ -257,12 +257,19 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
         { 'customerReview.communicationLevel': { $exists: false } },
         { 'professionalReview.rating': { $exists: false } },
       ],
+      $and: [
+        {
+          $or: [
+            { 'notificationReminders.reviewRemindersSent': { $exists: false } },
+            { 'notificationReminders.reviewRemindersSent': { $lt: 2 } },
+          ],
+        },
+      ],
     }).select('_id customer professional actualEndDate customerReview professionalReview notificationReminders').limit(200);
 
     for (const booking of bookings) {
       const rem = booking.notificationReminders || {};
       const sent = rem.reviewRemindersSent ?? 0;
-      if (sent >= 2) continue;
 
       const endAt = booking.actualEndDate ? new Date(booking.actualEndDate).getTime() : 0;
       const daysSinceEnd = endAt ? (Date.now() - endAt) / DAY_MS : 0;
@@ -313,6 +320,10 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
     const bookings = await Booking.find({
       status: 'rfq',
       createdAt: { $lte: daysAgo(3) },
+      $or: [
+        { 'notificationReminders.rfqPendingCount': { $exists: false } },
+        { 'notificationReminders.rfqPendingCount': { $lt: 3 } },
+      ],
     }).select('_id professional notificationReminders createdAt').limit(200);
 
     for (const booking of bookings) {
@@ -352,6 +363,10 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
       status: 'booked',
       scheduledStartDate: { $lte: startOfToday },
       actualStartDate: { $exists: false },
+      $or: [
+        { 'notificationReminders.notStartedCount': { $exists: false } },
+        { 'notificationReminders.notStartedCount': { $lt: 3 } },
+      ],
     }).select('_id professional notificationReminders scheduledStartDate').limit(200);
 
     for (const booking of bookings) {

@@ -1,14 +1,8 @@
 import mongoose, { Document, Schema, Types } from 'mongoose';
-import type { PrefCategory } from '../utils/notifications/types';
+import type { PrefCategory, NotificationEntityType } from '../utils/notifications/types';
+import { NOTIFICATION_ENTITY_TYPES } from '../utils/notifications/types';
 
-export type NotificationEntityType =
-  | 'booking'
-  | 'project'
-  | 'conversation'
-  | 'review'
-  | 'referral'
-  | 'user'
-  | 'cancellation_request';
+export type { NotificationEntityType };
 
 export interface INotification extends Document {
   userId: Types.ObjectId;
@@ -43,7 +37,7 @@ const notificationSchema = new Schema<INotification>(
     clickUrl: { type: String, required: true, trim: true, maxlength: 500 },
     entityType: {
       type: String,
-      enum: ['booking', 'project', 'conversation', 'review', 'referral', 'user', 'cancellation_request'],
+      enum: [...NOTIFICATION_ENTITY_TYPES],
     },
     entityId: { type: Schema.Types.ObjectId },
     readAt: { type: Date, default: null },
@@ -57,6 +51,7 @@ const notificationSchema = new Schema<INotification>(
 );
 
 notificationSchema.index({ userId: 1, createdAt: -1 });
+notificationSchema.index({ userId: 1, createdAt: -1, _id: -1 });
 notificationSchema.index({ userId: 1, readAt: 1, createdAt: -1 });
 notificationSchema.index({ userId: 1, eventKey: 1, entityId: 1, createdAt: -1 });
 

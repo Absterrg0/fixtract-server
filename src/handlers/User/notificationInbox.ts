@@ -30,21 +30,34 @@ export const listNotifications = async (req: Request, res: Response): Promise<vo
     const filter: Record<string, unknown> = { userId };
     if (unreadOnly) filter.readAt = null;
     if (before) {
-      const beforeDate = new Date(before);
-      if (!Number.isNaN(beforeDate.getTime())) {
-        filter.createdAt = { $lt: beforeDate };
+      const sep = before.indexOf('|');
+      if (sep !== -1) {
+        const beforeDate = new Date(before.slice(0, sep));
+        const beforeId = before.slice(sep + 1);
+        if (!Number.isNaN(beforeDate.getTime()) && mongoose.Types.ObjectId.isValid(beforeId)) {
+          filter.$or = [
+            { createdAt: { $lt: beforeDate } },
+            { createdAt: beforeDate, _id: { $lt: new mongoose.Types.ObjectId(beforeId) } },
+          ];
+        }
+      } else {
+        // Legacy ISO-only cursors
+        const beforeDate = new Date(before);
+        if (!Number.isNaN(beforeDate.getTime())) {
+          filter.createdAt = { $lt: beforeDate };
+        }
       }
     }
 
     const items = await Notification.find(filter)
-      .sort({ createdAt: -1 })
+      .sort({ createdAt: -1, _id: -1 })
       .limit(limit + 1)
       .lean();
 
     const hasMore = items.length > limit;
     const page = hasMore ? items.slice(0, limit) : items;
     const nextCursor = hasMore && page.length
-      ? page[page.length - 1].createdAt.toISOString()
+      ? `${page[page.length - 1].createdAt.toISOString()}|${page[page.length - 1]._id.toString()}`
       : null;
 
     const unreadCount = await Notification.countDocuments({ userId, readAt: null });

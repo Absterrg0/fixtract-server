@@ -5,14 +5,17 @@ export type ChannelTier = 'configurable' | 'email_always' | 'always_on';
 
 export type NotificationAudience = 'customer' | 'professional' | 'either';
 
-export type NotificationEntityType =
-  | 'booking'
-  | 'project'
-  | 'conversation'
-  | 'review'
-  | 'referral'
-  | 'user'
-  | 'cancellation_request';
+export const NOTIFICATION_ENTITY_TYPES = [
+  'booking',
+  'project',
+  'conversation',
+  'review',
+  'referral',
+  'user',
+  'cancellation_request',
+] as const;
+
+export type NotificationEntityType = (typeof NOTIFICATION_ENTITY_TYPES)[number];
 
 export interface ChannelPrefs {
   push?: boolean;
