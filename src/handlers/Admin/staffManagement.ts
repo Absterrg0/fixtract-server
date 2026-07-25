@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import User, { IUser } from '../../models/user';
 import connecToDatabase from '../../config/db';
 import { ADMIN_ROLES, isAdminRole, type AdminRole } from '../../utils/adminRbac/types';
@@ -22,7 +23,8 @@ function resolveInvitePhone(phone: unknown): { value: string; isPlaceholder: boo
   if (typeof phone === 'string' && phone.trim()) {
     return { value: phone.trim(), isPlaceholder: false };
   }
-  return { value: `+1000${Date.now().toString().slice(-8)}`, isPlaceholder: true };
+  // Collision-resistant placeholder (unique index); not a real phone, stays unverified
+  return { value: `+1999${crypto.randomBytes(6).toString('hex')}`, isPlaceholder: true };
 }
 
 function isInviteExpired(user: IUser): boolean {
