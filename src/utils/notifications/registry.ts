@@ -15,6 +15,8 @@ import {
   sendQuotationRejectedEmail,
   sendNotificationEmail,
   sendChatMirrorEmail,
+  sendUnfinishedCheckoutEmail,
+  sendPaymentFailedEmail,
 } from '../emailService';
 import { formatMirrorInboxBody, type ChatMirrorLine } from './chatEmailMirror';
 
@@ -46,6 +48,7 @@ export interface NotifyContext {
   conversationType?: 'direct' | 'support';
   counterpartyName?: string;
   chatMirrorLines?: ChatMirrorLine[];
+  discountCode?: string;
   [key: string]: unknown;
 }
 
@@ -176,8 +179,39 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
     'customer',
     (ctx) => ({
       title: 'Finish your booking',
-      body: 'You still have an unfinished checkout. Complete payment to confirm your booking.',
+      body: ctx.projectTitle
+        ? `You still need to complete payment for "${ctx.projectTitle}".`
+        : 'You still have an unfinished checkout. Complete payment to confirm your booking.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}/payment`),
+      sendEmail: async ({ email, name }) =>
+        sendUnfinishedCheckoutEmail(
+          email,
+          name,
+          String(ctx.bookingId || ''),
+          ctx.projectTitle ? String(ctx.projectTitle) : undefined,
+          ctx.discountCode ? String(ctx.discountCode) : undefined,
+        ),
+    }),
+    'booking',
+  ),
+  'customer.payment_failed': def(
+    'customer.payment_failed',
+    'booking_updates',
+    'email_always',
+    'customer',
+    (ctx) => ({
+      title: 'Payment failed',
+      body: ctx.projectTitle
+        ? `We couldn't process payment for "${ctx.projectTitle}". Please retry from your booking page.`
+        : "We couldn't process your payment. Please retry from your booking page.",
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}/payment`),
+      sendEmail: async ({ email, name }) =>
+        sendPaymentFailedEmail(
+          email,
+          name,
+          String(ctx.bookingId || ''),
+          ctx.projectTitle ? String(ctx.projectTitle) : undefined,
+        ),
     }),
     'booking',
   ),

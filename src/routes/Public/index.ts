@@ -25,9 +25,9 @@ import {
 } from "../../handlers/Public/cms";
 import { getPublicSiteSettings } from "../../handlers/Public/siteSettings";
 import { listPublicSiteAnnouncements } from "../../handlers/Public/siteAnnouncements";
+import { runNotificationRemindersCron } from "../../handlers/Public/cron";
 import { recordProfessionalView } from "../../handlers/Public/profileView";
 import { recordServiceView } from "../../handlers/Public/serviceView";
-import { runNotificationRemindersCron } from "../../handlers/Public/cron";
 
 // Public routes - accessible without authentication
 const publicRouter = Router();

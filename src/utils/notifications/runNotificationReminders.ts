@@ -58,20 +58,29 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
     const bookings = await Booking.find({
       status: 'payment_pending',
       updatedAt: { $lte: daysAgo(1) },
-    }).select('_id customer notificationReminders updatedAt').limit(200);
+    }).select('_id customer notificationReminders updatedAt rfqData.serviceType').limit(200);
+
+    const recoveryDiscountCode = process.env.MARKETING_ABANDONED_CHECKOUT_DISCOUNT_CODE?.trim() || '';
 
     for (const booking of bookings) {
       const rem = booking.notificationReminders || {};
       if (!shouldSend(rem.unfinishedCheckoutLastSentAt, rem.unfinishedCheckoutCount, 3)) continue;
       const customerId = booking.customer?.toString();
       if (!customerId) continue;
+      const reminderNumber = (rem.unfinishedCheckoutCount ?? 0) + 1;
+      const discountCode =
+        recoveryDiscountCode && reminderNumber >= 2 ? recoveryDiscountCode : undefined;
       try {
         await notify({
           userId: customerId,
           eventKey: 'customer.unfinished_checkout',
           entityType: 'booking',
           entityId: String(booking._id),
-          context: { bookingId: String(booking._id) },
+          context: {
+            bookingId: String(booking._id),
+            projectTitle: booking.rfqData?.serviceType,
+            discountCode,
+          },
         });
         await Booking.updateOne(
           { _id: booking._id },
