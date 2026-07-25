@@ -74,7 +74,7 @@ export const createSiteAnnouncement = async (
       return res.status(401).json({ success: false, msg: 'Authentication required' });
     }
 
-    const parsed = parseSiteAnnouncementWriteBody(req.body);
+    const parsed = parseSiteAnnouncementWriteBody(req.body ?? {});
     if (!parsed.ok) {
       return res.status(400).json({ success: false, msg: parsed.error });
     }
@@ -102,7 +102,7 @@ export const setSiteAnnouncementActive = async (
       return res.status(400).json({ success: false, msg: 'Invalid id' });
     }
 
-    const parsed = parseIsActiveBody(req.body);
+    const parsed = parseIsActiveBody(req.body ?? {});
     if (!parsed.ok) {
       return res.status(400).json({ success: false, msg: parsed.error });
     }
@@ -136,7 +136,7 @@ export const updateSiteAnnouncement = async (
       return res.status(400).json({ success: false, msg: 'Invalid id' });
     }
 
-    const parsed = parseSiteAnnouncementWriteBody(req.body);
+    const parsed = parseSiteAnnouncementWriteBody(req.body ?? {});
     if (!parsed.ok) {
       return res.status(400).json({ success: false, msg: parsed.error });
     }

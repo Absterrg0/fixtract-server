@@ -13,7 +13,7 @@ function isMongoExtendedDate(value: object): value is { $date: string } {
  * Coerce supported date inputs into a valid `Date`.
  * Returns null for missing/invalid values — never throws.
  */
-export const toDate = (value: DateInput): Date | null => {
+export const toDate = (value: unknown): Date | null => {
   if (value == null) return null;
 
   if (value instanceof Date) {
