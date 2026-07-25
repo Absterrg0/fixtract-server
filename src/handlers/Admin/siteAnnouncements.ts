@@ -2,12 +2,12 @@ import { Request, Response, NextFunction } from 'express';
 import mongoose from 'mongoose';
 import SiteAnnouncement from '../../models/siteAnnouncement';
 import { params } from '../../utils/requestParams';
+import { buildAdminListQuery } from '../../utils/siteAnnouncements/buildQueries';
+import { parseAdminListFilters } from '../../utils/siteAnnouncements/parseListFilters';
 import {
-  buildAdminListQuery,
-  parseAdminListFilters,
   parseIsActiveBody,
   parseSiteAnnouncementWriteBody,
-} from '../../utils/siteAnnouncements';
+} from '../../utils/siteAnnouncements/parseWriteBody';
 
 export const listSiteAnnouncements = async (
   req: Request,
