@@ -54,7 +54,7 @@ async function upsertStaff() {
       existing.isPhoneVerified = true;
       existing.password = hashed;
       await existing.save();
-      console.log(`updated ${member.adminRole} staff (${member.email.split('@')[0]}@…)`);
+      console.log(`updated ${member.adminRole} staff`);
     } else {
       await User.create({
         name: member.name,
@@ -67,7 +67,7 @@ async function upsertStaff() {
         isPhoneVerified: true,
         accountStatus: 'active',
       });
-      console.log(`created ${member.adminRole} staff (${member.email.split('@')[0]}@…)`);
+      console.log(`created ${member.adminRole} staff`);
     }
   }
 

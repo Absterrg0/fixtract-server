@@ -43,7 +43,9 @@ function isInvitePending(user: IUser): boolean {
 
 function canResendAdminInvite(user: IUser): boolean {
   if (user.role !== 'admin') return false;
-  if (user.accountStatus === 'suspended') return false;
+  // Resend only for active (or unset) accounts — never suspended/rejected/etc.
+  const status = user.accountStatus || 'active';
+  if (status !== 'active') return false;
   const adminStaff = (user as any).adminStaff;
   if (adminStaff?.inviteAcceptedAt) return false;
   // Legacy active admin created outside the invite flow
@@ -89,10 +91,7 @@ async function regeneratePendingInvite(
   }
   staff.isEmailVerified = false;
   staff.isPhoneVerified = false;
-  // Preserve suspension — resend must not silently reactivate
-  if (staff.accountStatus !== 'suspended') {
-    staff.accountStatus = 'active';
-  }
+  // Never reactivate non-active accounts via invite resend
 
   const adminStaff = { ...((staff as any).adminStaff || {}) };
   adminStaff.invitedBy = String(admin._id);
@@ -123,6 +122,16 @@ function serializeStaff(user: IUser) {
     !(user as any).adminStaff?.inviteAcceptedAt &&
     Boolean((user as any).adminStaff?.invitedAt) &&
     isInviteExpired(user);
+  const rawStatus = user.accountStatus || 'active';
+  // Keep real account state (suspended/rejected); invite lifecycle is separate
+  const accountStatus =
+    rawStatus === 'suspended' || rawStatus === 'rejected'
+      ? rawStatus
+      : pending
+        ? 'pending'
+        : expiredInvite
+          ? 'invite_expired'
+          : rawStatus;
   return {
     _id: user._id,
     name: user.name,
@@ -131,11 +140,7 @@ function serializeStaff(user: IUser) {
     role: user.role,
     adminRole,
     permissions: [...permissionsForRole(adminRole)],
-    accountStatus: pending
-      ? 'pending'
-      : expiredInvite
-        ? 'invite_expired'
-        : (user.accountStatus || 'active'),
+    accountStatus,
     invitePending: pending,
     inviteExpired: expiredInvite,
     isEmailVerified: user.isEmailVerified,
@@ -197,12 +202,13 @@ export const inviteStaff = async (req: Request, res: Response) => {
 
     if (existing) {
       if (!canResendAdminInvite(existing)) {
-        const suspended = existing.accountStatus === 'suspended';
+        const status = existing.accountStatus || 'active';
         return res.status(409).json({
           success: false,
-          msg: suspended
-            ? 'This staff member is suspended — reactivate them before resending an invite'
-            : 'A user with this email already exists',
+          msg:
+            status !== 'active'
+              ? `This staff member is ${status} — reactivate them before resending an invite`
+              : 'A user with this email already exists',
           field: 'email',
         });
       }
@@ -304,12 +310,13 @@ export const resendStaffInvite = async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, msg: 'Staff member not found' });
     }
     if (!canResendAdminInvite(staff)) {
-      const suspended = staff.accountStatus === 'suspended';
+      const status = staff.accountStatus || 'active';
       return res.status(400).json({
         success: false,
-        msg: suspended
-          ? 'This staff member is suspended — reactivate them before resending an invite'
-          : 'This staff member has already activated their account',
+        msg:
+          status !== 'active'
+            ? `This staff member is ${status} — reactivate them before resending an invite`
+            : 'This staff member has already activated their account',
       });
     }
 
