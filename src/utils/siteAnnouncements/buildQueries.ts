@@ -51,12 +51,10 @@ export function buildPublicListQuery(
     query.type = filters.type;
   }
 
-  if (filters.countryCode) {
-    query.$or = [
-      { activeCountries: { $size: 0 } },
-      { activeCountries: filters.countryCode },
-    ];
-  }
+  // Unknown country → global campaigns only (empty activeCountries).
+  query.$or = filters.countryCode
+    ? [{ activeCountries: { $size: 0 } }, { activeCountries: filters.countryCode }]
+    : [{ activeCountries: { $size: 0 } }];
 
   return query;
 }

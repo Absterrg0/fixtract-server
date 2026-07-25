@@ -26,6 +26,21 @@ describe('parseSiteAnnouncementWriteBody', () => {
     expect(result.value.discountCode).toBe('SUMMER10');
     expect(result.value.startsAt).toBeInstanceOf(Date);
     expect(result.value.endsAt).toBeInstanceOf(Date);
+    // Date-only ends must include the full final calendar day in Europe/Brussels.
+    expect(result.value.endsAt.getTime()).toBeGreaterThan(
+      Date.parse('2026-08-01T00:00:00.000Z'),
+    );
+  });
+
+  it('keeps a same-day date-only schedule active for the whole day', () => {
+    const result = parseSiteAnnouncementWriteBody({
+      ...validBody,
+      startsAt: '2026-08-31',
+      endsAt: '2026-08-31',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.endsAt.getTime()).toBeGreaterThan(result.value.startsAt.getTime());
   });
 
   it('rejects invalid type', () => {
