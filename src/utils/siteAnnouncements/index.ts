@@ -9,9 +9,11 @@ export {
   parseIsActiveBody,
   parseSiteAnnouncementWriteBody,
 } from './parseWriteBody';
+export type { SiteAnnouncementWriteBody } from './parseWriteBody';
 export type {
   AdminListFilters,
   ParseResult,
   PublicListFilters,
   SiteAnnouncementWriteInput,
 } from './types';
+

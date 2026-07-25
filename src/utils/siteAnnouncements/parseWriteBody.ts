@@ -1,79 +1,40 @@
-import { toDate, type DateInput } from '../dateUtils';
-import {
-  ANNOUNCEMENT_LIMITS,
-  isAnnouncementType,
-} from './constants';
-import type {
-  ParseFailure,
-  ParseResult,
-  SiteAnnouncementWriteInput,
-} from './types';
+import { toDate } from '../dateUtils';
+import { ANNOUNCEMENT_LIMITS, isAnnouncementType } from './constants';
+import type { ParseResult, SiteAnnouncementWriteInput } from './types';
 
-function fail(error: string): ParseFailure {
-  return { ok: false, error };
+/**
+ * Raw create/update body. Fields are `unknown` because Express JSON is untrusted;
+ * this function is the single place that narrows them.
+ */
+export type SiteAnnouncementWriteBody = {
+  name?: unknown;
+  type?: unknown;
+  title?: unknown;
+  message?: unknown;
+  ctaLabel?: unknown;
+  ctaUrl?: unknown;
+  discountCode?: unknown;
+  activeCountries?: unknown;
+  locale?: unknown;
+  startsAt?: unknown;
+  endsAt?: unknown;
+  isActive?: unknown;
+  priority?: unknown;
+  delaySeconds?: unknown;
+  dismissible?: unknown;
+  requireMarketingConsent?: unknown;
+};
+
+function trimString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+function optionalTrimmed(value: unknown): string | undefined {
+  const trimmed = trimString(value);
+  return trimmed || undefined;
 }
 
-function asDateInput(value: unknown): DateInput {
-  if (value == null) return null;
-  if (value instanceof Date || typeof value === 'string') return value;
-  if (
-    typeof value === 'object' &&
-    '$date' in value &&
-    typeof (value as { $date: unknown }).$date === 'string'
-  ) {
-    return value as { $date: string };
-  }
-  return null;
-}
-
-function parseRequiredTrimmedString(
-  value: unknown,
-  field: string,
-  limits: { min: number; max: number },
-): ParseResult<string> {
-  if (typeof value !== 'string') {
-    return fail(`${field} is required`);
-  }
-  const trimmed = value.trim();
-  if (trimmed.length < limits.min) {
-    return fail(`${field} is required (min ${limits.min} characters)`);
-  }
-  if (trimmed.length > limits.max) {
-    return fail(`${field} must be at most ${limits.max} characters`);
-  }
-  return { ok: true, value: trimmed };
-}
-
-function parseOptionalTrimmedString(
-  value: unknown,
-  field: string,
-  max: number,
-): ParseResult<string | undefined> {
-  if (value === undefined || value === null || value === '') {
-    return { ok: true, value: undefined };
-  }
-  if (typeof value !== 'string') {
-    return fail(`${field} must be a string`);
-  }
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return { ok: true, value: undefined };
-  }
-  if (trimmed.length > max) {
-    return fail(`${field} must be at most ${max} characters`);
-  }
-  return { ok: true, value: trimmed };
-}
-
-function parseBoolean(value: unknown, fallback: boolean): boolean {
-  return typeof value === 'boolean' ? value : fallback;
-}
-
-function parseFiniteNumber(value: unknown, fallback: number): number {
+function numberOr(value: unknown, fallback: number): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim() !== '') {
     const n = Number(value);
@@ -82,143 +43,132 @@ function parseFiniteNumber(value: unknown, fallback: number): number {
   return fallback;
 }
 
-function parseCountryCodes(value: unknown): ParseResult<string[]> {
-  if (value === undefined) {
-    return { ok: true, value: [] };
-  }
-  if (!Array.isArray(value)) {
-    return fail('activeCountries must be an array of country codes');
-  }
-
-  const codes: string[] = [];
-  for (const entry of value) {
-    if (typeof entry !== 'string') {
-      return fail('activeCountries must contain only strings');
-    }
-    const code = entry.trim().toUpperCase();
-    if (!code) continue;
-    if (!/^[A-Z]{2}$/.test(code)) {
-      return fail('activeCountries must contain ISO 3166-1 alpha-2 codes');
-    }
-    if (!codes.includes(code)) codes.push(code);
-  }
-  return { ok: true, value: codes };
-}
-
-function parseCtaUrl(value: unknown): ParseResult<string | undefined> {
-  const parsed = parseOptionalTrimmedString(value, 'ctaUrl', ANNOUNCEMENT_LIMITS.ctaUrl.max);
-  if (!parsed.ok) return parsed;
-  if (!parsed.value) return { ok: true, value: undefined };
-
-  const url = parsed.value;
-  const isRelative = url.startsWith('/');
-  const isHttp = url.startsWith('https://') || url.startsWith('http://');
-  if (!isRelative && !isHttp) {
-    return fail('ctaUrl must be a relative path or http(s) URL');
-  }
-  return { ok: true, value: url };
-}
-
 /**
- * Parse and normalize a create/update site-announcement body.
- * Accepts `unknown` so callers do not pass `any`.
+ * Normalize and validate a create/update announcement payload.
  */
 export function parseSiteAnnouncementWriteBody(
-  body: unknown,
+  body: SiteAnnouncementWriteBody,
 ): ParseResult<SiteAnnouncementWriteInput> {
-  if (!isRecord(body)) {
-    return fail('Request body must be an object');
+  const name = trimString(body.name);
+  if (name.length < ANNOUNCEMENT_LIMITS.name.min) {
+    return { ok: false, error: 'Name is required (min 2 characters)' };
   }
-
-  const name = parseRequiredTrimmedString(body.name, 'Name', ANNOUNCEMENT_LIMITS.name);
-  if (!name.ok) return name;
+  if (name.length > ANNOUNCEMENT_LIMITS.name.max) {
+    return { ok: false, error: `Name must be at most ${ANNOUNCEMENT_LIMITS.name.max} characters` };
+  }
 
   if (typeof body.type !== 'string' || !isAnnouncementType(body.type)) {
-    return fail('Type must be top_bar, modal, or exit_intent');
+    return { ok: false, error: 'Type must be top_bar, modal, or exit_intent' };
   }
 
-  const title = parseRequiredTrimmedString(body.title, 'Title', ANNOUNCEMENT_LIMITS.title);
-  if (!title.ok) return title;
+  const title = trimString(body.title);
+  if (title.length < ANNOUNCEMENT_LIMITS.title.min) {
+    return { ok: false, error: 'Title is required' };
+  }
+  if (title.length > ANNOUNCEMENT_LIMITS.title.max) {
+    return { ok: false, error: `Title must be at most ${ANNOUNCEMENT_LIMITS.title.max} characters` };
+  }
 
-  const message = parseRequiredTrimmedString(body.message, 'Message', ANNOUNCEMENT_LIMITS.message);
-  if (!message.ok) return message;
+  const message = trimString(body.message);
+  if (message.length < ANNOUNCEMENT_LIMITS.message.min) {
+    return { ok: false, error: 'Message is required' };
+  }
+  if (message.length > ANNOUNCEMENT_LIMITS.message.max) {
+    return { ok: false, error: `Message must be at most ${ANNOUNCEMENT_LIMITS.message.max} characters` };
+  }
 
-  const ctaLabel = parseOptionalTrimmedString(
-    body.ctaLabel,
-    'ctaLabel',
-    ANNOUNCEMENT_LIMITS.ctaLabel.max,
-  );
-  if (!ctaLabel.ok) return ctaLabel;
+  const ctaLabel = optionalTrimmed(body.ctaLabel);
+  if (ctaLabel && ctaLabel.length > ANNOUNCEMENT_LIMITS.ctaLabel.max) {
+    return { ok: false, error: `ctaLabel must be at most ${ANNOUNCEMENT_LIMITS.ctaLabel.max} characters` };
+  }
 
-  const ctaUrl = parseCtaUrl(body.ctaUrl);
-  if (!ctaUrl.ok) return ctaUrl;
+  const ctaUrl = optionalTrimmed(body.ctaUrl);
+  if (ctaUrl) {
+    if (ctaUrl.length > ANNOUNCEMENT_LIMITS.ctaUrl.max) {
+      return { ok: false, error: `ctaUrl must be at most ${ANNOUNCEMENT_LIMITS.ctaUrl.max} characters` };
+    }
+    if (!(ctaUrl.startsWith('/') || ctaUrl.startsWith('https://') || ctaUrl.startsWith('http://'))) {
+      return { ok: false, error: 'ctaUrl must be a relative path or http(s) URL' };
+    }
+  }
 
-  const discountCodeRaw = parseOptionalTrimmedString(
-    body.discountCode,
-    'discountCode',
-    ANNOUNCEMENT_LIMITS.discountCode.max,
-  );
-  if (!discountCodeRaw.ok) return discountCodeRaw;
+  const discountCode = optionalTrimmed(body.discountCode)?.toUpperCase();
+  if (discountCode && discountCode.length > ANNOUNCEMENT_LIMITS.discountCode.max) {
+    return {
+      ok: false,
+      error: `discountCode must be at most ${ANNOUNCEMENT_LIMITS.discountCode.max} characters`,
+    };
+  }
 
-  const countries = parseCountryCodes(body.activeCountries);
-  if (!countries.ok) return countries;
+  let activeCountries: string[] = [];
+  if (body.activeCountries !== undefined) {
+    if (!Array.isArray(body.activeCountries)) {
+      return { ok: false, error: 'activeCountries must be an array of country codes' };
+    }
+    for (const entry of body.activeCountries) {
+      if (typeof entry !== 'string') {
+        return { ok: false, error: 'activeCountries must contain only strings' };
+      }
+      const code = entry.trim().toUpperCase();
+      if (!code) continue;
+      if (!/^[A-Z]{2}$/.test(code)) {
+        return { ok: false, error: 'activeCountries must contain ISO 3166-1 alpha-2 codes' };
+      }
+      if (!activeCountries.includes(code)) activeCountries.push(code);
+    }
+  }
 
-  const localeRaw = parseOptionalTrimmedString(
-    body.locale,
-    'locale',
-    ANNOUNCEMENT_LIMITS.locale.max,
-  );
-  if (!localeRaw.ok) return localeRaw;
+  const locale = (optionalTrimmed(body.locale) || 'en').toLowerCase();
+  if (locale.length > ANNOUNCEMENT_LIMITS.locale.max) {
+    return { ok: false, error: `locale must be at most ${ANNOUNCEMENT_LIMITS.locale.max} characters` };
+  }
 
-  const startsAt = toDate(asDateInput(body.startsAt));
-  const endsAt = toDate(asDateInput(body.endsAt));
+  const startsAt = toDate(body.startsAt);
+  const endsAt = toDate(body.endsAt);
   if (!startsAt || !endsAt) {
-    return fail('startsAt and endsAt are required dates');
+    return { ok: false, error: 'startsAt and endsAt are required dates' };
   }
   if (endsAt <= startsAt) {
-    return fail('endsAt must be after startsAt');
+    return { ok: false, error: 'endsAt must be after startsAt' };
   }
 
-  const delay = parseFiniteNumber(
-    body.delaySeconds,
-    ANNOUNCEMENT_LIMITS.delaySeconds.default,
-  );
   const delaySeconds = Math.min(
     ANNOUNCEMENT_LIMITS.delaySeconds.max,
-    Math.max(ANNOUNCEMENT_LIMITS.delaySeconds.min, delay),
+    Math.max(
+      ANNOUNCEMENT_LIMITS.delaySeconds.min,
+      numberOr(body.delaySeconds, ANNOUNCEMENT_LIMITS.delaySeconds.default),
+    ),
   );
 
   return {
     ok: true,
     value: {
-      name: name.value,
+      name,
       type: body.type,
-      title: title.value,
-      message: message.value,
-      ctaLabel: ctaLabel.value,
-      ctaUrl: ctaUrl.value,
-      discountCode: discountCodeRaw.value
-        ? discountCodeRaw.value.toUpperCase()
-        : undefined,
-      activeCountries: countries.value,
-      locale: (localeRaw.value || 'en').toLowerCase(),
+      title,
+      message,
+      ctaLabel,
+      ctaUrl,
+      discountCode,
+      activeCountries,
+      locale,
       startsAt,
       endsAt,
-      isActive: parseBoolean(body.isActive, true),
-      priority: parseFiniteNumber(body.priority, 0),
+      isActive: typeof body.isActive === 'boolean' ? body.isActive : true,
+      priority: numberOr(body.priority, 0),
       delaySeconds,
-      dismissible: parseBoolean(body.dismissible, true),
-      requireMarketingConsent: parseBoolean(body.requireMarketingConsent, true),
+      dismissible: typeof body.dismissible === 'boolean' ? body.dismissible : true,
+      requireMarketingConsent:
+        typeof body.requireMarketingConsent === 'boolean'
+          ? body.requireMarketingConsent
+          : true,
     },
   };
 }
 
-export function parseIsActiveBody(body: unknown): ParseResult<boolean> {
-  if (!isRecord(body)) {
-    return fail('Request body must be an object');
-  }
+export function parseIsActiveBody(body: { isActive?: unknown }): ParseResult<boolean> {
   if (typeof body.isActive !== 'boolean') {
-    return fail('isActive must be a boolean');
+    return { ok: false, error: 'isActive must be a boolean' };
   }
   return { ok: true, value: body.isActive };
 }

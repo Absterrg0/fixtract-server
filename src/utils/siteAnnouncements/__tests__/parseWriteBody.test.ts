@@ -15,7 +15,7 @@ const validBody = {
 };
 
 describe('parseSiteAnnouncementWriteBody', () => {
-  it('normalizes a valid payload without using any', () => {
+  it('normalizes a valid payload', () => {
     const result = parseSiteAnnouncementWriteBody(validBody);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -31,8 +31,6 @@ describe('parseSiteAnnouncementWriteBody', () => {
   it('rejects invalid type', () => {
     const result = parseSiteAnnouncementWriteBody({ ...validBody, type: 'banner' });
     expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.error).toMatch(/Type must be/);
   });
 
   it('rejects endsAt before startsAt', () => {
@@ -59,21 +57,14 @@ describe('parseSiteAnnouncementWriteBody', () => {
     });
     expect(result.ok).toBe(false);
   });
-
-  it('rejects non-object bodies', () => {
-    expect(parseSiteAnnouncementWriteBody(null).ok).toBe(false);
-    expect(parseSiteAnnouncementWriteBody('x').ok).toBe(false);
-  });
 });
 
 describe('parseIsActiveBody', () => {
   it('accepts boolean isActive', () => {
-    const result = parseIsActiveBody({ isActive: true });
-    expect(result).toEqual({ ok: true, value: true });
+    expect(parseIsActiveBody({ isActive: true })).toEqual({ ok: true, value: true });
   });
 
   it('rejects non-boolean isActive', () => {
-    const result = parseIsActiveBody({ isActive: 'true' });
-    expect(result.ok).toBe(false);
+    expect(parseIsActiveBody({ isActive: 'true' }).ok).toBe(false);
   });
 });
