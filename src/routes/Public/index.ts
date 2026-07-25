@@ -24,6 +24,7 @@ import {
   listPublicPolicyLinks,
 } from "../../handlers/Public/cms";
 import { getPublicSiteSettings } from "../../handlers/Public/siteSettings";
+import { listPublicSiteAnnouncements } from "../../handlers/Public/siteAnnouncements";
 import { recordProfessionalView } from "../../handlers/Public/profileView";
 import { recordServiceView } from "../../handlers/Public/serviceView";
 
@@ -99,6 +100,9 @@ publicRouter
 
 // Public site settings (social links etc)
 publicRouter.route("/site-settings").get(getPublicSiteSettings);
+
+// Marketing site announcements (top bar / modal / exit-intent)
+publicRouter.route("/site-announcements").get(listPublicSiteAnnouncements);
 
 // CMS public endpoints
 publicRouter.route("/cms/sitemap").get(listCmsSitemapEntries);
