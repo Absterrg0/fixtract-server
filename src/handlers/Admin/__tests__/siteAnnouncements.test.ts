@@ -1,0 +1,197 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Request, Response } from 'express';
+
+const {
+  aggregate,
+  countDocuments,
+  find,
+  findById,
+  findByIdAndUpdate,
+  create,
+} = vi.hoisted(() => ({
+  aggregate: vi.fn(),
+  countDocuments: vi.fn(),
+  find: vi.fn(),
+  findById: vi.fn(),
+  findByIdAndUpdate: vi.fn(),
+  create: vi.fn(),
+}));
+
+vi.mock('../../../models/siteAnnouncement', () => ({
+  default: {
+    aggregate,
+    countDocuments,
+    find,
+    findById,
+    findByIdAndUpdate,
+    create,
+  },
+}));
+
+import {
+  createSiteAnnouncement,
+  deleteSiteAnnouncement,
+  getSiteAnnouncement,
+  listSiteAnnouncements,
+  setSiteAnnouncementActive,
+  updateSiteAnnouncement,
+} from '../siteAnnouncements';
+import {
+  listPublicSiteAnnouncements,
+} from '../../Public/siteAnnouncements';
+
+function mockRes() {
+  const res = {
+    statusCode: 200,
+    body: undefined as unknown,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: unknown) {
+      this.body = payload;
+      return this;
+    },
+  };
+  return res as Response & { statusCode: number; body: unknown };
+}
+
+describe('admin site announcement handlers', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('requires admin auth to create', async () => {
+    const res = mockRes();
+    await createSiteAnnouncement({ body: {}, admin: undefined } as Request, res, vi.fn());
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('rejects invalid ids on get', async () => {
+    const res = mockRes();
+    await getSiteAnnouncement({ params: { id: 'bad-id' } } as unknown as Request, res, vi.fn());
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('lists announcements with pagination filters', async () => {
+    countDocuments.mockResolvedValue(1);
+    const chain = {
+      sort: vi.fn().mockReturnThis(),
+      skip: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      lean: vi.fn().mockResolvedValue([{ _id: '1', title: 'Promo' }]),
+    };
+    find.mockReturnValue(chain);
+
+    const res = mockRes();
+    await listSiteAnnouncements(
+      { query: { page: '1', limit: '10', status: 'active' } } as unknown as Request,
+      res,
+      vi.fn(),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect((res.body as { data: { total: number } }).data.total).toBe(1);
+  });
+
+  it('patches only provided fields', async () => {
+    findById.mockResolvedValue({
+      name: 'Promo',
+      type: 'top_bar',
+      title: 'Old',
+      message: 'Message',
+      activeCountries: [],
+      locale: 'en',
+      startsAt: new Date('2026-07-01T00:00:00.000Z'),
+      endsAt: new Date('2026-08-31T23:59:59.999Z'),
+      isActive: true,
+      priority: 0,
+      delaySeconds: 3,
+      dismissible: true,
+      requireMarketingConsent: true,
+    });
+    findByIdAndUpdate.mockResolvedValue({ _id: '507f1f77bcf86cd799439011', title: 'New title' });
+
+    const res = mockRes();
+    await updateSiteAnnouncement(
+      {
+        params: { id: '507f1f77bcf86cd799439011' },
+        body: { title: 'New title' },
+      } as unknown as Request,
+      res,
+      vi.fn(),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(findByIdAndUpdate).toHaveBeenCalledWith(
+      '507f1f77bcf86cd799439011',
+      { title: 'New title' },
+      { new: true, runValidators: true },
+    );
+  });
+
+  it('toggles active state with validators enabled', async () => {
+    findByIdAndUpdate.mockResolvedValue({ _id: '507f1f77bcf86cd799439011', isActive: false });
+    const res = mockRes();
+    await setSiteAnnouncementActive(
+      {
+        params: { id: '507f1f77bcf86cd799439011' },
+        body: { isActive: false },
+      } as unknown as Request,
+      res,
+      vi.fn(),
+    );
+
+    expect(findByIdAndUpdate).toHaveBeenCalledWith(
+      '507f1f77bcf86cd799439011',
+      { isActive: false },
+      { new: true, runValidators: true },
+    );
+  });
+
+  it('soft-deletes by deactivating the announcement', async () => {
+    findByIdAndUpdate.mockResolvedValue({ _id: '507f1f77bcf86cd799439011', isActive: false });
+    const res = mockRes();
+    await deleteSiteAnnouncement(
+      { params: { id: '507f1f77bcf86cd799439011' } } as unknown as Request,
+      res,
+      vi.fn(),
+    );
+
+    expect(findByIdAndUpdate).toHaveBeenCalledWith(
+      '507f1f77bcf86cd799439011',
+      { isActive: false },
+      { new: true, runValidators: true },
+    );
+  });
+});
+
+describe('listPublicSiteAnnouncements', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns aggregated winners for the requested locale and country', async () => {
+    aggregate.mockResolvedValue([
+      { type: 'top_bar', title: 'BE promo', locale: 'nl' },
+      { type: 'modal', title: 'FR modal', locale: 'fr' },
+    ]);
+
+    const res = mockRes();
+    await listPublicSiteAnnouncements(
+      { query: { country: 'BE', locale: 'fr' } } as unknown as Request,
+      res,
+      vi.fn(),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(aggregate).toHaveBeenCalledOnce();
+    const pipeline = aggregate.mock.calls[0][0];
+    expect(pipeline[2]).toEqual({
+      $sort: { priority: -1, localeExact: -1, createdAt: -1 },
+    });
+    expect((res.body as { data: { announcements: unknown[]; country: string } }).data.country).toBe(
+      'BE',
+    );
+  });
+});

@@ -9,6 +9,41 @@ function isMongoExtendedDate(value: object): value is { $date: string } {
   return '$date' in value && typeof (value as { $date: unknown }).$date === 'string';
 }
 
+function matchesUtcCalendarParts(parsed: Date, year: number, month: number, day: number): boolean {
+  return (
+    parsed.getUTCFullYear() === year &&
+    parsed.getUTCMonth() === month - 1 &&
+    parsed.getUTCDate() === day
+  );
+}
+
+function parseStrictIsoString(value: string): Date | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (dateOnly) {
+    const year = Number(dateOnly[1]);
+    const month = Number(dateOnly[2]);
+    const day = Number(dateOnly[3]);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    return matchesUtcCalendarParts(parsed, year, month, day) ? parsed : null;
+  }
+
+  const dateTime = /^(\d{4})-(\d{2})-(\d{2})T/.exec(trimmed);
+  if (dateTime) {
+    const year = Number(dateTime[1]);
+    const month = Number(dateTime[2]);
+    const day = Number(dateTime[3]);
+    const parsed = new Date(trimmed);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return matchesUtcCalendarParts(parsed, year, month, day) ? parsed : null;
+  }
+
+  const parsed = new Date(trimmed);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 /**
  * Coerce supported date inputs into a valid `Date`.
  * Returns null for missing/invalid values — never throws.
@@ -21,8 +56,7 @@ export const toDate = (value: unknown): Date | null => {
   }
 
   if (typeof value === 'string') {
-    const parsed = new Date(value);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
+    return parseStrictIsoString(value);
   }
 
   if (typeof value === 'object' && isMongoExtendedDate(value)) {

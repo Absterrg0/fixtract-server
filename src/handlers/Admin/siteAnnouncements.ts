@@ -1,13 +1,36 @@
 import { Request, Response, NextFunction } from 'express';
 import mongoose from 'mongoose';
-import SiteAnnouncement from '../../models/siteAnnouncement';
+import SiteAnnouncement, { type ISiteAnnouncement } from '../../models/siteAnnouncement';
 import { params } from '../../utils/requestParams';
 import { buildAdminListQuery } from '../../utils/siteAnnouncements/buildQueries';
 import { parseAdminListFilters } from '../../utils/siteAnnouncements/parseListFilters';
 import {
   parseIsActiveBody,
+  parseSiteAnnouncementPatchBody,
   parseSiteAnnouncementWriteBody,
 } from '../../utils/siteAnnouncements/parseWriteBody';
+import type { SiteAnnouncementWriteInput } from '../../utils/siteAnnouncements/types';
+
+function toWriteInput(doc: ISiteAnnouncement): SiteAnnouncementWriteInput {
+  return {
+    name: doc.name,
+    type: doc.type,
+    title: doc.title,
+    message: doc.message,
+    ctaLabel: doc.ctaLabel,
+    ctaUrl: doc.ctaUrl,
+    discountCode: doc.discountCode,
+    activeCountries: [...doc.activeCountries],
+    locale: doc.locale,
+    startsAt: doc.startsAt,
+    endsAt: doc.endsAt,
+    isActive: doc.isActive,
+    priority: doc.priority,
+    delaySeconds: doc.delaySeconds,
+    dismissible: doc.dismissible,
+    requireMarketingConsent: doc.requireMarketingConsent,
+  };
+}
 
 export const listSiteAnnouncements = async (
   req: Request,
@@ -110,7 +133,7 @@ export const setSiteAnnouncementActive = async (
     const updated = await SiteAnnouncement.findByIdAndUpdate(
       id,
       { isActive: parsed.value },
-      { new: true },
+      { new: true, runValidators: true },
     );
     if (!updated) {
       return res.status(404).json({ success: false, msg: 'Announcement not found' });
@@ -136,13 +159,19 @@ export const updateSiteAnnouncement = async (
       return res.status(400).json({ success: false, msg: 'Invalid id' });
     }
 
-    const parsed = parseSiteAnnouncementWriteBody(req.body ?? {});
+    const existing = await SiteAnnouncement.findById(id);
+    if (!existing) {
+      return res.status(404).json({ success: false, msg: 'Announcement not found' });
+    }
+
+    const parsed = parseSiteAnnouncementPatchBody(req.body ?? {}, toWriteInput(existing));
     if (!parsed.ok) {
       return res.status(400).json({ success: false, msg: parsed.error });
     }
 
     const updated = await SiteAnnouncement.findByIdAndUpdate(id, parsed.value, {
       new: true,
+      runValidators: true,
     });
     if (!updated) {
       return res.status(404).json({ success: false, msg: 'Announcement not found' });
@@ -169,7 +198,7 @@ export const deleteSiteAnnouncement = async (
     const updated = await SiteAnnouncement.findByIdAndUpdate(
       id,
       { isActive: false },
-      { new: true },
+      { new: true, runValidators: true },
     );
     if (!updated) {
       return res.status(404).json({ success: false, msg: 'Announcement not found' });
