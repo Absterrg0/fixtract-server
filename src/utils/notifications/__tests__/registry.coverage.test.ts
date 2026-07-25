@@ -6,6 +6,7 @@ const REQUIRED_EVENT_KEYS = [
   'user.chat_message',
   'customer.rfq_rejected',
   'customer.unfinished_checkout',
+  'customer.payment_failed',
   'customer.reschedule_requested',
   'customer.reschedule_reminder',
   'customer.refund_negotiation',

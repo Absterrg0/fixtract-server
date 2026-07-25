@@ -19,6 +19,7 @@ import { deductPoints } from '../../utils/pointsSystem';
 import { sendPaymentConfirmedEmail, sendRefundProcessedEmail } from '../../utils/emailService';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
+import { notifyAsync } from '../../utils/notifications/notify';
 
 const reserveWebhookEvent = async (event: Stripe.Event): Promise<{ shouldProcess: boolean }> => {
   const now = new Date();
@@ -412,6 +413,20 @@ async function handlePaymentIntentFailed(paymentIntent: Stripe.PaymentIntent) {
     { booking: booking._id },
     { status: 'failed' }
   );
+
+  const customerId = booking.customer?.toString();
+  if (customerId) {
+    notifyAsync({
+      userId: customerId,
+      eventKey: 'customer.payment_failed',
+      entityType: 'booking',
+      entityId: String(booking._id),
+      context: {
+        bookingId: String(booking._id),
+        projectTitle: booking.rfqData?.serviceType,
+      },
+    });
+  }
 
   console.log(`Payment failed via webhook for booking ${bookingId}`);
 }

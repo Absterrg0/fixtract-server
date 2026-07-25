@@ -25,6 +25,7 @@ import {
 } from "../../handlers/Public/cms";
 import { getPublicSiteSettings } from "../../handlers/Public/siteSettings";
 import { listPublicSiteAnnouncements } from "../../handlers/Public/siteAnnouncements";
+import { runNotificationRemindersCron } from "../../handlers/Public/cron";
 import { recordProfessionalView } from "../../handlers/Public/profileView";
 import { recordServiceView } from "../../handlers/Public/serviceView";
 
@@ -103,6 +104,9 @@ publicRouter.route("/site-settings").get(getPublicSiteSettings);
 
 // Marketing site announcements (top bar / modal / exit-intent)
 publicRouter.route("/site-announcements").get(listPublicSiteAnnouncements);
+
+// Vercel Cron — daily notification reminder sweep
+publicRouter.route("/cron/notification-reminders").get(runNotificationRemindersCron);
 
 // CMS public endpoints
 publicRouter.route("/cms/sitemap").get(listCmsSitemapEntries);
