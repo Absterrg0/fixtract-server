@@ -790,7 +790,18 @@ export const sendAdminStaffInvitationEmail = async (
   staffName: string,
   adminRole: string,
   inviteUrl: string
-): Promise<boolean> => {
+): Promise<{ sent: boolean; error?: string }> => {
+  if (process.env.EMAIL_DEV_NO_SEND === 'true') {
+    console.log(`[EMAIL SKIPPED] admin_staff_invite to ${email}`);
+    return { sent: true };
+  }
+
+  if (!process.env.BREVO_API_KEY) {
+    const error = 'BREVO_API_KEY is not configured on the server';
+    console.error(`Cannot send admin staff invite to ${email}: ${error}`);
+    return { sent: false, error };
+  }
+
   try {
     const emailAPI = createEmailAPI();
     const safeStaffName = escapeHtml(staffName);
@@ -842,9 +853,28 @@ export const sendAdminStaffInvitationEmail = async (
     };
 
     await emailAPI.sendTransacEmail(sendSmtpEmail);
-    return true;
+    await logEmail({
+      to: email,
+      subject: 'You are invited to Fixtract admin',
+      template: 'admin_staff_invite',
+      status: 'sent',
+    }).catch((err) => console.error('Failed to write EmailLog for admin_staff_invite:', err));
+    return { sent: true };
   } catch (error: any) {
-    return false;
+    const brevoMessage =
+      error?.response?.body?.message ||
+      error?.response?.text ||
+      error?.message ||
+      'Unknown email provider error';
+    console.error(`Failed to send admin staff invite to ${email}:`, brevoMessage, error?.response?.body || '');
+    await logEmail({
+      to: email,
+      subject: 'You are invited to Fixtract admin',
+      template: 'admin_staff_invite',
+      status: 'failed',
+      errorMessage: brevoMessage,
+    }).catch((err) => console.error('Failed to write EmailLog for admin_staff_invite:', err));
+    return { sent: false, error: brevoMessage };
   }
 };
 

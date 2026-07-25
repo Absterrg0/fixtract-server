@@ -89,8 +89,14 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       });
     }
 
-    // Validate role
-    const validRoles = ['customer', 'professional', 'admin'];
+    // Validate role — admin accounts are provisioned via staff invite only
+    const validRoles = ['customer', 'professional'];
+    if (role === 'admin') {
+      return res.status(403).json({
+        success: false,
+        msg: 'Admin accounts must be created through staff invitation',
+      });
+    }
     if (role && !validRoles.includes(role)) {
       return res.status(400).json({
         success: false,

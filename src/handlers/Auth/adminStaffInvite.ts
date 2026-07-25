@@ -36,19 +36,12 @@ async function findStaffByInviteToken(token: string) {
   const tokenHash = hashAdminInviteToken(token);
   const staff = await User.findOne({
     role: 'admin',
+    accountStatus: 'active',
+    deletedAt: { $exists: false },
     'adminStaff.inviteTokenHash': tokenHash,
+    'adminStaff.inviteTokenExpires': { $gt: new Date() },
+    'adminStaff.inviteAcceptedAt': { $exists: false },
   }).select('+adminStaff.inviteTokenHash +adminStaff.inviteTokenExpires');
-
-  if (!staff) return null;
-
-  const expires = (staff as any).adminStaff?.inviteTokenExpires;
-  if (!expires || new Date() > new Date(expires)) {
-    return null;
-  }
-
-  if ((staff as any).adminStaff?.inviteAcceptedAt) {
-    return null;
-  }
 
   return staff;
 }
@@ -92,35 +85,48 @@ export const acceptAdminInvite = async (req: Request, res: Response, next: NextF
     if (!token || typeof token !== 'string') {
       return res.status(400).json({ success: false, msg: 'Invite token is required' });
     }
-    if (!password || typeof password !== 'string' || password.length < 6) {
+    if (!password || typeof password !== 'string' || password.length < 8) {
       return res.status(400).json({
         success: false,
-        msg: 'Password must be at least 6 characters long',
+        msg: 'Password must be at least 8 characters long',
       });
     }
 
     await connecToDatabase();
-    const staff = await findStaffByInviteToken(token);
+    const tokenHash = hashAdminInviteToken(token);
+    const hashedPassword = await bcrypt.hash(password, 12);
+    const now = new Date();
+
+    const staff = await User.findOneAndUpdate(
+      {
+        role: 'admin',
+        accountStatus: 'active',
+        deletedAt: { $exists: false },
+        'adminStaff.inviteTokenHash': tokenHash,
+        'adminStaff.inviteTokenExpires': { $gt: now },
+        'adminStaff.inviteAcceptedAt': { $exists: false },
+      },
+      {
+        $set: {
+          password: hashedPassword,
+          isEmailVerified: true,
+          accountStatus: 'active',
+          'adminStaff.inviteAcceptedAt': now,
+        },
+        $unset: {
+          'adminStaff.inviteTokenHash': '',
+          'adminStaff.inviteTokenExpires': '',
+        },
+      },
+      { new: true }
+    );
+
     if (!staff) {
       return res.status(404).json({
         success: false,
         msg: 'This invite link is invalid or has expired',
       });
     }
-
-    const hashedPassword = await bcrypt.hash(password, 12);
-    staff.password = hashedPassword;
-    staff.isEmailVerified = true;
-    staff.isPhoneVerified = true;
-    staff.accountStatus = 'active';
-
-    const adminStaff = { ...((staff as any).adminStaff || {}) };
-    adminStaff.inviteAcceptedAt = new Date();
-    adminStaff.inviteTokenHash = undefined;
-    adminStaff.inviteTokenExpires = undefined;
-    (staff as any).adminStaff = adminStaff;
-
-    await staff.save();
 
     const jwtToken = generateToken(staff._id as mongoose.Types.ObjectId);
     setTokenCookie(res, jwtToken);

@@ -48,8 +48,10 @@ export const ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[]> = {
 };
 
 export function permissionsForRole(adminRole: AdminRole | null | undefined): Set<AdminPermission> {
-  const role = adminRole && ROLE_PERMISSIONS[adminRole] ? adminRole : 'super';
-  return new Set(ROLE_PERMISSIONS[role]);
+  if (!adminRole || !(adminRole in ROLE_PERMISSIONS)) {
+    return new Set();
+  }
+  return new Set(ROLE_PERMISSIONS[adminRole]);
 }
 
 export function hasPermission(

@@ -12,12 +12,90 @@ import {
   randomUnusablePasswordHash,
 } from '../../utils/adminRbac/inviteToken';
 import { ADMIN_ROLE_LABELS } from '../../utils/adminRbac/types';
+import { sendHandlerError } from '../../utils/handlerErrors';
+
+function resolveInvitePhone(phone: unknown): string {
+  if (typeof phone === 'string' && phone.trim()) {
+    return phone.trim();
+  }
+  return `+1000${Date.now().toString().slice(-8)}`;
+}
 
 function isInvitePending(user: IUser): boolean {
   const adminStaff = (user as any).adminStaff;
-  if (!adminStaff?.inviteTokenHash || adminStaff.inviteAcceptedAt) return false;
-  if (!adminStaff.inviteTokenExpires) return false;
-  return new Date() <= new Date(adminStaff.inviteTokenExpires);
+  if (adminStaff?.inviteAcceptedAt) return false;
+  if (!adminStaff?.invitedAt) return false;
+  return true;
+}
+
+function canResendAdminInvite(user: IUser): boolean {
+  if (user.role !== 'admin') return false;
+  const adminStaff = (user as any).adminStaff;
+  if (adminStaff?.inviteAcceptedAt) return false;
+  // Legacy active admin created outside the invite flow
+  if (user.isEmailVerified && !adminStaff?.invitedAt) return false;
+  return true;
+}
+
+function createInviteCredentials() {
+  const inviteToken = generateAdminInviteToken();
+  return {
+    inviteToken,
+    inviteTokenHash: hashAdminInviteToken(inviteToken),
+    inviteTokenExpires: adminInviteExpiresAt(),
+    inviteUrl: buildAdminInviteUrl(inviteToken),
+  };
+}
+
+async function dispatchStaffInviteEmail(
+  email: string,
+  name: string,
+  adminRole: AdminRole,
+  inviteUrl: string
+) {
+  return sendAdminStaffInvitationEmail(
+    email,
+    name,
+    ADMIN_ROLE_LABELS[adminRole],
+    inviteUrl
+  );
+}
+
+async function regeneratePendingInvite(
+  staff: IUser,
+  admin: IUser,
+  opts: { name: string; adminRole: AdminRole; phone?: string }
+) {
+  const { inviteToken, inviteTokenHash, inviteTokenExpires, inviteUrl } = createInviteCredentials();
+
+  staff.name = opts.name.trim();
+  (staff as any).adminRole = opts.adminRole;
+  if (opts.phone) {
+    staff.phone = opts.phone;
+  }
+  staff.isEmailVerified = false;
+  staff.isPhoneVerified = false;
+  staff.accountStatus = 'active';
+
+  const adminStaff = { ...((staff as any).adminStaff || {}) };
+  adminStaff.invitedBy = String(admin._id);
+  adminStaff.invitedByEmail = admin.email;
+  adminStaff.invitedAt = new Date();
+  adminStaff.inviteTokenHash = inviteTokenHash;
+  adminStaff.inviteTokenExpires = inviteTokenExpires;
+  adminStaff.inviteAcceptedAt = undefined;
+  (staff as any).adminStaff = adminStaff;
+
+  await staff.save();
+
+  const emailResult = await dispatchStaffInviteEmail(
+    staff.email,
+    staff.name,
+    opts.adminRole,
+    inviteUrl
+  );
+
+  return { staff, inviteUrl, ...emailResult };
 }
 
 function serializeStaff(user: IUser) {
@@ -80,25 +158,78 @@ export const inviteStaff = async (req: Request, res: Response) => {
     }
 
     const normalizedEmail = email.trim().toLowerCase();
+    const normalizedPhone = resolveInvitePhone(phone);
+    const trimmedName = name.trim();
+    const role = adminRole as AdminRole;
     await connecToDatabase();
 
-    const existing = await User.findOne({ email: normalizedEmail });
+    const existing = await User.findOne({ email: normalizedEmail }).select(
+      'name email phone role adminRole accountStatus isEmailVerified createdAt updatedAt adminStaff'
+    );
+
     if (existing) {
-      return res.status(409).json({ success: false, msg: 'A user with this email already exists' });
+      if (!canResendAdminInvite(existing)) {
+        return res.status(409).json({
+          success: false,
+          msg: 'A user with this email already exists',
+          field: 'email',
+        });
+      }
+
+      if (typeof phone === 'string' && phone.trim() && phone.trim() !== existing.phone) {
+        const existingPhone = await User.findOne({
+          phone: normalizedPhone,
+          _id: { $ne: existing._id },
+        }).select('_id');
+        if (existingPhone) {
+          return res.status(409).json({
+            success: false,
+            msg: 'A user with this phone number already exists',
+            field: 'phone',
+          });
+        }
+      }
+
+      const { staff, inviteUrl, sent, error } = await regeneratePendingInvite(existing, admin, {
+        name: trimmedName,
+        adminRole: role,
+        phone: typeof phone === 'string' && phone.trim() ? normalizedPhone : undefined,
+      });
+
+      return res.status(200).json({
+        success: true,
+        resent: true,
+        data: serializeStaff(staff),
+        inviteUrl,
+        emailSent: sent,
+        emailError: error,
+        msg: sent
+          ? 'Invite resent — a fresh link was emailed'
+          : 'Invite link regenerated — copy it below (email could not be sent)',
+      });
     }
 
-    const inviteToken = generateAdminInviteToken();
-    const inviteTokenHash = hashAdminInviteToken(inviteToken);
-    const inviteTokenExpires = adminInviteExpiresAt();
+    if (typeof phone === 'string' && phone.trim()) {
+      const existingPhone = await User.findOne({ phone: normalizedPhone }).select('_id');
+      if (existingPhone) {
+        return res.status(409).json({
+          success: false,
+          msg: 'A user with this phone number already exists',
+          field: 'phone',
+        });
+      }
+    }
+
+    const { inviteTokenHash, inviteTokenExpires, inviteUrl } = createInviteCredentials();
     const unusablePassword = await randomUnusablePasswordHash();
 
     const staff = await User.create({
-      name: name.trim(),
+      name: trimmedName,
       email: normalizedEmail,
-      phone: typeof phone === 'string' && phone.trim() ? phone.trim() : `+1000${Date.now().toString().slice(-8)}`,
+      phone: normalizedPhone,
       password: unusablePassword,
       role: 'admin',
-      adminRole: adminRole as AdminRole,
+      adminRole: role,
       isEmailVerified: false,
       isPhoneVerified: false,
       accountStatus: 'active',
@@ -111,29 +242,61 @@ export const inviteStaff = async (req: Request, res: Response) => {
       },
     });
 
-    const inviteUrl = buildAdminInviteUrl(inviteToken);
-    let emailSent = false;
-
-    try {
-      emailSent = await sendAdminStaffInvitationEmail(
-        normalizedEmail,
-        name.trim(),
-        ADMIN_ROLE_LABELS[adminRole as AdminRole],
-        inviteUrl
-      );
-    } catch (emailErr) {
-      console.warn('Staff invite email failed (user still created):', emailErr);
-    }
+    const emailResult = await dispatchStaffInviteEmail(
+      normalizedEmail,
+      trimmedName,
+      role,
+      inviteUrl
+    );
 
     return res.status(201).json({
       success: true,
       data: serializeStaff(staff),
       inviteUrl,
-      emailSent,
+      emailSent: emailResult.sent,
+      emailError: emailResult.error,
     });
   } catch (error) {
-    console.error('Invite staff error:', error);
-    return res.status(500).json({ success: false, msg: 'Failed to invite staff' });
+    return sendHandlerError(res, error, 'Failed to invite staff');
+  }
+};
+
+export const resendStaffInvite = async (req: Request, res: Response) => {
+  try {
+    const admin = req.admin as IUser;
+    const { staffId } = req.params;
+
+    await connecToDatabase();
+    const staff = await User.findOne({ _id: staffId, role: 'admin' });
+    if (!staff) {
+      return res.status(404).json({ success: false, msg: 'Staff member not found' });
+    }
+    if (!canResendAdminInvite(staff)) {
+      return res.status(400).json({
+        success: false,
+        msg: 'This staff member has already activated their account',
+      });
+    }
+
+    const adminRole = resolveAdminRole((staff as any).adminRole) as AdminRole;
+    const { staff: updated, inviteUrl, sent, error } = await regeneratePendingInvite(staff, admin, {
+      name: staff.name,
+      adminRole,
+    });
+
+    return res.json({
+      success: true,
+      resent: true,
+      data: serializeStaff(updated),
+      inviteUrl,
+      emailSent: sent,
+      emailError: error,
+      msg: sent
+        ? 'Invite resent — a fresh link was emailed'
+        : 'Invite link regenerated — copy it below (email could not be sent)',
+    });
+  } catch (error) {
+    return sendHandlerError(res, error, 'Failed to resend invite');
   }
 };
 
@@ -183,8 +346,7 @@ export const updateStaff = async (req: Request, res: Response) => {
     await staff.save();
     return res.json({ success: true, data: serializeStaff(staff) });
   } catch (error) {
-    console.error('Update staff error:', error);
-    return res.status(500).json({ success: false, msg: 'Failed to update staff' });
+    return sendHandlerError(res, error, 'Failed to update staff');
   }
 };
 

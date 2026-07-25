@@ -52,6 +52,10 @@ const ROUTE_RULES: Array<{ prefix: string; permission: AdminPermission }> = [
 /** Permission required for an admin-router path, or null if any authenticated admin may call it. */
 export function permissionForAdminPath(path: string): AdminPermission | null {
   const normalized = path.split('?')[0] || '/';
-  const match = ROUTE_RULES.find((rule) => normalized === rule.prefix || normalized.startsWith(rule.prefix));
-  return match?.permission ?? null;
+  const matches = ROUTE_RULES.filter(
+    (rule) => normalized === rule.prefix || normalized.startsWith(rule.prefix)
+  );
+  if (matches.length === 0) return null;
+  matches.sort((a, b) => b.prefix.length - a.prefix.length);
+  return matches[0]?.permission ?? null;
 }

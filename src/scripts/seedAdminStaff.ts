@@ -16,6 +16,10 @@ const STAFF: Array<{ name: string; email: string; adminRole: AdminRole; phone: s
 ];
 
 async function upsertStaff() {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('seedAdminStaff is disabled in production');
+  }
+
   await connectDB();
   const hashed = await bcrypt.hash(PASSWORD, 12);
 
@@ -53,7 +57,7 @@ async function upsertStaff() {
     }
   }
 
-  console.log('\nDummy staff ready. Password for all:', PASSWORD);
+  console.log('\nDummy staff ready for local testing.');
   console.log('Roles:', ADMIN_ROLES.join(', '));
   await mongoose.disconnect();
 }
