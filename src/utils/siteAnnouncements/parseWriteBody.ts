@@ -1,5 +1,5 @@
-import { toDate } from '../dateUtils';
 import { ANNOUNCEMENT_LIMITS, isAnnouncementType } from './constants';
+import { parseScheduleEnd, parseScheduleStart } from './scheduleDates';
 import type { ParseResult, SiteAnnouncementWriteInput } from './types';
 
 /**
@@ -123,8 +123,8 @@ export function parseSiteAnnouncementWriteBody(
     return { ok: false, error: `locale must be at most ${ANNOUNCEMENT_LIMITS.locale.max} characters` };
   }
 
-  const startsAt = toDate(body.startsAt);
-  const endsAt = toDate(body.endsAt);
+  const startsAt = parseScheduleStart(body.startsAt);
+  const endsAt = parseScheduleEnd(body.endsAt);
   if (!startsAt || !endsAt) {
     return { ok: false, error: 'startsAt and endsAt are required dates' };
   }
