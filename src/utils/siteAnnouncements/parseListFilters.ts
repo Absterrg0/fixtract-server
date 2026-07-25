@@ -3,16 +3,22 @@ import {
   isAnnouncementListStatus,
   isAnnouncementType,
 } from './constants';
-import type { AdminListFilters, PublicListFilters } from './types';
+import type {
+  AdminListFilters,
+  AdminListQuery,
+  PublicListFilters,
+  PublicListQuery,
+  QueryParam,
+} from './types';
 
-function firstQueryValue(value: unknown): string | undefined {
+function firstQueryValue(value: QueryParam): string | undefined {
   if (typeof value === 'string') return value;
   if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
   return undefined;
 }
 
 function parsePositiveInt(
-  value: unknown,
+  value: QueryParam,
   fallback: number,
   bounds: { min: number; max: number },
 ): number {
@@ -22,15 +28,10 @@ function parsePositiveInt(
   return Math.min(bounds.max, Math.max(bounds.min, n));
 }
 
-export function parseAdminListFilters(query: unknown): AdminListFilters {
-  const record =
-    typeof query === 'object' && query !== null
-      ? (query as Record<string, unknown>)
-      : {};
-
-  const statusRaw = firstQueryValue(record.status)?.trim();
-  const typeRaw = firstQueryValue(record.type)?.trim();
-  const searchRaw = firstQueryValue(record.search)?.trim();
+export function parseAdminListFilters(query: AdminListQuery): AdminListFilters {
+  const statusRaw = firstQueryValue(query.status)?.trim();
+  const typeRaw = firstQueryValue(query.type)?.trim();
+  const searchRaw = firstQueryValue(query.search)?.trim();
 
   return {
     status:
@@ -39,23 +40,18 @@ export function parseAdminListFilters(query: unknown): AdminListFilters {
     search: searchRaw
       ? searchRaw.slice(0, ANNOUNCEMENT_LIMITS.search.max)
       : undefined,
-    page: parsePositiveInt(record.page, 1, { min: 1, max: Number.MAX_SAFE_INTEGER }),
-    limit: parsePositiveInt(record.limit, ANNOUNCEMENT_LIMITS.listLimit.default, {
+    page: parsePositiveInt(query.page, 1, { min: 1, max: Number.MAX_SAFE_INTEGER }),
+    limit: parsePositiveInt(query.limit, ANNOUNCEMENT_LIMITS.listLimit.default, {
       min: ANNOUNCEMENT_LIMITS.listLimit.min,
       max: ANNOUNCEMENT_LIMITS.listLimit.max,
     }),
   };
 }
 
-export function parsePublicListFilters(query: unknown): PublicListFilters {
-  const record =
-    typeof query === 'object' && query !== null
-      ? (query as Record<string, unknown>)
-      : {};
-
-  const localeRaw = firstQueryValue(record.locale)?.trim().toLowerCase() || 'en';
-  const countryRaw = firstQueryValue(record.country)?.trim().toUpperCase() || '';
-  const typeRaw = firstQueryValue(record.type)?.trim();
+export function parsePublicListFilters(query: PublicListQuery): PublicListFilters {
+  const localeRaw = firstQueryValue(query.locale)?.trim().toLowerCase() || 'en';
+  const countryRaw = firstQueryValue(query.country)?.trim().toUpperCase() || '';
+  const typeRaw = firstQueryValue(query.type)?.trim();
 
   return {
     locale: localeRaw.slice(0, ANNOUNCEMENT_LIMITS.locale.max) || 'en',

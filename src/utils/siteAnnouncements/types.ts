@@ -1,4 +1,5 @@
 import type { AnnouncementType } from '../../models/siteAnnouncement';
+import type { DateInput } from '../dateUtils';
 import type { AnnouncementListStatus } from './constants';
 
 export type ParseSuccess<T> = { ok: true; value: T };
@@ -23,6 +24,50 @@ export interface SiteAnnouncementWriteInput {
   delaySeconds: number;
   dismissible: boolean;
   requireMarketingConsent: boolean;
+}
+
+/**
+ * Expected JSON shape for create/update announcement requests.
+ * Runtime validation still narrows each field before persistence.
+ */
+export interface SiteAnnouncementWriteBody {
+  name?: string;
+  type?: string;
+  title?: string;
+  message?: string;
+  ctaLabel?: string;
+  ctaUrl?: string;
+  discountCode?: string;
+  activeCountries?: string[];
+  locale?: string;
+  startsAt?: DateInput;
+  endsAt?: DateInput;
+  isActive?: boolean;
+  priority?: number | string;
+  delaySeconds?: number | string;
+  dismissible?: boolean;
+  requireMarketingConsent?: boolean;
+}
+
+export interface SiteAnnouncementActiveBody {
+  isActive?: boolean;
+}
+
+/** Express-style query parameter (string or repeated string). */
+export type QueryParam = string | string[] | undefined;
+
+export interface AdminListQuery {
+  status?: QueryParam;
+  type?: QueryParam;
+  search?: QueryParam;
+  page?: QueryParam;
+  limit?: QueryParam;
+}
+
+export interface PublicListQuery {
+  country?: QueryParam;
+  locale?: QueryParam;
+  type?: QueryParam;
 }
 
 export interface AdminListFilters {
