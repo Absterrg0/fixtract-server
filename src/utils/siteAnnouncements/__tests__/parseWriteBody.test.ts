@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseIsActiveBody, parseSiteAnnouncementWriteBody } from '../parseWriteBody';
 
-import type { SiteAnnouncementWriteBody } from '../types';
+import type { SiteAnnouncementActiveBody, SiteAnnouncementWriteBody } from '../types';
 
 const validBody: SiteAnnouncementWriteBody = {
   name: 'Summer BE promo',
@@ -82,6 +82,8 @@ describe('parseIsActiveBody', () => {
   });
 
   it('rejects non-boolean isActive', () => {
-    expect(parseIsActiveBody({ isActive: 'true' as unknown as boolean }).ok).toBe(false);
+    expect(parseIsActiveBody({ isActive: 'true' } as SiteAnnouncementActiveBody).ok).toBe(
+      false,
+    );
   });
 });
