@@ -117,6 +117,9 @@ const siteAnnouncementSchema = new Schema<ISiteAnnouncement>({
 });
 
 siteAnnouncementSchema.index({ isActive: 1, type: 1, startsAt: 1, endsAt: 1, priority: -1 });
+siteAnnouncementSchema.index({ startsAt: 1, endsAt: 1 });
+siteAnnouncementSchema.index({ isActive: 1, locale: 1, priority: -1 });
+siteAnnouncementSchema.index({ isActive: 1, activeCountries: 1, locale: 1 });
 siteAnnouncementSchema.index({ createdAt: -1 });
 
 const SiteAnnouncement = mongoose.model<ISiteAnnouncement>('SiteAnnouncement', siteAnnouncementSchema);

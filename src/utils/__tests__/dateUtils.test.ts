@@ -21,6 +21,8 @@ describe('toDate', () => {
     expect(toDate(undefined)).toBeNull();
     expect(toDate('not-a-date')).toBeNull();
     expect(toDate(new Date('invalid'))).toBeNull();
+    expect(toDate('2026-02-30T00:00:00.000Z')).toBeNull();
+    expect(toDate('2026-02-30')).toBeNull();
   });
 
   it('powers toISOString', () => {
