@@ -111,6 +111,7 @@ import {
   getSiteAnnouncement,
   createSiteAnnouncement,
   updateSiteAnnouncement,
+  setSiteAnnouncementActive,
   deleteSiteAnnouncement,
 } from "../../handlers/Admin/siteAnnouncements";
 import { uploadProfileImage as cmsImageMulter, upload as adminFileUpload } from "../../utils/s3Upload";
@@ -266,6 +267,7 @@ adminRouter.route('/discount-codes/:id').get(getDiscountCode).patch(updateDiscou
 
 // Site announcement / marketing promo surfaces
 adminRouter.route('/site-announcements').get(listSiteAnnouncements).post(createSiteAnnouncement);
+adminRouter.route('/site-announcements/:id/active').patch(setSiteAnnouncementActive);
 adminRouter.route('/site-announcements/:id').get(getSiteAnnouncement).patch(updateSiteAnnouncement).delete(deleteSiteAnnouncement);
 
 // CMS management routes
