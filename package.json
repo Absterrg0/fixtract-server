@@ -10,6 +10,7 @@
     "start": "node dist/index.js",
     "seed:admin": "node src/scripts/seedAdmin.js",
     "seed:admin:ts": "npx tsx src/scripts/seedAdmin.ts",
+    "seed:admin-staff": "npx tsx src/scripts/seedAdminStaff.ts",
     "seed:cms": "npx tsx src/scripts/seedCmsDefaults.ts",
     "seed:csv": "npx tsx src/scripts/parseAndImportCSV.ts",
     "migrate:merge-solar": "npx tsx src/scripts/mergeDuplicateSolarServices.ts",

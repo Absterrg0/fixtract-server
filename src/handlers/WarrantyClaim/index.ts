@@ -26,6 +26,7 @@ import {
   presignS3Url,
 } from "../../utils/s3Upload";
 import { SYSTEM_USER_ID } from "../../constants/system";
+import { denyUnlessPermission } from "../../utils/adminRbac/assertPermission";
 import {
   sendWarrantyClaimOpenedEmail,
   sendWarrantyProposalSentEmail,
@@ -141,7 +142,10 @@ const getUserRole = (req: Request): string | null => {
 const toObjectId = (value: string) =>
   mongoose.Types.ObjectId.createFromHexString(value);
 
-const isAdmin = (req: Request) => getUserRole(req) === "admin";
+const isAdmin = (req: Request) => {
+  if (getUserRole(req) !== "admin") return false;
+  return !denyUnlessPermission(req.user, "warranty.manage");
+};
 
 const ensureConversationLabel = async (
   conversationId: Types.ObjectId,

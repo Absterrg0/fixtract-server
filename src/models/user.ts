@@ -3,6 +3,7 @@ import { normalizePendingIdChanges } from "../utils/pendingIdChanges";
 
 export type UserRole = "admin" | "visitor" | "customer" | "professional" | "employee";
 export type CustomerType = "individual" | "business";
+export type AdminRole = "super" | "care" | "marketing" | "quality" | "finance";
 
 export interface IUser extends Document {
     _id: Types.ObjectId;
@@ -15,6 +16,16 @@ export interface IUser extends Document {
     createdAt: Date;
     updatedAt: Date;
     role: UserRole;
+    /** Platform staff pack when role === 'admin'. Legacy admins default to super. */
+    adminRole?: AdminRole;
+    adminStaff?: {
+        invitedBy?: string;
+        invitedByEmail?: string;
+        invitedAt?: Date;
+        inviteTokenHash?: string;
+        inviteTokenExpires?: Date;
+        inviteAcceptedAt?: Date;
+    };
     verificationCode?: string;
     verificationCodeExpires?: Date;
     vatNumber?: string;
@@ -217,6 +228,20 @@ const UserSchema = new Schema({
         type: String,
         enum: ['admin', 'visitor', 'customer', 'professional', 'employee'],
         default: 'customer'
+    },
+    adminRole: {
+        type: String,
+        enum: ['super', 'care', 'marketing', 'quality', 'finance'],
+        required: false,
+        default: undefined,
+    },
+    adminStaff: {
+        invitedBy: { type: String, required: false },
+        invitedByEmail: { type: String, required: false },
+        invitedAt: { type: Date, required: false },
+        inviteTokenHash: { type: String, required: false, select: false },
+        inviteTokenExpires: { type: Date, required: false, select: false },
+        inviteAcceptedAt: { type: Date, required: false },
     },
 
     verificationCode: {

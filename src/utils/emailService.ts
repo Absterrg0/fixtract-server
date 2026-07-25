@@ -785,6 +785,69 @@ export const sendTeamMemberInvitationEmail = async (
   }
 };
 
+export const sendAdminStaffInvitationEmail = async (
+  email: string,
+  staffName: string,
+  adminRole: string,
+  inviteUrl: string
+): Promise<boolean> => {
+  try {
+    const emailAPI = createEmailAPI();
+    const safeStaffName = escapeHtml(staffName);
+    const safeRole = escapeHtml(adminRole);
+    const safeInviteUrl = escapeHtml(inviteUrl);
+
+    const htmlContent = `
+      <div style="max-width: 600px; margin: 0 auto; font-family: Arial, sans-serif; background: #f9f9f9; padding: 20px;">
+        <div style="background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+          ${getEmailHeader('Admin team invitation')}
+
+          <div style="padding: 30px;">
+            <h2 style="color: #333; margin-bottom: 20px;">Hi ${safeStaffName},</h2>
+
+            <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+              You have been invited to join the Fixtract admin team as <strong>${safeRole}</strong>.
+            </p>
+
+            <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+              Use the button below to set your password and activate your account. This link expires in 7 days.
+            </p>
+
+            <div style="text-align: center; margin: 30px 0;">
+              <a href="${safeInviteUrl}"
+                 style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-size: 16px; font-weight: bold; display: inline-block;">
+                Set up your account
+              </a>
+            </div>
+
+            <p style="color: #999; font-size: 14px; margin-top: 30px;">
+              If the button does not work, copy and paste this link into your browser:<br />
+              <a href="${safeInviteUrl}" style="color: #667eea; word-break: break-all;">${safeInviteUrl}</a>
+            </p>
+          </div>
+
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const sendSmtpEmail: SendSmtpEmail = {
+      to: [{ email, name: staffName }],
+      subject: 'You are invited to Fixtract admin',
+      htmlContent,
+      sender: {
+        email: process.env.FROM_EMAIL || 'noreply@fixtract.com',
+        name: 'Fixtract Team',
+      },
+    };
+
+    await emailAPI.sendTransacEmail(sendSmtpEmail);
+    return true;
+  } catch (error: any) {
+    return false;
+  }
+};
+
 // Send project approval email
 export const sendProjectApprovalEmail = async (
   email: string,
