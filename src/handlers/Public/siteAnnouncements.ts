@@ -1,48 +1,27 @@
-import { Request, Response, NextFunction } from "express";
-import SiteAnnouncement, { AnnouncementType } from "../../models/siteAnnouncement";
-
-const ANNOUNCEMENT_TYPES: AnnouncementType[] = ['top_bar', 'modal', 'exit_intent'];
+import { Request, Response, NextFunction } from 'express';
+import SiteAnnouncement from '../../models/siteAnnouncement';
+import {
+  ANNOUNCEMENT_LIMITS,
+  buildPublicListQuery,
+  parsePublicListFilters,
+} from '../../utils/siteAnnouncements';
 
 /**
  * Public active announcements for the visitor's country / locale / type.
  * Empty activeCountries = show everywhere.
  */
-export const listPublicSiteAnnouncements = async (req: Request, res: Response, _next: NextFunction) => {
+export const listPublicSiteAnnouncements = async (
+  req: Request,
+  res: Response,
+  _next: NextFunction,
+) => {
   try {
-    const {
-      country,
-      locale = 'en',
-      type,
-    } = req.query as Record<string, string>;
-
-    const now = new Date();
-    const query: Record<string, any> = {
-      isActive: true,
-      startsAt: { $lte: now },
-      endsAt: { $gte: now },
-    };
-
-    if (type && ANNOUNCEMENT_TYPES.includes(type as AnnouncementType)) {
-      query.type = type;
-    }
-
-    if (locale && typeof locale === 'string') {
-      // Soft match: prefer requested locale, always allow 'en' fallback content
-      const loc = locale.trim().toLowerCase().slice(0, 10) || 'en';
-      query.locale = { $in: [loc, 'en'] };
-    }
-
-    const countryCode = typeof country === 'string' ? country.trim().toUpperCase().slice(0, 2) : '';
-    if (countryCode && /^[A-Z]{2}$/.test(countryCode)) {
-      query.$or = [
-        { activeCountries: { $size: 0 } },
-        { activeCountries: countryCode },
-      ];
-    }
+    const filters = parsePublicListFilters(req.query);
+    const query = buildPublicListQuery(filters);
 
     const announcements = await SiteAnnouncement.find(query)
       .sort({ priority: -1, createdAt: -1 })
-      .limit(20)
+      .limit(ANNOUNCEMENT_LIMITS.publicListLimit)
       .select({
         name: 1,
         type: 1,
@@ -63,20 +42,22 @@ export const listPublicSiteAnnouncements = async (req: Request, res: Response, _
       .lean();
 
     // Pick one per type (highest priority) for simpler client rendering
-    const byType: Record<string, typeof announcements[number]> = {};
+    const byType = new Map<string, (typeof announcements)[number]>();
     for (const item of announcements) {
-      if (!byType[item.type]) byType[item.type] = item;
+      if (!byType.has(item.type)) {
+        byType.set(item.type, item);
+      }
     }
 
     return res.status(200).json({
       success: true,
       data: {
-        announcements: Object.values(byType),
-        country: countryCode || null,
-        locale: (locale || 'en').toLowerCase(),
+        announcements: Array.from(byType.values()),
+        country: filters.countryCode ?? null,
+        locale: filters.locale,
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('List public site announcements error:', error);
     return res.status(500).json({ success: false, msg: 'Failed to load announcements' });
   }

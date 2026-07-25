@@ -3,7 +3,35 @@
  * Handles MongoDB Extended JSON format ({$date: "..."}), Date instances, and string dates.
  */
 
-type DateInput = string | Date | { $date: string } | null | undefined;
+export type DateInput = string | Date | { $date: string } | null | undefined;
+
+function isMongoExtendedDate(value: object): value is { $date: string } {
+  return '$date' in value && typeof (value as { $date: unknown }).$date === 'string';
+}
+
+/**
+ * Coerce supported date inputs into a valid `Date`.
+ * Returns null for missing/invalid values — never throws.
+ */
+export const toDate = (value: DateInput): Date | null => {
+  if (value == null) return null;
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  if (typeof value === 'string') {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  if (typeof value === 'object' && isMongoExtendedDate(value)) {
+    const parsed = new Date(value.$date);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  return null;
+};
 
 /**
  * Converts various date formats to ISO string.
@@ -14,30 +42,8 @@ type DateInput = string | Date | { $date: string } | null | undefined;
  * @returns ISO string if valid, null otherwise
  */
 export const toISOString = (date: DateInput): string | null => {
-  if (!date) return null;
-
-  // Handle MongoDB Extended JSON format {$date: "..."}
-  if (typeof date === 'object' && date !== null && '$date' in date) {
-    const dateStr = date.$date;
-    // Validate the $date string
-    const parsed = new Date(dateStr);
-    return isNaN(parsed.getTime()) ? null : parsed.toISOString();
-  }
-
-  // Handle Date objects
-  if (date instanceof Date) {
-    return isNaN(date.getTime()) ? null : date.toISOString();
-  }
-
-  // Handle string dates - validate by parsing
-  if (typeof date === 'string') {
-    const parsed = new Date(date);
-    return isNaN(parsed.getTime()) ? null : parsed.toISOString();
-  }
-
-  // Fallback: try to convert to Date
-  const parsed = new Date(date as unknown as string);
-  return isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  const parsed = toDate(date);
+  return parsed ? parsed.toISOString() : null;
 };
 
 /**
@@ -49,28 +55,16 @@ export const toISOString = (date: DateInput): string | null => {
  * @returns Date string if valid, null otherwise
  */
 export const extractDateString = (date: DateInput): string | null => {
-  if (!date) return null;
+  if (date == null) return null;
 
-  // Handle MongoDB Extended JSON format {$date: "..."}
-  if (typeof date === 'object' && date !== null && '$date' in date) {
-    const dateStr = date.$date;
-    // Validate the $date string
-    const parsed = new Date(dateStr);
-    return isNaN(parsed.getTime()) ? null : dateStr;
-  }
-
-  // Handle Date objects
-  if (date instanceof Date) {
-    return isNaN(date.getTime()) ? null : date.toISOString();
-  }
-
-  // Handle string dates - validate by parsing, return original if valid
   if (typeof date === 'string') {
-    const parsed = new Date(date);
-    return isNaN(parsed.getTime()) ? null : date;
+    return toDate(date) ? date : null;
   }
 
-  // Fallback: try to convert to Date
-  const parsed = new Date(date as unknown as string);
-  return isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  if (typeof date === 'object' && !(date instanceof Date) && isMongoExtendedDate(date)) {
+    return toDate(date) ? date.$date : null;
+  }
+
+  const parsed = toDate(date);
+  return parsed ? parsed.toISOString() : null;
 };
