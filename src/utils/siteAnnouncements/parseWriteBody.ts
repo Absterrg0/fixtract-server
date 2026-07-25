@@ -1,40 +1,22 @@
 import { ANNOUNCEMENT_LIMITS, isAnnouncementType } from './constants';
 import { parseScheduleEnd, parseScheduleStart } from './scheduleDates';
-import type { ParseResult, SiteAnnouncementWriteInput } from './types';
+import type {
+  ParseResult,
+  SiteAnnouncementActiveBody,
+  SiteAnnouncementWriteBody,
+  SiteAnnouncementWriteInput,
+} from './types';
 
-/**
- * Raw create/update body. Fields are `unknown` because Express JSON is untrusted;
- * this function is the single place that narrows them.
- */
-export type SiteAnnouncementWriteBody = {
-  name?: unknown;
-  type?: unknown;
-  title?: unknown;
-  message?: unknown;
-  ctaLabel?: unknown;
-  ctaUrl?: unknown;
-  discountCode?: unknown;
-  activeCountries?: unknown;
-  locale?: unknown;
-  startsAt?: unknown;
-  endsAt?: unknown;
-  isActive?: unknown;
-  priority?: unknown;
-  delaySeconds?: unknown;
-  dismissible?: unknown;
-  requireMarketingConsent?: unknown;
-};
-
-function trimString(value: unknown): string {
+function trimString(value: string | number | boolean | null | undefined): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function optionalTrimmed(value: unknown): string | undefined {
+function optionalTrimmed(value: string | null | undefined): string | undefined {
   const trimmed = trimString(value);
   return trimmed || undefined;
 }
 
-function numberOr(value: unknown, fallback: number): number {
+function numberOr(value: number | string | null | undefined, fallback: number): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim() !== '') {
     const n = Number(value);
@@ -166,7 +148,9 @@ export function parseSiteAnnouncementWriteBody(
   };
 }
 
-export function parseIsActiveBody(body: { isActive?: unknown }): ParseResult<boolean> {
+export function parseIsActiveBody(
+  body: SiteAnnouncementActiveBody,
+): ParseResult<boolean> {
   if (typeof body.isActive !== 'boolean') {
     return { ok: false, error: 'isActive must be a boolean' };
   }

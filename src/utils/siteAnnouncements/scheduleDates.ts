@@ -1,5 +1,5 @@
 import { DateTime } from 'luxon';
-import { toDate } from '../dateUtils';
+import { toDate, type DateInput } from '../dateUtils';
 
 /** Fixera market timezone for date-only admin schedule fields. */
 export const ANNOUNCEMENT_MARKET_TZ = 'Europe/Brussels';
@@ -10,7 +10,7 @@ const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
  * Parse a schedule start: date-only → start of that day in Europe/Brussels;
  * otherwise coerce via shared toDate (ISO instants pass through).
  */
-export function parseScheduleStart(value: unknown): Date | null {
+export function parseScheduleStart(value: DateInput): Date | null {
   if (typeof value === 'string') {
     const trimmed = value.trim();
     if (DATE_ONLY.test(trimmed)) {
@@ -25,7 +25,7 @@ export function parseScheduleStart(value: unknown): Date | null {
  * Parse a schedule end: date-only → end of that day in Europe/Brussels;
  * otherwise coerce via shared toDate (ISO instants pass through).
  */
-export function parseScheduleEnd(value: unknown): Date | null {
+export function parseScheduleEnd(value: DateInput): Date | null {
   if (typeof value === 'string') {
     const trimmed = value.trim();
     if (DATE_ONLY.test(trimmed)) {
