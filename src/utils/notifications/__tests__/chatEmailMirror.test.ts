@@ -51,9 +51,19 @@ describe('unreadChatReminderTargets', () => {
       unreadChatReminderTargets({
         ...base,
         customerUnreadCount: 0,
+        professionalUnreadCount: 1,
         lastMessageSenderId: { toString: () => 'user-1' } as any,
       }),
     ).toEqual([{ userId: 'admin-1', eventKey: 'admin.unread_support_chat' }]);
+
+    expect(
+      unreadChatReminderTargets({
+        ...base,
+        customerUnreadCount: 0,
+        professionalUnreadCount: 0,
+        lastMessageSenderId: { toString: () => 'user-1' } as any,
+      }),
+    ).toEqual([]);
   });
 });
 

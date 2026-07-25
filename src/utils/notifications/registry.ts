@@ -16,7 +16,7 @@ import {
   sendNotificationEmail,
   sendChatMirrorEmail,
 } from '../emailService';
-import { formatMirrorInboxBody } from './chatEmailMirror';
+import { formatMirrorInboxBody, type ChatMirrorLine } from './chatEmailMirror';
 
 export interface NotifyBuildResult {
   title: string;
@@ -45,7 +45,7 @@ export interface NotifyContext {
   reason?: string;
   conversationType?: 'direct' | 'support';
   counterpartyName?: string;
-  chatMirrorLines?: Array<{ senderLabel: string; text: string; sentAtIso: string }>;
+  chatMirrorLines?: ChatMirrorLine[];
   [key: string]: unknown;
 }
 

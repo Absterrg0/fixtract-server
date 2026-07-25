@@ -59,7 +59,7 @@ export function unreadChatReminderTargets(conv: Pick<
   if (targetUserId && conv.customerUnreadCount > 0 && senderId !== targetUserId) {
     targets.push({ userId: targetUserId, eventKey: 'user.unread_support_chat' });
   }
-  if (adminId && targetUserId && senderId === targetUserId) {
+  if (adminId && targetUserId && conv.professionalUnreadCount > 0 && senderId === targetUserId) {
     targets.push({ userId: adminId, eventKey: 'admin.unread_support_chat' });
   }
 
@@ -107,10 +107,7 @@ export function unreadChatConversationFilter(cutoff: Date) {
       },
       {
         type: 'support' as const,
-        $or: [
-          { customerUnreadCount: { $gt: 0 } },
-          { $expr: { $eq: ['$lastMessageSenderId', '$supportTargetUserId'] } },
-        ],
+        $or: [{ customerUnreadCount: { $gt: 0 } }, { professionalUnreadCount: { $gt: 0 } }],
       },
     ],
   };

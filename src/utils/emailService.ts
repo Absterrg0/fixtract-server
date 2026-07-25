@@ -1,6 +1,7 @@
 import { TransactionalEmailsApi, SendSmtpEmail, TransactionalEmailsApiApiKeys } from "@getbrevo/brevo";
 import mongoose from "mongoose";
 import { logEmail } from "./emailLogger";
+import type { ChatMirrorLine } from "./notifications/chatEmailMirror";
 
 interface SendEmailMeta {
   template?: string;
@@ -1472,18 +1473,12 @@ const sendEmail = async (
  * Generic single-recipient notification email used by the notification registry
  * when a dedicated template is not required.
  */
-export type ChatMirrorEmailLine = {
-  senderLabel: string;
-  text: string;
-  sentAtIso: string;
-};
-
 export const sendChatMirrorEmail = async (params: {
   to: string;
   userName: string;
   subject: string;
   intro: string;
-  lines: ChatMirrorEmailLine[];
+  lines: ChatMirrorLine[];
   ctaUrl: string;
   template: string;
 }): Promise<boolean> => {
