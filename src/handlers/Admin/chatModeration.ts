@@ -342,6 +342,7 @@ export const adminStartSupportChat = async (req: Request, res: Response) => {
         lastMessageSenderId: adminObjectId,
       },
       $inc: { customerUnreadCount: 1 },
+      $unset: { unreadChatReminderLastSentAt: '' },
     });
 
     return res.status(201).json({
@@ -392,6 +393,7 @@ export const adminReplySupportChat = async (req: Request, res: Response) => {
           lastMessageSenderId: adminObjectId,
         },
         $inc: { customerUnreadCount: 1 },
+        $unset: { unreadChatReminderLastSentAt: '' },
       }
     );
     if (!claimed) {

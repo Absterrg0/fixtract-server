@@ -1472,6 +1472,57 @@ const sendEmail = async (
  * Generic single-recipient notification email used by the notification registry
  * when a dedicated template is not required.
  */
+export type ChatMirrorEmailLine = {
+  senderLabel: string;
+  text: string;
+  sentAtIso: string;
+};
+
+export const sendChatMirrorEmail = async (params: {
+  to: string;
+  userName: string;
+  subject: string;
+  intro: string;
+  lines: ChatMirrorEmailLine[];
+  ctaUrl: string;
+  template: string;
+}): Promise<boolean> => {
+  const { to, userName, subject, intro, lines, ctaUrl, template } = params;
+
+  const messageBlocks =
+    lines.length > 0
+      ? lines
+          .map((line) => {
+            const when = new Date(line.sentAtIso).toLocaleString('en-GB', {
+              dateStyle: 'medium',
+              timeStyle: 'short',
+            });
+            return `
+        <div style="background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px 16px; margin: 12px 0;">
+          <p style="margin: 0 0 6px 0; font-size: 13px; color: #6b7280; font-weight: 600;">${escapeHtml(line.senderLabel)} · ${escapeHtml(when)}</p>
+          <p style="margin: 0; color: #374151; line-height: 1.6; white-space: pre-wrap;">${escapeHtml(line.text)}</p>
+        </div>
+      `;
+          })
+          .join('')
+      : `<p style="color: #666; line-height: 1.6;">Open the conversation in Fixtract to read the latest messages.</p>`;
+
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Unread messages')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(userName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">${escapeHtml(intro)}</p>
+        ${messageBlocks}
+        ${buildEmailButton(ctaUrl, 'Open conversation', '#667eea')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+
+  return sendEmail(to, subject, content, { template });
+};
+
 export const sendNotificationEmail = async (params: {
   to: string;
   userName: string;

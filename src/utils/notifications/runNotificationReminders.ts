@@ -1,9 +1,9 @@
 import Booking from '../../models/booking';
-import Conversation from '../../models/conversation';
 import User from '../../models/user';
 import CancellationRequest from '../../models/cancellationRequest';
 import { notify } from './notify';
 import { daysAgo, hasUnpaidExtras, shouldSendReminder } from './reminderRules';
+import { processUnreadChatMirrorReminders } from './processUnreadChatMirrors';
 
 export interface ReminderJobCounts {
   unfinishedCheckout: number;
@@ -398,52 +398,11 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
     counts.errors.push(`notStarted query: ${e?.message || e}`);
   }
 
-  // --- Unread chat ≥ 24h ---
+  // --- Unread chat ≥ 24h (email mirror) ---
   try {
-    const cutoff = daysAgo(1);
-    const conversations = await Conversation.find({
-      type: 'direct',
-      status: 'active',
-      lastMessageAt: { $lte: cutoff },
-      $or: [
-        { customerUnreadCount: { $gt: 0 } },
-        { professionalUnreadCount: { $gt: 0 } },
-      ],
-    }).select('_id customerId professionalId customerUnreadCount professionalUnreadCount lastMessageSenderId unreadChatReminderLastSentAt lastMessageAt').limit(300);
-
-    for (const conv of conversations) {
-      if (conv.unreadChatReminderLastSentAt && conv.unreadChatReminderLastSentAt.getTime() > Date.now() - DAY_MS) {
-        continue;
-      }
-      try {
-        const senderId = conv.lastMessageSenderId?.toString();
-        if (conv.customerUnreadCount > 0 && conv.customerId?.toString() !== senderId) {
-          await notify({
-            userId: conv.customerId!.toString(),
-            eventKey: 'customer.unread_chat',
-            entityType: 'conversation',
-            entityId: String(conv._id),
-            context: { conversationId: String(conv._id) },
-          });
-        }
-        if (conv.professionalUnreadCount > 0 && conv.professionalId?.toString() !== senderId) {
-          await notify({
-            userId: conv.professionalId!.toString(),
-            eventKey: 'professional.unread_chat',
-            entityType: 'conversation',
-            entityId: String(conv._id),
-            context: { conversationId: String(conv._id) },
-          });
-        }
-        await Conversation.updateOne(
-          { _id: conv._id },
-          { $set: { unreadChatReminderLastSentAt: now } },
-        );
-        counts.unreadChat++;
-      } catch (e: any) {
-        counts.errors.push(`unreadChat ${conv._id}: ${e?.message || e}`);
-      }
-    }
+    const { sent, errors } = await processUnreadChatMirrorReminders();
+    counts.unreadChat = sent;
+    counts.errors.push(...errors);
   } catch (e: any) {
     counts.errors.push(`unreadChat query: ${e?.message || e}`);
   }
