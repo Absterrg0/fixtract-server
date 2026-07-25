@@ -106,6 +106,13 @@ import {
   updateDiscountCode,
   deleteDiscountCode,
 } from "../../handlers/Admin/discountCodes";
+import {
+  listSiteAnnouncements,
+  getSiteAnnouncement,
+  createSiteAnnouncement,
+  updateSiteAnnouncement,
+  deleteSiteAnnouncement,
+} from "../../handlers/Admin/siteAnnouncements";
 import { uploadProfileImage as cmsImageMulter, upload as adminFileUpload } from "../../utils/s3Upload";
 import { getAdminSiteSettings, updateAdminSiteSettings } from "../../handlers/Admin/siteSettings";
 import {
@@ -275,6 +282,10 @@ adminRouter.route('/support/meeting-requests/:id').patch(adminUpdateMeetingReque
 // Discount code management routes
 adminRouter.route('/discount-codes').get(listDiscountCodes).post(createDiscountCode);
 adminRouter.route('/discount-codes/:id').get(getDiscountCode).patch(updateDiscountCode).delete(deleteDiscountCode);
+
+// Site announcement / marketing promo surfaces
+adminRouter.route('/site-announcements').get(listSiteAnnouncements).post(createSiteAnnouncement);
+adminRouter.route('/site-announcements/:id').get(getSiteAnnouncement).patch(updateSiteAnnouncement).delete(deleteSiteAnnouncement);
 
 // CMS management routes
 adminRouter.route('/cms').get(listCmsContent).post(createCmsContent);
