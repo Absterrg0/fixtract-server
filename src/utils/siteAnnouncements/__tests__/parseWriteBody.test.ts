@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseIsActiveBody, parseSiteAnnouncementWriteBody } from '../parseWriteBody';
+import { parseIsActiveBody, parseSiteAnnouncementPatchBody, parseSiteAnnouncementWriteBody } from '../parseWriteBody';
 
 import type { SiteAnnouncementActiveBody, SiteAnnouncementWriteBody } from '../types';
 
@@ -72,6 +72,40 @@ describe('parseSiteAnnouncementWriteBody', () => {
       ...validBody,
       activeCountries: ['Belgium'],
     });
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe('parseSiteAnnouncementPatchBody', () => {
+  const existing = {
+    name: 'Summer BE promo',
+    type: 'top_bar' as const,
+    title: 'Summer 10% off',
+    message: 'Book this month and save',
+    activeCountries: ['BE'],
+    locale: 'en',
+    startsAt: new Date('2026-07-01T00:00:00.000Z'),
+    endsAt: new Date('2026-08-31T23:59:59.999Z'),
+    isActive: true,
+    priority: 0,
+    delaySeconds: 3,
+    dismissible: true,
+    requireMarketingConsent: true,
+  };
+
+  it('accepts a title-only patch', () => {
+    const result = parseSiteAnnouncementPatchBody({ title: 'Updated title' }, existing);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toEqual({ title: 'Updated title' });
+  });
+
+  it('rejects an empty patch body', () => {
+    expect(parseSiteAnnouncementPatchBody({}, existing).ok).toBe(false);
+  });
+
+  it('validates schedule bounds against the existing document', () => {
+    const result = parseSiteAnnouncementPatchBody({ endsAt: '2026-06-01' }, existing);
     expect(result.ok).toBe(false);
   });
 });

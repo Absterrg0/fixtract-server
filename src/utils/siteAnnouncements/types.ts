@@ -49,6 +49,8 @@ export interface SiteAnnouncementWriteBody {
   requireMarketingConsent?: boolean;
 }
 
+export type SiteAnnouncementPatchBody = Partial<SiteAnnouncementWriteBody>;
+
 export interface SiteAnnouncementActiveBody {
   isActive?: boolean;
 }
