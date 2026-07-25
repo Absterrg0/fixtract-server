@@ -13,7 +13,6 @@ export const ANNOUNCEMENT_LIMITS = {
   delaySeconds: { min: 0, max: 120, default: 3 },
   search: { max: 64 },
   listLimit: { min: 1, max: 100, default: 50 },
-  publicListLimit: 20,
 } as const;
 
 export type AnnouncementListStatus = 'active' | 'scheduled' | 'expired' | 'disabled';

@@ -2,8 +2,8 @@ import { Request, Response, NextFunction } from 'express';
 import SiteAnnouncement from '../../models/siteAnnouncement';
 import {
   buildPublicListQuery,
-  parsePublicListFilters,
-} from '../../utils/siteAnnouncements';
+} from '../../utils/siteAnnouncements/buildQueries';
+import { parsePublicListFilters } from '../../utils/siteAnnouncements/parseListFilters';
 
 /**
  * Public active announcements for the visitor's country / locale / type.
