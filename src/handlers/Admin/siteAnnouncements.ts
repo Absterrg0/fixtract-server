@@ -166,6 +166,28 @@ export const createSiteAnnouncement = async (req: Request, res: Response, _next:
   }
 };
 
+export const setSiteAnnouncementActive = async (req: Request, res: Response, _next: NextFunction) => {
+  try {
+    const { id } = params(req.params);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, msg: 'Invalid id' });
+    }
+
+    const { isActive } = req.body;
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ success: false, msg: 'isActive must be a boolean' });
+    }
+
+    const updated = await SiteAnnouncement.findByIdAndUpdate(id, { isActive }, { new: true });
+    if (!updated) return res.status(404).json({ success: false, msg: 'Announcement not found' });
+
+    return res.status(200).json({ success: true, data: { announcement: updated } });
+  } catch (error: any) {
+    console.error('Set site announcement active error:', error);
+    return res.status(500).json({ success: false, msg: 'Failed to update announcement status' });
+  }
+};
+
 export const updateSiteAnnouncement = async (req: Request, res: Response, _next: NextFunction) => {
   try {
     const { id } = params(req.params);
