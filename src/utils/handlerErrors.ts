@@ -6,6 +6,19 @@ type HandlerErrorBody = {
   field?: string;
 };
 
+function sanitizeErrorForLog(error: unknown): { name?: string; code?: unknown; message?: string } {
+  if (!error || typeof error !== 'object') {
+    return { message: String(error) };
+  }
+  const err = error as { name?: string; code?: unknown; message?: string };
+  return {
+    name: err.name,
+    code: err.code,
+    // Avoid dumping dup-key payloads that include raw email/phone values
+    message: typeof err.message === 'string' ? err.message.slice(0, 120) : undefined,
+  };
+}
+
 export function toHandlerError(
   error: unknown,
   fallback: string
@@ -31,21 +44,7 @@ export function toHandlerError(
     }
   }
 
-  if (error instanceof Error && error.message.trim()) {
-    const duplicateFromMessage = duplicateKeyResponse(error);
-    if (duplicateFromMessage) {
-      return {
-        status: duplicateFromMessage.status,
-        body: {
-          success: false,
-          msg: duplicateFromMessage.msg,
-          field: duplicateFromMessage.field,
-        },
-      };
-    }
-  }
-
-  console.error(fallback, error);
+  console.error(fallback, sanitizeErrorForLog(error));
   return {
     status: 500,
     body: { success: false, msg: fallback },

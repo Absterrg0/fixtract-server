@@ -14,22 +14,34 @@ import {
 import { ADMIN_ROLE_LABELS } from '../../utils/adminRbac/types';
 import { sendHandlerError } from '../../utils/handlerErrors';
 
-function resolveInvitePhone(phone: unknown): string {
+/**
+ * User.phone is required + unique. When invite omits a real phone we store a
+ * synthetic placeholder so the row can be created — never mark it verified.
+ */
+function resolveInvitePhone(phone: unknown): { value: string; isPlaceholder: boolean } {
   if (typeof phone === 'string' && phone.trim()) {
-    return phone.trim();
+    return { value: phone.trim(), isPlaceholder: false };
   }
-  return `+1000${Date.now().toString().slice(-8)}`;
+  return { value: `+1000${Date.now().toString().slice(-8)}`, isPlaceholder: true };
+}
+
+function isInviteExpired(user: IUser): boolean {
+  const expires = (user as any).adminStaff?.inviteTokenExpires;
+  if (!expires) return false;
+  return new Date(expires).getTime() <= Date.now();
 }
 
 function isInvitePending(user: IUser): boolean {
   const adminStaff = (user as any).adminStaff;
   if (adminStaff?.inviteAcceptedAt) return false;
   if (!adminStaff?.invitedAt) return false;
+  if (isInviteExpired(user)) return false;
   return true;
 }
 
 function canResendAdminInvite(user: IUser): boolean {
   if (user.role !== 'admin') return false;
+  if (user.accountStatus === 'suspended') return false;
   const adminStaff = (user as any).adminStaff;
   if (adminStaff?.inviteAcceptedAt) return false;
   // Legacy active admin created outside the invite flow
@@ -75,7 +87,10 @@ async function regeneratePendingInvite(
   }
   staff.isEmailVerified = false;
   staff.isPhoneVerified = false;
-  staff.accountStatus = 'active';
+  // Preserve suspension — resend must not silently reactivate
+  if (staff.accountStatus !== 'suspended') {
+    staff.accountStatus = 'active';
+  }
 
   const adminStaff = { ...((staff as any).adminStaff || {}) };
   adminStaff.invitedBy = String(admin._id);
@@ -101,6 +116,11 @@ async function regeneratePendingInvite(
 function serializeStaff(user: IUser) {
   const adminRole = resolveAdminRole((user as any).adminRole);
   const pending = isInvitePending(user);
+  const expiredInvite =
+    !pending &&
+    !(user as any).adminStaff?.inviteAcceptedAt &&
+    Boolean((user as any).adminStaff?.invitedAt) &&
+    isInviteExpired(user);
   return {
     _id: user._id,
     name: user.name,
@@ -109,9 +129,15 @@ function serializeStaff(user: IUser) {
     role: user.role,
     adminRole,
     permissions: [...permissionsForRole(adminRole)],
-    accountStatus: pending ? 'pending' : (user.accountStatus || 'active'),
+    accountStatus: pending
+      ? 'pending'
+      : expiredInvite
+        ? 'invite_expired'
+        : (user.accountStatus || 'active'),
     invitePending: pending,
+    inviteExpired: expiredInvite,
     isEmailVerified: user.isEmailVerified,
+    isPhoneVerified: user.isPhoneVerified,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
     invitedBy: (user as any).adminStaff?.invitedBy ?? null,
@@ -158,27 +184,30 @@ export const inviteStaff = async (req: Request, res: Response) => {
     }
 
     const normalizedEmail = email.trim().toLowerCase();
-    const normalizedPhone = resolveInvitePhone(phone);
+    const resolvedPhone = resolveInvitePhone(phone);
     const trimmedName = name.trim();
     const role = adminRole as AdminRole;
     await connecToDatabase();
 
     const existing = await User.findOne({ email: normalizedEmail }).select(
-      'name email phone role adminRole accountStatus isEmailVerified createdAt updatedAt adminStaff'
+      'name email phone role adminRole accountStatus isEmailVerified isPhoneVerified createdAt updatedAt adminStaff'
     );
 
     if (existing) {
       if (!canResendAdminInvite(existing)) {
+        const suspended = existing.accountStatus === 'suspended';
         return res.status(409).json({
           success: false,
-          msg: 'A user with this email already exists',
+          msg: suspended
+            ? 'This staff member is suspended — reactivate them before resending an invite'
+            : 'A user with this email already exists',
           field: 'email',
         });
       }
 
-      if (typeof phone === 'string' && phone.trim() && phone.trim() !== existing.phone) {
+      if (!resolvedPhone.isPlaceholder && resolvedPhone.value !== existing.phone) {
         const existingPhone = await User.findOne({
-          phone: normalizedPhone,
+          phone: resolvedPhone.value,
           _id: { $ne: existing._id },
         }).select('_id');
         if (existingPhone) {
@@ -193,7 +222,7 @@ export const inviteStaff = async (req: Request, res: Response) => {
       const { staff, inviteUrl, sent, error } = await regeneratePendingInvite(existing, admin, {
         name: trimmedName,
         adminRole: role,
-        phone: typeof phone === 'string' && phone.trim() ? normalizedPhone : undefined,
+        phone: resolvedPhone.isPlaceholder ? undefined : resolvedPhone.value,
       });
 
       return res.status(200).json({
@@ -209,8 +238,8 @@ export const inviteStaff = async (req: Request, res: Response) => {
       });
     }
 
-    if (typeof phone === 'string' && phone.trim()) {
-      const existingPhone = await User.findOne({ phone: normalizedPhone }).select('_id');
+    if (!resolvedPhone.isPlaceholder) {
+      const existingPhone = await User.findOne({ phone: resolvedPhone.value }).select('_id');
       if (existingPhone) {
         return res.status(409).json({
           success: false,
@@ -226,11 +255,12 @@ export const inviteStaff = async (req: Request, res: Response) => {
     const staff = await User.create({
       name: trimmedName,
       email: normalizedEmail,
-      phone: normalizedPhone,
+      phone: resolvedPhone.value,
       password: unusablePassword,
       role: 'admin',
       adminRole: role,
       isEmailVerified: false,
+      // Placeholder phones must stay unverified; real phones still require OTP later
       isPhoneVerified: false,
       accountStatus: 'active',
       adminStaff: {
@@ -272,9 +302,12 @@ export const resendStaffInvite = async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, msg: 'Staff member not found' });
     }
     if (!canResendAdminInvite(staff)) {
+      const suspended = staff.accountStatus === 'suspended';
       return res.status(400).json({
         success: false,
-        msg: 'This staff member has already activated their account',
+        msg: suspended
+          ? 'This staff member is suspended — reactivate them before resending an invite'
+          : 'This staff member has already activated their account',
       });
     }
 

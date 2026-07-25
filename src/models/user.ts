@@ -1,9 +1,10 @@
 import { Schema, model, Document, Types } from "mongoose";
 import { normalizePendingIdChanges } from "../utils/pendingIdChanges";
+import { ADMIN_ROLES, type AdminRole } from "../utils/adminRbac/types";
 
 export type UserRole = "admin" | "visitor" | "customer" | "professional" | "employee";
 export type CustomerType = "individual" | "business";
-export type AdminRole = "super" | "care" | "marketing" | "quality" | "finance";
+export type { AdminRole };
 
 export interface IUser extends Document {
     _id: Types.ObjectId;
@@ -231,7 +232,7 @@ const UserSchema = new Schema({
     },
     adminRole: {
         type: String,
-        enum: ['super', 'care', 'marketing', 'quality', 'finance'],
+        enum: [...ADMIN_ROLES],
         required: false,
         default: undefined,
     },

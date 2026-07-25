@@ -11,6 +11,8 @@ const FIELD_MESSAGES: Record<string, string> = {
   phone: 'A user with this phone number already exists',
 };
 
+const PUBLIC_FIELDS = new Set(Object.keys(FIELD_MESSAGES));
+
 function fieldFromDuplicateMessage(message: string): string | null {
   const dupKeyMatch = message.match(/dup key:\s*\{\s*(\w+)\s*:/i);
   if (dupKeyMatch?.[1]) return dupKeyMatch[1];
@@ -46,15 +48,26 @@ export function duplicateKeyField(error: unknown): string | null {
 export function duplicateKeyMessage(error: unknown): string | null {
   const field = duplicateKeyField(error);
   if (!field) return null;
-  return FIELD_MESSAGES[field] || `A user with this ${field} already exists`;
+  return FIELD_MESSAGES[field] || 'A record with this value already exists';
 }
 
-export function duplicateKeyResponse(error: unknown): { status: number; msg: string; field: string } | null {
+export function duplicateKeyResponse(
+  error: unknown
+): { status: number; msg: string; field?: string } | null {
   const field = duplicateKeyField(error);
   if (!field) return null;
+
+  if (PUBLIC_FIELDS.has(field)) {
+    return {
+      status: 409,
+      msg: FIELD_MESSAGES[field],
+      field,
+    };
+  }
+
+  // Do not leak internal unique-index field names to clients
   return {
     status: 409,
-    msg: FIELD_MESSAGES[field] || `A user with this ${field} already exists`,
-    field,
+    msg: 'A record with this value already exists',
   };
 }

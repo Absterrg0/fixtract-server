@@ -37,7 +37,8 @@ async function findStaffByInviteToken(token: string) {
   const staff = await User.findOne({
     role: 'admin',
     accountStatus: 'active',
-    deletedAt: { $exists: false },
+    // Matches missing or explicit null (unlike $exists: false alone)
+    deletedAt: null,
     'adminStaff.inviteTokenHash': tokenHash,
     'adminStaff.inviteTokenExpires': { $gt: new Date() },
     'adminStaff.inviteAcceptedAt': { $exists: false },
@@ -101,7 +102,8 @@ export const acceptAdminInvite = async (req: Request, res: Response, next: NextF
       {
         role: 'admin',
         accountStatus: 'active',
-        deletedAt: { $exists: false },
+        // Matches missing or explicit null (unlike $exists: false alone)
+        deletedAt: null,
         'adminStaff.inviteTokenHash': tokenHash,
         'adminStaff.inviteTokenExpires': { $gt: now },
         'adminStaff.inviteAcceptedAt': { $exists: false },
@@ -110,6 +112,7 @@ export const acceptAdminInvite = async (req: Request, res: Response, next: NextF
         $set: {
           password: hashedPassword,
           isEmailVerified: true,
+          // Email invite does not prove phone ownership
           accountStatus: 'active',
           'adminStaff.inviteAcceptedAt': now,
         },
