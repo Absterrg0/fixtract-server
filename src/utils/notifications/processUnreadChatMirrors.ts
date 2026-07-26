@@ -10,17 +10,40 @@ import {
 
 const CONVERSATION_BATCH_SIZE = 25;
 
-async function stampReminderIfUnchanged(
+async function claimReminderSlot(
   conversationId: unknown,
   lastMessageAt: Date | undefined,
+  previousReminderLastSentAt: Date | undefined | null,
   now: Date,
 ): Promise<boolean> {
   if (!lastMessageAt) return false;
   const result = await Conversation.updateOne(
-    { _id: conversationId, lastMessageAt },
+    {
+      _id: conversationId,
+      lastMessageAt,
+      unreadChatReminderLastSentAt: previousReminderLastSentAt ?? null,
+    },
     { $set: { unreadChatReminderLastSentAt: now } },
   );
   return result.modifiedCount > 0;
+}
+
+async function releaseReminderClaim(
+  conversationId: unknown,
+  claimedAt: Date,
+  previousReminderLastSentAt: Date | undefined | null,
+): Promise<void> {
+  if (previousReminderLastSentAt) {
+    await Conversation.updateOne(
+      { _id: conversationId, unreadChatReminderLastSentAt: claimedAt },
+      { $set: { unreadChatReminderLastSentAt: previousReminderLastSentAt } },
+    );
+    return;
+  }
+  await Conversation.updateOne(
+    { _id: conversationId, unreadChatReminderLastSentAt: claimedAt },
+    { $unset: { unreadChatReminderLastSentAt: '' } },
+  );
 }
 
 async function processConversationMirror(
@@ -47,6 +70,12 @@ async function processConversationMirror(
 
   const targets = unreadChatReminderTargets(conv);
   if (targets.length === 0) return { sent: 0, errors: [] };
+
+  const previousStamp = conv.unreadChatReminderLastSentAt ?? null;
+  const claimed = await claimReminderSlot(conv._id, conv.lastMessageAt, previousStamp, now);
+  if (!claimed) {
+    return { sent: 0, errors: [] };
+  }
 
   const errors: string[] = [];
   let sent = 0;
@@ -81,11 +110,8 @@ async function processConversationMirror(
     }
   }
 
-  if (sent > 0) {
-    const stamped = await stampReminderIfUnchanged(conv._id, conv.lastMessageAt, now);
-    if (!stamped) {
-      errors.push(`unreadChat ${conv._id}: skipped stamp — conversation activity changed during sweep`);
-    }
+  if (sent === 0) {
+    await releaseReminderClaim(conv._id, now, previousStamp);
   }
 
   return { sent, errors };
