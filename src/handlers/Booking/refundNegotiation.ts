@@ -6,6 +6,7 @@ import CancellationRequest from '../../models/cancellationRequest';
 import { executeRefund, RefundError } from '../Stripe/payment';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
+import { notifyBookingCancelledAndRefunded } from '../../utils/notifications/notifyBookingCancelledAndRefunded';
 import { notifyAsync } from '../../utils/notifications/notify';
 
 const REFUND_FINALIZED_BOOKING_STATUS = 'cancelled';
@@ -188,8 +189,8 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
     request.professionalNote = typeof note === 'string' ? note.trim().slice(0, 1000) : undefined;
 
     const [customerUser, professionalUser] = await Promise.all([
-      User.findById(booking.customer).select('email name').lean(),
-      User.findById(booking.professional).select('email name username').lean(),
+      User.findById(booking.customer).select('_id name').lean(),
+      User.findById(booking.professional).select('_id name businessInfo username').lean(),
     ]);
 
     if (decision === 'approve') {
@@ -199,46 +200,16 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
         return res.status(result.status).json({ success: false, msg: result.message, code: result.code });
       }
       try {
-        if (customerUser?._id) {
-          notifyAsync({
-            userId: customerUser._id.toString(),
-            eventKey: 'customer.refund_processed',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: {
-              bookingId: String(booking._id),
-              refundAmount: result.refundAmount,
-              currency: booking.payment?.currency || 'EUR',
-              isPartialRefund: false,
-            },
-          });
-          notifyAsync({
-            userId: customerUser._id.toString(),
-            eventKey: 'customer.booking_cancelled_refunded',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: {
-              bookingId: String(booking._id),
-              reason: request.reason,
-              cancelledBy: 'professional',
-              professionalName: getProfessionalDisplayName(professionalUser),
-            },
-          });
-        }
-        if (professionalUser?._id) {
-          notifyAsync({
-            userId: professionalUser._id.toString(),
-            eventKey: 'professional.booking_cancelled_refunded',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: {
-              bookingId: String(booking._id),
-              reason: request.reason,
-              cancelledBy: 'professional',
-              customerName: customerUser?.name,
-            },
-          });
-        }
+        notifyBookingCancelledAndRefunded({
+          bookingId: String(booking._id),
+          reason: request.reason,
+          cancelledBy: 'professional',
+          customerUser,
+          professionalUser,
+          refundAmount: result.refundAmount,
+          currency: booking.payment?.currency || 'EUR',
+          isPartialRefund: false,
+        });
       } catch (e) { console.error('refund notify failed', e); }
       return res.json({ success: true, data: { status: 'approved', refundAmount: result.refundAmount } });
     }
@@ -343,46 +314,16 @@ export const customerRespondToCounterOffer = async (req: Request, res: Response)
       try {
         const customerUser = await User.findById(booking.customer).select('_id name').lean();
         const professionalUser = await User.findById(booking.professional).select('_id name businessInfo username').lean();
-        if (customerUser?._id) {
-          notifyAsync({
-            userId: customerUser._id.toString(),
-            eventKey: 'customer.refund_processed',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: {
-              bookingId: String(booking._id),
-              refundAmount: result.refundAmount,
-              currency: booking.payment?.currency || 'EUR',
-              isPartialRefund: false,
-            },
-          });
-          notifyAsync({
-            userId: customerUser._id.toString(),
-            eventKey: 'customer.booking_cancelled_refunded',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: {
-              bookingId: String(booking._id),
-              reason: request.reason,
-              cancelledBy: 'customer',
-              professionalName: professionalUser ? getProfessionalDisplayName(professionalUser) : undefined,
-            },
-          });
-        }
-        if (professionalUser?._id) {
-          notifyAsync({
-            userId: professionalUser._id.toString(),
-            eventKey: 'professional.booking_cancelled_refunded',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: {
-              bookingId: String(booking._id),
-              reason: request.reason,
-              cancelledBy: 'customer',
-              customerName: customerUser?.name,
-            },
-          });
-        }
+        notifyBookingCancelledAndRefunded({
+          bookingId: String(booking._id),
+          reason: request.reason,
+          cancelledBy: 'customer',
+          customerUser,
+          professionalUser,
+          refundAmount: result.refundAmount,
+          currency: booking.payment?.currency || 'EUR',
+          isPartialRefund: false,
+        });
       } catch (e) { console.error('refund notify failed', e); }
       return res.json({ success: true, data: { status: 'approved', refundAmount: result.refundAmount } });
     }

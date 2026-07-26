@@ -15,7 +15,7 @@ import {
   sendQuotationRejectedEmail,
   sendNotificationEmail,
   sendPaymentConfirmedEmail,
-  sendBookingScheduledEmail,
+  sendBookingScheduledProfessionalEmail,
   sendRescheduleRequestedEmail,
   sendRescheduleRequestedByCustomerEmail,
   sendRescheduleResolvedEmail,
@@ -28,7 +28,8 @@ import {
   sendQuotationReceivedEmail,
   sendDirectQuotationEmail,
   sendQuotationUpdatedEmail,
-  sendWarrantyClaimOpenedEmail,
+  sendWarrantyClaimOpenedProfessionalPartyEmail,
+  sendWarrantyClaimOpenedAdminEmail,
   sendWarrantyProposalSentEmail,
   sendRfqDeadlineReminderEmail,
   sendRfqDeadlineExpiredProfessionalEmail,
@@ -847,7 +848,7 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
         : 'A start date was set for your booking.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
       sendEmail: async ({ email, name }) =>
-        sendBookingScheduledEmail(
+        sendBookingScheduledProfessionalEmail(
           email,
           name,
           String(ctx.customerName || 'the customer'),
@@ -1062,15 +1063,31 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
         ? `${ctx.customerName} opened a warranty claim on your booking.`
         : 'A warranty claim was opened on your booking.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
-      sendEmail: async ({ email, name }) =>
-        sendWarrantyClaimOpenedEmail(
+      sendEmail: async ({ email, name }) => {
+        const adminEmail = String(
+          ctx.adminEmail || process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '',
+        ).trim();
+        if (adminEmail) {
+          await sendWarrantyClaimOpenedAdminEmail(
+            adminEmail,
+            name,
+            String(ctx.customerName || 'Customer'),
+            String(ctx.bookingId || ''),
+            String(ctx.claimNumber || ''),
+          );
+        } else {
+          console.error(
+            '[warranty_claim_opened] ADMIN_NOTIFICATIONS_EMAIL/FROM_EMAIL not configured — admin will not be notified',
+          );
+        }
+        return sendWarrantyClaimOpenedProfessionalPartyEmail(
           email,
-          String(ctx.adminEmail || process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || ''),
           name,
           String(ctx.customerName || 'Customer'),
           String(ctx.bookingId || ''),
           String(ctx.claimNumber || ''),
-        ),
+        );
+      },
     }),
     'booking',
   ),

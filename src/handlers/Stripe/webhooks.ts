@@ -504,9 +504,9 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
     if (booking.customer) {
       const customerUser = await User.findById(booking.customer).select('_id').lean();
       const isPartial = booking.payment.status === 'partially_refunded';
-      const { notifyAsync } = await import('../../utils/notifications/notify');
+      const { notify } = await import('../../utils/notifications/notify');
       if (customerUser?._id) {
-        notifyAsync({
+        await notify({
           userId: customerUser._id.toString(),
           eventKey: 'customer.refund_processed',
           entityType: 'booking',

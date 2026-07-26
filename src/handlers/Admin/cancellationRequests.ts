@@ -6,7 +6,7 @@ import Payment from "../../models/payment";
 import User from "../../models/user";
 import { executeRefund, RefundError } from "../Stripe/payment";
 import { releaseScheduleSlots } from "../../utils/scheduleRelease";
-import { getProfessionalDisplayName } from "../../utils/displayName";
+import { notifyBookingCancelledAndRefunded } from "../../utils/notifications/notifyBookingCancelledAndRefunded";
 import { auditLog } from "../../utils/auditLogger";
 import { param, params } from "../../utils/requestParams";
 
@@ -241,46 +241,16 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
         freshBooking.professional ? User.findById(freshBooking.professional).select("_id name businessInfo username").lean() : null,
       ]);
 
-      const { notifyAsync } = await import("../../utils/notifications/notify");
-      const cancelContext = {
+      notifyBookingCancelledAndRefunded({
         bookingId: String(freshBooking._id),
         reason: cancellation.reason,
-        cancelledBy: 'admin' as const,
-        customerName: customerUser?.name,
-        professionalName: professionalUser ? getProfessionalDisplayName(professionalUser) : undefined,
-      };
-      if (customerUser?._id) {
-        notifyAsync({
-          userId: customerUser._id.toString(),
-          eventKey: "customer.booking_cancelled_refunded",
-          entityType: "booking",
-          entityId: String(freshBooking._id),
-          context: cancelContext,
-        });
-        if (refundAmount > 0) {
-          notifyAsync({
-            userId: customerUser._id.toString(),
-            eventKey: "customer.refund_processed",
-            entityType: "booking",
-            entityId: String(freshBooking._id),
-            context: {
-              bookingId: String(freshBooking._id),
-              refundAmount,
-              currency: freshBooking.payment?.currency || "EUR",
-              isPartialRefund: refundAmount < totalWithVat,
-            },
-          });
-        }
-      }
-      if (professionalUser?._id) {
-        notifyAsync({
-          userId: professionalUser._id.toString(),
-          eventKey: "professional.booking_cancelled_refunded",
-          entityType: "booking",
-          entityId: String(freshBooking._id),
-          context: cancelContext,
-        });
-      }
+        cancelledBy: 'admin',
+        customerUser,
+        professionalUser,
+        refundAmount,
+        currency: freshBooking.payment?.currency || 'EUR',
+        isPartialRefund: refundAmount < totalWithVat,
+      });
     } catch (notifyError: any) {
       console.error("Approve cancellation notify error:", notifyError?.message || notifyError);
     }

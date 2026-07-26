@@ -1,7 +1,7 @@
 import Booking from '../models/booking';
 import { SYSTEM_USER_ID } from '../constants/system';
 import { getWorkingDaysBetween } from './workingDays';
-import { notifyAsync } from './notifications/notify';
+import { notifyAsync, notify } from './notifications/notify';
 
 export const runRfqDeadlineCheck = async () => {
   const now = new Date();
@@ -88,7 +88,7 @@ export const runRfqDeadlineCheck = async () => {
           const professionalId = professional?._id?.toString?.() || professional?.id;
 
           if (professionalId) {
-            notifyAsync({
+            const result = await notify({
               userId: professionalId,
               eventKey: 'professional.rfq_deadline_reminder',
               entityType: 'booking',
@@ -98,11 +98,13 @@ export const runRfqDeadlineCheck = async () => {
                 daysRemaining,
               },
             });
-            booking.rfqRemindersSent = (booking.rfqRemindersSent || 0) + 1;
-            booking.lastReminderSentAt = now;
-            await booking.save();
-            remindersSent++;
-            console.log(`[RFQ Check] ✅ Reminder notified for booking ${(booking as any).bookingNumber || booking._id} (${daysRemaining} days remaining)`);
+            if (result.notificationId || result.emailSent || result.pushSent) {
+              booking.rfqRemindersSent = (booking.rfqRemindersSent || 0) + 1;
+              booking.lastReminderSentAt = now;
+              await booking.save();
+              remindersSent++;
+              console.log(`[RFQ Check] ✅ Reminder notified for booking ${(booking as any).bookingNumber || booking._id} (${daysRemaining} days remaining)`);
+            }
           }
         }
       } catch (e) {
