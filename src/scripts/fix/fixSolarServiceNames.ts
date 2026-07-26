@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
-import ServiceConfiguration from '../models/serviceConfiguration';
-import connectDB from '../config/db';
+import ServiceConfiguration from '../../models/serviceConfiguration';
+import connectDB from '../../config/db';
 
 /**
  * Migration Script: Fix Solar Service Names

@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
-import connectDB from "../config/db";
-import CmsContent from "../models/cmsContent";
-import User from "../models/user";
+import connectDB from "../../config/db";
+import CmsContent from "../../models/cmsContent";
+import User from "../../models/user";
 
 interface DefaultPolicy {
   slug: string;

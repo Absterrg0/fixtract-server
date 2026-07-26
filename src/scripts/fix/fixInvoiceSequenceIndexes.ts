@@ -11,7 +11,7 @@
  */
 import dotenv from "dotenv";
 import mongoose from "mongoose";
-import InvoiceSequence from "../models/invoiceSequence";
+import InvoiceSequence from "../../models/invoiceSequence";
 
 dotenv.config();
 

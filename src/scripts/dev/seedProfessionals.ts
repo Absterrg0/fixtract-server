@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcrypt';
-import User from '../models/user';
-import connectDB from '../config/db';
+import User from '../../models/user';
+import connectDB from '../../config/db';
 
 const seedProfessionals = async () => {
   try {

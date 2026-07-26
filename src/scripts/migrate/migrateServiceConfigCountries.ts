@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import { config } from 'dotenv';
-import ServiceConfiguration from '../models/serviceConfiguration';
+import ServiceConfiguration from '../../models/serviceConfiguration';
 
 config();
 

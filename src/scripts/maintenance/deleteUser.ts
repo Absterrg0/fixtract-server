@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 import dotenv from "dotenv";
-import User from "../models/user";
-import { deleteUserData } from "../utils/deleteUserData";
+import User from "../../models/user";
+import { deleteUserData } from "../../utils/deleteUserData";
 
 dotenv.config();
 
@@ -27,7 +27,7 @@ async function deleteUserByEmail(email: string) {
 
 const email = process.argv[2];
 if (!email) {
-  console.error("Usage: npx ts-node src/scripts/deleteUser.ts <email>");
+  console.error("Usage: npm run delete:user -- <email>");
   process.exit(1);
 }
 
