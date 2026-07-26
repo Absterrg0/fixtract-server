@@ -314,6 +314,7 @@ export const customerRespondToCounterOffer = async (req: Request, res: Response)
       try {
         const customerUser = await User.findById(booking.customer).select('_id name').lean();
         const professionalUser = await User.findById(booking.professional).select('_id name businessInfo username').lean();
+        const bookingPrice = Number(booking.payment?.amount || 0);
         notifyBookingCancelledAndRefunded({
           bookingId: String(booking._id),
           reason: request.reason,
@@ -322,7 +323,7 @@ export const customerRespondToCounterOffer = async (req: Request, res: Response)
           professionalUser,
           refundAmount: result.refundAmount,
           currency: booking.payment?.currency || 'EUR',
-          isPartialRefund: false,
+          isPartialRefund: result.refundAmount < bookingPrice,
         });
       } catch (e) { console.error('refund notify failed', e); }
       return res.json({ success: true, data: { status: 'approved', refundAmount: result.refundAmount } });

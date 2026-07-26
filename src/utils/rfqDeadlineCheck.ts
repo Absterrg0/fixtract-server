@@ -88,6 +88,35 @@ export const runRfqDeadlineCheck = async () => {
           const professionalId = professional?._id?.toString?.() || professional?.id;
 
           if (professionalId) {
+            const previousLastReminderSentAt = booking.lastReminderSentAt ?? null;
+            const claimFilter: Record<string, unknown> = {
+              _id: booking._id,
+              status: 'rfq_accepted',
+            };
+            if (previousLastReminderSentAt) {
+              claimFilter.lastReminderSentAt = previousLastReminderSentAt;
+            } else {
+              claimFilter.$or = [
+                { lastReminderSentAt: { $exists: false } },
+                { lastReminderSentAt: null },
+              ];
+            }
+
+            const claimed = await Booking.findOneAndUpdate(
+              claimFilter,
+              {
+                $inc: { rfqRemindersSent: 1 },
+                $set: { lastReminderSentAt: now },
+              },
+              { new: false },
+            );
+            if (!claimed) {
+              console.log(
+                `[RFQ Check] Skipping booking ${(booking as any).bookingNumber || booking._id} — reminder already claimed by another run`,
+              );
+              continue;
+            }
+
             const result = await notify({
               userId: professionalId,
               eventKey: 'professional.rfq_deadline_reminder',
@@ -99,11 +128,19 @@ export const runRfqDeadlineCheck = async () => {
               },
             });
             if (result.notificationId || result.emailSent || result.pushSent) {
-              booking.rfqRemindersSent = (booking.rfqRemindersSent || 0) + 1;
-              booking.lastReminderSentAt = now;
-              await booking.save();
               remindersSent++;
               console.log(`[RFQ Check] ✅ Reminder notified for booking ${(booking as any).bookingNumber || booking._id} (${daysRemaining} days remaining)`);
+            } else {
+              const rollback: Record<string, unknown> = { $inc: { rfqRemindersSent: -1 } };
+              if (claimed.lastReminderSentAt) {
+                rollback.$set = { lastReminderSentAt: claimed.lastReminderSentAt };
+              } else {
+                rollback.$unset = { lastReminderSentAt: '' };
+              }
+              await Booking.findByIdAndUpdate(booking._id, rollback);
+              console.warn(
+                `[RFQ Check] Rolled back reminder claim for booking ${(booking as any).bookingNumber || booking._id} — notify returned no delivery`,
+              );
             }
           }
         }
