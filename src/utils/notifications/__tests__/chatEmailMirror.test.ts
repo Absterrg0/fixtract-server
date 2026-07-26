@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  classifyMirrorEmailOutcome,
   formatMessageMirrorText,
   formatMirrorInboxBody,
   unreadChatMirrorThrottleOk,
@@ -74,6 +75,16 @@ describe('unreadChatMirrorThrottleOk', () => {
     expect(unreadChatMirrorThrottleOk(null, now)).toBe(true);
     expect(unreadChatMirrorThrottleOk(new Date(now - 12 * 60 * 60 * 1000), now)).toBe(false);
     expect(unreadChatMirrorThrottleOk(new Date(now - 25 * 60 * 60 * 1000), now)).toBe(true);
+  });
+});
+
+describe('classifyMirrorEmailOutcome', () => {
+  it('treats sent and terminal outcomes as handled, retryable as not', () => {
+    expect(classifyMirrorEmailOutcome({ emailOutcome: 'sent' })).toBe('sent');
+    expect(classifyMirrorEmailOutcome({ emailOutcome: 'not_eligible' })).toBe('terminal');
+    expect(classifyMirrorEmailOutcome({ skipped: 'user_not_found' })).toBe('terminal');
+    expect(classifyMirrorEmailOutcome({ emailOutcome: 'failed' })).toBe('retryable');
+    expect(classifyMirrorEmailOutcome({})).toBe('retryable');
   });
 });
 

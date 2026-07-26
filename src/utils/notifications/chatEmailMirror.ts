@@ -18,6 +18,18 @@ export type UnreadChatTarget = {
   eventKey: string;
 };
 
+export type MirrorEmailDeliveryClass = 'sent' | 'terminal' | 'retryable';
+
+/** Classify cron mirror notify() results for claim retention vs retry. */
+export function classifyMirrorEmailOutcome(result: {
+  emailOutcome?: 'sent' | 'not_eligible' | 'failed';
+  skipped?: string;
+}): MirrorEmailDeliveryClass {
+  if (result.emailOutcome === 'sent') return 'sent';
+  if (result.skipped || result.emailOutcome === 'not_eligible') return 'terminal';
+  return 'retryable';
+}
+
 export function unreadChatMirrorThrottleOk(
   lastSentAt: Date | undefined | null,
   nowMs = Date.now(),

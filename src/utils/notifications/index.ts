@@ -1,5 +1,5 @@
 export { notify, notifyAsync } from './notify';
-export type { NotifyArgs, NotifyResult } from './notify';
+export type { NotifyArgs, NotifyResult, NotifyDeliveryOptions, EmailDeliveryOutcome } from './notify';
 export { getEventDef, listRegistryEventKeys, NOTIFICATION_REGISTRY } from './registry';
 export { resolveChannels } from './types';
 export type { ChannelTier, PrefCategory, NotificationPreferences } from './types';

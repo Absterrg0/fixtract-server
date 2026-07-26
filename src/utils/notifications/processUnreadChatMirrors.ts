@@ -1,6 +1,7 @@
 import Conversation, { type IConversation } from '../../models/conversation';
 import { notify } from './notify';
 import {
+  classifyMirrorEmailOutcome,
   loadUnreadMirrorLines,
   unreadChatConversationFilter,
   unreadChatCutoff,
@@ -84,11 +85,12 @@ async function processConversationMirror(
 
   const errors: string[] = [];
   let sent = 0;
+  let handledTargets = 0;
 
   const results = await Promise.allSettled(
     targets.map(async (target) => {
       const lines = await loadUnreadMirrorLines(String(conv._id), target.userId);
-      if (lines.length === 0) return { delivered: false } as const;
+      if (lines.length === 0) return { delivery: 'empty' as const };
       const counterpartyName = lines[lines.length - 1]?.senderLabel;
 
       const notifyResult = await notify({
@@ -96,6 +98,7 @@ async function processConversationMirror(
         eventKey: target.eventKey,
         entityType: 'conversation',
         entityId: String(conv._id),
+        delivery: { persistInbox: false, sendPush: false },
         context: {
           conversationId: String(conv._id),
           conversationType: conv.type,
@@ -103,13 +106,19 @@ async function processConversationMirror(
           chatMirrorLines: lines,
         },
       });
-      return { delivered: notifyResult.emailSent } as const;
+      return { delivery: classifyMirrorEmailOutcome(notifyResult) };
     }),
   );
 
   for (const [index, result] of results.entries()) {
     if (result.status === 'fulfilled') {
-      if (result.value.delivered) sent++;
+      const { delivery } = result.value;
+      if (delivery === 'sent') {
+        sent++;
+        handledTargets++;
+      } else if (delivery === 'terminal') {
+        handledTargets++;
+      }
     } else {
       const target = targets[index];
       const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
@@ -117,7 +126,7 @@ async function processConversationMirror(
     }
   }
 
-  if (sent === 0) {
+  if (handledTargets === 0) {
     await releaseReminderClaim(conv._id, now, lastMessageAt, previousStamp);
   }
 
