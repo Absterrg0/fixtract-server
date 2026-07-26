@@ -31,19 +31,21 @@ async function claimReminderSlot(
 async function releaseReminderClaim(
   conversationId: unknown,
   claimedAt: Date,
+  claimedLastMessageAt: Date,
   previousReminderLastSentAt: Date | undefined | null,
 ): Promise<void> {
+  const claimFilter = {
+    _id: conversationId,
+    lastMessageAt: claimedLastMessageAt,
+    unreadChatReminderLastSentAt: claimedAt,
+  };
   if (previousReminderLastSentAt) {
-    await Conversation.updateOne(
-      { _id: conversationId, unreadChatReminderLastSentAt: claimedAt },
-      { $set: { unreadChatReminderLastSentAt: previousReminderLastSentAt } },
-    );
+    await Conversation.updateOne(claimFilter, {
+      $set: { unreadChatReminderLastSentAt: previousReminderLastSentAt },
+    });
     return;
   }
-  await Conversation.updateOne(
-    { _id: conversationId, unreadChatReminderLastSentAt: claimedAt },
-    { $unset: { unreadChatReminderLastSentAt: '' } },
-  );
+  await Conversation.updateOne(claimFilter, { $unset: { unreadChatReminderLastSentAt: '' } });
 }
 
 async function processConversationMirror(
@@ -71,8 +73,11 @@ async function processConversationMirror(
   const targets = unreadChatReminderTargets(conv);
   if (targets.length === 0) return { sent: 0, errors: [] };
 
+  const lastMessageAt = conv.lastMessageAt;
+  if (!lastMessageAt) return { sent: 0, errors: [] };
+
   const previousStamp = conv.unreadChatReminderLastSentAt ?? null;
-  const claimed = await claimReminderSlot(conv._id, conv.lastMessageAt, previousStamp, now);
+  const claimed = await claimReminderSlot(conv._id, lastMessageAt, previousStamp, now);
   if (!claimed) {
     return { sent: 0, errors: [] };
   }
@@ -83,10 +88,10 @@ async function processConversationMirror(
   const results = await Promise.allSettled(
     targets.map(async (target) => {
       const lines = await loadUnreadMirrorLines(String(conv._id), target.userId);
-      if (lines.length === 0) return { skipped: true } as const;
+      if (lines.length === 0) return { delivered: false } as const;
       const counterpartyName = lines[lines.length - 1]?.senderLabel;
 
-      await notify({
+      const notifyResult = await notify({
         userId: target.userId,
         eventKey: target.eventKey,
         entityType: 'conversation',
@@ -98,13 +103,13 @@ async function processConversationMirror(
           chatMirrorLines: lines,
         },
       });
-      return { skipped: false } as const;
+      return { delivered: notifyResult.emailSent } as const;
     }),
   );
 
   for (const [index, result] of results.entries()) {
     if (result.status === 'fulfilled') {
-      if (!result.value.skipped) sent++;
+      if (result.value.delivered) sent++;
     } else {
       const target = targets[index];
       const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
@@ -113,7 +118,7 @@ async function processConversationMirror(
   }
 
   if (sent === 0) {
-    await releaseReminderClaim(conv._id, now, previousStamp);
+    await releaseReminderClaim(conv._id, now, lastMessageAt, previousStamp);
   }
 
   return { sent, errors };
@@ -139,11 +144,19 @@ export async function processUnreadChatMirrorReminders(): Promise<{
 
   for (let offset = 0; offset < conversations.length; offset += CONVERSATION_BATCH_SIZE) {
     const batch = conversations.slice(offset, offset + CONVERSATION_BATCH_SIZE);
-    const batchResults = await Promise.all(batch.map((conv) => processConversationMirror(conv, now, nowMs)));
+    const batchResults = await Promise.allSettled(
+      batch.map((conv) => processConversationMirror(conv, now, nowMs)),
+    );
 
-    for (const result of batchResults) {
-      sent += result.sent;
-      errors.push(...result.errors);
+    for (const [index, result] of batchResults.entries()) {
+      if (result.status === 'fulfilled') {
+        sent += result.value.sent;
+        errors.push(...result.value.errors);
+      } else {
+        const message =
+          result.reason instanceof Error ? result.reason.message : String(result.reason);
+        errors.push(`unreadChat ${batch[index]._id}: ${message}`);
+      }
     }
   }
 
