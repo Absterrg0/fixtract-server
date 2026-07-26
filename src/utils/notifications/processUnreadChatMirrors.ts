@@ -83,6 +83,7 @@ async function processConversationMirror(
   const results = await Promise.allSettled(
     targets.map(async (target) => {
       const lines = await loadUnreadMirrorLines(String(conv._id), target.userId);
+      if (lines.length === 0) return { skipped: true } as const;
       const counterpartyName = lines[lines.length - 1]?.senderLabel;
 
       await notify({
@@ -97,12 +98,13 @@ async function processConversationMirror(
           chatMirrorLines: lines,
         },
       });
+      return { skipped: false } as const;
     }),
   );
 
   for (const [index, result] of results.entries()) {
     if (result.status === 'fulfilled') {
-      sent++;
+      if (!result.value.skipped) sent++;
     } else {
       const target = targets[index];
       const message = result.reason instanceof Error ? result.reason.message : String(result.reason);

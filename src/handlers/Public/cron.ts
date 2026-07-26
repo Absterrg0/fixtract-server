@@ -21,8 +21,15 @@ export const runNotificationRemindersCron = async (req: Request, res: Response) 
   }
 
   try {
+    const startedAt = Date.now();
     const result = await runNotificationReminders();
-    return res.json({ success: true, data: result });
+    const durationMs = Date.now() - startedAt;
+    console.log('[Cron] Notification reminders completed', {
+      durationMs,
+      unreadChat: result.unreadChat,
+      errorCount: result.errors.length,
+    });
+    return res.json({ success: true, data: { ...result, durationMs } });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('[Cron] Notification reminders failed:', error);

@@ -1488,10 +1488,7 @@ export const sendChatMirrorEmail = async (params: {
     lines.length > 0
       ? lines
           .map((line) => {
-            const when = new Date(line.sentAtIso).toLocaleString('en-GB', {
-              dateStyle: 'medium',
-              timeStyle: 'short',
-            });
+            const when = formatUtcDateTime(line.sentAtIso);
             return `
         <div style="background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px 16px; margin: 12px 0;">
           <p style="margin: 0 0 6px 0; font-size: 13px; color: #6b7280; font-weight: 600;">${escapeHtml(line.senderLabel)} · ${escapeHtml(when)}</p>
@@ -1867,6 +1864,20 @@ const formatDateTime = (value: Date | string | null | undefined): string => {
   const d = value instanceof Date ? value : new Date(value);
   if (isNaN(d.getTime())) return 'TBD';
   return d.toLocaleString('en-GB', { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+};
+
+const formatUtcDateTime = (value: Date | string | null | undefined): string => {
+  if (!value) return 'Unknown time';
+  const d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d.getTime())) return 'Unknown time';
+  return `${d.toLocaleString('en-GB', {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC',
+  })} UTC`;
 };
 
 // Payment confirmed → both parties
