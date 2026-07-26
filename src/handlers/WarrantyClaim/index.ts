@@ -27,10 +27,7 @@ import {
 } from "../../utils/s3Upload";
 import { SYSTEM_USER_ID } from "../../constants/system";
 import { denyUnlessPermission } from "../../utils/adminRbac/assertPermission";
-import {
-  sendWarrantyClaimOpenedEmail,
-  sendWarrantyProposalSentEmail,
-} from "../../utils/emailService";
+import { notifyAsync } from "../../utils/notifications/notify";
 import { getProfessionalDisplayName } from "../../utils/displayName";
 import { params } from "../../utils/requestParams";
 
@@ -719,21 +716,25 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
 
     try {
       const [customerUser, professionalUser] = await Promise.all([
-        User.findById(booking.customer).select('email name').lean(),
-        User.findById(professionalId).select('email name businessInfo username').lean(),
+        User.findById(booking.customer).select('name').lean(),
+        User.findById(professionalId).select('_id name businessInfo username').lean(),
       ]);
-      if (professionalUser?.email && WARRANTY_ADMIN_NOTIFICATIONS_EMAIL) {
-        await sendWarrantyClaimOpenedEmail(
-          professionalUser.email,
-          WARRANTY_ADMIN_NOTIFICATIONS_EMAIL,
-          getProfessionalDisplayName(professionalUser),
-          customerUser?.name || 'Customer',
-          String(booking._id),
-          claim.claimNumber || String(claim._id)
-        );
+      if (professionalUser?._id) {
+        notifyAsync({
+          userId: professionalUser._id.toString(),
+          eventKey: 'professional.warranty_claim_opened',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            customerName: customerUser?.name || 'Customer',
+            claimNumber: claim.claimNumber || String(claim._id),
+            adminEmail: WARRANTY_ADMIN_NOTIFICATIONS_EMAIL,
+          },
+        });
       }
     } catch (emailError: any) {
-      console.error('Failed to send warranty-claim-opened email:', emailError?.message || emailError);
+      console.error('Failed to notify warranty-claim-opened:', emailError?.message || emailError);
     }
 
     return res.status(201).json({
@@ -964,21 +965,25 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
 
     try {
       const [customerUser, professionalUser] = await Promise.all([
-        User.findById(claim.customer).select('email name').lean(),
+        User.findById(claim.customer).select('_id name').lean(),
         User.findById(claim.professional).select('name businessInfo username').lean(),
       ]);
-      if (customerUser?.email) {
-        await sendWarrantyProposalSentEmail(
-          customerUser.email,
-          customerUser.name || 'Customer',
-          getProfessionalDisplayName(professionalUser),
-          message.trim(),
-          String(claim.booking),
-          claim.claimNumber || String(claim._id)
-        );
+      if (customerUser?._id) {
+        notifyAsync({
+          userId: customerUser._id.toString(),
+          eventKey: 'customer.warranty_proposal_sent',
+          entityType: 'booking',
+          entityId: String(claim.booking),
+          context: {
+            bookingId: String(claim.booking),
+            professionalName: getProfessionalDisplayName(professionalUser),
+            warrantyMessage: message.trim(),
+            claimNumber: claim.claimNumber || String(claim._id),
+          },
+        });
       }
     } catch (emailError: any) {
-      console.error('Failed to send warranty-proposal-sent email:', emailError?.message || emailError);
+      console.error('Failed to notify warranty-proposal-sent:', emailError?.message || emailError);
     }
 
     return res.status(200).json({
