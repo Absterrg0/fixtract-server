@@ -15,25 +15,7 @@ const STAFF: Array<{ name: string; email: string; adminRole: AdminRole; phone: s
   { name: 'Finance Analyst', email: 'finance.admin@fixtract.test', adminRole: 'finance', phone: '+32000000005' },
 ];
 
-function assertSeedAllowed() {
-  const env = process.env.NODE_ENV;
-  const explicitlyAllowed = process.env.ALLOW_ADMIN_STAFF_SEED === 'true';
-  // Fail closed when NODE_ENV is unset or production
-  if (!env || env === 'production') {
-    throw new Error(
-      'seedAdminStaff is disabled unless NODE_ENV is development/test (or ALLOW_ADMIN_STAFF_SEED=true)'
-    );
-  }
-  if (env !== 'development' && env !== 'test' && !explicitlyAllowed) {
-    throw new Error(
-      `seedAdminStaff refused for NODE_ENV=${env}. Set ALLOW_ADMIN_STAFF_SEED=true to override.`
-    );
-  }
-}
-
 async function upsertStaff() {
-  assertSeedAllowed();
-
   await connectDB();
   const hashed = await bcrypt.hash(PASSWORD, 12);
 
