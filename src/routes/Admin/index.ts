@@ -151,12 +151,31 @@ import {
 import { listAuditLogs, getAuditLogStats } from "../../handlers/Admin/auditLogs";
 import { adminAnonymizeUser } from "../../handlers/Admin/userAnonymize";
 import { auditAdmin } from "../../middlewares/auditAdmin";
+import {
+  getMyAdminAccess,
+  inviteStaff,
+  listStaff,
+  resendStaffInvite,
+  updateStaff,
+} from "../../handlers/Admin/staffManagement";
+import {
+  attachResolvedAdminRole,
+  enforceAdminRoutePermission,
+} from "../../utils/adminRbac/middleware";
 
 const adminRouter = Router();
 
 // All admin routes require authentication and admin role
 adminRouter.use(requireAdmin);
+adminRouter.use(attachResolvedAdminRole);
 adminRouter.use(auditAdmin);
+adminRouter.use(enforceAdminRoutePermission);
+
+// Staff RBAC management (super only via staff.manage — except /access for any admin)
+adminRouter.route('/access').get(getMyAdminAccess);
+adminRouter.route('/staff').get(listStaff).post(inviteStaff);
+adminRouter.route('/staff/:staffId/resend-invite').post(resendStaffInvite);
+adminRouter.route('/staff/:staffId').patch(updateStaff);
 
 // Professional management routes (must be before :professionalId param routes)
 adminRouter.route('/professionals/manage').get(listProfessionalManagement);

@@ -10,6 +10,16 @@ import { buildBookingBlockedRanges } from "../../utils/bookingBlocks";
 import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../utils/viesApi";
 import { generateReferralCode, validateReferralCode, createReferral } from "../../utils/referralSystem";
 import { sendIdExpiredEmail } from "../../utils/emailService";
+import { permissionsForRole, resolveAdminRole } from "../../utils/adminRbac/rolePermissions";
+
+function adminAccessFields(user: { role?: string; adminRole?: string }) {
+  if (user.role !== 'admin') return {};
+  const adminRole = resolveAdminRole(user.adminRole);
+  return {
+    adminRole,
+    adminPermissions: [...permissionsForRole(adminRole)],
+  };
+}
 
 // Helper function to set secure cookie
 const setTokenCookie = (res: Response, token: string) => {
@@ -79,8 +89,14 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       });
     }
 
-    // Validate role
-    const validRoles = ['customer', 'professional', 'admin'];
+    // Validate role — admin accounts are provisioned via staff invite only
+    const validRoles = ['customer', 'professional'];
+    if (role === 'admin') {
+      return res.status(403).json({
+        success: false,
+        msg: 'Admin accounts must be created through staff invitation',
+      });
+    }
     if (role && !validRoles.includes(role)) {
       return res.status(400).json({
         success: false,
@@ -293,6 +309,7 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       email: user.email,
       phone: user.phone,
       role: user.role,
+      ...adminAccessFields(user),
       isEmailVerified: user.isEmailVerified || false,
       isPhoneVerified: user.isPhoneVerified || false,
       vatNumber: user.vatNumber,
@@ -426,6 +443,7 @@ export const LogIn = async (req: Request, res: Response, next: NextFunction) => 
       email: userExists.email,
       phone: userExists.phone,
       role: userExists.role,
+      ...adminAccessFields(userExists),
       isEmailVerified: userExists.isEmailVerified || false,
       isPhoneVerified: userExists.isPhoneVerified || false,
       vatNumber: userExists.vatNumber,
@@ -557,6 +575,7 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       email: user.email,
       phone: user.phone,
       role: user.role,
+      ...adminAccessFields(user),
       isEmailVerified: user.isEmailVerified || false,
       isPhoneVerified: user.isPhoneVerified || false,
       vatNumber: user.vatNumber,

@@ -13,6 +13,7 @@ import {
 import { notifyAsync } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { getPresignedUrl, parseS3KeyFromUrl } from '../../utils/s3Upload';
+import { denyUnlessPermission } from '../../utils/adminRbac/assertPermission';
 
 // Helper: presign all file URLs (certifications and attachments) for admin viewing
 const presignProjectFiles = async (projectObj: any) => {
@@ -91,8 +92,9 @@ const presignProjectFiles = async (projectObj: any) => {
 
 export const getPendingProjects = async (req: Request, res: Response) => {
     try {
-        if (!req.user || req.user.role !== 'admin') {
-            return res.status(403).json({ error: 'Admin access required' });
+        const denied = denyUnlessPermission(req.user, 'projects.approve');
+        if (denied) {
+            return res.status(denied.status).json(denied.body);
         }
 
         // Get all pending projects with full details
@@ -130,8 +132,9 @@ export const getPendingProjects = async (req: Request, res: Response) => {
 
 export const approveProject = async (req: Request, res: Response) => {
     try {
-        if (!req.user || req.user.role !== 'admin') {
-            return res.status(403).json({ error: 'Admin access required' });
+        const denied = denyUnlessPermission(req.user, 'projects.approve');
+        if (denied) {
+            return res.status(denied.status).json(denied.body);
         }
 
         const { id } = req.params;
@@ -189,8 +192,9 @@ export const approveProject = async (req: Request, res: Response) => {
 
 export const rejectProject = async (req: Request, res: Response) => {
     try {
-        if (!req.user || req.user.role !== 'admin') {
-            return res.status(403).json({ error: 'Admin access required' });
+        const denied = denyUnlessPermission(req.user, 'projects.approve');
+        if (denied) {
+            return res.status(denied.status).json(denied.body);
         }
 
         const { id } = req.params;
@@ -255,8 +259,9 @@ export const rejectProject = async (req: Request, res: Response) => {
 // Delete a project (admin only)
 export const deleteProjectByAdmin = async (req: Request, res: Response) => {
     try {
-        if (!req.user || req.user.role !== 'admin') {
-            return res.status(403).json({ error: 'Admin access required' });
+        const denied = denyUnlessPermission(req.user, 'projects.approve');
+        if (denied) {
+            return res.status(denied.status).json(denied.body);
         }
 
         const { id } = req.params;
@@ -305,8 +310,9 @@ export const deleteProjectByAdmin = async (req: Request, res: Response) => {
 // Deactivate a published project (admin only)
 export const deactivateProject = async (req: Request, res: Response) => {
     try {
-        if (!req.user || req.user.role !== 'admin') {
-            return res.status(403).json({ error: 'Admin access required' });
+        const denied = denyUnlessPermission(req.user, 'projects.approve');
+        if (denied) {
+            return res.status(denied.status).json(denied.body);
         }
 
         const { id } = req.params;
@@ -358,8 +364,9 @@ export const deactivateProject = async (req: Request, res: Response) => {
 // Reactivate a deactivated project (admin only)
 export const reactivateProject = async (req: Request, res: Response) => {
     try {
-        if (!req.user || req.user.role !== 'admin') {
-            return res.status(403).json({ error: 'Admin access required' });
+        const denied = denyUnlessPermission(req.user, 'projects.approve');
+        if (denied) {
+            return res.status(denied.status).json(denied.body);
         }
 
         const { id } = req.params;
@@ -398,8 +405,9 @@ export const reactivateProject = async (req: Request, res: Response) => {
 // Get change details for a project (admin only)
 export const getProjectChanges = async (req: Request, res: Response) => {
     try {
-        if (!req.user || req.user.role !== 'admin') {
-            return res.status(403).json({ error: 'Admin access required' });
+        const denied = denyUnlessPermission(req.user, 'projects.approve');
+        if (denied) {
+            return res.status(denied.status).json(denied.body);
         }
 
         const { id } = req.params;
@@ -423,8 +431,9 @@ export const getProjectChanges = async (req: Request, res: Response) => {
 // Get approved (published/on_hold) projects for admin moderation
 export const getApprovedProjects = async (req: Request, res: Response) => {
     try {
-        if (!req.user || req.user.role !== 'admin') {
-            return res.status(403).json({ error: 'Admin access required' });
+        const denied = denyUnlessPermission(req.user, 'projects.approve');
+        if (denied) {
+            return res.status(denied.status).json(denied.body);
         }
 
         const { status } = req.query as any;

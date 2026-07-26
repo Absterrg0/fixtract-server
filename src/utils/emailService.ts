@@ -785,6 +785,107 @@ export const sendTeamMemberInvitationEmail = async (
   }
 };
 
+function maskEmail(email: string): string {
+  const [local, domain] = email.split('@');
+  if (!local || !domain) return '[redacted]';
+  const visible = local.slice(0, Math.min(2, local.length));
+  return `${visible}…@${domain}`;
+}
+
+export const sendAdminStaffInvitationEmail = async (
+  email: string,
+  staffName: string,
+  adminRole: string,
+  inviteUrl: string
+): Promise<{ sent: boolean; error?: string }> => {
+  const masked = maskEmail(email);
+  if (process.env.EMAIL_DEV_NO_SEND === 'true') {
+    console.log(`[EMAIL SKIPPED] admin_staff_invite to ${masked}`);
+    return { sent: true };
+  }
+
+  if (!process.env.BREVO_API_KEY) {
+    const error = 'BREVO_API_KEY is not configured on the server';
+    console.error(`Cannot send admin staff invite to ${masked}: ${error}`);
+    return { sent: false, error };
+  }
+
+  try {
+    const emailAPI = createEmailAPI();
+    const safeStaffName = escapeHtml(staffName);
+    const safeRole = escapeHtml(adminRole);
+    const safeInviteUrl = escapeHtml(inviteUrl);
+
+    const htmlContent = `
+      <div style="max-width: 600px; margin: 0 auto; font-family: Arial, sans-serif; background: #f9f9f9; padding: 20px;">
+        <div style="background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+          ${getEmailHeader('Admin team invitation')}
+
+          <div style="padding: 30px;">
+            <h2 style="color: #333; margin-bottom: 20px;">Hi ${safeStaffName},</h2>
+
+            <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+              You have been invited to join the Fixtract admin team as <strong>${safeRole}</strong>.
+            </p>
+
+            <p style="color: #666; font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+              Use the button below to set your password and activate your account. This link expires in 7 days.
+            </p>
+
+            <div style="text-align: center; margin: 30px 0;">
+              <a href="${safeInviteUrl}"
+                 style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-size: 16px; font-weight: bold; display: inline-block;">
+                Set up your account
+              </a>
+            </div>
+
+            <p style="color: #999; font-size: 14px; margin-top: 30px;">
+              If the button does not work, copy and paste this link into your browser:<br />
+              <a href="${safeInviteUrl}" style="color: #667eea; word-break: break-all;">${safeInviteUrl}</a>
+            </p>
+          </div>
+
+          ${getEmailFooter()}
+        </div>
+      </div>
+    `;
+
+    const sendSmtpEmail: SendSmtpEmail = {
+      to: [{ email, name: staffName }],
+      subject: 'You are invited to Fixtract admin',
+      htmlContent,
+      sender: {
+        email: process.env.FROM_EMAIL || 'noreply@fixtract.com',
+        name: 'Fixtract Team',
+      },
+    };
+
+    await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await logEmail({
+      to: email,
+      subject: 'You are invited to Fixtract admin',
+      template: 'admin_staff_invite',
+      status: 'sent',
+    }).catch((err) => console.error('Failed to write EmailLog for admin_staff_invite:', err));
+    return { sent: true };
+  } catch (error: any) {
+    const brevoMessage =
+      error?.response?.body?.message ||
+      error?.response?.text ||
+      error?.message ||
+      'Unknown email provider error';
+    console.error(`Failed to send admin staff invite to ${masked}:`, brevoMessage, error?.response?.body || '');
+    await logEmail({
+      to: email,
+      subject: 'You are invited to Fixtract admin',
+      template: 'admin_staff_invite',
+      status: 'failed',
+      errorMessage: brevoMessage,
+    }).catch((err) => console.error('Failed to write EmailLog for admin_staff_invite:', err));
+    return { sent: false, error: brevoMessage };
+  }
+};
+
 // Send project approval email
 export const sendProjectApprovalEmail = async (
   email: string,
