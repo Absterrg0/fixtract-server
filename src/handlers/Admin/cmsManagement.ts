@@ -23,6 +23,10 @@ import {
 import { presignCmsDoc, presignCmsDocs } from "../../utils/cmsPresign";
 import { toSlug } from "../../utils/slug";
 import { param, params } from "../../utils/requestParams";
+import {
+  applyCoverImageAltUpdate,
+  coverImageAltForCreate,
+} from "../../utils/cmsCoverImageAlt";
 
 const isValidObjectId = (id: string): boolean => mongoose.Types.ObjectId.isValid(id);
 
@@ -372,10 +376,7 @@ export const createCmsContent = async (req: Request, res: Response) => {
       }
     }
 
-    const coverImageAlt =
-      typeof body.coverImageAlt === "string" && body.coverImageAlt.trim()
-        ? body.coverImageAlt.trim().slice(0, 200)
-        : undefined;
+    const coverImageAlt = coverImageAltForCreate(body.coverImageAlt);
 
     const doc = await CmsContent.create({
       type,
@@ -474,11 +475,11 @@ export const updateCmsContent = async (req: Request, res: Response) => {
       doc.coverImage = nextCover;
     }
 
-    if (typeof body.coverImageAlt === "string") {
-      const alt = body.coverImageAlt.trim().slice(0, 200);
-      doc.coverImageAlt = alt || undefined;
-    } else if (body.coverImageAlt === null) {
-      doc.coverImageAlt = undefined;
+    if (
+      typeof body.coverImageAlt === "string" ||
+      body.coverImageAlt === null
+    ) {
+      doc.coverImageAlt = applyCoverImageAltUpdate(doc.coverImageAlt, body.coverImageAlt);
     }
 
     if (doc.type === "faq" && typeof body.category === "string") {
