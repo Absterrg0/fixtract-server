@@ -11,7 +11,7 @@ import { toSlug } from "../../utils/slug";
 import { param } from "../../utils/requestParams";
 
 const LISTING_FIELDS =
-  "type title slug locale excerpt coverImage tags publishedAt seo category author authorOverride updatedAt";
+  "type title slug locale excerpt coverImage coverImageAlt tags publishedAt seo category author authorOverride relatedServiceSlug updatedAt";
 
 const BOT_UA_RE =
   /bot|crawl|spider|slurp|bingpreview|facebookexternalhit|linkedinbot|twitterbot|whatsapp|telegram|prerender|headlesschrome|lighthouse/i;
@@ -91,7 +91,7 @@ export const getPublicCmsContentBySlug = async (req: Request, res: Response) => 
       .populate({
         path: "relatedContent",
         match: { status: "published" },
-        select: "title slug type excerpt coverImage publishedAt",
+        select: "title slug type excerpt coverImage coverImageAlt publishedAt",
       })
       .populate("relatedServices", "name slug")
       .lean();
