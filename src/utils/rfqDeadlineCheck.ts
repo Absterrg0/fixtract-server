@@ -117,20 +117,7 @@ export const runRfqDeadlineCheck = async () => {
               continue;
             }
 
-            const result = await notify({
-              userId: professionalId,
-              eventKey: 'professional.rfq_deadline_reminder',
-              entityType: 'booking',
-              entityId: String(booking._id),
-              context: {
-                bookingId: String(booking._id),
-                daysRemaining,
-              },
-            });
-            if (result.notificationId || result.emailSent || result.pushSent) {
-              remindersSent++;
-              console.log(`[RFQ Check] ✅ Reminder notified for booking ${(booking as any).bookingNumber || booking._id} (${daysRemaining} days remaining)`);
-            } else {
+            const rollbackReminderClaim = async (reason: string) => {
               const rollback: Record<string, unknown> = { $inc: { rfqRemindersSent: -1 } };
               if (claimed.lastReminderSentAt) {
                 rollback.$set = { lastReminderSentAt: claimed.lastReminderSentAt };
@@ -139,8 +126,36 @@ export const runRfqDeadlineCheck = async () => {
               }
               await Booking.findByIdAndUpdate(booking._id, rollback);
               console.warn(
-                `[RFQ Check] Rolled back reminder claim for booking ${(booking as any).bookingNumber || booking._id} — notify returned no delivery`,
+                `[RFQ Check] Rolled back reminder claim for booking ${(booking as any).bookingNumber || booking._id} — ${reason}`,
               );
+            };
+
+            let result: { notificationId?: string | null; emailSent?: boolean; pushSent?: boolean };
+            try {
+              result = await notify({
+                userId: professionalId,
+                eventKey: 'professional.rfq_deadline_reminder',
+                entityType: 'booking',
+                entityId: String(booking._id),
+                context: {
+                  bookingId: String(booking._id),
+                  daysRemaining,
+                },
+              });
+            } catch (notifyErr) {
+              console.error(
+                `[RFQ Check] notify() threw for booking ${(booking as any).bookingNumber || booking._id}:`,
+                notifyErr,
+              );
+              await rollbackReminderClaim('notify threw');
+              continue;
+            }
+
+            if (result.notificationId || result.emailSent || result.pushSent) {
+              remindersSent++;
+              console.log(`[RFQ Check] ✅ Reminder notified for booking ${(booking as any).bookingNumber || booking._id} (${daysRemaining} days remaining)`);
+            } else {
+              await rollbackReminderClaim('notify returned no delivery');
             }
           }
         }

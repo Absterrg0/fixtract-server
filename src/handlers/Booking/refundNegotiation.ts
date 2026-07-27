@@ -314,7 +314,17 @@ export const customerRespondToCounterOffer = async (req: Request, res: Response)
       try {
         const customerUser = await User.findById(booking.customer).select('_id name').lean();
         const professionalUser = await User.findById(booking.professional).select('_id name businessInfo username').lean();
-        const bookingPrice = Number(booking.payment?.amount || 0);
+        // Prefer totalWithVat when present; never default a missing amount to 0
+        // (that would mark positive refunds as full refunds in customer copy).
+        const rawBookingTotal = booking.payment?.totalWithVat ?? booking.payment?.amount;
+        const bookingPrice =
+          typeof rawBookingTotal === 'number' && Number.isFinite(rawBookingTotal) && rawBookingTotal > 0
+            ? rawBookingTotal
+            : null;
+        const isPartialRefund =
+          bookingPrice == null
+            ? true
+            : result.refundAmount < bookingPrice;
         notifyBookingCancelledAndRefunded({
           bookingId: String(booking._id),
           reason: request.reason,
@@ -323,7 +333,7 @@ export const customerRespondToCounterOffer = async (req: Request, res: Response)
           professionalUser,
           refundAmount: result.refundAmount,
           currency: booking.payment?.currency || 'EUR',
-          isPartialRefund: result.refundAmount < bookingPrice,
+          isPartialRefund,
         });
       } catch (e) { console.error('refund notify failed', e); }
       return res.json({ success: true, data: { status: 'approved', refundAmount: result.refundAmount } });
