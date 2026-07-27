@@ -388,35 +388,67 @@ export const adminReplySupportChat = async (req: Request, res: Response) => {
     }
 
     const adminObjectId = new mongoose.Types.ObjectId(adminId);
+    const preview = text.trim().slice(0, 200);
 
-    // Any admin may reply; claim assignee on reply for shared-inbox routing.
-    const claimed = await Conversation.findOneAndUpdate(
-      { _id: conversation._id, type: "support", status: "active" },
-      {
-        $set: {
-          supportAdminId: adminObjectId,
-          lastMessageAt: new Date(),
-          lastMessagePreview: text.trim().slice(0, 200),
-          lastMessageSenderId: adminObjectId,
-        },
-        $inc: { customerUnreadCount: 1 },
-        $unset: { unreadChatReminderLastSentAt: '' },
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+      // Claim only while still active; message + metadata stay in the same txn.
+      const claimed = await Conversation.findOneAndUpdate(
+        { _id: conversation._id, type: "support", status: "active" },
+        { $set: { supportAdminId: adminObjectId } },
+        { session, new: true }
+      );
+      if (!claimed) {
+        await session.abortTransaction();
+        return res.status(409).json({ success: false, msg: "This support conversation is closed" });
       }
-    );
-    if (!claimed) {
-      return res.status(409).json({ success: false, msg: "This support conversation is closed" });
+
+      const [message] = await ChatMessage.create(
+        [
+          {
+            conversationId: conversation._id,
+            senderId: adminObjectId,
+            senderRole: "admin",
+            text: text.trim(),
+            messageType: "text",
+            readBy: [{ userId: adminObjectId, readAt: new Date() }],
+          },
+        ],
+        { session }
+      );
+
+      const updated = await Conversation.findOneAndUpdate(
+        { _id: conversation._id, type: "support", status: "active" },
+        {
+          $set: {
+            supportAdminId: adminObjectId,
+            lastMessageAt: new Date(),
+            lastMessagePreview: preview,
+            lastMessageSenderId: adminObjectId,
+          },
+          $inc: { customerUnreadCount: 1 },
+          $unset: { unreadChatReminderLastSentAt: "" },
+        },
+        { session, new: true }
+      );
+      if (!updated) {
+        await session.abortTransaction();
+        return res.status(409).json({ success: false, msg: "This support conversation is closed" });
+      }
+
+      await session.commitTransaction();
+      return res.status(201).json({ success: true, data: { messageId: message._id } });
+    } catch (innerErr) {
+      try {
+        await session.abortTransaction();
+      } catch {
+        /* ignore */
+      }
+      throw innerErr;
+    } finally {
+      session.endSession();
     }
-
-    const message = await ChatMessage.create({
-      conversationId: conversation._id,
-      senderId: adminObjectId,
-      senderRole: "admin",
-      text: text.trim(),
-      messageType: "text",
-      readBy: [{ userId: adminObjectId, readAt: new Date() }],
-    });
-
-    return res.status(201).json({ success: true, data: { messageId: message._id } });
   } catch (error: any) {
     console.error("Admin reply support chat error:", error);
     return res.status(500).json({ success: false, msg: "Failed to send message" });

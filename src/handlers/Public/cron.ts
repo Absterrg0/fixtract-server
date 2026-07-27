@@ -54,9 +54,11 @@ export const runKpiMonthlyReportCron = async (req: Request, res: Response) => {
     return res.status(401).json({ success: false, msg: 'Unauthorized' });
   }
 
+  const { from, to } = previousCalendarMonthUtc();
+  let recipients: Array<{ email?: string | null }> = [];
+
   try {
     const startedAt = Date.now();
-    const { from, to } = previousCalendarMonthUtc();
 
     const override = (process.env.KPI_REPORT_EMAILS || '')
       .split(',')
@@ -67,7 +69,7 @@ export const runKpiMonthlyReportCron = async (req: Request, res: Response) => {
       .select('_id email adminRole')
       .lean();
 
-    const recipients = admins.filter((admin: any) => {
+    recipients = admins.filter((admin: any) => {
       const email = typeof admin.email === 'string' ? admin.email.trim().toLowerCase() : '';
       if (!email) return false;
       if (override.length > 0) return override.includes(email);
@@ -118,6 +120,20 @@ export const runKpiMonthlyReportCron = async (req: Request, res: Response) => {
     });
   } catch (error: unknown) {
     console.error('[Cron] Monthly KPI report failed:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    try {
+      const { sendKpiReportEmail } = await import('../../utils/emailService');
+      for (const admin of recipients) {
+        if (!admin.email) continue;
+        try {
+          await sendKpiReportEmail(String(admin.email), { from, to, error: message });
+        } catch (notifyErr) {
+          console.error('[Cron] Failed to send KPI failure email to', admin.email, notifyErr);
+        }
+      }
+    } catch (notifySetupErr) {
+      console.error('[Cron] Failed to load KPI failure mailer', notifySetupErr);
+    }
     return res.status(500).json({ success: false, msg: 'Monthly KPI report failed' });
   }
 };
