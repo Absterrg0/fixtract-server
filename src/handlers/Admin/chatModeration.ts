@@ -94,7 +94,14 @@ export const getChatReport = async (req: Request, res: Response) => {
         .limit(10)
         .populate("senderId", "name email")
         .lean();
-      surroundingMessages = [...before.reverse(), ...after];
+      const reported = await ChatMessage.findById(reportedMessageId)
+        .populate("senderId", "name email")
+        .lean();
+      surroundingMessages = [
+        ...before.reverse(),
+        ...(reported ? [reported] : []),
+        ...after,
+      ];
     }
 
     return res.json({ success: true, data: { report, surroundingMessages } });
@@ -291,11 +298,11 @@ export const adminStartSupportChat = async (req: Request, res: Response) => {
     const adminObjectId = new mongoose.Types.ObjectId(adminId);
     const targetObjectId = new mongoose.Types.ObjectId(targetUserId);
 
+    // Shared inbox: reuse any existing support thread for this user (not per-admin).
     let conversation = await Conversation.findOne({
       type: "support",
-      supportAdminId: adminObjectId,
       supportTargetUserId: targetObjectId,
-    });
+    }).sort({ status: 1, lastMessageAt: -1 });
     if (!conversation) {
       try {
         conversation = await Conversation.create({
@@ -309,9 +316,8 @@ export const adminStartSupportChat = async (req: Request, res: Response) => {
         if (err?.code === 11000) {
           conversation = await Conversation.findOne({
             type: "support",
-            supportAdminId: adminObjectId,
             supportTargetUserId: targetObjectId,
-          });
+          }).sort({ status: 1, lastMessageAt: -1 });
         } else {
           throw err;
         }
@@ -323,8 +329,10 @@ export const adminStartSupportChat = async (req: Request, res: Response) => {
 
     if (conversation.status !== "active") {
       conversation.status = "active";
-      await conversation.save();
     }
+    // Claim / reassign so the shared thread shows a current assignee.
+    conversation.supportAdminId = adminObjectId as any;
+    await conversation.save();
 
     const message = await ChatMessage.create({
       conversationId: conversation._id,
@@ -375,19 +383,18 @@ export const adminReplySupportChat = async (req: Request, res: Response) => {
     if (!conversation || conversation.type !== "support") {
       return res.status(404).json({ success: false, msg: "Support conversation not found" });
     }
-    if (!conversation.supportAdminId || conversation.supportAdminId.toString() !== adminId) {
-      return res.status(403).json({ success: false, msg: "Forbidden" });
-    }
     if (conversation.status !== "active") {
       return res.status(409).json({ success: false, msg: "This support conversation is closed" });
     }
 
     const adminObjectId = new mongoose.Types.ObjectId(adminId);
 
+    // Any admin may reply; claim assignee on reply for shared-inbox routing.
     const claimed = await Conversation.findOneAndUpdate(
-      { _id: conversation._id, type: "support", status: "active", supportAdminId: adminObjectId },
+      { _id: conversation._id, type: "support", status: "active" },
       {
         $set: {
+          supportAdminId: adminObjectId,
           lastMessageAt: new Date(),
           lastMessagePreview: text.trim().slice(0, 200),
           lastMessageSenderId: adminObjectId,
@@ -430,9 +437,6 @@ export const adminCloseSupportChat = async (req: Request, res: Response) => {
     const conversation = await Conversation.findById(id);
     if (!conversation || conversation.type !== "support") {
       return res.status(404).json({ success: false, msg: "Support conversation not found" });
-    }
-    if (!conversation.supportAdminId || conversation.supportAdminId.toString() !== adminId) {
-      return res.status(403).json({ success: false, msg: "Forbidden" });
     }
     conversation.status = "archived";
     await conversation.save();
@@ -480,14 +484,19 @@ export const adminListSupportConversations = async (req: Request, res: Response)
     if (!adminId || !mongoose.Types.ObjectId.isValid(adminId)) {
       return res.status(401).json({ success: false, msg: "Unauthorized" });
     }
-    const adminObjectId = new mongoose.Types.ObjectId(adminId);
     const { page, limit, skip } = parsePagination(req.query);
+    const assigneeRaw = typeof req.query.assigneeId === "string" ? req.query.assigneeId.trim() : "";
+    const mineOnly = String(req.query.mine || "").toLowerCase() === "true" || req.query.mine === "1";
 
-    const filter = {
+    const filter: Record<string, unknown> = {
       type: "support",
       status: "active",
-      supportAdminId: adminObjectId,
     };
+    if (mineOnly) {
+      filter.supportAdminId = new mongoose.Types.ObjectId(adminId);
+    } else if (assigneeRaw && mongoose.Types.ObjectId.isValid(assigneeRaw)) {
+      filter.supportAdminId = new mongoose.Types.ObjectId(assigneeRaw);
+    }
 
     const [conversations, total] = await Promise.all([
       Conversation.find(filter)
@@ -495,7 +504,8 @@ export const adminListSupportConversations = async (req: Request, res: Response)
         .skip(skip)
         .limit(limit)
         .populate("supportTargetUserId", "name email")
-        .select("_id supportTargetUserId lastMessagePreview lastMessageAt lastMessageSenderId")
+        .populate("supportAdminId", "name email")
+        .select("_id supportAdminId supportTargetUserId lastMessagePreview lastMessageAt lastMessageSenderId")
         .lean(),
       Conversation.countDocuments(filter),
     ]);
@@ -505,6 +515,7 @@ export const adminListSupportConversations = async (req: Request, res: Response)
       const senderId = c.lastMessageSenderId?.toString();
       return {
         _id: c._id,
+        supportAdminId: c.supportAdminId || null,
         supportTargetUserId: c.supportTargetUserId,
         lastMessagePreview: c.lastMessagePreview || "",
         lastMessageAt: c.lastMessageAt || null,
@@ -526,11 +537,10 @@ export const adminGetSupportUnreadCount = async (req: Request, res: Response) =>
     if (!adminId || !mongoose.Types.ObjectId.isValid(adminId)) {
       return res.status(401).json({ success: false, msg: "Unauthorized" });
     }
-    const adminObjectId = new mongoose.Types.ObjectId(adminId);
+    // Shared inbox: count all support threads awaiting an admin reply.
     const count = await Conversation.countDocuments({
       type: "support",
       status: "active",
-      supportAdminId: adminObjectId,
       lastMessageSenderId: { $ne: null },
       $expr: { $eq: ["$lastMessageSenderId", "$supportTargetUserId"] },
     });

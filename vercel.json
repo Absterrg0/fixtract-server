@@ -1,4 +1,5 @@
 {
+<<<<<<< HEAD
   "version": 2,
   "builds": [
     {
@@ -19,3 +20,34 @@
     }
   ]
 }
+=======
+    "version": 2,
+    "builds": [
+      {
+        "src": "src/index.ts",
+        "use": "@vercel/node"
+      }
+    ],
+    "functions": {
+      "src/index.ts": {
+        "maxDuration": 60
+      }
+    },
+    "routes": [
+      {
+        "src": "/(.*)",
+        "dest": "/src/index.ts"
+      }
+    ],
+    "crons": [
+      {
+        "path": "/api/public/cron/notification-reminders",
+        "schedule": "0 8 * * *"
+      },
+      {
+        "path": "/api/public/cron/kpi-monthly-report",
+        "schedule": "0 9 1 * *"
+      }
+    ]
+  }
+>>>>>>> 23b1c00 (Close Point 11 admin dashboard gaps on the API.)

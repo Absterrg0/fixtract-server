@@ -5,6 +5,7 @@ import WarrantyClaim from '../../models/warrantyClaim';
 import Favorite from '../../models/favorite';
 import ServiceView from '../../models/serviceView';
 import { buildCsv } from '../../utils/csv';
+import { toSlug } from '../../utils/slug';
 import { STRIPE_CONFIG } from '../../services/stripe';
 
 const REPORTING_CURRENCY = STRIPE_CONFIG.defaultCurrency || 'EUR';
@@ -726,12 +727,23 @@ export const getKpiByService = async (req: Request, res: Response) => {
       .map((r) => ({ serviceId: String(r._id || ''), views: r.views }))
       .sort((a, b) => b.views - a.views);
 
+    // Views are keyed by CMS landing slug; bookings by service name — map via toSlug.
+    const viewsBySlug = new Map<string, number>();
+    for (const v of serviceViews) {
+      const key = toSlug(v.serviceId) || v.serviceId.toLowerCase();
+      viewsBySlug.set(key, (viewsBySlug.get(key) || 0) + v.views);
+    }
+
     const serviceBookings = bookingRows
       .map((r) => {
         const w = warrantyByService.get(String(r._id)) || { warrantyCount: 0, avgWarrantyResponseHours: null };
-        const base = deriveBookingRates(r as GroupAgg);
+        const serviceType = r._id === '__unknown__' ? 'Unknown' : String(r.serviceLabel || r._id || '');
+        const slugKey = toSlug(serviceType) || String(r._id || '').toLowerCase();
+        const views = viewsBySlug.get(slugKey) || viewsBySlug.get(String(r._id || '').toLowerCase()) || 0;
+        const base = deriveBookingRates(r as GroupAgg, views);
         return {
-          serviceType: r._id === '__unknown__' ? 'Unknown' : String(r.serviceLabel || r._id || ''),
+          serviceType,
+          views,
           ...base,
           completedCount: base.completedBookings,
           warrantyCount: w.warrantyCount,
@@ -1084,8 +1096,8 @@ export const exportKpiCsv = async (req: Request, res: Response) => {
       rows = data.map((r) => [r.city, r.signUps, r.views, r.totalBookings, r.completedBookings, Number(r.bookedValue ?? 0).toFixed(2), Number(r.platformRevenue ?? 0).toFixed(2), r.quotationConversionRate, r.disputeRate, r.warrantyClaimRate, r.refundRate]);
     } else if (section === 'service') {
       const data = ((await captureJson(getKpiByService, req))?.data?.serviceBookings || []) as Row[];
-      headers = ['Service type', 'RFQs', 'Quotes sent', 'Bookings', 'Completed', 'Gross revenue (EUR)', 'Platform revenue (EUR)', 'Quotation conversion (%)', 'Avg time to first quote (h)'];
-      rows = data.map((r) => [r.serviceType, r.totalRfqs, r.quotedCount, r.bookingsCount, r.completedCount, Number(r.grossRevenue ?? 0).toFixed(2), Number(r.platformRevenue ?? 0).toFixed(2), r.quotationConversionRate, r.avgTtfqHours ?? '']);
+      headers = ['Service type', 'Views', 'RFQs', 'Quotes sent', 'Bookings', 'Completed', 'Booking rate (%)', 'Gross revenue (EUR)', 'Platform revenue (EUR)', 'Quotation conversion (%)', 'Avg time to first quote (h)'];
+      rows = data.map((r) => [r.serviceType, r.views ?? 0, r.totalRfqs, r.quotedCount, r.bookingsCount, r.completedCount, r.bookingRate ?? '', Number(r.grossRevenue ?? 0).toFixed(2), Number(r.platformRevenue ?? 0).toFixed(2), r.quotationConversionRate, r.avgTtfqHours ?? '']);
     } else if (section === 'service-views') {
       const data = ((await captureJson(getKpiByService, req))?.data?.serviceViews || []) as Row[];
       headers = ['Service slug', 'Views'];

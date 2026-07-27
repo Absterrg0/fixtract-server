@@ -1,9 +1,11 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import AuditLog from '../../models/auditLog';
+import { buildCsv } from '../../utils/csv';
 
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
+const EXPORT_MAX = 10000;
 
 const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -122,5 +124,79 @@ export const getAuditLogStats = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('[ADMIN][AUDIT_LOGS][STATS] Failed', error);
     return res.status(500).json({ success: false, msg: error?.message || 'Failed to load audit stats' });
+  }
+};
+
+export const getAuditLogFilterOptions = async (_req: Request, res: Response) => {
+  try {
+    const [actions, targetTypes] = await Promise.all([
+      AuditLog.distinct('action'),
+      AuditLog.distinct('targetType'),
+    ]);
+    return res.json({
+      success: true,
+      data: {
+        actions: (actions as string[]).filter(Boolean).sort(),
+        targetTypes: (targetTypes as string[]).filter(Boolean).sort(),
+      },
+    });
+  } catch (error: any) {
+    console.error('[ADMIN][AUDIT_LOGS][OPTIONS] Failed', error);
+    return res.status(500).json({ success: false, msg: error?.message || 'Failed to load audit filter options' });
+  }
+};
+
+export const exportAuditLogs = async (req: Request, res: Response) => {
+  try {
+    const query = buildAuditLogQuery(req.query);
+    const format = String(req.query.format || 'csv').toLowerCase();
+    const logs = await AuditLog.find(query)
+      .sort({ createdAt: -1 })
+      .limit(EXPORT_MAX)
+      .lean();
+
+    const headers = [
+      'Created at',
+      'Actor email',
+      'Actor role',
+      'Action',
+      'Target type',
+      'Target id',
+      'Method',
+      'Path',
+      'Status',
+      'Status code',
+      'IP',
+      'Error',
+    ];
+    const rows = logs.map((log: any) => [
+      log.createdAt ? new Date(log.createdAt).toISOString() : '',
+      log.actorEmail || '',
+      log.actorRole || '',
+      log.action || '',
+      log.targetType || '',
+      log.targetId ? String(log.targetId) : '',
+      log.method || '',
+      log.path || '',
+      log.status || '',
+      log.statusCode ?? '',
+      log.ip || '',
+      log.errorMessage || '',
+    ]);
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    if (format === 'json') {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="audit-logs-${stamp}.json"`);
+      return res.send(JSON.stringify({ success: true, count: logs.length, logs }, null, 2));
+    }
+
+    const csv = buildCsv(headers, rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="audit-logs-${stamp}.csv"`);
+    return res.send(csv);
+  } catch (error: any) {
+    console.error('[ADMIN][AUDIT_LOGS][EXPORT] Failed', error);
+    return res.status(500).json({ success: false, msg: error?.message || 'Failed to export audit logs' });
   }
 };
