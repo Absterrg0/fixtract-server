@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
-import User from "../models/user";
-import Meeting from "../models/meeting";
+import User from "../../models/user";
+import Meeting from "../../models/meeting";
 import { config } from "dotenv";
 
 config();

@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 import dotenv from "dotenv";
-import Booking from "../models/booking";
+import Booking from "../../models/booking";
 
 dotenv.config();
 

@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import ServiceConfiguration from "../models/serviceConfiguration";
+import ServiceConfiguration from "../../models/serviceConfiguration";
 import { config } from "dotenv";
 import * as fs from "fs";
 import * as path from "path";
@@ -292,7 +292,7 @@ async function importFromCSV() {
   try {
     const csvPath = path.join(
       __dirname,
-      "../public/Fixtract service data ENG.csv",
+      "../../public/Fixtract service data ENG.csv",
     );
 
     console.log("📖 Reading CSV file...");

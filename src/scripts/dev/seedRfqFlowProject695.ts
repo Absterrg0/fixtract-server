@@ -1,8 +1,8 @@
 import "dotenv/config";
 import mongoose from "mongoose";
-import Project from "../models/project";
-import User from "../models/user";
-import { buildProjectScheduleProposals } from "../utils/scheduleEngine";
+import Project from "../../models/project";
+import User from "../../models/user";
+import { buildProjectScheduleProposals } from "../../utils/scheduleEngine";
 
 const PROJECT_ID = "695c2a7c7b0d3d00e194548d";
 const DEMO_ATTACHMENT_URL =

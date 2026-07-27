@@ -1,9 +1,9 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcrypt';
-import User from '../models/user';
-import connectDB from '../config/db';
-import type { AdminRole } from '../utils/adminRbac/types';
-import { ADMIN_ROLES } from '../utils/adminRbac/types';
+import User from '../../models/user';
+import connectDB from '../../config/db';
+import type { AdminRole } from '../../utils/adminRbac/types';
+import { ADMIN_ROLES } from '../../utils/adminRbac/types';
 
 const PASSWORD = 'StaffTest123!';
 

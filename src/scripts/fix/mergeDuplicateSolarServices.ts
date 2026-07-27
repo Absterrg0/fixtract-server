@@ -1,8 +1,8 @@
 import mongoose from "mongoose";
 import { config } from "dotenv";
-import ServiceConfiguration from "../models/serviceConfiguration";
-import ServiceCategory from "../models/serviceCategory";
-import Project from "../models/project";
+import ServiceConfiguration from "../../models/serviceConfiguration";
+import ServiceCategory from "../../models/serviceCategory";
+import Project from "../../models/project";
 
 config();
 
