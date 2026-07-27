@@ -35,6 +35,8 @@ const REQUIRED_EVENT_KEYS = [
   'customer.referral_completed',
   'customer.loyalty_tier_up',
   'customer.unread_chat',
+  'user.unread_support_chat',
+  'admin.unread_support_chat',
   'professional.project_published',
   'professional.project_rejected',
   'professional.project_suspended',

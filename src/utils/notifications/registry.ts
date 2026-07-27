@@ -38,7 +38,9 @@ import {
   sendRefundCounterOfferEmail,
   sendRefundEscalatedEmail,
   sendRefundDeniedEmail,
+  sendChatMirrorEmail,
 } from '../emailService';
+import { formatMirrorInboxBody, type ChatMirrorLine } from './chatEmailMirror';
 
 export interface NotifyBuildResult {
   title: string;
@@ -87,6 +89,9 @@ export interface NotifyContext {
   responseNote?: string;
   isDirectQuotation?: boolean;
   adminEmail?: string;
+  conversationType?: 'direct' | 'support';
+  counterpartyName?: string;
+  chatMirrorLines?: ChatMirrorLine[];
   [key: string]: unknown;
 }
 
@@ -100,6 +105,36 @@ export interface EventDef {
 }
 
 const frontend = (path: string) => `${getFrontendUrl()}${path.startsWith('/') ? path : `/${path}`}`;
+
+function buildUnreadChatMirrorResult(
+  ctx: NotifyContext,
+  inboxTitle: string,
+  emailIntro: string,
+  template: string,
+  clickPath?: string,
+): NotifyBuildResult {
+  const lines = ctx.chatMirrorLines || [];
+  const counterpartyName = typeof ctx.counterpartyName === 'string' ? ctx.counterpartyName : undefined;
+  const clickUrl = frontend(
+    clickPath || `/chat?conversationId=${ctx.conversationId || ''}`,
+  );
+
+  return {
+    title: inboxTitle,
+    body: formatMirrorInboxBody(lines, counterpartyName),
+    clickUrl,
+    sendEmail: async ({ email, name }) =>
+      sendChatMirrorEmail({
+        to: email,
+        userName: name || 'User',
+        subject: inboxTitle,
+        intro: emailIntro,
+        lines,
+        ctaUrl: clickUrl,
+        template,
+      }),
+  };
+}
 
 const def = (
   eventKey: string,
@@ -688,11 +723,42 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
     'messages',
     'email_always',
     'customer',
-    (ctx) => ({
-      title: 'Unread messages',
-      body: 'You have unread chat messages waiting for you.',
-      clickUrl: frontend(`/chat?conversationId=${ctx.conversationId || ''}`),
-    }),
+    (ctx) =>
+      buildUnreadChatMirrorResult(
+        ctx,
+        'Unread messages waiting for you',
+        'These messages have been waiting for your reply for over 24 hours:',
+        'customer_unread_chat_mirror',
+      ),
+    'conversation',
+  ),
+  'user.unread_support_chat': def(
+    'user.unread_support_chat',
+    'messages',
+    'email_always',
+    'either',
+    (ctx) =>
+      buildUnreadChatMirrorResult(
+        ctx,
+        'Support reply waiting for you',
+        'Fixtract support sent these messages over 24 hours ago and is still waiting for your reply:',
+        'user_unread_support_chat_mirror',
+      ),
+    'conversation',
+  ),
+  'admin.unread_support_chat': def(
+    'admin.unread_support_chat',
+    'messages',
+    'email_always',
+    'either',
+    (ctx) =>
+      buildUnreadChatMirrorResult(
+        ctx,
+        'Support chat awaiting your reply',
+        'A user is waiting for your support reply. These messages are still unanswered after 24 hours:',
+        'admin_unread_support_chat_mirror',
+        `/admin/chat?conversationId=${ctx.conversationId || ''}`,
+      ),
     'conversation',
   ),
 
@@ -1261,11 +1327,13 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
     'messages',
     'email_always',
     'professional',
-    (ctx) => ({
-      title: 'Unread messages',
-      body: 'You have unread chat messages waiting for you.',
-      clickUrl: frontend(`/chat?conversationId=${ctx.conversationId || ''}`),
-    }),
+    (ctx) =>
+      buildUnreadChatMirrorResult(
+        ctx,
+        'Unread messages waiting for you',
+        'These messages have been waiting for your reply for over 24 hours:',
+        'professional_unread_chat_mirror',
+      ),
     'conversation',
   ),
   'professional.completion_auto_accepted': def(

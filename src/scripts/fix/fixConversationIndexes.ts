@@ -33,7 +33,7 @@
  */
 import dotenv from "dotenv";
 import mongoose from "mongoose";
-import Conversation from "../models/conversation";
+import Conversation from "../../models/conversation";
 
 dotenv.config();
 

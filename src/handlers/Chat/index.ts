@@ -516,6 +516,7 @@ export const sendMessage = async (req: Request, res: Response) => {
   await Conversation.findByIdAndUpdate(conversation._id, {
     $set: updateSet,
     $inc: updateInc,
+    $unset: { unreadChatReminderLastSentAt: '' },
   });
 
   await message.populate("senderId", "name email username businessInfo profileImage role");
