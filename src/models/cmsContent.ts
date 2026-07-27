@@ -35,7 +35,7 @@ export interface ICmsContent extends Document {
   body: string;
   excerpt?: string;
   coverImage?: string;
-  /** Accessible/SEO alt text for the cover image. Falls back to title when empty. */
+  /** Optional cover-image alt text. When empty/unset, consumers should fall back to `title`. */
   coverImageAlt?: string;
   category?: string;
   tags: string[];

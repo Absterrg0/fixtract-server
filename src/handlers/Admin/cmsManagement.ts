@@ -62,6 +62,24 @@ const pickSeo = (input: any) => {
   return seo;
 };
 
+/** Best-effort populate after a successful write — never fail the request if this read fails. */
+async function loadCmsDocForResponse(
+  id: mongoose.Types.ObjectId | string,
+  fallback: Record<string, any>
+): Promise<Record<string, any>> {
+  try {
+    const populated = await CmsContent.findById(id)
+      .populate("author", "name email")
+      .populate("relatedContent", "title slug type")
+      .populate("relatedServices", "name slug")
+      .lean();
+    return (populated as Record<string, any> | null) || fallback;
+  } catch (err) {
+    console.error("CMS response populate failed; returning unpopulated doc:", err);
+    return fallback;
+  }
+}
+
 export const listFaqCategories = async (_req: Request, res: Response) => {
   return res.status(200).json({ success: true, data: FAQ_CATEGORIES });
 };
@@ -379,12 +397,9 @@ export const createCmsContent = async (req: Request, res: Response) => {
       relatedServiceSlug,
     });
 
-    const populated = await CmsContent.findById(doc._id)
-      .populate("author", "name email")
-      .populate("relatedContent", "title slug type")
-      .populate("relatedServices", "name slug")
-      .lean();
-    const presigned = await presignCmsDoc(populated || doc.toObject());
+    const fallback = doc.toObject() as Record<string, any>;
+    const populated = await loadCmsDocForResponse(doc._id, fallback);
+    const presigned = await presignCmsDoc(populated);
     return res.status(201).json({ success: true, data: presigned });
   } catch (error: any) {
     if (error?.code === 11000) {
@@ -529,12 +544,9 @@ export const updateCmsContent = async (req: Request, res: Response) => {
       }
     }
 
-    const populated = await CmsContent.findById(doc._id)
-      .populate("author", "name email")
-      .populate("relatedContent", "title slug type")
-      .populate("relatedServices", "name slug")
-      .lean();
-    const presigned = await presignCmsDoc(populated || doc.toObject());
+    const fallback = doc.toObject() as Record<string, any>;
+    const populated = await loadCmsDocForResponse(doc._id, fallback);
+    const presigned = await presignCmsDoc(populated);
     return res.status(200).json({ success: true, data: presigned });
   } catch (error: any) {
     if (error?.code === 11000) {
