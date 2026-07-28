@@ -27,7 +27,7 @@ import { getPublicSiteSettings } from "../../handlers/Public/siteSettings";
 import { listPublicSiteAnnouncements } from "../../handlers/Public/siteAnnouncements";
 import { recordProfessionalView } from "../../handlers/Public/profileView";
 import { recordServiceView } from "../../handlers/Public/serviceView";
-import { runNotificationRemindersCron } from "../../handlers/Public/cron";
+import { runNotificationRemindersCron, runKpiMonthlyReportCron } from "../../handlers/Public/cron";
 
 // Public routes - accessible without authentication
 const publicRouter = Router();
@@ -115,5 +115,7 @@ publicRouter.route("/cms/:type/:slug").get(getPublicCmsContentBySlug);
 // Cron entrypoints (secured via CRON_SECRET bearer token)
 publicRouter.route("/cron/notification-reminders").get(runNotificationRemindersCron);
 publicRouter.route("/cron/notification-reminders").post(runNotificationRemindersCron);
+publicRouter.route("/cron/kpi-monthly-report").get(runKpiMonthlyReportCron);
+publicRouter.route("/cron/kpi-monthly-report").post(runKpiMonthlyReportCron);
 
 export default publicRouter;
