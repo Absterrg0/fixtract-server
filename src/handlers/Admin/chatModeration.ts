@@ -391,59 +391,53 @@ export const adminReplySupportChat = async (req: Request, res: Response) => {
     const preview = text.trim().slice(0, 200);
 
     const session = await mongoose.startSession();
-    session.startTransaction();
     try {
-      // Claim only while still active; message + metadata stay in the same txn.
-      const claimed = await Conversation.findOneAndUpdate(
-        { _id: conversation._id, type: "support", status: "active" },
-        { $set: { supportAdminId: adminObjectId } },
-        { session, new: true }
-      );
-      if (!claimed) {
-        await session.abortTransaction();
-        return res.status(409).json({ success: false, msg: "This support conversation is closed" });
-      }
+      let messageId: mongoose.Types.ObjectId | null = null;
+      let closedDuringTxn = false;
 
-      const [message] = await ChatMessage.create(
-        [
+      await session.withTransaction(async () => {
+        const [message] = await ChatMessage.create(
+          [
+            {
+              conversationId: conversation._id,
+              senderId: adminObjectId,
+              senderRole: "admin",
+              text: text.trim(),
+              messageType: "text",
+              readBy: [{ userId: adminObjectId, readAt: new Date() }],
+            },
+          ],
+          { session }
+        );
+
+        const updated = await Conversation.findOneAndUpdate(
+          { _id: conversation._id, type: "support", status: "active" },
           {
-            conversationId: conversation._id,
-            senderId: adminObjectId,
-            senderRole: "admin",
-            text: text.trim(),
-            messageType: "text",
-            readBy: [{ userId: adminObjectId, readAt: new Date() }],
+            $set: {
+              supportAdminId: adminObjectId,
+              lastMessageAt: new Date(),
+              lastMessagePreview: preview,
+              lastMessageSenderId: adminObjectId,
+            },
+            $inc: { customerUnreadCount: 1 },
+            $unset: { unreadChatReminderLastSentAt: "" },
           },
-        ],
-        { session }
-      );
+          { session, new: true }
+        );
+        if (!updated) {
+          closedDuringTxn = true;
+          throw new Error("SUPPORT_CHAT_CLOSED");
+        }
+        messageId = message._id as mongoose.Types.ObjectId;
+      });
 
-      const updated = await Conversation.findOneAndUpdate(
-        { _id: conversation._id, type: "support", status: "active" },
-        {
-          $set: {
-            supportAdminId: adminObjectId,
-            lastMessageAt: new Date(),
-            lastMessagePreview: preview,
-            lastMessageSenderId: adminObjectId,
-          },
-          $inc: { customerUnreadCount: 1 },
-          $unset: { unreadChatReminderLastSentAt: "" },
-        },
-        { session, new: true }
-      );
-      if (!updated) {
-        await session.abortTransaction();
+      if (closedDuringTxn || !messageId) {
         return res.status(409).json({ success: false, msg: "This support conversation is closed" });
       }
-
-      await session.commitTransaction();
-      return res.status(201).json({ success: true, data: { messageId: message._id } });
-    } catch (innerErr) {
-      try {
-        await session.abortTransaction();
-      } catch {
-        /* ignore */
+      return res.status(201).json({ success: true, data: { messageId } });
+    } catch (innerErr: any) {
+      if (innerErr?.message === "SUPPORT_CHAT_CLOSED") {
+        return res.status(409).json({ success: false, msg: "This support conversation is closed" });
       }
       throw innerErr;
     } finally {

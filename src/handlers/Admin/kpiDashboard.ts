@@ -731,7 +731,7 @@ export const getKpiByService = async (req: Request, res: Response) => {
 
     // Canonical join: CMS landing slug ↔ service-configuration name (not raw toSlug alone).
     const [landings, serviceConfigs] = await Promise.all([
-      CmsContent.find({ type: 'landing', status: 'published' }).select('slug title').lean(),
+      CmsContent.find({ type: 'landing' }).select('slug title').lean(),
       ServiceConfiguration.find({}).select('service').lean(),
     ]);
 

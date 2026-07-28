@@ -55,7 +55,7 @@ export const runKpiMonthlyReportCron = async (req: Request, res: Response) => {
   }
 
   const { from, to } = previousCalendarMonthUtc();
-  let recipients: Array<{ email?: string | null }> = [];
+  let recipients: Array<{ _id?: unknown; email?: string | null }> = [];
 
   try {
     const startedAt = Date.now();
@@ -128,7 +128,11 @@ export const runKpiMonthlyReportCron = async (req: Request, res: Response) => {
         try {
           await sendKpiReportEmail(String(admin.email), { from, to, error: message });
         } catch (notifyErr) {
-          console.error('[Cron] Failed to send KPI failure email to', admin.email, notifyErr);
+          console.error(
+            '[Cron] Failed to send KPI failure email to admin',
+            admin._id ? String(admin._id) : 'unknown',
+            notifyErr
+          );
         }
       }
     } catch (notifySetupErr) {
