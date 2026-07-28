@@ -23,6 +23,10 @@ import {
 import { presignCmsDoc, presignCmsDocs } from "../../utils/cmsPresign";
 import { toSlug } from "../../utils/slug";
 import { param, params } from "../../utils/requestParams";
+import {
+  applyCoverImageAltUpdate,
+  coverImageAltForCreate,
+} from "../../utils/cmsCoverImageAlt";
 
 const isValidObjectId = (id: string): boolean => mongoose.Types.ObjectId.isValid(id);
 
@@ -61,6 +65,24 @@ const pickSeo = (input: any) => {
   if (typeof input.noindex === "boolean") seo.noindex = input.noindex;
   return seo;
 };
+
+/** Best-effort populate after a successful write — never fail the request if this read fails. */
+async function loadCmsDocForResponse(
+  id: mongoose.Types.ObjectId | string,
+  fallback: Record<string, any>
+): Promise<Record<string, any>> {
+  try {
+    const populated = await CmsContent.findById(id)
+      .populate("author", "name email")
+      .populate("relatedContent", "title slug type")
+      .populate("relatedServices", "name slug")
+      .lean();
+    return (populated as Record<string, any> | null) || fallback;
+  } catch (err) {
+    console.error("CMS response populate failed; returning unpopulated doc:", err);
+    return fallback;
+  }
+}
 
 export const listFaqCategories = async (_req: Request, res: Response) => {
   return res.status(200).json({ success: true, data: FAQ_CATEGORIES });
@@ -354,6 +376,8 @@ export const createCmsContent = async (req: Request, res: Response) => {
       }
     }
 
+    const coverImageAlt = coverImageAltForCreate(body.coverImageAlt);
+
     const doc = await CmsContent.create({
       type,
       title,
@@ -362,6 +386,7 @@ export const createCmsContent = async (req: Request, res: Response) => {
       body: typeof body.body === "string" ? body.body : "",
       excerpt: typeof body.excerpt === "string" ? body.excerpt.trim().slice(0, 500) : undefined,
       coverImage: coverImage || undefined,
+      coverImageAlt,
       category,
       tags: type === "blog" || type === "news" ? sanitizeStringArray(body.tags) : [],
       status,
@@ -373,7 +398,9 @@ export const createCmsContent = async (req: Request, res: Response) => {
       relatedServiceSlug,
     });
 
-    const presigned = await presignCmsDoc(doc.toObject());
+    const fallback = doc.toObject() as Record<string, any>;
+    const populated = await loadCmsDocForResponse(doc._id, fallback);
+    const presigned = await presignCmsDoc(populated);
     return res.status(201).json({ success: true, data: presigned });
   } catch (error: any) {
     if (error?.code === 11000) {
@@ -448,6 +475,13 @@ export const updateCmsContent = async (req: Request, res: Response) => {
       doc.coverImage = nextCover;
     }
 
+    if (
+      typeof body.coverImageAlt === "string" ||
+      body.coverImageAlt === null
+    ) {
+      doc.coverImageAlt = applyCoverImageAltUpdate(doc.coverImageAlt, body.coverImageAlt);
+    }
+
     if (doc.type === "faq" && typeof body.category === "string") {
       const cat = body.category.trim().toLowerCase();
       if (!FAQ_CATEGORY_SLUGS.includes(cat)) {
@@ -511,7 +545,9 @@ export const updateCmsContent = async (req: Request, res: Response) => {
       }
     }
 
-    const presigned = await presignCmsDoc(doc.toObject());
+    const fallback = doc.toObject() as Record<string, any>;
+    const populated = await loadCmsDocForResponse(doc._id, fallback);
+    const presigned = await presignCmsDoc(populated);
     return res.status(200).json({ success: true, data: presigned });
   } catch (error: any) {
     if (error?.code === 11000) {
@@ -565,7 +601,10 @@ export const getCmsPreviewBySlug = async (req: Request, res: Response) => {
     await connecToDatabase();
     const doc = await CmsContent.findOne({ type, slug, locale })
       .populate("author", "name email")
-      .populate({ path: "relatedContent", select: "title slug type excerpt coverImage publishedAt" })
+      .populate({
+        path: "relatedContent",
+        select: "title slug type excerpt coverImage coverImageAlt publishedAt",
+      })
       .populate("relatedServices", "name slug")
       .lean();
 

@@ -35,6 +35,8 @@ export interface ICmsContent extends Document {
   body: string;
   excerpt?: string;
   coverImage?: string;
+  /** Optional cover-image alt text. When empty/unset, consumers should fall back to `title`. */
+  coverImageAlt?: string;
   category?: string;
   tags: string[];
   status: CmsContentStatus;
@@ -76,6 +78,7 @@ const CmsContentSchema = new Schema<ICmsContent>(
     body: { type: String, default: "" },
     excerpt: { type: String, trim: true, maxlength: 500 },
     coverImage: { type: String, trim: true },
+    coverImageAlt: { type: String, trim: true, maxlength: 200 },
     category: { type: String, trim: true, lowercase: true },
     tags: [{ type: String, trim: true, lowercase: true }],
     status: {
