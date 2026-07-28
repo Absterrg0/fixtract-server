@@ -393,7 +393,6 @@ export const adminReplySupportChat = async (req: Request, res: Response) => {
     const session = await mongoose.startSession();
     try {
       let messageId: mongoose.Types.ObjectId | null = null;
-      let closedDuringTxn = false;
 
       await session.withTransaction(async () => {
         const [message] = await ChatMessage.create(
@@ -425,14 +424,13 @@ export const adminReplySupportChat = async (req: Request, res: Response) => {
           { session, new: true }
         );
         if (!updated) {
-          closedDuringTxn = true;
           throw new Error("SUPPORT_CHAT_CLOSED");
         }
         messageId = message._id as mongoose.Types.ObjectId;
       });
 
-      if (closedDuringTxn || !messageId) {
-        return res.status(409).json({ success: false, msg: "This support conversation is closed" });
+      if (!messageId) {
+        return res.status(500).json({ success: false, msg: "Failed to send message" });
       }
       return res.status(201).json({ success: true, data: { messageId } });
     } catch (innerErr: any) {
