@@ -30,6 +30,9 @@ const ROUTE_RULES: Array<{ prefix: string; permission: AdminPermission }> = [
   { prefix: '/email-logs', permission: 'email_logs.read' },
 
   { prefix: '/cms', permission: 'cms.manage' },
+  { prefix: '/site-announcements', permission: 'cms.manage' },
+  { prefix: '/marketing-campaigns', permission: 'campaigns.manage' },
+  { prefix: '/marketing-subscribers', permission: 'campaigns.manage' },
   { prefix: '/discount-codes', permission: 'discounts.manage' },
   { prefix: '/loyalty', permission: 'loyalty.manage' },
   { prefix: '/points', permission: 'loyalty.manage' },

@@ -21,6 +21,7 @@ export const ROLE_PERMISSIONS: Record<AdminRole, readonly AdminPermission[]> = {
   marketing: [
     'dashboard.overview',
     'cms.manage',
+    'campaigns.manage',
     'discounts.manage',
     'loyalty.manage',
     'referrals.manage',

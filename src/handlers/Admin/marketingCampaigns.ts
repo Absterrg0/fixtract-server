@@ -1,0 +1,342 @@
+import { Request, Response } from 'express';
+import mongoose from 'mongoose';
+import MarketingCampaign, {
+  MARKETING_CAMPAIGN_TYPES,
+  MARKETING_LOCALES,
+  type MarketingCampaignType,
+  type MarketingLocale,
+} from '../../models/marketingCampaign';
+import { params } from '../../utils/requestParams';
+import { countCampaignAudience, syncSubscribersFromUsers } from '../../utils/marketing/audience';
+import { refreshCampaignStats, sendMarketingCampaign } from '../../utils/marketing/sendCampaign';
+
+const DEFAULT_LIMIT = 25;
+const MAX_LIMIT = 100;
+
+function parseAudience(body: any) {
+  const countries = Array.isArray(body?.countries)
+    ? body.countries.map((c: any) => String(c).trim().toUpperCase()).filter(Boolean)
+    : [];
+  const interestedServices = Array.isArray(body?.interestedServices)
+    ? body.interestedServices.map((s: any) => String(s).trim()).filter(Boolean)
+    : [];
+  const locales = Array.isArray(body?.locales)
+    ? body.locales
+        .map((l: any) => String(l).trim().toLowerCase())
+        .filter((l: string) => (MARKETING_LOCALES as readonly string[]).includes(l))
+    : [];
+  const roles = Array.isArray(body?.roles)
+    ? body.roles.filter((r: any) => r === 'customer' || r === 'professional')
+    : ['customer', 'professional'];
+  return { countries, interestedServices, locales, roles };
+}
+
+function parseContent(body: any): Record<string, { subject: string; htmlContent: string; previewText?: string; brevoTemplateId?: number }> {
+  const out: Record<string, any> = {};
+  const raw = body?.content && typeof body.content === 'object' ? body.content : {};
+  for (const locale of MARKETING_LOCALES) {
+    const block = raw[locale];
+    if (!block || typeof block !== 'object') continue;
+    const subject = typeof block.subject === 'string' ? block.subject.trim() : '';
+    const htmlContent = typeof block.htmlContent === 'string' ? block.htmlContent : '';
+    const previewText =
+      typeof block.previewText === 'string' ? block.previewText.trim() : undefined;
+    const brevoTemplateId =
+      block.brevoTemplateId != null && Number.isFinite(Number(block.brevoTemplateId))
+        ? Number(block.brevoTemplateId)
+        : undefined;
+    if (!subject) continue;
+    if (!htmlContent && !brevoTemplateId) continue;
+    out[locale] = { subject, htmlContent: htmlContent || '<p></p>', previewText, brevoTemplateId };
+  }
+  return out;
+}
+
+function serializeCampaign(doc: any) {
+  const obj = doc.toObject ? doc.toObject() : doc;
+  return {
+    ...obj,
+    _id: String(obj._id),
+    createdBy: obj.createdBy ? String(obj.createdBy) : undefined,
+  };
+}
+
+export const listMarketingCampaigns = async (req: Request, res: Response) => {
+  try {
+    const { type, status, page, limit, q } = req.query;
+    const pageNumber = Math.max(Math.floor(Number(page) || 1), 1);
+    const limitNumber = Math.min(Math.max(Math.floor(Number(limit) || DEFAULT_LIMIT), 1), MAX_LIMIT);
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const query: Record<string, unknown> = {};
+    if (typeof type === 'string' && (MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(type)) {
+      query.type = type;
+    }
+    if (typeof status === 'string' && status.trim()) query.status = status.trim();
+    if (typeof q === 'string' && q.trim().length >= 2) {
+      query.name = new RegExp(q.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    }
+
+    const [rows, total] = await Promise.all([
+      MarketingCampaign.find(query).sort({ updatedAt: -1 }).skip(skip).limit(limitNumber).lean(),
+      MarketingCampaign.countDocuments(query),
+    ]);
+
+    return res.json({
+      success: true,
+      data: {
+        campaigns: rows.map((r) => serializeCampaign(r)),
+        pagination: {
+          page: pageNumber,
+          limit: limitNumber,
+          total,
+          totalPages: Math.max(1, Math.ceil(total / limitNumber)),
+        },
+      },
+    });
+  } catch (error: any) {
+    console.error('listMarketingCampaigns:', error);
+    return res.status(500).json({ success: false, msg: 'Failed to list campaigns' });
+  }
+};
+
+export const getMarketingCampaign = async (req: Request, res: Response) => {
+  try {
+    const { id } = params(req.params);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, msg: 'Invalid campaign id' });
+    }
+    const campaign = await MarketingCampaign.findById(id);
+    if (!campaign) return res.status(404).json({ success: false, msg: 'Campaign not found' });
+    return res.json({ success: true, data: serializeCampaign(campaign) });
+  } catch (error: any) {
+    console.error('getMarketingCampaign:', error);
+    return res.status(500).json({ success: false, msg: 'Failed to get campaign' });
+  }
+};
+
+export const createMarketingCampaign = async (req: Request, res: Response) => {
+  try {
+    const { name, type, scheduledAt, inactiveDays, autoSend, utmCampaign } = req.body || {};
+    if (!name || typeof name !== 'string' || name.trim().length < 2) {
+      return res.status(400).json({ success: false, msg: 'Name is required' });
+    }
+    if (!(MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(type)) {
+      return res.status(400).json({ success: false, msg: 'Invalid campaign type' });
+    }
+
+    const content = parseContent(req.body);
+    if (Object.keys(content).length === 0) {
+      return res.status(400).json({
+        success: false,
+        msg: 'Provide content for at least one locale (en/nl/fr) with subject + htmlContent or brevoTemplateId',
+      });
+    }
+
+    const audience = parseAudience(req.body?.audience || req.body);
+    let scheduled: Date | null = null;
+    if (scheduledAt) {
+      const d = new Date(scheduledAt);
+      if (Number.isNaN(d.getTime())) {
+        return res.status(400).json({ success: false, msg: 'Invalid scheduledAt' });
+      }
+      scheduled = d;
+    }
+
+    const campaign = await MarketingCampaign.create({
+      name: name.trim(),
+      type: type as MarketingCampaignType,
+      status: scheduled && scheduled.getTime() > Date.now() ? 'scheduled' : 'draft',
+      content,
+      audience,
+      inactiveDays:
+        type === 'reengagement' && Number.isFinite(Number(inactiveDays))
+          ? Math.max(1, Math.floor(Number(inactiveDays)))
+          : type === 'reengagement'
+            ? Number(process.env.MARKETING_REENGAGEMENT_INACTIVE_DAYS) || 60
+            : undefined,
+      autoSend: type === 'reengagement' ? Boolean(autoSend) : false,
+      scheduledAt: scheduled,
+      utmCampaign: typeof utmCampaign === 'string' ? utmCampaign.trim() : undefined,
+      createdBy: (req as any).user?._id,
+      deliveries: [],
+    });
+
+    return res.status(201).json({ success: true, data: serializeCampaign(campaign) });
+  } catch (error: any) {
+    console.error('createMarketingCampaign:', error);
+    return res.status(500).json({ success: false, msg: 'Failed to create campaign' });
+  }
+};
+
+export const updateMarketingCampaign = async (req: Request, res: Response) => {
+  try {
+    const { id } = params(req.params);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, msg: 'Invalid campaign id' });
+    }
+    const campaign = await MarketingCampaign.findById(id);
+    if (!campaign) return res.status(404).json({ success: false, msg: 'Campaign not found' });
+    if (['sending', 'sent'].includes(campaign.status)) {
+      return res.status(400).json({ success: false, msg: 'Sent campaigns cannot be edited' });
+    }
+
+    const { name, scheduledAt, inactiveDays, autoSend, utmCampaign } = req.body || {};
+    if (typeof name === 'string' && name.trim().length >= 2) campaign.name = name.trim();
+    if (req.body?.audience || req.body?.countries || req.body?.interestedServices) {
+      campaign.audience = parseAudience(req.body?.audience || req.body) as any;
+    }
+    if (req.body?.content) {
+      const content = parseContent(req.body);
+      if (Object.keys(content).length === 0) {
+        return res.status(400).json({ success: false, msg: 'Content update cleared all locales' });
+      }
+      campaign.content = content as any;
+    }
+    if (scheduledAt !== undefined) {
+      if (scheduledAt === null || scheduledAt === '') {
+        campaign.scheduledAt = null;
+        if (campaign.status === 'scheduled') campaign.status = 'draft';
+      } else {
+        const d = new Date(scheduledAt);
+        if (Number.isNaN(d.getTime())) {
+          return res.status(400).json({ success: false, msg: 'Invalid scheduledAt' });
+        }
+        campaign.scheduledAt = d;
+        campaign.status = d.getTime() > Date.now() ? 'scheduled' : campaign.status;
+      }
+    }
+    if (campaign.type === 'reengagement') {
+      if (inactiveDays !== undefined) {
+        campaign.inactiveDays = Math.max(1, Math.floor(Number(inactiveDays)) || 60);
+      }
+      if (autoSend !== undefined) campaign.autoSend = Boolean(autoSend);
+    }
+    if (typeof utmCampaign === 'string') campaign.utmCampaign = utmCampaign.trim();
+
+    await campaign.save();
+    return res.json({ success: true, data: serializeCampaign(campaign) });
+  } catch (error: any) {
+    console.error('updateMarketingCampaign:', error);
+    return res.status(500).json({ success: false, msg: 'Failed to update campaign' });
+  }
+};
+
+export const deleteMarketingCampaign = async (req: Request, res: Response) => {
+  try {
+    const { id } = params(req.params);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, msg: 'Invalid campaign id' });
+    }
+    const campaign = await MarketingCampaign.findById(id);
+    if (!campaign) return res.status(404).json({ success: false, msg: 'Campaign not found' });
+    if (campaign.status === 'sending') {
+      return res.status(400).json({ success: false, msg: 'Cannot delete a campaign that is sending' });
+    }
+    await campaign.deleteOne();
+    return res.json({ success: true, msg: 'Campaign deleted' });
+  } catch (error: any) {
+    console.error('deleteMarketingCampaign:', error);
+    return res.status(500).json({ success: false, msg: 'Failed to delete campaign' });
+  }
+};
+
+export const previewMarketingAudience = async (req: Request, res: Response) => {
+  try {
+    const audience = parseAudience(req.body?.audience || req.body);
+    const inactiveDays =
+      req.body?.inactiveDays != null ? Math.max(1, Math.floor(Number(req.body.inactiveDays))) : undefined;
+    const count = await countCampaignAudience(audience, { inactiveDays });
+    return res.json({ success: true, data: { count, audience } });
+  } catch (error: any) {
+    console.error('previewMarketingAudience:', error);
+    return res.status(500).json({ success: false, msg: 'Failed to preview audience' });
+  }
+};
+
+export const sendMarketingCampaignNow = async (req: Request, res: Response) => {
+  try {
+    const { id } = params(req.params);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, msg: 'Invalid campaign id' });
+    }
+    const result = await sendMarketingCampaign(id, { forceNow: true });
+    if (!result.ok) {
+      return res.status(400).json({ success: false, msg: result.error });
+    }
+    return res.json({ success: true, data: serializeCampaign(result.campaign) });
+  } catch (error: any) {
+    console.error('sendMarketingCampaignNow:', error);
+    return res.status(500).json({ success: false, msg: 'Failed to send campaign' });
+  }
+};
+
+export const refreshMarketingCampaignStats = async (req: Request, res: Response) => {
+  try {
+    const { id } = params(req.params);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, msg: 'Invalid campaign id' });
+    }
+    const campaign = await refreshCampaignStats(id);
+    if (!campaign) return res.status(404).json({ success: false, msg: 'Campaign not found' });
+    return res.json({ success: true, data: serializeCampaign(campaign) });
+  } catch (error: any) {
+    console.error('refreshMarketingCampaignStats:', error);
+    return res.status(500).json({ success: false, msg: 'Failed to refresh stats' });
+  }
+};
+
+export const syncMarketingSubscribers = async (_req: Request, res: Response) => {
+  try {
+    const result = await syncSubscribersFromUsers();
+    return res.json({ success: true, data: result });
+  } catch (error: any) {
+    console.error('syncMarketingSubscribers:', error);
+    return res.status(500).json({ success: false, msg: 'Failed to sync subscribers' });
+  }
+};
+
+export const listMarketingSubscribers = async (req: Request, res: Response) => {
+  try {
+    const MarketingSubscriber = (await import('../../models/marketingSubscriber')).default;
+    const { page, limit, q, region, locale, status } = req.query;
+    const pageNumber = Math.max(Math.floor(Number(page) || 1), 1);
+    const limitNumber = Math.min(Math.max(Math.floor(Number(limit) || DEFAULT_LIMIT), 1), MAX_LIMIT);
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const query: Record<string, unknown> = {};
+    if (typeof region === 'string' && region.trim()) query.region = region.trim().toUpperCase();
+    if (typeof locale === 'string' && (MARKETING_LOCALES as readonly string[]).includes(locale)) {
+      query.locale = locale;
+    }
+    if (status === 'active') query.unsubscribedAt = null;
+    if (status === 'unsubscribed') query.unsubscribedAt = { $ne: null };
+    if (typeof q === 'string' && q.trim().length >= 2) {
+      query.email = new RegExp(q.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    }
+
+    const [rows, total] = await Promise.all([
+      MarketingSubscriber.find(query).sort({ subscribedAt: -1 }).skip(skip).limit(limitNumber).lean(),
+      MarketingSubscriber.countDocuments(query),
+    ]);
+
+    return res.json({
+      success: true,
+      data: {
+        subscribers: rows,
+        pagination: {
+          page: pageNumber,
+          limit: limitNumber,
+          total,
+          totalPages: Math.max(1, Math.ceil(total / limitNumber)),
+        },
+      },
+    });
+  } catch (error: any) {
+    console.error('listMarketingSubscribers:', error);
+    return res.status(500).json({ success: false, msg: 'Failed to list subscribers' });
+  }
+};
+
+// silence unused type import in some TS configs
+void 0 as unknown as MarketingLocale;
