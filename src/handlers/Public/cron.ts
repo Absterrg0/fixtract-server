@@ -33,22 +33,39 @@ type KpiMonthlyReportResult = {
 
 type AdminRecipient = { _id?: unknown; email?: string | null };
 
+function kpiReportEmailOverride(): string[] {
+  return (process.env.KPI_REPORT_EMAILS || '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function recipientsFromEmailOverride(): AdminRecipient[] {
+  return kpiReportEmailOverride().map((email) => ({ email }));
+}
+
 async function notifyKpiFailure(
   recipients: AdminRecipient[],
   from: Date,
   to: Date,
   message: string
 ): Promise<void> {
+  const notifyList = recipients.length > 0 ? recipients : recipientsFromEmailOverride();
+  if (notifyList.length === 0) {
+    console.error('[Cron] KPI failure with no recipients and no KPI_REPORT_EMAILS fallback');
+    return;
+  }
+
   try {
     const { sendKpiReportEmail } = await import('../../utils/emailService');
-    for (const admin of recipients) {
+    for (const admin of notifyList) {
       if (!admin.email) continue;
       try {
         await sendKpiReportEmail(String(admin.email), { from, to, error: message });
       } catch (notifyErr) {
         console.error(
           '[Cron] Failed to send KPI failure email to admin',
-          admin._id ? String(admin._id) : 'unknown',
+          admin._id ? String(admin._id) : admin.email,
           notifyErr
         );
       }
@@ -68,10 +85,7 @@ async function executeKpiMonthlyReport(): Promise<KpiMonthlyReportResult> {
   let recipients: AdminRecipient[] = [];
 
   try {
-    const override = (process.env.KPI_REPORT_EMAILS || '')
-      .split(',')
-      .map((e) => e.trim().toLowerCase())
-      .filter(Boolean);
+    const override = kpiReportEmailOverride();
 
     const admins = await User.find({ role: 'admin' })
       .select('_id email adminRole')
@@ -134,9 +148,23 @@ async function executeKpiMonthlyReport(): Promise<KpiMonthlyReportResult> {
   }
 }
 
+async function maybeRunDay1KpiMonthly(): Promise<
+  KpiMonthlyReportResult | { error: string } | undefined
+> {
+  if (new Date().getUTCDate() !== 1) return undefined;
+  try {
+    return await executeKpiMonthlyReport();
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Monthly KPI report failed';
+    console.error('[Cron] Piggybacked monthly KPI report failed:', error);
+    return { error: message };
+  }
+}
+
 /**
  * Vercel Cron entrypoint (Hobby allows only one cron).
  * Runs daily notification reminders; on the 1st UTC also sends the monthly KPI report.
+ * KPI is attempted even if reminders fail so the monthly job is not blocked.
  * Secured via Authorization: Bearer ${CRON_SECRET}.
  */
 export const runNotificationRemindersCron = async (req: Request, res: Response) => {
@@ -144,35 +172,44 @@ export const runNotificationRemindersCron = async (req: Request, res: Response) 
     return res.status(401).json({ success: false, msg: 'Unauthorized' });
   }
 
+  let reminders:
+    | Awaited<ReturnType<typeof runNotificationReminders>>
+    | undefined;
+  let remindersError: string | undefined;
+  const startedAt = Date.now();
+
   try {
-    const startedAt = Date.now();
-    const result = await runNotificationReminders();
-    const durationMs = Date.now() - startedAt;
+    reminders = await runNotificationReminders();
     console.log('[Cron] Notification reminders completed', {
-      durationMs,
-      unreadChat: result.unreadChat,
-      errorCount: result.errors.length,
-    });
-
-    let kpiMonthly: KpiMonthlyReportResult | { error: string } | undefined;
-    if (new Date().getUTCDate() === 1) {
-      try {
-        kpiMonthly = await executeKpiMonthlyReport();
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : 'Monthly KPI report failed';
-        console.error('[Cron] Piggybacked monthly KPI report failed:', error);
-        kpiMonthly = { error: message };
-      }
-    }
-
-    return res.json({
-      success: true,
-      data: { ...result, durationMs, ...(kpiMonthly ? { kpiMonthly } : {}) },
+      durationMs: Date.now() - startedAt,
+      unreadChat: reminders.unreadChat,
+      errorCount: reminders.errors.length,
     });
   } catch (error: unknown) {
+    remindersError = error instanceof Error ? error.message : 'Notification reminders failed';
     console.error('[Cron] Notification reminders failed:', error);
-    return res.status(500).json({ success: false, msg: 'Notification reminders failed' });
   }
+
+  // Day-1 KPI must not depend on reminders succeeding (only scheduled Hobby trigger).
+  const kpiMonthly = await maybeRunDay1KpiMonthly();
+  const durationMs = Date.now() - startedAt;
+
+  if (remindersError) {
+    return res.status(500).json({
+      success: false,
+      msg: 'Notification reminders failed',
+      data: {
+        durationMs,
+        error: remindersError,
+        ...(kpiMonthly ? { kpiMonthly } : {}),
+      },
+    });
+  }
+
+  return res.json({
+    success: true,
+    data: { ...reminders!, durationMs, ...(kpiMonthly ? { kpiMonthly } : {}) },
+  });
 };
 
 /**
