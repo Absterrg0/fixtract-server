@@ -65,7 +65,7 @@ async function notifyKpiFailure(
       } catch (notifyErr) {
         console.error(
           '[Cron] Failed to send KPI failure email to admin',
-          admin._id ? String(admin._id) : admin.email,
+          admin._id ? String(admin._id) : '[override-recipient]',
           notifyErr
         );
       }
@@ -91,13 +91,22 @@ async function executeKpiMonthlyReport(): Promise<KpiMonthlyReportResult> {
       .select('_id email adminRole')
       .lean();
 
-    recipients = admins.filter((admin: any) => {
-      const email = typeof admin.email === 'string' ? admin.email.trim().toLowerCase() : '';
-      if (!email) return false;
-      if (override.length > 0) return override.includes(email);
-      const role = resolveAdminRole(admin.adminRole);
-      return hasPermission(role, 'kpi.read');
-    });
+    // KPI_REPORT_EMAILS is authoritative when set — include addresses even if not in admin collection.
+    if (override.length > 0) {
+      const byEmail = new Map<string, AdminRecipient>();
+      for (const admin of admins) {
+        const email = typeof admin.email === 'string' ? admin.email.trim().toLowerCase() : '';
+        if (email) byEmail.set(email, { _id: admin._id, email });
+      }
+      recipients = override.map((email) => byEmail.get(email) || { email });
+    } else {
+      recipients = admins.filter((admin: any) => {
+        const email = typeof admin.email === 'string' ? admin.email.trim().toLowerCase() : '';
+        if (!email) return false;
+        const role = resolveAdminRole(admin.adminRole);
+        return hasPermission(role, 'kpi.read');
+      });
+    }
 
     if (recipients.length === 0) {
       return {
