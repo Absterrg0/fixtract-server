@@ -103,7 +103,7 @@ publicRouter
 publicRouter.route("/site-settings").get(getPublicSiteSettings);
 
 // Marketing site announcements (top bar / modal / exit-intent)
-publicRouter.route("/site-announcements").get(listPublicSiteAnnouncements);
+publicRouter.route("/site-announcements").get(schedulingRateLimiter, listPublicSiteAnnouncements);
 
 // CMS public endpoints
 publicRouter.route("/cms/sitemap").get(listCmsSitemapEntries);
