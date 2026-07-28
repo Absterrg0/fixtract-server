@@ -4,7 +4,10 @@ import User from '../../models/user';
 import WarrantyClaim from '../../models/warrantyClaim';
 import Favorite from '../../models/favorite';
 import ServiceView from '../../models/serviceView';
+import ServiceConfiguration from '../../models/serviceConfiguration';
+import CmsContent from '../../models/cmsContent';
 import { buildCsv } from '../../utils/csv';
+import { toSlug } from '../../utils/slug';
 import { STRIPE_CONFIG } from '../../services/stripe';
 
 const REPORTING_CURRENCY = STRIPE_CONFIG.defaultCurrency || 'EUR';
@@ -726,12 +729,72 @@ export const getKpiByService = async (req: Request, res: Response) => {
       .map((r) => ({ serviceId: String(r._id || ''), views: r.views }))
       .sort((a, b) => b.views - a.views);
 
+    // Canonical join: CMS landing slug ↔ service-configuration name (not raw toSlug alone).
+    const [landings, serviceConfigs] = await Promise.all([
+      CmsContent.find({ type: 'landing' }).select('slug title').lean(),
+      ServiceConfiguration.find({}).select('service').lean(),
+    ]);
+
+    const viewsBySlug = new Map<string, number>();
+    for (const v of serviceViews) {
+      const key = String(v.serviceId || '').toLowerCase();
+      if (!key) continue;
+      viewsBySlug.set(key, (viewsBySlug.get(key) || 0) + v.views);
+    }
+
+    const landingSlugSet = new Set(
+      landings.map((l: any) => String(l.slug || '').toLowerCase()).filter(Boolean)
+    );
+    const labelToSlug = new Map<string, string>();
+    for (const landing of landings as any[]) {
+      const slug = String(landing.slug || '').toLowerCase();
+      if (!slug) continue;
+      labelToSlug.set(slug, slug);
+      const title = String(landing.title || '').trim();
+      if (title) {
+        labelToSlug.set(title.toLowerCase(), slug);
+        const titleSlug = toSlug(title);
+        if (titleSlug) labelToSlug.set(titleSlug, slug);
+      }
+    }
+    for (const config of serviceConfigs as any[]) {
+      const name = String(config.service || '').trim();
+      if (!name) continue;
+      const nameKey = name.toLowerCase();
+      const nameSlug = toSlug(name);
+      const resolved =
+        labelToSlug.get(nameKey) ||
+        (nameSlug ? labelToSlug.get(nameSlug) : undefined) ||
+        (nameSlug && landingSlugSet.has(nameSlug) ? nameSlug : undefined);
+      if (!resolved) continue;
+      labelToSlug.set(nameKey, resolved);
+      if (nameSlug) labelToSlug.set(nameSlug, resolved);
+    }
+
+    const resolveServiceSlug = (serviceKey: string, serviceLabel: string): string | null => {
+      const key = String(serviceKey || '').toLowerCase();
+      const label = String(serviceLabel || '').trim();
+      const labelSlug = toSlug(label);
+      return (
+        labelToSlug.get(key) ||
+        (label ? labelToSlug.get(label.toLowerCase()) : undefined) ||
+        (labelSlug ? labelToSlug.get(labelSlug) : undefined) ||
+        (labelSlug && landingSlugSet.has(labelSlug) ? labelSlug : undefined) ||
+        (key && landingSlugSet.has(key) ? key : null)
+      );
+    };
+
     const serviceBookings = bookingRows
       .map((r) => {
         const w = warrantyByService.get(String(r._id)) || { warrantyCount: 0, avgWarrantyResponseHours: null };
-        const base = deriveBookingRates(r as GroupAgg);
+        const serviceType = r._id === '__unknown__' ? 'Unknown' : String(r.serviceLabel || r._id || '');
+        const slug = resolveServiceSlug(String(r._id || ''), serviceType);
+        const views = slug ? viewsBySlug.get(slug) || 0 : 0;
+        const base = deriveBookingRates(r as GroupAgg, views);
         return {
-          serviceType: r._id === '__unknown__' ? 'Unknown' : String(r.serviceLabel || r._id || ''),
+          serviceType,
+          serviceSlug: slug,
+          views,
           ...base,
           completedCount: base.completedBookings,
           warrantyCount: w.warrantyCount,
@@ -1084,8 +1147,8 @@ export const exportKpiCsv = async (req: Request, res: Response) => {
       rows = data.map((r) => [r.city, r.signUps, r.views, r.totalBookings, r.completedBookings, Number(r.bookedValue ?? 0).toFixed(2), Number(r.platformRevenue ?? 0).toFixed(2), r.quotationConversionRate, r.disputeRate, r.warrantyClaimRate, r.refundRate]);
     } else if (section === 'service') {
       const data = ((await captureJson(getKpiByService, req))?.data?.serviceBookings || []) as Row[];
-      headers = ['Service type', 'RFQs', 'Quotes sent', 'Bookings', 'Completed', 'Gross revenue (EUR)', 'Platform revenue (EUR)', 'Quotation conversion (%)', 'Avg time to first quote (h)'];
-      rows = data.map((r) => [r.serviceType, r.totalRfqs, r.quotedCount, r.bookingsCount, r.completedCount, Number(r.grossRevenue ?? 0).toFixed(2), Number(r.platformRevenue ?? 0).toFixed(2), r.quotationConversionRate, r.avgTtfqHours ?? '']);
+      headers = ['Service type', 'Views', 'RFQs', 'Quotes sent', 'Bookings', 'Completed', 'Booking rate (%)', 'Gross revenue (EUR)', 'Platform revenue (EUR)', 'Quotation conversion (%)', 'Avg time to first quote (h)'];
+      rows = data.map((r) => [r.serviceType, r.views ?? 0, r.totalRfqs, r.quotedCount, r.bookingsCount, r.completedCount, r.bookingRate ?? '', Number(r.grossRevenue ?? 0).toFixed(2), Number(r.platformRevenue ?? 0).toFixed(2), r.quotationConversionRate, r.avgTtfqHours ?? '']);
     } else if (section === 'service-views') {
       const data = ((await captureJson(getKpiByService, req))?.data?.serviceViews || []) as Row[];
       headers = ['Service slug', 'Views'];

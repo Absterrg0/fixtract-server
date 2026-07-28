@@ -148,7 +148,7 @@ import {
   exportKpiCsv,
   triggerKpiEmailReport,
 } from "../../handlers/Admin/kpiDashboard";
-import { listAuditLogs, getAuditLogStats } from "../../handlers/Admin/auditLogs";
+import { listAuditLogs, getAuditLogStats, getAuditLogFilterOptions, exportAuditLogs } from "../../handlers/Admin/auditLogs";
 import { adminAnonymizeUser } from "../../handlers/Admin/userAnonymize";
 import { auditAdmin } from "../../middlewares/auditAdmin";
 import {
@@ -292,6 +292,8 @@ adminRouter.route('/email-logs').get(listEmailLogs);
 // Audit logs
 adminRouter.route('/audit-logs').get(listAuditLogs);
 adminRouter.route('/audit-logs/stats').get(getAuditLogStats);
+adminRouter.route('/audit-logs/actions').get(getAuditLogFilterOptions);
+adminRouter.route('/audit-logs/export').get(exportAuditLogs);
 
 // Cancellation requests
 adminRouter.route('/cancellation-requests').get(listCancellationRequests);
