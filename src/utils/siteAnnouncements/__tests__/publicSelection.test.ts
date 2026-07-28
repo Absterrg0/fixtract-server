@@ -16,6 +16,7 @@ function candidate(
     activeCountries: overrides.activeCountries ?? [],
     startsAt: overrides.startsAt ?? new Date('2026-07-01T00:00:00.000Z'),
     endsAt: overrides.endsAt ?? new Date('2026-08-01T23:59:59.999Z'),
+    isActive: overrides.isActive ?? true,
     ...overrides,
   };
 }

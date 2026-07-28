@@ -41,6 +41,11 @@ describe('admin route permission mapping', () => {
     expect(permissionForAdminPath('/access')).toBeNull();
   });
 
+  it('maps site-announcements to cms.manage', () => {
+    expect(permissionForAdminPath('/site-announcements')).toBe('cms.manage');
+    expect(permissionForAdminPath('/site-announcements/abc')).toBe('cms.manage');
+  });
+
   it('prefers professionals/manage over professionals', () => {
     expect(permissionForAdminPath('/professionals/manage')).toBe('professionals.manage');
     expect(permissionForAdminPath('/professionals')).toBe('professionals.approve');

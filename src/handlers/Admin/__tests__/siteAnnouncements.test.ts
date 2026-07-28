@@ -67,6 +67,37 @@ describe('admin site announcement handlers', () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it('creates an announcement with the parsed body and createdBy', async () => {
+    create.mockResolvedValue({ _id: '507f1f77bcf86cd799439011', name: 'Summer BE promo' });
+    const res = mockRes();
+    await createSiteAnnouncement(
+      {
+        admin: { _id: 'admin-1' },
+        body: {
+          name: 'Summer BE promo',
+          type: 'top_bar',
+          title: 'Summer 10% off',
+          message: 'Book this month and save',
+          startsAt: '2026-07-01',
+          endsAt: '2026-08-01',
+          activeCountries: ['be'],
+          locale: 'en',
+          ctaUrl: '/services',
+        },
+      } as unknown as Request,
+      res,
+      vi.fn(),
+    );
+
+    expect(res.statusCode).toBe(201);
+    expect(create).toHaveBeenCalledOnce();
+    const payload = create.mock.calls[0][0];
+    expect(payload.createdBy).toBe('admin-1');
+    expect(payload.name).toBe('Summer BE promo');
+    expect(payload.activeCountries).toEqual(['BE']);
+    expect(payload.ctaUrl).toBe('/services');
+  });
+
   it('rejects invalid ids on get', async () => {
     const res = mockRes();
     await getSiteAnnouncement({ params: { id: 'bad-id' } } as unknown as Request, res, vi.fn());
@@ -126,6 +157,45 @@ describe('admin site announcement handlers', () => {
     expect(findByIdAndUpdate).toHaveBeenCalledWith(
       '507f1f77bcf86cd799439011',
       { title: 'New title' },
+      { new: true, runValidators: true },
+    );
+  });
+
+  it('unsets cleared optional fields on patch', async () => {
+    findById.mockResolvedValue({
+      name: 'Promo',
+      type: 'top_bar',
+      title: 'Old',
+      message: 'Message',
+      ctaLabel: 'Go',
+      ctaUrl: '/services',
+      discountCode: 'SAVE',
+      activeCountries: [],
+      locale: 'en',
+      startsAt: new Date('2026-07-01T00:00:00.000Z'),
+      endsAt: new Date('2026-08-31T23:59:59.999Z'),
+      isActive: true,
+      priority: 0,
+      delaySeconds: 3,
+      dismissible: true,
+      requireMarketingConsent: true,
+    });
+    findByIdAndUpdate.mockResolvedValue({ _id: '507f1f77bcf86cd799439011' });
+
+    const res = mockRes();
+    await updateSiteAnnouncement(
+      {
+        params: { id: '507f1f77bcf86cd799439011' },
+        body: { ctaLabel: '', ctaUrl: '', discountCode: '' },
+      } as unknown as Request,
+      res,
+      vi.fn(),
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(findByIdAndUpdate).toHaveBeenCalledWith(
+      '507f1f77bcf86cd799439011',
+      { $unset: { ctaLabel: 1, ctaUrl: 1, discountCode: 1 } },
       { new: true, runValidators: true },
     );
   });

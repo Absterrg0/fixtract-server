@@ -10,18 +10,23 @@ export type PublicAnnouncementCandidate = {
   activeCountries: string[];
   startsAt: Date;
   endsAt: Date;
+  isActive: boolean;
 };
 
 /** Mirrors the aggregation winner selection for in-memory tests. */
 export function selectPublicAnnouncementWinners(
   candidates: PublicAnnouncementCandidate[],
-  filters: { locale: string; countryCode?: string },
+  filters: { locale: string; countryCode?: string; type?: AnnouncementType },
   now: Date = new Date(),
 ): PublicAnnouncementCandidate[] {
+  const localeBase = filters.locale.split('-')[0] || filters.locale;
+  const locales = new Set([filters.locale, localeBase, 'en']);
+
   const eligible = candidates.filter((item) => {
+    if (!item.isActive) return false;
+    if (filters.type && item.type !== filters.type) return false;
     if (!item.startsAt || !item.endsAt) return false;
     if (item.startsAt > now || item.endsAt < now) return false;
-    const locales = new Set([filters.locale, 'en']);
     if (!locales.has(item.locale)) return false;
     if (filters.countryCode) {
       if (item.activeCountries.length > 0 && !item.activeCountries.includes(filters.countryCode)) {
