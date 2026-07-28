@@ -1,26 +1,21 @@
 {
-    "version": 2,
-    "builds": [
-      {
-        "src": "src/index.ts",
-        "use": "@vercel/node"
-      }
-    ],
-    "functions": {
-      "src/index.ts": {
-        "maxDuration": 60
-      }
-    },
-    "routes": [
-      {
-        "src": "/(.*)",
-        "dest": "/src/index.ts"
-      }
-    ],
-    "crons": [
-      {
-        "path": "/api/public/cron/notification-reminders",
-        "schedule": "0 8 * * *"
-      }
-    ]
-  }
+  "version": 2,
+  "builds": [
+    {
+      "src": "src/index.ts",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/src/index.ts"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/public/cron/notification-reminders",
+      "schedule": "0 8 * * *"
+    }
+  ]
+}
