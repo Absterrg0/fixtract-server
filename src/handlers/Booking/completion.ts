@@ -31,10 +31,7 @@ import {
   getUnpaidMilestoneCount,
   markMilestonesCompleted,
 } from '../../utils/bookingHelpers';
-import {
-  sendCustomerConfirmedCompletionEmail,
-  sendDisputeRaisedEmail,
-} from '../../utils/emailService';
+import { sendDisputeRaisedAdminEmail } from '../../utils/emailService';
 import { notifyAsync } from '../../utils/notifications/notify';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
@@ -734,16 +731,20 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
         proId ? User.findById(proId).select('email name businessInfo').lean() : null,
       ]);
       try {
-        if (professionalUser?.email) {
-          await sendCustomerConfirmedCompletionEmail(
-            professionalUser.email,
-            getProfessionalDisplayName(professionalUser),
-            customerUser?.name || 'Customer',
-            String(finalizedBooking._id)
-          );
+        if (professionalUser?._id) {
+          notifyAsync({
+            userId: professionalUser._id.toString(),
+            eventKey: 'professional.completion_confirmed_by_customer',
+            entityType: 'booking',
+            entityId: String(finalizedBooking._id),
+            context: {
+              bookingId: String(finalizedBooking._id),
+              customerName: customerUser?.name,
+            },
+          });
         }
       } catch (emailError: any) {
-        console.error('Failed to send customer-confirmed-completion email:', emailError?.message || emailError);
+        console.error('Failed to notify customer-confirmed-completion:', emailError?.message || emailError);
       }
 
       // Ask both parties for reviews (independent of email delivery)
@@ -900,9 +901,8 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
     ]);
 
     try {
-      if (professionalUser?.email && ADMIN_NOTIFICATIONS_EMAIL) {
-        await sendDisputeRaisedEmail(
-          professionalUser.email,
+      if (ADMIN_NOTIFICATIONS_EMAIL && professionalUser) {
+        await sendDisputeRaisedAdminEmail(
           ADMIN_NOTIFICATIONS_EMAIL,
           getProfessionalDisplayName(professionalUser),
           customerUser?.name || 'Customer',
@@ -911,7 +911,7 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
         );
       }
     } catch (emailError: any) {
-      console.error('Failed to send dispute-raised email:', emailError?.message || emailError);
+      console.error('Failed to send dispute-raised admin email:', emailError?.message || emailError);
     }
 
     try {
@@ -921,7 +921,7 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
           eventKey: 'professional.dispute_started',
           entityType: 'booking',
           entityId: String(disputedBooking._id),
-          context: { bookingId: String(disputedBooking._id) },
+          context: { bookingId: String(disputedBooking._id), reason: trimmedReason, customerName: customerUser?.name },
         });
       }
       if (customerUser?._id) {
@@ -930,7 +930,7 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
           eventKey: 'customer.dispute_started',
           entityType: 'booking',
           entityId: String(disputedBooking._id),
-          context: { bookingId: String(disputedBooking._id) },
+          context: { bookingId: String(disputedBooking._id), reason: trimmedReason, customerName: customerUser?.name },
         });
       }
     } catch (notifyError: any) {
