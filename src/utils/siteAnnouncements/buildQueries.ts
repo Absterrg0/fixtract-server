@@ -1,0 +1,61 @@
+import type { FilterQuery } from 'mongoose';
+import type { ISiteAnnouncement } from '../../models/siteAnnouncement';
+import { escapeRegExp } from '../escapeRegExp';
+import type { AdminListFilters, PublicListFilters } from './types';
+
+export function buildAdminListQuery(
+  filters: AdminListFilters,
+  now: Date = new Date(),
+): FilterQuery<ISiteAnnouncement> {
+  const query: FilterQuery<ISiteAnnouncement> = {};
+
+  if (filters.type) {
+    query.type = filters.type;
+  }
+
+  if (filters.status === 'active') {
+    query.isActive = true;
+    query.startsAt = { $lte: now };
+    query.endsAt = { $gte: now };
+  } else if (filters.status === 'scheduled') {
+    query.startsAt = { $gt: now };
+  } else if (filters.status === 'expired') {
+    query.endsAt = { $lt: now };
+  } else if (filters.status === 'disabled') {
+    query.isActive = false;
+  }
+
+  if (filters.search) {
+    const safe = escapeRegExp(filters.search);
+    query.$or = [
+      { name: { $regex: safe, $options: 'i' } },
+      { title: { $regex: safe, $options: 'i' } },
+    ];
+  }
+
+  return query;
+}
+
+export function buildPublicListQuery(
+  filters: PublicListFilters,
+  now: Date = new Date(),
+): FilterQuery<ISiteAnnouncement> {
+  const localeBase = filters.locale.split('-')[0] || filters.locale;
+  const query: FilterQuery<ISiteAnnouncement> = {
+    isActive: true,
+    startsAt: { $lte: now },
+    endsAt: { $gte: now },
+    locale: { $in: [...new Set([filters.locale, localeBase, 'en'])] },
+  };
+
+  if (filters.type) {
+    query.type = filters.type;
+  }
+
+  // Unknown country → global campaigns only (empty activeCountries).
+  query.$or = filters.countryCode
+    ? [{ activeCountries: { $size: 0 } }, { activeCountries: filters.countryCode }]
+    : [{ activeCountries: { $size: 0 } }];
+
+  return query;
+}
