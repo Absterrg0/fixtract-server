@@ -7,6 +7,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 export interface ICronJobLock extends Document {
   key: string;
   claimedAt: Date;
+  claimId?: string;
   completedAt?: Date;
   sentRecipients: string[];
 }
@@ -15,6 +16,7 @@ const CronJobLockSchema = new Schema<ICronJobLock>(
   {
     key: { type: String, required: true, unique: true, index: true },
     claimedAt: { type: Date, required: true, default: () => new Date() },
+    claimId: { type: String },
     completedAt: { type: Date },
     sentRecipients: { type: [String], default: [] },
   },

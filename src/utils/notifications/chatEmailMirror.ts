@@ -22,7 +22,7 @@ export type MirrorEmailDeliveryClass = 'sent' | 'terminal' | 'retryable';
 
 /** Classify cron mirror notify() results for claim retention vs retry. */
 export function classifyMirrorEmailOutcome(result: {
-  emailOutcome?: 'sent' | 'not_eligible' | 'failed';
+  emailOutcome?: 'sent' | 'not_eligible' | 'failed' | 'in_progress';
   skipped?: string;
 }): MirrorEmailDeliveryClass {
   if (result.emailOutcome === 'sent') return 'sent';

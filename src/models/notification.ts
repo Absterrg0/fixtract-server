@@ -16,8 +16,12 @@ export interface INotification extends Document {
   readAt: Date | null;
   emailAttempted: boolean;
   emailSent: boolean;
+  emailClaimedAt?: Date;
+  emailClaimToken?: string;
   pushAttempted: boolean;
   pushSent: boolean;
+  pushClaimedAt?: Date;
+  pushClaimToken?: string;
   meta?: Record<string, unknown>;
   deliveryKey?: string;
   createdAt: Date;
@@ -44,8 +48,12 @@ const notificationSchema = new Schema<INotification>(
     readAt: { type: Date, default: null },
     emailAttempted: { type: Boolean, default: false },
     emailSent: { type: Boolean, default: false },
+    emailClaimedAt: { type: Date },
+    emailClaimToken: { type: String },
     pushAttempted: { type: Boolean, default: false },
     pushSent: { type: Boolean, default: false },
+    pushClaimedAt: { type: Date },
+    pushClaimToken: { type: String },
     meta: { type: Schema.Types.Mixed },
     deliveryKey: { type: String, trim: true, maxlength: 200 },
   },

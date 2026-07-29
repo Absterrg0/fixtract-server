@@ -66,10 +66,7 @@ const marketingSubscriberSchema = new Schema<IMarketingSubscriber>(
       type: Date,
       default: null,
     },
-    unsubscribedAt: {
-      type: Date,
-      default: null,
-    },
+    unsubscribedAt: { type: Date, default: null },
     unsubscribeToken: {
       type: String,
       required: true,

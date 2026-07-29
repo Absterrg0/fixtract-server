@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import mongoose from 'mongoose';
 import Notification from '../../models/notification';
 import User from '../../models/user';
@@ -26,7 +27,7 @@ export interface NotifyArgs {
   idempotencyKey?: string;
 }
 
-export type EmailDeliveryOutcome = 'sent' | 'not_eligible' | 'failed';
+export type EmailDeliveryOutcome = 'sent' | 'not_eligible' | 'failed' | 'in_progress';
 
 export interface NotifyResult {
   notificationId: string | null;
@@ -34,6 +35,57 @@ export interface NotifyResult {
   pushSent: boolean;
   emailOutcome?: EmailDeliveryOutcome;
   skipped?: 'unknown_event' | 'user_not_found';
+}
+
+const DELIVERY_CLAIM_LEASE_MS = 5 * 60 * 1000;
+
+type DeliveryChannel = 'email' | 'push';
+type DeliveryClaim =
+  | { state: 'claimed'; token: string }
+  | { state: 'sent' | 'in_progress' };
+
+function deliveryFields(channel: DeliveryChannel) {
+  return channel === 'email'
+    ? { attempted: 'emailAttempted', sent: 'emailSent', claimedAt: 'emailClaimedAt', token: 'emailClaimToken' }
+    : { attempted: 'pushAttempted', sent: 'pushSent', claimedAt: 'pushClaimedAt', token: 'pushClaimToken' };
+}
+
+async function claimDelivery(notificationId: string, channel: DeliveryChannel): Promise<DeliveryClaim> {
+  const fields = deliveryFields(channel);
+  const token = crypto.randomUUID();
+  const now = new Date();
+  const claim = await Notification.findOneAndUpdate(
+    {
+      _id: notificationId,
+      [fields.sent]: { $ne: true },
+      $or: [
+        { [fields.claimedAt]: { $exists: false } },
+        { [fields.claimedAt]: null },
+        { [fields.claimedAt]: { $lte: new Date(now.getTime() - DELIVERY_CLAIM_LEASE_MS) } },
+      ],
+    },
+    { $set: { [fields.attempted]: true, [fields.claimedAt]: now, [fields.token]: token } },
+    { new: true },
+  );
+  if (claim) return { state: 'claimed', token };
+
+  const current = await Notification.findById(notificationId).select(fields.sent).lean();
+  return { state: current?.[fields.sent as keyof typeof current] ? 'sent' : 'in_progress' };
+}
+
+async function finishDelivery(
+  notificationId: string,
+  channel: DeliveryChannel,
+  token: string,
+  sent: boolean,
+): Promise<void> {
+  const fields = deliveryFields(channel);
+  await Notification.updateOne(
+    { _id: notificationId, [fields.token]: token },
+    sent
+      ? { $set: { [fields.sent]: true }, $unset: { [fields.claimedAt]: 1, [fields.token]: 1 } }
+      : { $unset: { [fields.claimedAt]: 1, [fields.token]: 1 } },
+  );
 }
 
 /**
@@ -74,8 +126,6 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
       : undefined;
 
   let notificationId: string | null = null;
-  let existingEmailSent = false;
-  let existingPushSent = false;
   if (persistInbox) {
     try {
       const notificationData = {
@@ -103,8 +153,6 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
           )
         : await Notification.create(notificationData);
       notificationId = doc._id.toString();
-      existingEmailSent = doc.emailSent;
-      existingPushSent = doc.pushSent;
     } catch (err) {
       console.error(`[notify] Failed to persist inbox for ${args.eventKey}:`, err);
       // Continue to attempt channels even if persist failed (best-effort)
@@ -118,24 +166,33 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
   let pushSent = false;
   let emailOutcome: EmailDeliveryOutcome | undefined;
 
-  if (existingEmailSent) {
-    emailSent = true;
-    emailOutcome = 'sent';
-  } else if (sendEmail && built.sendEmail && user.email) {
+  if (sendEmail && built.sendEmail && user.email) {
+    let emailClaim: DeliveryClaim | null = null;
     try {
-      if (notificationId) {
-        await Notification.findByIdAndUpdate(notificationId, { emailAttempted: true });
-      }
-      emailSent = await built.sendEmail({
-        email: user.email,
-        name: user.name || 'User',
-        userId: user._id.toString(),
-      });
-      emailOutcome = emailSent ? 'sent' : 'failed';
-      if (notificationId && emailSent) {
-        await Notification.findByIdAndUpdate(notificationId, { emailSent: true });
+      emailClaim = notificationId ? await claimDelivery(notificationId, 'email') : null;
+      if (emailClaim?.state === 'sent') {
+        emailSent = true;
+        emailOutcome = 'sent';
+      } else if (emailClaim?.state === 'in_progress') {
+        emailOutcome = 'in_progress';
+      } else {
+        if (notificationId) {
+          await Notification.findByIdAndUpdate(notificationId, { emailAttempted: true });
+        }
+        emailSent = await built.sendEmail({
+          email: user.email,
+          name: user.name || 'User',
+          userId: user._id.toString(),
+        });
+        emailOutcome = emailSent ? 'sent' : 'failed';
+        if (notificationId && emailClaim?.state === 'claimed') {
+          await finishDelivery(notificationId, 'email', emailClaim.token, emailSent);
+        }
       }
     } catch (err) {
+      if (notificationId && emailClaim?.state === 'claimed') {
+        await finishDelivery(notificationId, 'email', emailClaim.token, false);
+      }
       emailOutcome = 'failed';
       console.error(`[notify] Email failed for ${args.eventKey}:`, err);
     }
@@ -143,11 +200,14 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
     emailOutcome = 'not_eligible';
   }
 
-  if (sendPush && !existingPushSent) {
+  if (sendPush) {
+    let pushClaim: DeliveryClaim | null = null;
     try {
-      if (notificationId) {
-        await Notification.findByIdAndUpdate(notificationId, { pushAttempted: true });
+      pushClaim = notificationId ? await claimDelivery(notificationId, 'push') : null;
+      if (pushClaim?.state === 'sent' || pushClaim?.state === 'in_progress') {
+        return { notificationId, emailSent, pushSent, emailOutcome };
       }
+      if (notificationId) await Notification.findByIdAndUpdate(notificationId, { pushAttempted: true });
       await sendPushToUser(
         user._id.toString(),
         {
@@ -165,10 +225,13 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
         { skipPrefCheck: true },
       );
       pushSent = true;
-      if (notificationId) {
-        await Notification.findByIdAndUpdate(notificationId, { pushSent: true });
+      if (notificationId && pushClaim?.state === 'claimed') {
+        await finishDelivery(notificationId, 'push', pushClaim.token, true);
       }
     } catch (err) {
+      if (notificationId && pushClaim?.state === 'claimed') {
+        await finishDelivery(notificationId, 'push', pushClaim.token, false);
+      }
       console.error(`[notify] Push failed for ${args.eventKey}:`, err);
     }
   }

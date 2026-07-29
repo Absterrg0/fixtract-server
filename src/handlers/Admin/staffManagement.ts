@@ -19,22 +19,26 @@ import CronJobLock from '../../models/cronJobLock';
 const SUPER_ADMIN_GUARD_KEY = 'admin_super_role_guard';
 const SUPER_ADMIN_GUARD_LEASE_MS = 30_000;
 
-async function acquireSuperAdminGuard(): Promise<boolean> {
+async function acquireSuperAdminGuard(): Promise<string | null> {
+  const claimId = crypto.randomUUID();
   try {
-    await CronJobLock.findOneAndUpdate(
+    const lock = await CronJobLock.findOneAndUpdate(
       {
         key: SUPER_ADMIN_GUARD_KEY,
-        claimedAt: { $lte: new Date(Date.now() - SUPER_ADMIN_GUARD_LEASE_MS) },
+        $or: [
+          { claimedAt: { $lte: new Date(Date.now() - SUPER_ADMIN_GUARD_LEASE_MS) } },
+          { claimedAt: { $exists: false } },
+        ],
       },
       {
-        $set: { claimedAt: new Date() },
+        $set: { claimedAt: new Date(), claimId },
         $setOnInsert: { key: SUPER_ADMIN_GUARD_KEY },
       },
-      { upsert: true },
+      { upsert: true, new: true },
     );
-    return true;
+    return lock?.claimId === claimId ? claimId : null;
   } catch (error: any) {
-    if (error?.code === 11000) return false;
+    if (error?.code === 11000) return null;
     throw error;
   }
 }
@@ -367,7 +371,7 @@ export const resendStaffInvite = async (req: Request, res: Response) => {
 };
 
 export const updateStaff = async (req: Request, res: Response) => {
-  let superAdminGuard = false;
+  let superAdminGuard: string | null = null;
   try {
     const admin = req.admin as IUser;
     const { staffId } = req.params;
@@ -458,7 +462,7 @@ export const updateStaff = async (req: Request, res: Response) => {
     return sendHandlerError(res, error, 'Failed to update staff');
   } finally {
     if (superAdminGuard) {
-      await CronJobLock.deleteOne({ key: SUPER_ADMIN_GUARD_KEY }).catch((error) => {
+      await CronJobLock.deleteOne({ key: SUPER_ADMIN_GUARD_KEY, claimId: superAdminGuard }).catch((error) => {
         console.error('Failed to release super-admin update guard:', error);
       });
     }

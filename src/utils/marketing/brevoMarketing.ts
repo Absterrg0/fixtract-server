@@ -197,8 +197,8 @@ async function waitForImport(processId: number): Promise<void> {
   );
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const process = await api.getProcess(processId);
-    if (String(process.body?.status) === 'completed') return;
+    const processState = await api.getProcess(processId);
+    if (String(processState.body?.status) === 'completed') return;
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   throw new Error(`Brevo contact import ${processId} did not complete within ${timeout}ms`);
@@ -336,7 +336,7 @@ export async function sendBrevoCampaignNow(campaignId: number): Promise<void> {
     await api.sendEmailCampaignNow(campaignId);
   } catch (error) {
     const current = await api.getEmailCampaign(campaignId, 'globalStats').catch(() => null);
-    if (['sent', 'queued'].includes(String(current?.body?.status))) return;
+    if (['sent', 'queued', 'in_process'].includes(String(current?.body?.status))) return;
     console.error('[Brevo] sendEmailCampaignNow failed', {
       campaignId,
       ...sanitizedBrevoError(error),

@@ -64,35 +64,33 @@ async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
     },
   );
 
-  const sub = await MarketingSubscriber.findOne({ email: normalized });
+  const now = new Date();
   let already = false;
-  if (sub) {
-    already = Boolean(sub.unsubscribedAt);
-    if (!sub.unsubscribedAt) {
-      sub.unsubscribedAt = new Date();
-      sub.consentVerifiedAt = null;
-      await sub.save();
-    }
-  } else {
-    try {
-      await MarketingSubscriber.create({
-        email: normalized,
-        interestedServices: [],
-        locale: 'en',
-        unsubscribeToken: generateUnsubscribeToken(),
-        source: 'manual',
-        subscribedAt: new Date(),
-        unsubscribedAt: new Date(),
-      });
-    } catch (error: unknown) {
-      if (!isDuplicateKeyError(error)) throw error;
-      // Concurrent create on unique email — treat as already handled / ensure unsubscribed
-      await MarketingSubscriber.updateOne(
-        { email: normalized },
-        { $set: { unsubscribedAt: new Date() } },
-      );
-      already = true;
-    }
+  try {
+    const previous = await MarketingSubscriber.findOneAndUpdate(
+      { email: normalized },
+      {
+        $set: { unsubscribedAt: now },
+        $unset: { consentVerifiedAt: 1 },
+        $setOnInsert: {
+          interestedServices: [],
+          locale: 'en',
+          unsubscribeToken: generateUnsubscribeToken(),
+          source: 'manual',
+          subscribedAt: now,
+        },
+      },
+      { upsert: true, new: false },
+    );
+    already = Boolean(previous?.unsubscribedAt);
+  } catch (error: unknown) {
+    if (!isDuplicateKeyError(error)) throw error;
+    // A simultaneous upsert won the unique-email race. Its final state is also unsubscribed.
+    await MarketingSubscriber.updateOne(
+      { email: normalized },
+      { $set: { unsubscribedAt: now }, $unset: { consentVerifiedAt: 1 } },
+    );
+    already = true;
   }
 
   return { already };

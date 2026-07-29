@@ -236,27 +236,27 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
     if (type === 'promotions' && channel === 'email') {
       const normalizedEmail = updatedUser.email.toLowerCase().trim();
       const consentUpdatedAt = new Date();
-      await MarketingSubscriber.updateOne(
-        {
-          $or: [
-            { userId: updatedUser._id },
-            { email: normalizedEmail },
-          ],
-        },
-        enabled
-          ? {
-              $set: {
-                userId: updatedUser._id,
-                unsubscribedAt: null,
-                subscribedAt: consentUpdatedAt,
-                consentVerifiedAt: consentUpdatedAt,
-              },
-            }
-          : {
-              $set: { unsubscribedAt: consentUpdatedAt },
-              $unset: { consentVerifiedAt: 1 },
+      if (enabled) {
+        await MarketingSubscriber.updateOne(
+          { email: normalizedEmail },
+          {
+            $set: {
+              userId: updatedUser._id,
+              unsubscribedAt: null,
+              subscribedAt: consentUpdatedAt,
+              consentVerifiedAt: consentUpdatedAt,
             },
-      );
+          },
+        );
+      } else {
+        await MarketingSubscriber.updateMany(
+          { $or: [{ userId: updatedUser._id }, { email: normalizedEmail }] },
+          {
+            $set: { unsubscribedAt: consentUpdatedAt },
+            $unset: { consentVerifiedAt: 1 },
+          },
+        );
+      }
     }
 
     res.status(200).json({ success: true, msg: 'Preference updated' });

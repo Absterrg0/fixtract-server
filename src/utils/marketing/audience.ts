@@ -52,7 +52,7 @@ export async function syncSubscribersFromUsers(): Promise<{
   const baseQuery = {
     email: { $exists: true, $nin: [null, ''] },
     role: { $in: ['customer', 'professional'] },
-    deletedAt: { $exists: false },
+    deletedAt: null,
   };
   let lastUserId: unknown;
   let upserted = 0;
@@ -130,11 +130,7 @@ export async function syncSubscribersFromUsers(): Promise<{
       );
       const existing = existingByEmail.get(email);
       const bookingEngagement = bookingActivityByUser.get(String(user._id));
-      const userUpdatedAt = user.updatedAt instanceof Date ? user.updatedAt : undefined;
-      const lastEngagedAt =
-        bookingEngagement && userUpdatedAt
-          ? new Date(Math.max(bookingEngagement.getTime(), userUpdatedAt.getTime()))
-          : bookingEngagement || userUpdatedAt;
+      const lastEngagedAt = bookingEngagement;
 
       if (!optedIn) {
         if (existing && !existing.unsubscribedAt) {
