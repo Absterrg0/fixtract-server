@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import User from '../../models/user';
+import CronJobLock from '../../models/cronJobLock';
 import { runNotificationReminders } from '../../utils/notifications/runNotificationReminders';
 import { hasPermission, resolveAdminRole } from '../../utils/adminRbac/rolePermissions';
 
@@ -158,12 +159,35 @@ async function executeKpiMonthlyReport(): Promise<KpiMonthlyReportResult> {
 }
 
 async function maybeRunDay1KpiMonthly(): Promise<
-  KpiMonthlyReportResult | { error: string } | undefined
+  KpiMonthlyReportResult | { error: string; skipped?: boolean; reason?: string } | undefined
 > {
   if (new Date().getUTCDate() !== 1) return undefined;
+
+  const monthKey = previousCalendarMonthUtc().from.toISOString().slice(0, 7);
+  const lockKey = `kpi_monthly:${monthKey}`;
+
+  try {
+    await CronJobLock.create({ key: lockKey, claimedAt: new Date() });
+  } catch (error: unknown) {
+    const code =
+      error && typeof error === 'object' && 'code' in error
+        ? (error as { code?: number | string }).code
+        : undefined;
+    if (code === 11000 || code === '11000') {
+      console.log('[Cron] Monthly KPI already claimed for', monthKey);
+      return { skipped: true, reason: 'already_ran', sent: 0, failed: 0, durationMs: 0 };
+    }
+    throw error;
+  }
+
   try {
     return await executeKpiMonthlyReport();
   } catch (error: unknown) {
+    try {
+      await CronJobLock.deleteOne({ key: lockKey });
+    } catch (unlockErr) {
+      console.error('[Cron] Failed to release KPI monthly lock', unlockErr);
+    }
     const message = error instanceof Error ? error.message : 'Monthly KPI report failed';
     console.error('[Cron] Piggybacked monthly KPI report failed:', error);
     return { error: message };
@@ -234,7 +258,11 @@ export const runKpiMonthlyReportCron = async (req: Request, res: Response) => {
   try {
     const data = await executeKpiMonthlyReport();
     return res.json({ success: true, data });
-  } catch {
-    return res.status(500).json({ success: false, msg: 'Monthly KPI report failed' });
+  } catch (error: unknown) {
+    return res.status(500).json({
+      success: false,
+      msg: 'Monthly KPI report failed',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    });
   }
 };
