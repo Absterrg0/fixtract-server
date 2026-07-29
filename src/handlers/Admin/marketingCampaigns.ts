@@ -229,11 +229,16 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
     }
     if (campaign.type === 'reengagement') {
       if (inactiveDays !== undefined) {
+        const configuredInactiveDays = Math.floor(
+          Number(process.env.MARKETING_REENGAGEMENT_INACTIVE_DAYS),
+        );
         const parsed = Number(inactiveDays);
         campaign.inactiveDays =
           Number.isFinite(parsed) && parsed > 0
             ? Math.max(1, Math.floor(parsed))
-            : Number(process.env.MARKETING_REENGAGEMENT_INACTIVE_DAYS) || 60;
+            : Number.isFinite(configuredInactiveDays) && configuredInactiveDays > 0
+              ? configuredInactiveDays
+              : 60;
       }
       if (autoSend !== undefined) campaign.autoSend = Boolean(autoSend);
     }

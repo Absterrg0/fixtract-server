@@ -64,6 +64,10 @@ export interface IMarketingCampaign extends Document {
   sentAt?: Date | null;
   createdBy?: mongoose.Types.ObjectId;
   deliveries: ICampaignLocaleDelivery[];
+  /** Identifies the invocation that currently owns a sending campaign. */
+  sendClaimId?: string;
+  /** Lease timestamp used to recover abandoned sending campaigns. */
+  sendStartedAt?: Date | null;
   lastError?: string;
   utmCampaign?: string;
   createdAt: Date;
@@ -152,6 +156,8 @@ const marketingCampaignSchema = new Schema<IMarketingCampaign>(
     sentAt: { type: Date, default: null },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
     deliveries: { type: [deliverySchema], default: [] },
+    sendClaimId: { type: String, index: true },
+    sendStartedAt: { type: Date, default: null },
     lastError: { type: String },
     utmCampaign: { type: String, trim: true },
   },

@@ -46,24 +46,32 @@ export async function syncSubscribersFromUsers(): Promise<{
   upserted: number;
   unsubscribed: number;
 }> {
-  // Cap daily sync so cron cannot load an unbounded user set into memory.
-  // If you outgrow this, switch to a cursor/_id pagination loop.
-  const SYNC_USER_CAP = 5000;
-  const users = await User.find({
+  const SYNC_BATCH_SIZE = 500;
+  const baseQuery = {
     email: { $exists: true, $nin: [null, ''] },
     role: { $in: ['customer', 'professional'] },
     deletedAt: { $exists: false },
-  })
-    .select(
-      'email name role location companyAddress businessInfo notificationPreferences serviceCategories preferredLocale locale language',
+  };
+  let lastUserId: unknown;
+  let upserted = 0;
+  let unsubscribed = 0;
+
+  // Stable _id keyset pagination bounds memory without permanently omitting users
+  // beyond an arbitrary daily cap.
+  while (true) {
+    const users = await User.find(
+      lastUserId ? { ...baseQuery, _id: { $gt: lastUserId } } : baseQuery,
     )
-    .limit(SYNC_USER_CAP)
-    .lean();
+      .select(
+        'email name role location companyAddress businessInfo notificationPreferences serviceCategories preferredLocale locale language',
+      )
+      .sort({ _id: 1 })
+      .limit(SYNC_BATCH_SIZE)
+      .lean();
 
-  const emails = users.map((u) => String(u.email).toLowerCase().trim()).filter(Boolean);
-  const serviceInterestByUser = new Map<string, string[]>();
+    if (users.length === 0) break;
 
-  if (users.length > 0) {
+    const serviceInterestByUser = new Map<string, string[]>();
     const userIds = users.map((u) => u._id);
     const bookingServices = await Booking.aggregate<{
       _id: unknown;
@@ -80,64 +88,62 @@ export async function syncSubscribersFromUsers(): Promise<{
     for (const row of bookingServices) {
       serviceInterestByUser.set(String(row._id), (row.services || []).filter(Boolean));
     }
-  }
 
-  let upserted = 0;
-  let unsubscribed = 0;
+    for (const user of users) {
+      const email = String(user.email).toLowerCase().trim();
+      if (!email) continue;
 
-  for (const user of users) {
-    const email = String(user.email).toLowerCase().trim();
-    if (!email) continue;
+      const promotionsEmail = (user as any).notificationPreferences?.promotions?.email;
+      const optedIn = promotionsEmail !== false;
+      const region = userCountry(user);
+      const fromBookings = serviceInterestByUser.get(String(user._id)) || [];
+      const fromPro =
+        Array.isArray((user as any).serviceCategories) ? (user as any).serviceCategories : [];
+      const interestedServices = Array.from(new Set([...fromBookings, ...fromPro].map(String)));
+      // Seed locale from preference fields when present (schema may not declare them yet)
+      const locale = normalizeLocale(
+        (user as any).preferredLocale ?? (user as any).locale ?? (user as any).language,
+      );
 
-    const promotionsEmail = (user as any).notificationPreferences?.promotions?.email;
-    const optedIn = promotionsEmail !== false;
-    const region = userCountry(user);
-    const fromBookings = serviceInterestByUser.get(String(user._id)) || [];
-    const fromPro =
-      Array.isArray((user as any).serviceCategories) ? (user as any).serviceCategories : [];
-    const interestedServices = Array.from(new Set([...fromBookings, ...fromPro].map(String)));
-    // Seed locale from preference fields when present (schema may not declare them yet)
-    const locale = normalizeLocale(
-      (user as any).preferredLocale ?? (user as any).locale ?? (user as any).language,
-    );
-
-    const existing = await MarketingSubscriber.findOne({ email });
-    if (!optedIn) {
-      if (existing && !existing.unsubscribedAt) {
-        existing.unsubscribedAt = new Date();
-        await existing.save();
-        unsubscribed += 1;
+      const existing = await MarketingSubscriber.findOne({ email });
+      if (!optedIn) {
+        if (existing && !existing.unsubscribedAt) {
+          existing.unsubscribedAt = new Date();
+          await existing.save();
+          unsubscribed += 1;
+        }
+        continue;
       }
-      continue;
+
+      if (existing) {
+        existing.userId = user._id as any;
+        existing.region = region;
+        existing.interestedServices = interestedServices;
+        if (!existing.locale || existing.locale === 'en') existing.locale = locale;
+        if (existing.unsubscribedAt) existing.unsubscribedAt = null;
+        if (!existing.unsubscribeToken) existing.unsubscribeToken = generateUnsubscribeToken();
+        await existing.save();
+        upserted += 1;
+      } else {
+        await MarketingSubscriber.create({
+          email,
+          userId: user._id,
+          region,
+          interestedServices,
+          locale,
+          unsubscribeToken: generateUnsubscribeToken(),
+          source: 'user_sync',
+          subscribedAt: new Date(),
+          unsubscribedAt: null,
+        });
+        upserted += 1;
+      }
     }
 
-    if (existing) {
-      existing.userId = user._id as any;
-      existing.region = region;
-      existing.interestedServices = interestedServices;
-      if (!existing.locale || existing.locale === 'en') existing.locale = locale;
-      if (existing.unsubscribedAt) existing.unsubscribedAt = null;
-      if (!existing.unsubscribeToken) existing.unsubscribeToken = generateUnsubscribeToken();
-      await existing.save();
-      upserted += 1;
-    } else {
-      await MarketingSubscriber.create({
-        email,
-        userId: user._id,
-        region,
-        interestedServices,
-        locale,
-        unsubscribeToken: generateUnsubscribeToken(),
-        source: 'user_sync',
-        subscribedAt: new Date(),
-        unsubscribedAt: null,
-      });
-      upserted += 1;
-    }
+    lastUserId = users[users.length - 1]._id;
+    if (users.length < SYNC_BATCH_SIZE) break;
   }
 
-  // Mark subscribers whose user no longer exists / email gone as untouched
-  void emails;
   return { upserted, unsubscribed };
 }
 

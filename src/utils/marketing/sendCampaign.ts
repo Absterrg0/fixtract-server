@@ -4,6 +4,7 @@ import MarketingCampaign, {
   MARKETING_LOCALES,
 } from '../../models/marketingCampaign';
 import MarketingSubscriber from '../../models/marketingSubscriber';
+import { randomUUID } from 'node:crypto';
 import { getFrontendUrl } from '../frontendUrl';
 import { resolveCampaignAudience } from './audience';
 import {
@@ -74,14 +75,35 @@ export function personalizedUnsubscribeFooter(email: string): string {
   return `<p style="font-size:12px;color:#6b7280;text-align:center;"><a href="${url}">Unsubscribe</a></p>`;
 }
 
+export const MARKETING_SEND_LEASE_MS = 30 * 60 * 1000;
+
+async function failOwnedCampaign(
+  campaignId: string,
+  claimId: string,
+  error: string,
+  deliveries?: IMarketingCampaign['deliveries'],
+): Promise<{ ok: false; error: string }> {
+  const set: Record<string, unknown> = {
+    status: 'failed',
+    lastError: error,
+    sendStartedAt: null,
+  };
+  if (deliveries) set.deliveries = deliveries;
+
+  await MarketingCampaign.updateOne(
+    { _id: campaignId, status: 'sending', sendClaimId: claimId },
+    { $set: set, $unset: { sendClaimId: 1 } },
+  );
+  return { ok: false, error };
+}
+
 export async function sendMarketingCampaign(
   campaignId: string,
-  opts?: { forceNow?: boolean },
+  opts?: { forceNow?: boolean; claimId?: string },
 ): Promise<{ ok: true; campaign: IMarketingCampaign } | { ok: false; error: string }> {
   let campaign = await MarketingCampaign.findById(campaignId);
   if (!campaign) return { ok: false, error: 'Campaign not found' };
 
-  // 'sending' is allowed when cron already claimed scheduled→sending
   if (!['draft', 'scheduled', 'failed', 'sending'].includes(campaign.status)) {
     return { ok: false, error: `Cannot send campaign in status ${campaign.status}` };
   }
@@ -92,32 +114,41 @@ export async function sendMarketingCampaign(
     return { ok: true, campaign };
   }
 
-  const locales = localesToSend(campaign);
-  if (locales.length === 0) {
-    return { ok: false, error: 'Add at least one locale with subject and HTML (or Brevo template id)' };
-  }
-
-  if (!isBrevoMarketingConfigured() && !isMarketingDryRun()) {
-    return { ok: false, error: 'BREVO_API_KEY is not configured' };
-  }
-
-  if (campaign.status === 'sending') {
-    // Already claimed by cron — reset delivery tracking and continue
-    campaign.lastError = undefined;
-    campaign.deliveries = [];
+  const claimId = opts?.claimId || randomUUID();
+  if (opts?.claimId) {
+    const owned = await MarketingCampaign.findOne({
+      _id: campaignId,
+      status: 'sending',
+      sendClaimId: claimId,
+    });
+    if (!owned) {
+      return { ok: false, error: 'Campaign send claim is no longer owned by this invocation' };
+    }
+    campaign = owned;
   } else {
-    // Atomic claim prevents double-send races (admin send / reengagement / overlapping callers)
+    const staleBefore = new Date(Date.now() - MARKETING_SEND_LEASE_MS);
     const claimed = await MarketingCampaign.findOneAndUpdate(
       {
         _id: campaign._id,
-        status: { $in: ['draft', 'scheduled', 'failed'] },
+        $or: [
+          { status: { $in: ['draft', 'scheduled', 'failed'] } },
+          {
+            status: 'sending',
+            $or: [
+              { sendStartedAt: { $lte: staleBefore } },
+              { sendStartedAt: null },
+              { sendStartedAt: { $exists: false } },
+            ],
+          },
+        ],
       },
       {
         $set: {
           status: 'sending',
-          lastError: undefined,
-          deliveries: [],
+          sendClaimId: claimId,
+          sendStartedAt: new Date(),
         },
+        $unset: { lastError: 1 },
       },
       { new: true },
     );
@@ -134,22 +165,70 @@ export async function sendMarketingCampaign(
     campaign = claimed;
   }
 
-  const members = await resolveCampaignAudience(campaign.audience, {
-    inactiveDays: resolveReengagementInactiveDays(campaign),
-  });
+  const locales = localesToSend(campaign);
+  if (locales.length === 0) {
+    return failOwnedCampaign(
+      campaignId,
+      claimId,
+      'Add at least one locale with subject and HTML (or Brevo template id)',
+    );
+  }
+
+  if (!isBrevoMarketingConfigured() && !isMarketingDryRun()) {
+    return failOwnedCampaign(campaignId, claimId, 'BREVO_API_KEY is not configured');
+  }
+
+  let members;
+  try {
+    members = await resolveCampaignAudience(campaign.audience, {
+      inactiveDays: resolveReengagementInactiveDays(campaign),
+    });
+  } catch (err: any) {
+    const error = err?.message || String(err) || 'Failed to resolve campaign audience';
+    return failOwnedCampaign(campaignId, claimId, error);
+  }
 
   if (members.length === 0) {
-    campaign.status = 'failed';
-    campaign.lastError = 'Audience is empty — sync subscribers and check filters';
-    await campaign.save();
-    return { ok: false, error: campaign.lastError };
+    return failOwnedCampaign(
+      campaignId,
+      claimId,
+      'Audience is empty — sync subscribers and check filters',
+    );
   }
 
   const stamp = Date.now().toString(36);
-  const deliveries: IMarketingCampaign['deliveries'] = [];
+  const deliveries: IMarketingCampaign['deliveries'] = campaign.deliveries.map((delivery) => ({
+    locale: delivery.locale,
+    brevoListId: delivery.brevoListId,
+    brevoCampaignId: delivery.brevoCampaignId,
+    recipientCount: delivery.recipientCount,
+    stats: delivery.stats,
+    error: delivery.error,
+  }));
+  const checkpoint = async (): Promise<boolean> => {
+    const result = await MarketingCampaign.updateOne(
+      { _id: campaignId, status: 'sending', sendClaimId: claimId },
+      { $set: { deliveries, sendStartedAt: new Date() } },
+    );
+    return result.matchedCount === 1;
+  };
+  const recordDelivery = (delivery: IMarketingCampaign['deliveries'][number]) => {
+    const index = deliveries.findIndex((existing) => existing.locale === delivery.locale);
+    if (index >= 0) deliveries[index] = delivery;
+    else deliveries.push(delivery);
+  };
 
   try {
     for (const locale of locales) {
+      const completed = deliveries.find(
+        (delivery) => delivery.locale === locale && delivery.brevoCampaignId,
+      );
+      if (completed) continue;
+
+      if (!(await checkpoint())) {
+        return { ok: false, error: 'Campaign send claim was lost before completion' };
+      }
+
       const content = contentForLocale(campaign, locale);
       if (!content) continue;
 
@@ -163,16 +242,19 @@ export async function sendMarketingCampaign(
             : [];
 
       if (recipients.length === 0) {
-        deliveries.push({
+        recordDelivery({
           locale,
           recipientCount: 0,
           error: 'No recipients for locale',
         });
+        if (!(await checkpoint())) {
+          return { ok: false, error: 'Campaign send claim was lost before completion' };
+        }
         continue;
       }
 
       if (isMarketingDryRun()) {
-        deliveries.push({
+        recordDelivery({
           locale,
           recipientCount: recipients.length,
           stats: {
@@ -185,6 +267,9 @@ export async function sendMarketingCampaign(
             hardBounces: 0,
           },
         });
+        if (!(await checkpoint())) {
+          return { ok: false, error: 'Campaign send claim was lost before completion' };
+        }
         continue;
       }
 
@@ -214,12 +299,15 @@ export async function sendMarketingCampaign(
         utmCampaign: campaign.utmCampaign || `fixtract_${campaign.type}_${campaign._id}`,
       });
 
-      deliveries.push({
+      recordDelivery({
         locale,
         brevoListId: listId,
         brevoCampaignId,
         recipientCount: recipients.length,
       });
+      if (!(await checkpoint())) {
+        return { ok: false, error: 'Campaign send claim was lost after delivery' };
+      }
 
       const ids = recipients.map((r) => r.subscriberId).filter(Boolean);
       if (ids.length > 0) {
@@ -230,17 +318,26 @@ export async function sendMarketingCampaign(
       }
     }
 
-    campaign.deliveries = deliveries;
-    campaign.status = 'sent';
-    campaign.sentAt = new Date();
-    await campaign.save();
-    return { ok: true, campaign };
+    const completed = await MarketingCampaign.findOneAndUpdate(
+      { _id: campaignId, status: 'sending', sendClaimId: claimId },
+      {
+        $set: {
+          deliveries,
+          status: 'sent',
+          sentAt: new Date(),
+          sendStartedAt: null,
+        },
+        $unset: { sendClaimId: 1, lastError: 1 },
+      },
+      { new: true },
+    );
+    if (!completed) {
+      return { ok: false, error: 'Campaign send claim was lost before completion' };
+    }
+    return { ok: true, campaign: completed };
   } catch (err: any) {
-    campaign.deliveries = deliveries;
-    campaign.status = 'failed';
-    campaign.lastError = err?.message || String(err);
-    await campaign.save();
-    return { ok: false, error: campaign.lastError || 'Send failed' };
+    const error = err?.message || String(err) || 'Send failed';
+    return failOwnedCampaign(campaignId, claimId, error, deliveries);
   }
 }
 

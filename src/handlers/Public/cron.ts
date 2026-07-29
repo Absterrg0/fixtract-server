@@ -4,8 +4,13 @@ import CronJobLock from '../../models/cronJobLock';
 import { runNotificationReminders } from '../../utils/notifications/runNotificationReminders';
 import { hasPermission, resolveAdminRole } from '../../utils/adminRbac/rolePermissions';
 import { syncSubscribersFromUsers } from '../../utils/marketing/audience';
-import { runReengagementSweep, sendMarketingCampaign } from '../../utils/marketing/sendCampaign';
+import {
+  MARKETING_SEND_LEASE_MS,
+  runReengagementSweep,
+  sendMarketingCampaign,
+} from '../../utils/marketing/sendCampaign';
 import MarketingCampaign from '../../models/marketingCampaign';
+import { randomUUID } from 'node:crypto';
 
 function isAuthorizedCron(req: Request): boolean {
   const secret = process.env.CRON_SECRET;
@@ -302,25 +307,46 @@ type MarketingCampaignsDailyResult = {
 async function executeMarketingCampaignsDaily(): Promise<MarketingCampaignsDailyResult> {
   const startedAt = Date.now();
   const sync = await syncSubscribersFromUsers();
+  const staleSendBefore = new Date(Date.now() - MARKETING_SEND_LEASE_MS);
+  const claimableSend = {
+    $or: [
+      {
+        status: 'scheduled',
+        scheduledAt: { $lte: new Date() },
+      },
+      {
+        status: 'sending',
+        $or: [
+          { sendStartedAt: { $lte: staleSendBefore } },
+          { sendStartedAt: null },
+          { sendStartedAt: { $exists: false } },
+        ],
+      },
+    ],
+  };
 
-  const due = await MarketingCampaign.find({
-    status: 'scheduled',
-    scheduledAt: { $lte: new Date() },
-  })
+  const due = await MarketingCampaign.find(claimableSend)
     .select('_id')
     .limit(10)
     .lean();
 
   const scheduledResults: Array<{ id: string; ok: boolean; error?: string }> = [];
   for (const row of due) {
+    const claimId = randomUUID();
     // Atomically claim scheduled → sending to prevent double-send races
     const claimed = await MarketingCampaign.findOneAndUpdate(
       {
         _id: row._id,
-        status: 'scheduled',
-        scheduledAt: { $lte: new Date() },
+        ...claimableSend,
       },
-      { $set: { status: 'sending' } },
+      {
+        $set: {
+          status: 'sending',
+          sendClaimId: claimId,
+          sendStartedAt: new Date(),
+        },
+        $unset: { lastError: 1 },
+      },
       { new: true },
     );
     if (!claimed) {
@@ -332,7 +358,10 @@ async function executeMarketingCampaignsDaily(): Promise<MarketingCampaignsDaily
       continue;
     }
 
-    const result = await sendMarketingCampaign(String(row._id), { forceNow: true });
+    const result = await sendMarketingCampaign(String(row._id), {
+      forceNow: true,
+      claimId,
+    });
     scheduledResults.push({
       id: String(row._id),
       ok: result.ok,
