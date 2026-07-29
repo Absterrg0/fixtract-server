@@ -29,11 +29,6 @@ import {
   resolveSubprojectIndex,
   normalizeExtraOptions,
 } from '../../utils/bookingHelpers';
-import {
-  sendBookingScheduledEmail,
-  sendRescheduleRequestedEmail,
-  sendRescheduleResolvedEmail,
-} from '../../utils/emailService';
 import { notifyAsync } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { MAX_RESCHEDULES_PER_BOOKING } from '../../constants/booking';
@@ -1150,17 +1145,22 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
     try {
       const professional = booking.professional as any;
       const customer = booking.customer as any;
-      if (professional?.email) {
-        await sendBookingScheduledEmail(
-          professional.email,
-          getProfessionalDisplayName(professional),
-          customer?.name || 'the customer',
-          (booking as any).scheduledStartDate,
-          String(booking._id)
-        );
+      const professionalId = professional?._id?.toString?.() || professional?.id;
+      if (professionalId) {
+        notifyAsync({
+          userId: professionalId,
+          eventKey: 'professional.booking_scheduled',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            customerName: customer?.name,
+            scheduledStart: (booking as any).scheduledStartDate,
+          },
+        });
       }
     } catch (emailError: any) {
-      console.error('Failed to send booking-scheduled email:', emailError?.message || emailError);
+      console.error('Failed to notify booking-scheduled:', emailError?.message || emailError);
     }
 
     return res.json({
@@ -1304,19 +1304,8 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
     try {
       const customer = booking.customer as any;
       const professional = booking.professional as any;
-      if (customer?.email) {
-        const oldDate = booking.rescheduleRequest?.previousSchedule?.scheduledStartDate;
-        const newDate = booking.rescheduleRequest?.proposedSchedule?.scheduledStartDate;
-        await sendRescheduleRequestedEmail(
-          customer.email,
-          customer.name || 'Customer',
-          getProfessionalDisplayName(professional, 'the professional'),
-          oldDate,
-          newDate,
-          normalizedReason,
-          String(booking._id)
-        );
-      }
+      const oldDate = booking.rescheduleRequest?.previousSchedule?.scheduledStartDate;
+      const newDate = booking.rescheduleRequest?.proposedSchedule?.scheduledStartDate;
       // Notify the party who must respond (not the requester)
       if (isProfessional && customerId) {
         notifyAsync({
@@ -1324,7 +1313,13 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
           eventKey: 'customer.reschedule_requested',
           entityType: 'booking',
           entityId: String(booking._id),
-          context: { bookingId: String(booking._id) },
+          context: {
+            bookingId: String(booking._id),
+            professionalName: getProfessionalDisplayName(professional),
+            oldDate,
+            newDate,
+            reason: normalizedReason,
+          },
         });
       } else if (isCustomer && professionalId) {
         notifyAsync({
@@ -1332,11 +1327,17 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
           eventKey: 'professional.reschedule_requested',
           entityType: 'booking',
           entityId: String(booking._id),
-          context: { bookingId: String(booking._id) },
+          context: {
+            bookingId: String(booking._id),
+            customerName: customer?.name,
+            oldDate,
+            newDate,
+            reason: normalizedReason,
+          },
         });
       }
     } catch (emailError: any) {
-      console.error('Failed to send reschedule-requested email:', emailError?.message || emailError);
+      console.error('Failed to notify reschedule-requested:', emailError?.message || emailError);
     }
 
     return res.json({
@@ -1530,29 +1531,24 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
     if (normalizedAction !== 'dispute') {
       try {
         const professional = booking.professional as any;
-        if (professional?.email) {
-          await sendRescheduleResolvedEmail(
-            professional.email,
-            getProfessionalDisplayName(professional),
-            normalizedAction === 'accept' ? 'accept' : 'decline',
-            typeof note === 'string' ? note.trim() : undefined,
-            String(booking._id)
-          );
-        }
-        if (normalizedAction === 'accept') {
-          const professionalId = professional._id?.toString?.() || professional.id;
-          if (professionalId) {
-            notifyAsync({
-              userId: professionalId,
-              eventKey: 'professional.reschedule_accepted',
-              entityType: 'booking',
-              entityId: String(booking._id),
-              context: { bookingId: String(booking._id) },
-            });
-          }
+        const professionalId = professional?._id?.toString?.() || professional?.id;
+        if (professionalId) {
+          notifyAsync({
+            userId: professionalId,
+            eventKey:
+              normalizedAction === 'accept'
+                ? 'professional.reschedule_accepted'
+                : 'professional.reschedule_declined',
+            entityType: 'booking',
+            entityId: String(booking._id),
+            context: {
+              bookingId: String(booking._id),
+              responseNote: typeof note === 'string' ? note.trim() : undefined,
+            },
+          });
         }
       } catch (emailError: any) {
-        console.error('Failed to send reschedule-resolved email:', emailError?.message || emailError);
+        console.error('Failed to notify reschedule-resolved:', emailError?.message || emailError);
       }
     }
 

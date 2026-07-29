@@ -15,12 +15,6 @@ import { addWorkingDays } from '../../utils/workingDays';
 import { getNextSequence } from '../../utils/counterSequence';
 import { createPaymentIntent } from '../Stripe/payment';
 import { getVatRateOptionsFromConfig, resolveVatDecisionFromConfig } from '../../utils/vatManagement';
-import {
-  sendRfqAcceptedEmail,
-  sendQuotationReceivedEmail,
-  sendQuotationUpdatedEmail,
-  sendDirectQuotationEmail,
-} from '../../utils/emailService';
 import { notifyAsync } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
@@ -408,9 +402,21 @@ export const respondToRFQ = async (req: Request, res: Response) => {
       await booking.save();
 
       try {
-        await sendRfqAcceptedEmail(customer.email, customer.name, getProfessionalDisplayName(professional), booking._id.toString());
+        const customerId = customer._id?.toString?.() || customer.id;
+        if (customerId) {
+          notifyAsync({
+            userId: customerId,
+            eventKey: 'customer.rfq_accepted',
+            entityType: 'booking',
+            entityId: String(booking._id),
+            context: {
+              bookingId: String(booking._id),
+              professionalName: getProfessionalDisplayName(professional),
+            },
+          });
+        }
       } catch (e) {
-        console.error('Failed to send RFQ accepted email:', e);
+        console.error('Failed to notify RFQ accepted:', e);
       }
 
       return res.json({
@@ -618,13 +624,24 @@ export const submitQuotation = async (req: Request, res: Response) => {
       const customerAmount = +(normalizedTotalAmount * (1 + commissionPercent / 100)).toFixed(2);
       const profDisplayName = getProfessionalDisplayName(professional);
       const isDirect = booking.rfqResponse === undefined || booking.rfqResponse === null;
-      if (isDirect) {
-        await sendDirectQuotationEmail(customer.email, customer.name, profDisplayName, booking.quotationNumber || '', customerAmount, booking._id.toString());
-      } else {
-        await sendQuotationReceivedEmail(customer.email, customer.name, profDisplayName, booking.quotationNumber || '', customerAmount, booking._id.toString());
+      const customerId = customer._id?.toString?.() || customer.id;
+      if (customerId) {
+        notifyAsync({
+          userId: customerId,
+          eventKey: 'customer.quotation_received',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            professionalName: profDisplayName,
+            quotationNumber: booking.quotationNumber || '',
+            amount: customerAmount,
+            isDirectQuotation: isDirect,
+          },
+        });
       }
     } catch (e) {
-      console.error('Failed to send quotation email:', e);
+      console.error('Failed to notify quotation received:', e);
     }
 
     await sendQuotationChatMessage(booking, versionNumber, scope, normalizedTotalAmount, currency || 'EUR', validUntil, false);
@@ -774,9 +791,23 @@ export const editQuotation = async (req: Request, res: Response) => {
     const professional = booking.professional as any;
 
     try {
-      await sendQuotationUpdatedEmail(customer.email, customer.name, getProfessionalDisplayName(professional), booking.quotationNumber || '', newVersionNumber, booking._id.toString());
+      const customerId = customer._id?.toString?.() || customer.id;
+      if (customerId) {
+        notifyAsync({
+          userId: customerId,
+          eventKey: 'customer.quotation_updated',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            professionalName: getProfessionalDisplayName(professional),
+            quotationNumber: booking.quotationNumber || '',
+            quoteVersion: newVersionNumber,
+          },
+        });
+      }
     } catch (e) {
-      console.error('Failed to send quotation updated email:', e);
+      console.error('Failed to notify quotation updated:', e);
     }
 
     await sendQuotationChatMessage(booking, newVersionNumber, scope, normalizedTotalAmount, currency || 'EUR', validUntil, true);

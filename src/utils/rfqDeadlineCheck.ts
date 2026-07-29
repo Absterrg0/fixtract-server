@@ -1,11 +1,7 @@
 import Booking from '../models/booking';
 import { SYSTEM_USER_ID } from '../constants/system';
 import { getWorkingDaysBetween } from './workingDays';
-import {
-  sendRfqDeadlineReminderEmail,
-  sendRfqDeadlineExpiredEmail,
-} from './emailService';
-import { getProfessionalDisplayName } from './displayName';
+import { notifyAsync, notify } from './notifications/notify';
 
 export const runRfqDeadlineCheck = async () => {
   const now = new Date();
@@ -39,18 +35,27 @@ export const runRfqDeadlineCheck = async () => {
         const customer = booking.customer as any;
         const professional = booking.professional as any;
 
-        if (professional?.email && customer?.email) {
-          await sendRfqDeadlineExpiredEmail(
-            professional.email,
-            getProfessionalDisplayName(professional),
-            customer.email,
-            customer.name,
-            booking._id.toString()
-          );
-          console.log(`[RFQ Check] ✅ Cancelled & emailed for booking ${(booking as any).bookingNumber || booking._id}`);
-        } else {
-          console.log(`[RFQ Check] ✅ Cancelled booking ${(booking as any).bookingNumber || booking._id} (no email — missing addresses)`);
+        const professionalId = professional?._id?.toString?.() || professional?.id;
+        const customerId = customer?._id?.toString?.() || customer?.id;
+        if (professionalId) {
+          notifyAsync({
+            userId: professionalId,
+            eventKey: 'professional.rfq_deadline_expired',
+            entityType: 'booking',
+            entityId: String(booking._id),
+            context: { bookingId: String(booking._id) },
+          });
         }
+        if (customerId) {
+          notifyAsync({
+            userId: customerId,
+            eventKey: 'customer.rfq_deadline_expired',
+            entityType: 'booking',
+            entityId: String(booking._id),
+            context: { bookingId: String(booking._id) },
+          });
+        }
+        console.log(`[RFQ Check] ✅ Cancelled & notified for booking ${(booking as any).bookingNumber || booking._id}`);
         cancelled++;
       } catch (e) {
         const msg = `Failed to process expired booking ${String(booking._id)}`;
@@ -80,21 +85,77 @@ export const runRfqDeadlineCheck = async () => {
         if (workingDaysSince >= 2) {
           const professional = booking.professional as any;
           const daysRemaining = getWorkingDaysBetween(now, booking.rfqDeadline!);
+          const professionalId = professional?._id?.toString?.() || professional?.id;
 
-          if (professional?.email) {
-            const sent = await sendRfqDeadlineReminderEmail(
-              professional.email,
-              getProfessionalDisplayName(professional),
-              daysRemaining,
-              booking._id.toString()
+          if (professionalId) {
+            const previousLastReminderSentAt = booking.lastReminderSentAt ?? null;
+            const claimFilter: Record<string, unknown> = {
+              _id: booking._id,
+              status: 'rfq_accepted',
+            };
+            if (previousLastReminderSentAt) {
+              claimFilter.lastReminderSentAt = previousLastReminderSentAt;
+            } else {
+              claimFilter.$or = [
+                { lastReminderSentAt: { $exists: false } },
+                { lastReminderSentAt: null },
+              ];
+            }
+
+            const claimed = await Booking.findOneAndUpdate(
+              claimFilter,
+              {
+                $inc: { rfqRemindersSent: 1 },
+                $set: { lastReminderSentAt: now },
+              },
+              { new: false },
             );
+            if (!claimed) {
+              console.log(
+                `[RFQ Check] Skipping booking ${(booking as any).bookingNumber || booking._id} — reminder already claimed by another run`,
+              );
+              continue;
+            }
 
-            if (sent) {
-              booking.rfqRemindersSent = (booking.rfqRemindersSent || 0) + 1;
-              booking.lastReminderSentAt = now;
-              await booking.save();
+            const rollbackReminderClaim = async (reason: string) => {
+              const rollback: Record<string, unknown> = { $inc: { rfqRemindersSent: -1 } };
+              if (claimed.lastReminderSentAt) {
+                rollback.$set = { lastReminderSentAt: claimed.lastReminderSentAt };
+              } else {
+                rollback.$unset = { lastReminderSentAt: '' };
+              }
+              await Booking.findByIdAndUpdate(booking._id, rollback);
+              console.warn(
+                `[RFQ Check] Rolled back reminder claim for booking ${(booking as any).bookingNumber || booking._id} — ${reason}`,
+              );
+            };
+
+            let result: { notificationId?: string | null; emailSent?: boolean; pushSent?: boolean };
+            try {
+              result = await notify({
+                userId: professionalId,
+                eventKey: 'professional.rfq_deadline_reminder',
+                entityType: 'booking',
+                entityId: String(booking._id),
+                context: {
+                  bookingId: String(booking._id),
+                  daysRemaining,
+                },
+              });
+            } catch (notifyErr) {
+              console.error(
+                `[RFQ Check] notify() threw for booking ${(booking as any).bookingNumber || booking._id}:`,
+                notifyErr,
+              );
+              await rollbackReminderClaim('notify threw');
+              continue;
+            }
+
+            if (result.notificationId || result.emailSent || result.pushSent) {
               remindersSent++;
-              console.log(`[RFQ Check] ✅ Reminder sent to ${professional.email} for booking ${(booking as any).bookingNumber || booking._id} (${daysRemaining} days remaining)`);
+              console.log(`[RFQ Check] ✅ Reminder notified for booking ${(booking as any).bookingNumber || booking._id} (${daysRemaining} days remaining)`);
+            } else {
+              await rollbackReminderClaim('notify returned no delivery');
             }
           }
         }

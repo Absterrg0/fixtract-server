@@ -14,6 +14,30 @@ import {
   sendQuotationAcceptedEmail,
   sendQuotationRejectedEmail,
   sendNotificationEmail,
+  sendPaymentConfirmedEmail,
+  sendBookingScheduledProfessionalEmail,
+  sendRescheduleRequestedEmail,
+  sendRescheduleRequestedByCustomerEmail,
+  sendRescheduleResolvedEmail,
+  sendBookingCancelledPartyEmail,
+  sendRefundProcessedEmail,
+  sendCustomerConfirmedCompletionEmail,
+  sendDisputeRaisedProfessionalPartyEmail,
+  sendDisputeResolvedPartyEmail,
+  sendRfqAcceptedEmail,
+  sendQuotationReceivedEmail,
+  sendDirectQuotationEmail,
+  sendQuotationUpdatedEmail,
+  sendWarrantyClaimOpenedProfessionalPartyEmail,
+  sendWarrantyClaimOpenedAdminEmail,
+  sendWarrantyProposalSentEmail,
+  sendRfqDeadlineReminderEmail,
+  sendRfqDeadlineExpiredProfessionalEmail,
+  sendRfqDeadlineExpiredCustomerEmail,
+  sendCancellationRequestOtherPartyEmail,
+  sendRefundCounterOfferEmail,
+  sendRefundEscalatedEmail,
+  sendRefundDeniedEmail,
   sendChatMirrorEmail,
   sendUnfinishedCheckoutEmail,
   sendPaymentFailedEmail,
@@ -42,9 +66,31 @@ export interface NotifyContext {
   professionalName?: string;
   preferredDate?: string;
   amountLabel?: string;
+  amount?: number;
+  currency?: string;
   levelName?: string;
   extraCostTotal?: number;
   reason?: string;
+  quotationNumber?: string;
+  quoteVersion?: number;
+  scheduledStart?: Date | string | null;
+  oldDate?: Date | string | null;
+  newDate?: Date | string | null;
+  cancelledBy?: 'customer' | 'professional' | 'admin';
+  refundAmount?: number;
+  isPartialRefund?: boolean;
+  resolution?: string;
+  adjustedAmount?: number;
+  claimNumber?: string;
+  warrantyMessage?: string;
+  daysRemaining?: number;
+  requesterName?: string;
+  requesterRole?: 'customer' | 'professional';
+  escalationReason?: string;
+  rescheduleAction?: 'accept' | 'decline';
+  responseNote?: string;
+  isDirectQuotation?: boolean;
+  adminEmail?: string;
   conversationType?: 'direct' | 'support';
   counterpartyName?: string;
   chatMirrorLines?: ChatMirrorLine[];
@@ -215,6 +261,239 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
     }),
     'booking',
   ),
+  'customer.payment_confirmed': def(
+    'customer.payment_confirmed',
+    'booking_updates',
+    'always_on',
+    'customer',
+    (ctx) => ({
+      title: 'Payment confirmed',
+      body: ctx.professionalName
+        ? `Your payment for the booking with ${ctx.professionalName} has been confirmed.`
+        : 'Your booking payment has been confirmed.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendPaymentConfirmedEmail(
+          email,
+          name,
+          String(ctx.professionalName || 'your professional'),
+          typeof ctx.amount === 'number' ? ctx.amount : 0,
+          String(ctx.bookingId || ''),
+          String(ctx.currency || 'EUR'),
+        ),
+    }),
+    'booking',
+  ),
+  'customer.rfq_accepted': def(
+    'customer.rfq_accepted',
+    'booking_updates',
+    'email_always',
+    'customer',
+    (ctx) => ({
+      title: 'Request accepted',
+      body: ctx.professionalName
+        ? `${ctx.professionalName} accepted your booking request.`
+        : 'Your booking request was accepted.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendRfqAcceptedEmail(
+          email,
+          name,
+          String(ctx.professionalName || 'the professional'),
+          String(ctx.bookingId || ''),
+        ),
+    }),
+    'booking',
+  ),
+  'customer.quotation_received': def(
+    'customer.quotation_received',
+    'booking_updates',
+    'email_always',
+    'customer',
+    (ctx) => ({
+      title: 'New quotation received',
+      body: ctx.professionalName
+        ? `${ctx.professionalName} sent you a quotation.`
+        : 'You received a new quotation.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) => {
+        const profName = String(ctx.professionalName || 'the professional');
+        const bookingId = String(ctx.bookingId || '');
+        const quotationNumber = String(ctx.quotationNumber || '');
+        const amount = typeof ctx.amount === 'number' ? ctx.amount : 0;
+        if (ctx.isDirectQuotation) {
+          return sendDirectQuotationEmail(email, name, profName, quotationNumber, amount, bookingId);
+        }
+        return sendQuotationReceivedEmail(email, name, profName, quotationNumber, amount, bookingId);
+      },
+    }),
+    'booking',
+  ),
+  'customer.quotation_updated': def(
+    'customer.quotation_updated',
+    'booking_updates',
+    'email_always',
+    'customer',
+    (ctx) => ({
+      title: 'Quotation updated',
+      body: ctx.professionalName
+        ? `${ctx.professionalName} updated your quotation.`
+        : 'Your quotation was updated.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendQuotationUpdatedEmail(
+          email,
+          name,
+          String(ctx.professionalName || 'the professional'),
+          String(ctx.quotationNumber || ''),
+          typeof ctx.quoteVersion === 'number' ? ctx.quoteVersion : 1,
+          String(ctx.bookingId || ''),
+        ),
+    }),
+    'booking',
+  ),
+  'customer.cancellation_request_received': def(
+    'customer.cancellation_request_received',
+    'booking_updates',
+    'always_on',
+    'customer',
+    (ctx) => ({
+      title: 'Cancellation request submitted',
+      body: ctx.requesterName
+        ? `${ctx.requesterName} requested cancellation of your shared booking.`
+        : 'A cancellation request was submitted for your booking.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendCancellationRequestOtherPartyEmail({
+          otherPartyEmail: email,
+          otherPartyName: name,
+          requesterName: String(ctx.requesterName || 'The other party'),
+          reason: String(ctx.reason || ''),
+          bookingId: String(ctx.bookingId || ''),
+        }),
+    }),
+    'booking',
+  ),
+  'customer.refund_counter_offer': def(
+    'customer.refund_counter_offer',
+    'booking_updates',
+    'always_on',
+    'customer',
+    (ctx) => ({
+      title: 'Refund counter-offer',
+      body: 'The professional proposed a different refund amount. Please review.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendRefundCounterOfferEmail({
+          customerEmail: email,
+          customerName: name,
+          professionalName: String(ctx.professionalName || 'the professional'),
+          amount: typeof ctx.refundAmount === 'number' ? ctx.refundAmount : 0,
+          note: ctx.responseNote ? String(ctx.responseNote) : undefined,
+          bookingId: String(ctx.bookingId || ''),
+          currency: String(ctx.currency || 'EUR'),
+        }),
+    }),
+    'booking',
+  ),
+  'customer.refund_escalated': def(
+    'customer.refund_escalated',
+    'booking_updates',
+    'always_on',
+    'customer',
+    (ctx) => ({
+      title: 'Refund request escalated',
+      body: 'Your refund request was escalated to Fixtract for review.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendRefundEscalatedEmail({
+          bookingId: String(ctx.bookingId || ''),
+          reason: (['rejected', 'refused', 'no_response'] as const).includes(ctx.escalationReason as any)
+            ? (ctx.escalationReason as 'rejected' | 'refused' | 'no_response')
+            : 'no_response',
+          customerEmail: email,
+          customerName: name,
+        }),
+    }),
+    'booking',
+  ),
+  'customer.refund_denied': def(
+    'customer.refund_denied',
+    'booking_updates',
+    'always_on',
+    'customer',
+    (ctx) => ({
+      title: 'Refund request denied',
+      body: 'Your cancellation/refund request was denied after admin review.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendRefundDeniedEmail({
+          requesterEmail: email,
+          requesterName: name,
+          bookingId: String(ctx.bookingId || ''),
+          denyReason: String(ctx.reason || ''),
+        }),
+    }),
+    'booking',
+  ),
+  'customer.refund_processed': def(
+    'customer.refund_processed',
+    'booking_updates',
+    'always_on',
+    'customer',
+    (ctx) => ({
+      title: ctx.isPartialRefund ? 'Partial refund processed' : 'Refund processed',
+      body: 'A refund has been processed for your booking.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendRefundProcessedEmail(
+          email,
+          name,
+          typeof ctx.refundAmount === 'number' ? ctx.refundAmount : 0,
+          String(ctx.currency || 'EUR'),
+          Boolean(ctx.isPartialRefund),
+          String(ctx.bookingId || ''),
+        ),
+    }),
+    'booking',
+  ),
+  'customer.warranty_proposal_sent': def(
+    'customer.warranty_proposal_sent',
+    'booking_updates',
+    'always_on',
+    'customer',
+    (ctx) => ({
+      title: 'Warranty proposal received',
+      body: ctx.professionalName
+        ? `${ctx.professionalName} submitted a warranty resolution proposal.`
+        : 'A warranty resolution proposal was submitted.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendWarrantyProposalSentEmail(
+          email,
+          name,
+          String(ctx.professionalName || 'the professional'),
+          String(ctx.warrantyMessage || ''),
+          String(ctx.bookingId || ''),
+          String(ctx.claimNumber || ''),
+        ),
+    }),
+    'booking',
+  ),
+  'customer.rfq_deadline_expired': def(
+    'customer.rfq_deadline_expired',
+    'booking_updates',
+    'email_always',
+    'customer',
+    (ctx) => ({
+      title: 'Quotation deadline expired',
+      body: 'The professional did not submit a quotation before the deadline. The booking was cancelled.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendRfqDeadlineExpiredCustomerEmail(email, name, String(ctx.bookingId || '')),
+    }),
+    'booking',
+  ),
   'customer.reschedule_requested': def(
     'customer.reschedule_requested',
     'booking_updates',
@@ -224,6 +503,16 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       title: 'Reschedule requested',
       body: 'A reschedule has been requested for your booking. Please review and respond.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendRescheduleRequestedEmail(
+          email,
+          name,
+          String(ctx.professionalName || 'the professional'),
+          ctx.oldDate,
+          ctx.newDate,
+          String(ctx.reason || ''),
+          String(ctx.bookingId || ''),
+        ),
     }),
     'booking',
   ),
@@ -272,6 +561,16 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       title: 'Booking cancelled & refunded',
       body: 'Your booking was cancelled and a refund has been processed.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendBookingCancelledPartyEmail(
+          'customer',
+          email,
+          name,
+          String(ctx.professionalName || 'the professional'),
+          String(ctx.reason || 'No reason provided'),
+          (ctx.cancelledBy as 'customer' | 'professional' | 'admin') || 'admin',
+          String(ctx.bookingId || ''),
+        ),
     }),
     'booking',
   ),
@@ -296,6 +595,15 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       title: 'Dispute resolved',
       body: 'The dispute on your booking has been resolved.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendDisputeResolvedPartyEmail(
+          email,
+          name,
+          String(ctx.resolution || 'Closed by admin'),
+          typeof ctx.adjustedAmount === 'number' ? ctx.adjustedAmount : undefined,
+          String(ctx.bookingId || ''),
+          String(ctx.currency || 'EUR'),
+        ),
     }),
     'booking',
   ),
@@ -628,6 +936,49 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
     }),
     'booking',
   ),
+  'professional.booking_scheduled': def(
+    'professional.booking_scheduled',
+    'booking_updates',
+    'email_always',
+    'professional',
+    (ctx) => ({
+      title: 'Booking scheduled',
+      body: ctx.customerName
+        ? `A start date was set for your booking with ${ctx.customerName}.`
+        : 'A start date was set for your booking.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendBookingScheduledProfessionalEmail(
+          email,
+          name,
+          String(ctx.customerName || 'the customer'),
+          ctx.scheduledStart,
+          String(ctx.bookingId || ''),
+        ),
+    }),
+    'booking',
+  ),
+  'professional.completion_confirmed_by_customer': def(
+    'professional.completion_confirmed_by_customer',
+    'booking_updates',
+    'email_always',
+    'professional',
+    (ctx) => ({
+      title: 'Customer confirmed completion',
+      body: ctx.customerName
+        ? `${ctx.customerName} confirmed that the work is complete.`
+        : 'The customer confirmed that the work is complete.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendCustomerConfirmedCompletionEmail(
+          email,
+          name,
+          String(ctx.customerName || 'Customer'),
+          String(ctx.bookingId || ''),
+        ),
+    }),
+    'booking',
+  ),
   'professional.booking_not_started_reminder': def(
     'professional.booking_not_started_reminder',
     'booking_updates',
@@ -649,6 +1000,34 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       title: 'Reschedule accepted',
       body: 'A reschedule request was accepted for your booking.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendRescheduleResolvedEmail(
+          email,
+          name,
+          'accept',
+          ctx.responseNote ? String(ctx.responseNote) : undefined,
+          String(ctx.bookingId || ''),
+        ),
+    }),
+    'booking',
+  ),
+  'professional.reschedule_declined': def(
+    'professional.reschedule_declined',
+    'booking_updates',
+    'email_always',
+    'professional',
+    (ctx) => ({
+      title: 'Reschedule declined',
+      body: 'The customer declined your rescheduling request.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendRescheduleResolvedEmail(
+          email,
+          name,
+          'decline',
+          ctx.responseNote ? String(ctx.responseNote) : undefined,
+          String(ctx.bookingId || ''),
+        ),
     }),
     'booking',
   ),
@@ -661,6 +1040,16 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       title: 'Reschedule requested',
       body: 'A customer requested to reschedule a booking. Please review.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendRescheduleRequestedByCustomerEmail(
+          email,
+          name,
+          String(ctx.customerName || 'the customer'),
+          ctx.oldDate,
+          ctx.newDate,
+          String(ctx.reason || ''),
+          String(ctx.bookingId || ''),
+        ),
     }),
     'booking',
   ),
@@ -697,6 +1086,144 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       title: 'Booking cancelled & refunded',
       body: 'A booking was cancelled and refunded.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendBookingCancelledPartyEmail(
+          'professional',
+          email,
+          name,
+          String(ctx.customerName || 'the customer'),
+          String(ctx.reason || 'No reason provided'),
+          (ctx.cancelledBy as 'customer' | 'professional' | 'admin') || 'admin',
+          String(ctx.bookingId || ''),
+        ),
+    }),
+    'booking',
+  ),
+  'professional.cancellation_request_received': def(
+    'professional.cancellation_request_received',
+    'booking_updates',
+    'always_on',
+    'professional',
+    (ctx) => ({
+      title: 'Cancellation request submitted',
+      body: ctx.requesterName
+        ? `${ctx.requesterName} requested cancellation of your shared booking.`
+        : 'A cancellation request was submitted for your booking.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendCancellationRequestOtherPartyEmail({
+          otherPartyEmail: email,
+          otherPartyName: name,
+          requesterName: String(ctx.requesterName || 'The other party'),
+          reason: String(ctx.reason || ''),
+          bookingId: String(ctx.bookingId || ''),
+        }),
+    }),
+    'booking',
+  ),
+  'professional.refund_escalated': def(
+    'professional.refund_escalated',
+    'booking_updates',
+    'always_on',
+    'professional',
+    (ctx) => ({
+      title: 'Refund request escalated',
+      body: 'A refund request on your booking was escalated to Fixtract.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+    }),
+    'booking',
+  ),
+  'professional.refund_denied': def(
+    'professional.refund_denied',
+    'booking_updates',
+    'always_on',
+    'professional',
+    (ctx) => ({
+      title: 'Refund request denied',
+      body: 'A cancellation/refund request was denied after admin review.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendRefundDeniedEmail({
+          requesterEmail: email,
+          requesterName: name,
+          bookingId: String(ctx.bookingId || ''),
+          denyReason: String(ctx.reason || ''),
+        }),
+    }),
+    'booking',
+  ),
+  'professional.warranty_claim_opened': def(
+    'professional.warranty_claim_opened',
+    'booking_updates',
+    'always_on',
+    'professional',
+    (ctx) => ({
+      title: 'Warranty claim opened',
+      body: ctx.customerName
+        ? `${ctx.customerName} opened a warranty claim on your booking.`
+        : 'A warranty claim was opened on your booking.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) => {
+        const adminEmail = String(
+          ctx.adminEmail || process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '',
+        ).trim();
+        if (adminEmail) {
+          await sendWarrantyClaimOpenedAdminEmail(
+            adminEmail,
+            name,
+            String(ctx.customerName || 'Customer'),
+            String(ctx.bookingId || ''),
+            String(ctx.claimNumber || ''),
+          );
+        } else {
+          console.error(
+            '[warranty_claim_opened] ADMIN_NOTIFICATIONS_EMAIL/FROM_EMAIL not configured — admin will not be notified',
+          );
+        }
+        return sendWarrantyClaimOpenedProfessionalPartyEmail(
+          email,
+          name,
+          String(ctx.customerName || 'Customer'),
+          String(ctx.bookingId || ''),
+          String(ctx.claimNumber || ''),
+        );
+      },
+    }),
+    'booking',
+  ),
+  'professional.rfq_deadline_reminder': def(
+    'professional.rfq_deadline_reminder',
+    'booking_updates',
+    'email_always',
+    'professional',
+    (ctx) => ({
+      title: 'Quotation deadline approaching',
+      body:
+        typeof ctx.daysRemaining === 'number'
+          ? `You have ${ctx.daysRemaining} working day(s) left to submit a quotation.`
+          : 'Your quotation deadline is approaching.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendRfqDeadlineReminderEmail(
+          email,
+          name,
+          typeof ctx.daysRemaining === 'number' ? ctx.daysRemaining : 0,
+          String(ctx.bookingId || ''),
+        ),
+    }),
+    'booking',
+  ),
+  'professional.rfq_deadline_expired': def(
+    'professional.rfq_deadline_expired',
+    'booking_updates',
+    'email_always',
+    'professional',
+    (ctx) => ({
+      title: 'Quotation deadline expired',
+      body: 'The RFQ deadline passed without a quotation. The booking was cancelled.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendRfqDeadlineExpiredProfessionalEmail(email, name, String(ctx.bookingId || '')),
     }),
     'booking',
   ),
@@ -709,6 +1236,14 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       title: 'Dispute started',
       body: 'A dispute has been opened on one of your bookings.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendDisputeRaisedProfessionalPartyEmail(
+          email,
+          name,
+          String(ctx.customerName || 'Customer'),
+          String(ctx.reason || ''),
+          String(ctx.bookingId || ''),
+        ),
     }),
     'booking',
   ),
@@ -721,6 +1256,15 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       title: 'Dispute resolved',
       body: 'A dispute on your booking has been resolved.',
       clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
+      sendEmail: async ({ email, name }) =>
+        sendDisputeResolvedPartyEmail(
+          email,
+          name,
+          String(ctx.resolution || 'Closed by admin'),
+          typeof ctx.adjustedAmount === 'number' ? ctx.adjustedAmount : undefined,
+          String(ctx.bookingId || ''),
+          String(ctx.currency || 'EUR'),
+        ),
     }),
     'booking',
   ),

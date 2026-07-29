@@ -16,10 +16,8 @@ import DiscountCodeUsage from '../../models/discountCodeUsage';
 import { convertFromStripeAmount } from '../../utils/payment';
 import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
 import { deductPoints } from '../../utils/pointsSystem';
-import { sendPaymentConfirmedEmail, sendRefundProcessedEmail } from '../../utils/emailService';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
-import { notifyAsync } from '../../utils/notifications/notify';
 
 const reserveWebhookEvent = async (event: Stripe.Event): Promise<{ shouldProcess: boolean }> => {
   const now = new Date();
@@ -356,18 +354,23 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
       const amountPaid = (booking.payment as any)?.amount ?? convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency);
       const currency = (paymentIntent.currency || 'EUR').toUpperCase();
       try {
-        if (customerUser?.email) {
-          await sendPaymentConfirmedEmail(
-            customerUser.email,
-            customerUser.name || 'Customer',
-            professionalUser ? getProfessionalDisplayName(professionalUser) : 'Professional',
-            amountPaid,
-            String(booking._id),
-            currency
-          );
+        if (customerUser?._id) {
+          const { notify } = await import('../../utils/notifications/notify');
+          await notify({
+            userId: customerUser._id.toString(),
+            eventKey: 'customer.payment_confirmed',
+            entityType: 'booking',
+            entityId: String(booking._id),
+            context: {
+              bookingId: String(booking._id),
+              professionalName: professionalUser ? getProfessionalDisplayName(professionalUser) : 'Professional',
+              amount: amountPaid,
+              currency,
+            },
+          });
         }
       } catch (emailError: any) {
-        console.error('Failed to send payment-confirmed email:', emailError?.message || emailError);
+        console.error('Failed to notify payment-confirmed:', emailError?.message || emailError);
       }
 
       // Inbox + email + push for professional "new booking"
@@ -416,16 +419,26 @@ async function handlePaymentIntentFailed(paymentIntent: Stripe.PaymentIntent) {
 
   const customerId = booking.customer?.toString();
   if (customerId) {
-    notifyAsync({
-      userId: customerId,
-      eventKey: 'customer.payment_failed',
-      entityType: 'booking',
-      entityId: String(booking._id),
-      context: {
-        bookingId: String(booking._id),
-        projectTitle: booking.rfqData?.serviceType,
-      },
-    });
+    try {
+      const { notify } = await import('../../utils/notifications/notify');
+      await notify({
+        userId: customerId,
+        eventKey: 'customer.payment_failed',
+        entityType: 'booking',
+        entityId: String(booking._id),
+        context: {
+          bookingId: String(booking._id),
+          projectTitle: booking.rfqData?.serviceType,
+        },
+      });
+    } catch (notifyError: any) {
+      // Match refund_processed: await delivery so transient failures are logged;
+      // do not fail the webhook ack (booking status already persisted for retry).
+      console.error(
+        'Failed to notify payment-failed:',
+        notifyError?.message || notifyError,
+      );
+    }
   }
 
   console.log(`Payment failed via webhook for booking ${bookingId}`);
@@ -513,21 +526,26 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
 
   try {
     if (booking.customer) {
-      const customerUser = await User.findById(booking.customer).select('email name').lean();
-      if (customerUser?.email) {
-        const isPartial = booking.payment.status === 'partially_refunded';
-        await sendRefundProcessedEmail(
-          customerUser.email,
-          customerUser.name || 'Customer',
-          refundAmount,
-          (charge.currency || 'EUR').toUpperCase(),
-          isPartial,
-          String(booking._id)
-        );
+      const customerUser = await User.findById(booking.customer).select('_id').lean();
+      const isPartial = booking.payment.status === 'partially_refunded';
+      const { notify } = await import('../../utils/notifications/notify');
+      if (customerUser?._id) {
+        await notify({
+          userId: customerUser._id.toString(),
+          eventKey: 'customer.refund_processed',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            refundAmount,
+            currency: (charge.currency || 'EUR').toUpperCase(),
+            isPartialRefund: isPartial,
+          },
+        });
       }
     }
   } catch (emailError: any) {
-    console.error('Failed to send refund-processed email:', emailError?.message || emailError);
+    console.error('Failed to notify refund-processed:', emailError?.message || emailError);
   }
 
   if (booking.payment.status === 'refunded' || booking.payment.status === 'partially_refunded') {

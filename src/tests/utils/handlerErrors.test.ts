@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { toHandlerError } from '../handlerErrors';
+import { toHandlerError } from '../../utils/handlerErrors';
 
 describe('handlerErrors', () => {
   it('maps duplicate key errors to field-specific responses', () => {

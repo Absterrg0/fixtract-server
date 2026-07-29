@@ -1,4 +1,5 @@
 import mongoose, { Document, Schema } from 'mongoose';
+import { ANNOUNCEMENT_TYPES } from '../utils/siteAnnouncements/constants';
 
 export type AnnouncementType = 'top_bar' | 'modal' | 'exit_intent';
 
@@ -33,7 +34,7 @@ const siteAnnouncementSchema = new Schema<ISiteAnnouncement>({
   },
   type: {
     type: String,
-    enum: ['top_bar', 'modal', 'exit_intent'],
+    enum: [...ANNOUNCEMENT_TYPES],
     required: true,
     index: true,
   },

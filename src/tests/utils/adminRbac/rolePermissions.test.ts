@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { permissionsForRole, hasPermission, resolveAdminRole } from '../rolePermissions';
-import { permissionForAdminPath } from '../routePermissions';
+import { permissionsForRole, hasPermission, resolveAdminRole } from '../../../utils/adminRbac/rolePermissions';
+import { permissionForAdminPath } from '../../../utils/adminRbac/routePermissions';
 
 describe('admin RBAC role packs', () => {
   it('defaults missing role to super', () => {
@@ -39,6 +39,11 @@ describe('admin route permission mapping', () => {
     expect(permissionForAdminPath('/staff/abc')).toBe('staff.manage');
     expect(permissionForAdminPath('/payments')).toBe('payments.manage');
     expect(permissionForAdminPath('/access')).toBeNull();
+  });
+
+  it('maps site-announcements to cms.manage', () => {
+    expect(permissionForAdminPath('/site-announcements')).toBe('cms.manage');
+    expect(permissionForAdminPath('/site-announcements/abc')).toBe('cms.manage');
   });
 
   it('prefers professionals/manage over professionals', () => {

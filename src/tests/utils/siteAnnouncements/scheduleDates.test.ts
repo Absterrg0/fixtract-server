@@ -1,31 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { DateTime } from 'luxon';
-import { buildPublicListQuery } from '../buildQueries';
+import { buildPublicListQuery } from '../../../utils/siteAnnouncements/buildQueries';
 import {
-  ANNOUNCEMENT_MARKET_TZ,
   parseScheduleEnd,
   parseScheduleStart,
-} from '../scheduleDates';
+} from '../../../utils/siteAnnouncements/scheduleDates';
 
 describe('parseScheduleStart / parseScheduleEnd', () => {
   it('expands date-only start to start of day in Europe/Brussels', () => {
     const start = parseScheduleStart('2026-08-31');
-    expect(start).not.toBeNull();
-    const expected = DateTime.fromISO('2026-08-31', { zone: ANNOUNCEMENT_MARKET_TZ })
-      .startOf('day')
-      .toUTC()
-      .toJSDate();
-    expect(start!.getTime()).toBe(expected.getTime());
+    // 2026-08-31 is CEST (UTC+2)
+    expect(start?.toISOString()).toBe('2026-08-30T22:00:00.000Z');
   });
 
   it('expands date-only end to end of day in Europe/Brussels', () => {
     const end = parseScheduleEnd('2026-08-31');
-    expect(end).not.toBeNull();
-    const expected = DateTime.fromISO('2026-08-31', { zone: ANNOUNCEMENT_MARKET_TZ })
-      .endOf('day')
-      .toUTC()
-      .toJSDate();
-    expect(end!.getTime()).toBe(expected.getTime());
+    expect(end?.toISOString()).toBe('2026-08-31T21:59:59.999Z');
   });
 
   it('keeps same-day date-only start before end', () => {
@@ -57,5 +46,10 @@ describe('buildPublicListQuery', () => {
   it('matches only global campaigns when country is unknown', () => {
     const query = buildPublicListQuery({ locale: 'en' }, now);
     expect(query.$or).toEqual([{ activeCountries: { $size: 0 } }]);
+  });
+
+  it('includes base language for region-tagged locales', () => {
+    const query = buildPublicListQuery({ locale: 'nl-be' }, now);
+    expect(query.locale).toEqual({ $in: ['nl-be', 'nl', 'en'] });
   });
 });

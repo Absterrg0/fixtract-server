@@ -11,6 +11,13 @@ const hashVisitor = (ip: string, userAgent: string): string =>
 
 const SERVICE_ID_PATTERN = /^[a-z0-9][a-z0-9\-_]{0,80}$/i;
 
+const pickTrimmed = (...values: unknown[]): string | null => {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+};
+
 export const recordServiceView = async (req: Request, res: Response) => {
   try {
     const rawServiceId = param(req.params.serviceId).trim();
@@ -27,14 +34,14 @@ export const recordServiceView = async (req: Request, res: Response) => {
     const viewerId = (req as any).user?._id ? new mongoose.Types.ObjectId((req as any).user._id) : undefined;
 
     let city: string | null = null;
+    let country: string | null = null;
     if (viewerId) {
-      const user = await User.findById(viewerId).select('location.city companyAddress.city businessInfo.city').lean();
+      const user = await User.findById(viewerId)
+        .select('location.city location.country companyAddress.city companyAddress.country businessInfo.city businessInfo.country')
+        .lean();
       const u: any = user;
-      city =
-        (u?.location?.city && String(u.location.city).trim()) ||
-        (u?.companyAddress?.city && String(u.companyAddress.city).trim()) ||
-        (u?.businessInfo?.city && String(u.businessInfo.city).trim()) ||
-        null;
+      city = pickTrimmed(u?.location?.city, u?.companyAddress?.city, u?.businessInfo?.city);
+      country = pickTrimmed(u?.location?.country, u?.companyAddress?.country, u?.businessInfo?.country);
     }
 
     const ip = req.ip || 'unknown';
@@ -49,6 +56,7 @@ export const recordServiceView = async (req: Request, res: Response) => {
         visitorKey,
         dayKey,
         city,
+        country,
       });
       return res.json({ success: true, data: { recorded: true } });
     } catch (err: any) {

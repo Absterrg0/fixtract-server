@@ -32,12 +32,16 @@ function parseStrictIsoString(value: string): Date | null {
 
   const dateTime = /^(\d{4})-(\d{2})-(\d{2})T/.exec(trimmed);
   if (dateTime) {
+    // Require Z or an explicit numeric offset so parsing is not host-local.
+    if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)) return null;
     const year = Number(dateTime[1]);
     const month = Number(dateTime[2]);
     const day = Number(dateTime[3]);
+    // Validate the written calendar day (not the UTC day after offset apply).
+    const probe = new Date(Date.UTC(year, month - 1, day));
+    if (!matchesUtcCalendarParts(probe, year, month, day)) return null;
     const parsed = new Date(trimmed);
-    if (Number.isNaN(parsed.getTime())) return null;
-    return matchesUtcCalendarParts(parsed, year, month, day) ? parsed : null;
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
 
   const parsed = new Date(trimmed);
@@ -60,8 +64,7 @@ export const toDate = (value: unknown): Date | null => {
   }
 
   if (typeof value === 'object' && isMongoExtendedDate(value)) {
-    const parsed = new Date(value.$date);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
+    return parseStrictIsoString(value.$date);
   }
 
   return null;

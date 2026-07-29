@@ -5,7 +5,7 @@ import {
   formatMirrorInboxBody,
   unreadChatMirrorThrottleOk,
   unreadChatReminderTargets,
-} from '../chatEmailMirror';
+} from '../../../utils/notifications/chatEmailMirror';
 
 describe('unreadChatReminderTargets', () => {
   it('notifies customer and professional on direct chats with unread counts', () => {

@@ -15,7 +15,6 @@ import {
   getProfessionalId,
   markMilestonesCompleted,
 } from '../../utils/bookingHelpers';
-import { sendDisputeResolvedEmail } from '../../utils/emailService';
 import { auditLog } from '../../utils/auditLogger';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { presignS3Url } from '../../utils/s3Upload';
@@ -750,30 +749,26 @@ export const resolveDispute = async (req: Request, res: Response) => {
 
     try {
       const [customerUser, professionalUser] = await Promise.all([
-        User.findById(resolvedBooking.customer).select('email name').lean(),
-        proId ? User.findById(proId).select('email name username').lean() : null,
+        User.findById(resolvedBooking.customer).select('_id email name').lean(),
+        proId ? User.findById(proId).select('_id email name username businessInfo').lean() : null,
       ]);
-      if (customerUser?.email && professionalUser?.email) {
-        await sendDisputeResolvedEmail(
-          customerUser.email,
-          professionalUser.email,
-          customerUser.name || 'Customer',
-          getProfessionalDisplayName(professionalUser),
-          resolution,
-          isExtraCostsDispute && typeof finalExtraCostAmount === 'number' ? finalExtraCostAmount : undefined,
-          String(resolvedBooking._id),
-          (resolvedBooking as any).payment?.currency || 'EUR'
-        );
-      }
-
       const { notifyAsync } = await import('../../utils/notifications/notify');
+      const disputeContext = {
+        bookingId: String(resolvedBooking._id),
+        resolution,
+        adjustedAmount:
+          isExtraCostsDispute && typeof finalExtraCostAmount === 'number'
+            ? finalExtraCostAmount
+            : undefined,
+        currency: (resolvedBooking as any).payment?.currency || 'EUR',
+      };
       if (customerUser?._id) {
         notifyAsync({
           userId: customerUser._id.toString(),
           eventKey: 'customer.dispute_resolved',
           entityType: 'booking',
           entityId: String(resolvedBooking._id),
-          context: { bookingId: String(resolvedBooking._id) },
+          context: disputeContext,
         });
       }
       if (professionalUser?._id) {
@@ -782,11 +777,11 @@ export const resolveDispute = async (req: Request, res: Response) => {
           eventKey: 'professional.dispute_resolved',
           entityType: 'booking',
           entityId: String(resolvedBooking._id),
-          context: { bookingId: String(resolvedBooking._id) },
+          context: disputeContext,
         });
       }
     } catch (emailError: any) {
-      console.error('Failed to send dispute-resolved email:', emailError?.message || emailError);
+      console.error('Failed to notify dispute-resolved:', emailError?.message || emailError);
     }
 
     try {

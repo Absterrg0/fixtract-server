@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateVatFromPricingLines } from "../vatLineCalculation";
+import { calculateVatFromPricingLines } from "../../utils/vatLineCalculation";
 
 describe("calculateVatFromPricingLines", () => {
   it("returns null when there are no valid lines", () => {

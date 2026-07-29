@@ -8,7 +8,7 @@ import {
   normalizeVatCountry,
   requiresVatRfqReview,
   type VatDecision,
-} from "../vatManagement";
+} from "../../utils/vatManagement";
 import type { IVatLogicRule } from "../../models/serviceConfiguration";
 
 describe("normalizeVatCountry", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveChannels, type NotificationPreferences } from '../types';
+import { resolveChannels, type NotificationPreferences } from '../../../utils/notifications/types';
 
 const allOff: NotificationPreferences = {
   booking_updates: { push: false, email: false },

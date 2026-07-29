@@ -1770,12 +1770,12 @@ export const sendRfqDeadlineReminderEmail = async (
   });
 };
 
-// Both parties notified about expired RFQ deadline
-export const sendRfqDeadlineExpiredEmail = async (
-  profEmail: string, profName: string, custEmail: string, custName: string, bookingId: string
+export const sendRfqDeadlineExpiredProfessionalEmail = async (
+  profEmail: string,
+  profName: string,
+  bookingId: string,
 ): Promise<boolean> => {
-  // Send to professional
-  const profContent = `
+  const content = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
       ${getEmailHeader('Quotation Deadline Expired')}
       <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
@@ -1787,8 +1787,18 @@ export const sendRfqDeadlineExpiredEmail = async (
       </div>
     </div>
   `;
-  // Send to customer
-  const custContent = `
+  return sendEmail(profEmail, 'Quotation Deadline Expired - Fixtract', content, {
+    template: 'rfq_deadline_expired',
+    relatedBooking: bookingId,
+  });
+};
+
+export const sendRfqDeadlineExpiredCustomerEmail = async (
+  custEmail: string,
+  custName: string,
+  bookingId: string,
+): Promise<boolean> => {
+  const content = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
       ${getEmailHeader('Request Update')}
       <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
@@ -1804,18 +1814,10 @@ export const sendRfqDeadlineExpiredEmail = async (
       </div>
     </div>
   `;
-  const meta = { template: 'rfq_deadline_expired', relatedBooking: bookingId };
-  const [profResult, custResult] = await Promise.all([
-    sendEmail(profEmail, 'Quotation Deadline Expired - Fixtract', profContent, meta),
-    sendEmail(custEmail, 'Request Update - Fixtract', custContent, meta),
-  ]);
-  if (!profResult) {
-    console.error(`[Email] Failed to send RFQ deadline expired email to professional: ${profEmail}`);
-  }
-  if (!custResult) {
-    console.error(`[Email] Failed to send RFQ deadline expired email to customer: ${custEmail}`);
-  }
-  return profResult && custResult;
+  return sendEmail(custEmail, 'Request Update - Fixtract', content, {
+    template: 'rfq_deadline_expired',
+    relatedBooking: bookingId,
+  });
 };
 
 // Customer receives direct quotation from professional
@@ -2066,6 +2068,36 @@ export const sendBookingScheduledEmail = async (
   });
 };
 
+// Booking scheduled → professional (start date set on a confirmed booking)
+export const sendBookingScheduledProfessionalEmail = async (
+  profEmail: string,
+  profName: string,
+  custName: string,
+  scheduledStart: Date | string | null | undefined,
+  bookingId: string,
+): Promise<boolean> => {
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Booking Scheduled')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(profName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          A start date has been set for your booking with <strong>${escapeHtml(custName)}</strong>.
+        </p>
+        <div style="background: #e8f4fd; border-left: 4px solid #3b82f6; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0;"><strong>Scheduled Start:</strong> ${escapeHtml(formatDateTime(scheduledStart))}</p>
+        </div>
+        ${buildEmailButton(buildBookingLink(bookingId), 'View Booking')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(profEmail, 'Booking Scheduled - Fixtract', content, {
+    template: 'booking_scheduled',
+    relatedBooking: bookingId,
+  });
+};
+
 // Reschedule requested → customer
 export const sendRescheduleRequestedEmail = async (
   custEmail: string,
@@ -2133,49 +2165,6 @@ export const sendRescheduleResolvedEmail = async (
     template: accepted ? 'reschedule_accepted' : 'reschedule_declined',
     relatedBooking: bookingId,
   });
-};
-
-// Booking cancelled → both parties
-export const sendBookingCancelledEmail = async (
-  custEmail: string,
-  profEmail: string,
-  custName: string,
-  profName: string,
-  reason: string,
-  cancelledBy: 'customer' | 'professional' | 'admin',
-  bookingId: string
-): Promise<boolean> => {
-  const link = buildBookingLink(bookingId);
-  const safeReason = escapeHtml(reason || 'No reason provided');
-  const cancelledByLabel = cancelledBy === 'customer' ? 'the customer' : cancelledBy === 'professional' ? 'the professional' : 'an administrator';
-  const buildContent = (greeting: string, body: string) => `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-      ${getEmailHeader('Booking Cancelled')}
-      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-        <h2 style="color: #333; margin: 0 0 20px 0;">${greeting}</h2>
-        <p style="color: #666; line-height: 1.6;">${body}</p>
-        <div style="background: #fee2e2; border-left: 4px solid #dc2626; padding: 15px; margin: 20px 0;">
-          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${safeReason}</p>
-        </div>
-        ${buildEmailButton(link, 'View Booking', '#dc2626')}
-        ${getEmailFooter()}
-      </div>
-    </div>
-  `;
-  const custContent = buildContent(
-    `Hello ${escapeHtml(custName)},`,
-    `Your booking with <strong>${escapeHtml(profName)}</strong> has been cancelled by ${cancelledByLabel}.`
-  );
-  const profContent = buildContent(
-    `Hello ${escapeHtml(profName)},`,
-    `The booking with <strong>${escapeHtml(custName)}</strong> has been cancelled by ${cancelledByLabel}.`
-  );
-  const meta = { template: 'booking_cancelled', relatedBooking: bookingId };
-  const [custOk, profOk] = await Promise.all([
-    sendEmail(custEmail, 'Booking Cancelled - Fixtract', custContent, meta),
-    sendEmail(profEmail, 'Booking Cancelled - Fixtract', profContent, meta),
-  ]);
-  return custOk && profOk;
 };
 
 // Refund processed → customer
@@ -2309,106 +2298,13 @@ export const sendCustomerConfirmedCompletionEmail = async (
   });
 };
 
-// Dispute raised → professional + admin
-export const sendDisputeRaisedEmail = async (
+// Warranty claim opened → professional
+export const sendWarrantyClaimOpenedProfessionalPartyEmail = async (
   profEmail: string,
-  adminEmail: string,
-  profName: string,
-  custName: string,
-  reason: string,
-  bookingId: string
-): Promise<boolean> => {
-  const link = buildBookingLink(bookingId);
-  const safeReason = escapeHtml(reason || 'No reason provided');
-  const profContent = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-      ${getEmailHeader('Dispute Raised')}
-      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(profName)},</h2>
-        <p style="color: #666; line-height: 1.6;">
-          <strong>${escapeHtml(custName)}</strong> has raised a dispute on your booking.
-        </p>
-        <div style="background: #fee2e2; border-left: 4px solid #dc2626; padding: 15px; margin: 20px 0;">
-          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${safeReason}</p>
-        </div>
-        <p style="color: #666; line-height: 1.6;">
-          Our admin team will review the dispute and may reach out for additional information.
-        </p>
-        ${buildEmailButton(link, 'View Booking', '#dc2626')}
-        ${getEmailFooter()}
-      </div>
-    </div>
-  `;
-  const adminContent = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-      ${getEmailHeader('New Dispute — Action Required')}
-      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-        <h2 style="color: #333; margin: 0 0 20px 0;">A new dispute has been raised.</h2>
-        <p style="color: #666; line-height: 1.6;">
-          <strong>${escapeHtml(custName)}</strong> raised a dispute against <strong>${escapeHtml(profName)}</strong>.
-        </p>
-        <div style="background: #fee2e2; border-left: 4px solid #dc2626; padding: 15px; margin: 20px 0;">
-          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${safeReason}</p>
-        </div>
-        ${buildEmailButton(link, 'Review Dispute', '#dc2626')}
-        ${getEmailFooter()}
-      </div>
-    </div>
-  `;
-  const meta = { template: 'dispute_raised', relatedBooking: bookingId };
-  const [profOk, adminOk] = await Promise.all([
-    sendEmail(profEmail, 'Dispute Raised - Fixtract', profContent, meta),
-    sendEmail(adminEmail, 'New Dispute — Action Required - Fixtract', adminContent, meta),
-  ]);
-  return profOk && adminOk;
-};
-
-// Dispute resolved → both parties
-export const sendDisputeResolvedEmail = async (
-  custEmail: string,
-  profEmail: string,
-  custName: string,
-  profName: string,
-  resolution: string,
-  adjustedAmount: number | undefined,
-  bookingId: string,
-  currency: string = 'EUR'
-): Promise<boolean> => {
-  const link = buildBookingLink(bookingId);
-  const safeResolution = escapeHtml(resolution || 'Closed by admin');
-  const buildContent = (name: string) => `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-      ${getEmailHeader('Dispute Resolved')}
-      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(name)},</h2>
-        <p style="color: #666; line-height: 1.6;">
-          The dispute on the booking has been resolved by our admin team.
-        </p>
-        <div style="background: #e8f5e8; border-left: 4px solid #16a34a; padding: 15px; margin: 20px 0;">
-          <p style="color: #333; margin: 0 0 8px 0;"><strong>Resolution:</strong> ${safeResolution}</p>
-          ${typeof adjustedAmount === 'number' && Number.isFinite(adjustedAmount) ? `<p style="color: #333; margin: 0;"><strong>Adjusted amount:</strong> ${formatCurrency(adjustedAmount, currency)}</p>` : ''}
-        </div>
-        ${buildEmailButton(link, 'View Booking', '#16a34a')}
-        ${getEmailFooter()}
-      </div>
-    </div>
-  `;
-  const meta = { template: 'dispute_resolved', relatedBooking: bookingId };
-  const [custOk, profOk] = await Promise.all([
-    sendEmail(custEmail, 'Dispute Resolved - Fixtract', buildContent(custName), meta),
-    sendEmail(profEmail, 'Dispute Resolved - Fixtract', buildContent(profName), meta),
-  ]);
-  return custOk && profOk;
-};
-
-// Warranty claim opened → professional + admin
-export const sendWarrantyClaimOpenedEmail = async (
-  profEmail: string,
-  adminEmail: string,
   profName: string,
   custName: string,
   bookingId: string,
-  claimId: string
+  claimId: string,
 ): Promise<boolean> => {
   const link = buildBookingLink(bookingId);
   const profContent = `
@@ -2427,6 +2323,24 @@ export const sendWarrantyClaimOpenedEmail = async (
       </div>
     </div>
   `;
+  return sendEmail(profEmail, 'Warranty Claim Opened - Fixtract', profContent, {
+    template: 'warranty_opened',
+    relatedBooking: bookingId,
+  });
+};
+
+export const sendWarrantyClaimOpenedAdminEmail = async (
+  adminEmail: string,
+  profName: string,
+  custName: string,
+  bookingId: string,
+  claimId: string,
+): Promise<boolean> => {
+  if (!adminEmail?.trim()) {
+    console.error('[warranty_claim_opened] ADMIN_NOTIFICATIONS_EMAIL/FROM_EMAIL not configured — admin will not be notified');
+    return false;
+  }
+  const link = buildBookingLink(bookingId);
   const adminContent = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
       ${getEmailHeader('New Warranty Claim')}
@@ -2443,12 +2357,10 @@ export const sendWarrantyClaimOpenedEmail = async (
       </div>
     </div>
   `;
-  const meta = { template: 'warranty_opened', relatedBooking: bookingId };
-  const [profOk, adminOk] = await Promise.all([
-    sendEmail(profEmail, 'Warranty Claim Opened - Fixtract', profContent, meta),
-    sendEmail(adminEmail, 'New Warranty Claim - Fixtract', adminContent, meta),
-  ]);
-  return profOk && adminOk;
+  return sendEmail(adminEmail, 'New Warranty Claim - Fixtract', adminContent, {
+    template: 'warranty_opened',
+    relatedBooking: bookingId,
+  });
 };
 
 // Warranty proposal sent → customer
@@ -2484,72 +2396,6 @@ export const sendWarrantyProposalSentEmail = async (
 
 const ADMIN_EMAIL_FALLBACK = (): string =>
   process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
-
-// Cancellation request raised → admin + other party
-export const sendCancellationRequestRaisedEmail = async (params: {
-  bookingId: string;
-  requesterName: string;
-  requesterRole: 'customer' | 'professional';
-  reason: string;
-  otherPartyEmail?: string;
-  otherPartyName?: string;
-}): Promise<boolean> => {
-  const { bookingId, requesterName, requesterRole, reason, otherPartyEmail, otherPartyName } = params;
-  const link = buildBookingLink(bookingId);
-  const safeReason = escapeHtml(reason || 'No reason provided');
-  const adminEmail = ADMIN_EMAIL_FALLBACK();
-
-  const buildContent = (greeting: string, body: string) => `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-      ${getEmailHeader('Cancellation Request')}
-      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
-        <h2 style="color: #333; margin: 0 0 20px 0;">${greeting}</h2>
-        <p style="color: #666; line-height: 1.6;">${body}</p>
-        <div style="background: #fff3cd; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0;">
-          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${safeReason}</p>
-        </div>
-        ${buildEmailButton(link, 'View Booking', '#f59e0b')}
-        ${getEmailFooter()}
-      </div>
-    </div>
-  `;
-
-  const meta = { template: 'cancellation_request_raised', relatedBooking: bookingId };
-
-  if (!adminEmail) {
-    console.error(
-      '[cancellation_request_raised] ADMIN_NOTIFICATIONS_EMAIL/FROM_EMAIL not configured — admin will not be notified'
-    );
-    return false;
-  }
-
-  const adminContent = buildContent(
-    'A cancellation request needs review',
-    `<strong>${escapeHtml(requesterName)}</strong> (${escapeHtml(requesterRole)}) has requested cancellation of a booking. Please review and approve or deny.`
-  );
-  const adminSent = await sendEmail(
-    adminEmail,
-    'Cancellation Request - Fixtract Admin Review',
-    adminContent,
-    meta
-  );
-
-  let otherSent = true;
-  if (otherPartyEmail) {
-    const otherContent = buildContent(
-      `Hello ${escapeHtml(otherPartyName || '')},`,
-      `<strong>${escapeHtml(requesterName)}</strong> has requested cancellation of your shared booking. Our team is reviewing the request.`
-    );
-    otherSent = await sendEmail(
-      otherPartyEmail,
-      'Cancellation Request Submitted - Fixtract',
-      otherContent,
-      meta
-    );
-  }
-
-  return adminSent && otherSent;
-};
 
 // Professional counter-offered a refund amount → customer
 export const sendRefundCounterOfferEmail = async (params: {
@@ -2670,6 +2516,261 @@ export const sendRefundDeniedEmail = async (params: {
   `;
   return sendEmail(requesterEmail, 'Refund Request Denied - Fixtract', content, {
     template: 'refund_denied',
+    relatedBooking: bookingId,
+  });
+};
+
+type CancelledByRole = 'customer' | 'professional' | 'admin';
+
+/** Single-recipient cancellation email (used by notification registry). */
+export const sendBookingCancelledPartyEmail = async (
+  party: 'customer' | 'professional',
+  email: string,
+  partyName: string,
+  otherPartyName: string,
+  reason: string,
+  cancelledBy: CancelledByRole,
+  bookingId: string,
+): Promise<boolean> => {
+  const link = buildBookingLink(bookingId);
+  const safeReason = escapeHtml(reason || 'No reason provided');
+  const cancelledByLabel =
+    cancelledBy === 'customer'
+      ? 'the customer'
+      : cancelledBy === 'professional'
+        ? 'the professional'
+        : 'an administrator';
+  const body =
+    party === 'customer'
+      ? `Your booking with <strong>${escapeHtml(otherPartyName)}</strong> has been cancelled by ${cancelledByLabel}.`
+      : `The booking with <strong>${escapeHtml(otherPartyName)}</strong> has been cancelled by ${cancelledByLabel}.`;
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Booking Cancelled')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(partyName)},</h2>
+        <p style="color: #666; line-height: 1.6;">${body}</p>
+        <div style="background: #fee2e2; border-left: 4px solid #dc2626; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${safeReason}</p>
+        </div>
+        ${buildEmailButton(link, 'View Booking', '#dc2626')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(email, 'Booking Cancelled - Fixtract', content, {
+    template: 'booking_cancelled',
+    relatedBooking: bookingId,
+  });
+};
+
+/** Single-recipient dispute resolved email (used by notification registry). */
+export const sendDisputeResolvedPartyEmail = async (
+  email: string,
+  partyName: string,
+  resolution: string,
+  adjustedAmount: number | undefined,
+  bookingId: string,
+  currency: string = 'EUR',
+): Promise<boolean> => {
+  const link = buildBookingLink(bookingId);
+  const safeResolution = escapeHtml(resolution || 'Closed by admin');
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Dispute Resolved')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(partyName)},</h2>
+        <p style="color: #666; line-height: 1.6;">
+          The dispute on the booking has been resolved by our admin team.
+        </p>
+        <div style="background: #e8f5e8; border-left: 4px solid #16a34a; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0 0 8px 0;"><strong>Resolution:</strong> ${safeResolution}</p>
+          ${typeof adjustedAmount === 'number' && Number.isFinite(adjustedAmount) ? `<p style="color: #333; margin: 0;"><strong>Adjusted amount:</strong> ${formatCurrency(adjustedAmount, currency)}</p>` : ''}
+        </div>
+        ${buildEmailButton(link, 'View Booking', '#16a34a')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(email, 'Dispute Resolved - Fixtract', content, {
+    template: 'dispute_resolved',
+    relatedBooking: bookingId,
+  });
+};
+
+/** Admin alert when a dispute is raised (professional mail via notification registry). */
+export const sendDisputeRaisedAdminEmail = async (
+  adminEmail: string,
+  profName: string,
+  custName: string,
+  reason: string,
+  bookingId: string,
+): Promise<boolean> => {
+  if (!adminEmail?.trim()) {
+    console.error('[dispute_raised] ADMIN_NOTIFICATIONS_EMAIL/FROM_EMAIL not configured — admin will not be notified');
+    return false;
+  }
+  const link = buildBookingLink(bookingId);
+  const safeReason = escapeHtml(reason || 'No reason provided');
+  const adminContent = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('New Dispute — Action Required')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">A new dispute has been raised.</h2>
+        <p style="color: #666; line-height: 1.6;">
+          <strong>${escapeHtml(custName)}</strong> raised a dispute against <strong>${escapeHtml(profName)}</strong>.
+        </p>
+        <div style="background: #fee2e2; border-left: 4px solid #dc2626; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${safeReason}</p>
+        </div>
+        ${buildEmailButton(link, 'Review Dispute', '#dc2626')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(adminEmail, 'New Dispute — Action Required - Fixtract', adminContent, {
+    template: 'dispute_raised',
+    relatedBooking: bookingId,
+  });
+};
+
+/** Professional-only dispute raised email (admin mail stays separate). */
+export const sendDisputeRaisedProfessionalPartyEmail = async (
+  profEmail: string,
+  profName: string,
+  custName: string,
+  reason: string,
+  bookingId: string,
+): Promise<boolean> => {
+  const link = buildBookingLink(bookingId);
+  const safeReason = escapeHtml(reason || 'No reason provided');
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Dispute Raised')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(profName)},</h2>
+        <p style="color: #666; line-height: 1.6;">
+          <strong>${escapeHtml(custName)}</strong> has raised a dispute on your booking.
+        </p>
+        <div style="background: #fee2e2; border-left: 4px solid #dc2626; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${safeReason}</p>
+        </div>
+        <p style="color: #666; line-height: 1.6;">
+          Our admin team will review the dispute and may reach out for additional information.
+        </p>
+        ${buildEmailButton(link, 'View Booking', '#dc2626')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(profEmail, 'Dispute Raised - Fixtract', content, {
+    template: 'dispute_raised',
+    relatedBooking: bookingId,
+  });
+};
+
+/** Reschedule requested by customer → professional */
+export const sendRescheduleRequestedByCustomerEmail = async (
+  profEmail: string,
+  profName: string,
+  custName: string,
+  oldDate: Date | string | null | undefined,
+  newDate: Date | string | null | undefined,
+  reason: string,
+  bookingId: string,
+): Promise<boolean> => {
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Rescheduling Request')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(profName)},</h2>
+        <p style="color: #666; line-height: 1.6;">
+          <strong>${escapeHtml(custName)}</strong> has requested to reschedule your shared booking.
+        </p>
+        <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0 0 8px 0;"><strong>Original Start:</strong> ${escapeHtml(formatDateTime(oldDate))}</p>
+          <p style="color: #333; margin: 0 0 8px 0;"><strong>Proposed Start:</strong> ${escapeHtml(formatDateTime(newDate))}</p>
+          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${escapeHtml(reason)}</p>
+        </div>
+        ${buildEmailButton(buildBookingLink(bookingId), 'Review Request', '#ffc107')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(profEmail, 'Rescheduling Request - Fixtract', content, {
+    template: 'reschedule_requested',
+    relatedBooking: bookingId,
+  });
+};
+
+/** Other party when a cancellation/refund request is raised. */
+export const sendCancellationRequestOtherPartyEmail = async (params: {
+  otherPartyEmail: string;
+  otherPartyName: string;
+  requesterName: string;
+  reason: string;
+  bookingId: string;
+}): Promise<boolean> => {
+  const { otherPartyEmail, otherPartyName, requesterName, reason, bookingId } = params;
+  const link = buildBookingLink(bookingId);
+  const safeReason = escapeHtml(reason || 'No reason provided');
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Cancellation Request')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(otherPartyName)},</h2>
+        <p style="color: #666; line-height: 1.6;">
+          <strong>${escapeHtml(requesterName)}</strong> has requested cancellation of your shared booking. Our team is reviewing the request.
+        </p>
+        <div style="background: #fff3cd; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${safeReason}</p>
+        </div>
+        ${buildEmailButton(link, 'View Booking', '#f59e0b')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(otherPartyEmail, 'Cancellation Request Submitted - Fixtract', content, {
+    template: 'cancellation_request_raised',
+    relatedBooking: bookingId,
+  });
+};
+
+/** Admin alert when a cancellation/refund request is raised. */
+export const sendCancellationRequestAdminEmail = async (params: {
+  requesterName: string;
+  requesterRole: 'customer' | 'professional';
+  reason: string;
+  bookingId: string;
+}): Promise<boolean> => {
+  const { requesterName, requesterRole, reason, bookingId } = params;
+  const adminEmail = ADMIN_EMAIL_FALLBACK();
+  if (!adminEmail) {
+    console.error(
+      '[cancellation_request_raised] ADMIN_NOTIFICATIONS_EMAIL/FROM_EMAIL not configured — admin will not be notified',
+    );
+    return false;
+  }
+  const link = buildBookingLink(bookingId);
+  const safeReason = escapeHtml(reason || 'No reason provided');
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Cancellation Request')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">A cancellation request needs review</h2>
+        <p style="color: #666; line-height: 1.6;">
+          <strong>${escapeHtml(requesterName)}</strong> (${escapeHtml(requesterRole)}) has requested cancellation of a booking. Please review and approve or deny.
+        </p>
+        <div style="background: #fff3cd; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${safeReason}</p>
+        </div>
+        ${buildEmailButton(link, 'View Booking', '#f59e0b')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return sendEmail(adminEmail, 'Cancellation Request - Fixtract Admin Review', content, {
+    template: 'cancellation_request_raised',
     relatedBooking: bookingId,
   });
 };

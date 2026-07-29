@@ -3,7 +3,7 @@ import {
   applyCoverImageAltUpdate,
   coverImageAltForCreate,
   parseCoverImageAltPatch,
-} from "../cmsCoverImageAlt";
+} from "../../utils/cmsCoverImageAlt";
 
 describe("coverImageAlt contract", () => {
   describe("create (coverImageAltForCreate)", () => {

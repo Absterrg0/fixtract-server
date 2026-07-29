@@ -3,7 +3,7 @@ import {
   generateUnsubscribeToken,
   signUnsubscribePayload,
   verifyUnsubscribePayload,
-} from '../unsubscribeToken';
+} from '../../../utils/marketing/unsubscribeToken';
 
 describe('unsubscribeToken', () => {
   it('generates opaque random tokens', () => {

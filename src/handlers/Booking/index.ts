@@ -10,7 +10,7 @@ import {
 } from "../../utils/scheduleEngine";
 import { presignS3Url, uploadToS3, generateFileName } from "../../utils/s3Upload";
 import { resolveSubprojectIndex } from "../../utils/bookingHelpers";
-import { sendBookingCancelledEmail, sendCancellationRequestRaisedEmail } from "../../utils/emailService";
+import { sendCancellationRequestAdminEmail } from "../../utils/emailService";
 import { getProfessionalDisplayName } from "../../utils/displayName";
 import CancellationRequest, { ACTIVE_CANCELLATION_STATUSES, CANCELLATION_REASON_CATEGORIES, CANCELLATION_REASON_LABELS, CancellationReasonCategory } from "../../models/cancellationRequest";
 import { addBusinessDays, REFUND_RESPONSE_BUSINESS_DAYS } from "../../utils/businessDays";
@@ -1584,21 +1584,31 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
       const requesterName = isCustomer
         ? customerUser?.name || 'Customer'
         : getProfessionalDisplayName(professionalUser);
-      const otherPartyEmail = isCustomer ? professionalUser?.email : customerUser?.email;
-      const otherPartyName = isCustomer
-        ? getProfessionalDisplayName(professionalUser)
-        : customerUser?.name || 'Customer';
-
-      await sendCancellationRequestRaisedEmail({
+      await sendCancellationRequestAdminEmail({
         bookingId: String(booking._id),
         requesterName,
         requesterRole: requestedRole,
         reason: trimmedReason,
-        otherPartyEmail: otherPartyEmail || undefined,
-        otherPartyName,
       });
 
-      // Inbox + push for both parties (email to other party already sent above)
+      const otherPartyUserId = isCustomer ? professionalUser?._id : customerUser?._id;
+      if (otherPartyUserId) {
+        notifyAsync({
+          userId: otherPartyUserId.toString(),
+          eventKey: isCustomer
+            ? 'professional.cancellation_request_received'
+            : 'customer.cancellation_request_received',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            requesterName,
+            reason: trimmedReason,
+          },
+        });
+      }
+
+      // Inbox + push for both parties in the negotiation flow
       if (isCustomer && professionalUser?._id) {
         notifyAsync({
           userId: professionalUser._id.toString(),

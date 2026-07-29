@@ -40,11 +40,12 @@ export function buildPublicListQuery(
   filters: PublicListFilters,
   now: Date = new Date(),
 ): FilterQuery<ISiteAnnouncement> {
+  const localeBase = filters.locale.split('-')[0] || filters.locale;
   const query: FilterQuery<ISiteAnnouncement> = {
     isActive: true,
     startsAt: { $lte: now },
     endsAt: { $gte: now },
-    locale: { $in: [filters.locale, 'en'] },
+    locale: { $in: [...new Set([filters.locale, localeBase, 'en'])] },
   };
 
   if (filters.type) {
