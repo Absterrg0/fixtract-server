@@ -16,6 +16,7 @@ function candidate(
     activeCountries: overrides.activeCountries ?? [],
     startsAt: overrides.startsAt ?? new Date('2026-07-01T00:00:00.000Z'),
     endsAt: overrides.endsAt ?? new Date('2026-08-01T23:59:59.999Z'),
+    isActive: overrides.isActive ?? true,
     ...overrides,
   };
 }
@@ -104,6 +105,30 @@ describe('selectPublicAnnouncementWinners', () => {
       now,
     );
     expect(winners.find((w) => w.type === 'modal')?.title).toBe('FR exact');
+  });
+
+  it('treats base-language locale as exact for region-tagged requests', () => {
+    const winners = selectPublicAnnouncementWinners(
+      [
+        candidate({
+          type: 'modal',
+          title: 'NL base',
+          locale: 'nl',
+          priority: 5,
+          createdAt: new Date('2026-07-01T00:00:00.000Z'),
+        }),
+        candidate({
+          type: 'modal',
+          title: 'EN newer',
+          locale: 'en',
+          priority: 5,
+          createdAt: new Date('2026-07-20T00:00:00.000Z'),
+        }),
+      ],
+      { locale: 'nl-be' },
+      now,
+    );
+    expect(winners.find((w) => w.type === 'modal')?.title).toBe('NL base');
   });
 
   it('returns only global campaigns when country is unknown', () => {

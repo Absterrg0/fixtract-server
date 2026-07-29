@@ -6,12 +6,7 @@ import Payment from "../../models/payment";
 import User from "../../models/user";
 import { executeRefund, RefundError } from "../Stripe/payment";
 import { releaseScheduleSlots } from "../../utils/scheduleRelease";
-import {
-  sendBookingCancelledEmail,
-  sendRefundProcessedEmail,
-  sendRefundDeniedEmail,
-} from "../../utils/emailService";
-import { getProfessionalDisplayName } from "../../utils/displayName";
+import { notifyBookingCancelledAndRefunded } from "../../utils/notifications/notifyBookingCancelledAndRefunded";
 import { auditLog } from "../../utils/auditLogger";
 import { param, params } from "../../utils/requestParams";
 
@@ -242,54 +237,20 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
 
     try {
       const [customerUser, professionalUser] = await Promise.all([
-        freshBooking.customer ? User.findById(freshBooking.customer).select("email name").lean() : null,
-        freshBooking.professional ? User.findById(freshBooking.professional).select("email name businessInfo username").lean() : null,
+        freshBooking.customer ? User.findById(freshBooking.customer).select("_id name").lean() : null,
+        freshBooking.professional ? User.findById(freshBooking.professional).select("_id name businessInfo username").lean() : null,
       ]);
-      try {
-        if (customerUser?.email && professionalUser?.email) {
-          await sendBookingCancelledEmail(
-            customerUser.email,
-            professionalUser.email,
-            customerUser.name || "Customer",
-            getProfessionalDisplayName(professionalUser),
-            cancellation.reason,
-            "admin",
-            String(freshBooking._id)
-          );
-        }
-        if (customerUser?.email && refundAmount > 0) {
-          await sendRefundProcessedEmail(
-            customerUser.email,
-            customerUser.name || "Customer",
-            refundAmount,
-            freshBooking.payment?.currency || "EUR",
-            refundAmount < totalWithVat,
-            String(freshBooking._id)
-          );
-        }
-      } catch (emailError: any) {
-        console.error("Approve cancellation email error:", emailError?.message || emailError);
-      }
 
-      const { notifyAsync } = await import("../../utils/notifications/notify");
-      if (customerUser?._id) {
-        notifyAsync({
-          userId: customerUser._id.toString(),
-          eventKey: "customer.booking_cancelled_refunded",
-          entityType: "booking",
-          entityId: String(freshBooking._id),
-          context: { bookingId: String(freshBooking._id) },
-        });
-      }
-      if (professionalUser?._id) {
-        notifyAsync({
-          userId: professionalUser._id.toString(),
-          eventKey: "professional.booking_cancelled_refunded",
-          entityType: "booking",
-          entityId: String(freshBooking._id),
-          context: { bookingId: String(freshBooking._id) },
-        });
-      }
+      notifyBookingCancelledAndRefunded({
+        bookingId: String(freshBooking._id),
+        reason: cancellation.reason,
+        cancelledBy: 'admin',
+        customerUser,
+        professionalUser,
+        refundAmount,
+        currency: freshBooking.payment?.currency || 'EUR',
+        isPartialRefund: refundAmount < totalWithVat,
+      });
     } catch (notifyError: any) {
       console.error("Approve cancellation notify error:", notifyError?.message || notifyError);
     }
@@ -402,19 +363,25 @@ export const denyCancellationRequest = async (req: Request, res: Response) => {
 
     try {
       const requester: any = cancellation.requestedBy;
-      if (requester?.email) {
-        const requesterName = cancellation.requestedRole === "professional"
-          ? getProfessionalDisplayName(requester, "Professional")
-          : (requester.name || "Customer");
-        await sendRefundDeniedEmail({
-          requesterEmail: requester.email,
-          requesterName,
-          bookingId: String(cancellation.booking),
-          denyReason: cancellation.denyReason || denyReason.trim(),
+      if (requester?._id) {
+        const { notifyAsync } = await import("../../utils/notifications/notify");
+        const eventKey =
+          cancellation.requestedRole === "professional"
+            ? "professional.refund_denied"
+            : "customer.refund_denied";
+        notifyAsync({
+          userId: requester._id.toString(),
+          eventKey,
+          entityType: "booking",
+          entityId: String(cancellation.booking),
+          context: {
+            bookingId: String(cancellation.booking),
+            reason: cancellation.denyReason || denyReason.trim(),
+          },
         });
       }
     } catch (emailError: any) {
-      console.error("Deny cancellation email error:", emailError?.message || emailError);
+      console.error("Deny cancellation notify error:", emailError?.message || emailError);
     }
 
     await auditLog({

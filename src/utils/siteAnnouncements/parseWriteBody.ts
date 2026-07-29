@@ -17,6 +17,12 @@ function optionalTrimmed(value: string | null | undefined): string | undefined {
   return trimmed || undefined;
 }
 
+function isSafeCtaUrl(url: string): boolean {
+  if (url.startsWith('https://') || url.startsWith('http://')) return true;
+  // Relative path only: reject protocol-relative and backslash variants.
+  return url.startsWith('/') && !/^\/[/\\]/.test(url);
+}
+
 function numberOr(value: number | string | null | undefined, fallback: number): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim() !== '') {
@@ -70,7 +76,7 @@ export function parseSiteAnnouncementWriteBody(
     if (ctaUrl.length > ANNOUNCEMENT_LIMITS.ctaUrl.max) {
       return { ok: false, error: `ctaUrl must be at most ${ANNOUNCEMENT_LIMITS.ctaUrl.max} characters` };
     }
-    if (!(ctaUrl.startsWith('/') || ctaUrl.startsWith('https://') || ctaUrl.startsWith('http://'))) {
+    if (!isSafeCtaUrl(ctaUrl)) {
       return { ok: false, error: 'ctaUrl must be a relative path or http(s) URL' };
     }
   }
@@ -216,7 +222,8 @@ export function parseSiteAnnouncementPatchBody(
     if (ctaLabel && ctaLabel.length > ANNOUNCEMENT_LIMITS.ctaLabel.max) {
       return { ok: false, error: `ctaLabel must be at most ${ANNOUNCEMENT_LIMITS.ctaLabel.max} characters` };
     }
-    update.ctaLabel = ctaLabel;
+    // Present-but-empty clears the field (null → $unset in the handler).
+    update.ctaLabel = ctaLabel ?? null;
   }
 
   if (isPresent(body, 'ctaUrl')) {
@@ -225,11 +232,11 @@ export function parseSiteAnnouncementPatchBody(
       if (ctaUrl.length > ANNOUNCEMENT_LIMITS.ctaUrl.max) {
         return { ok: false, error: `ctaUrl must be at most ${ANNOUNCEMENT_LIMITS.ctaUrl.max} characters` };
       }
-      if (!(ctaUrl.startsWith('/') || ctaUrl.startsWith('https://') || ctaUrl.startsWith('http://'))) {
+      if (!isSafeCtaUrl(ctaUrl)) {
         return { ok: false, error: 'ctaUrl must be a relative path or http(s) URL' };
       }
     }
-    update.ctaUrl = ctaUrl;
+    update.ctaUrl = ctaUrl ?? null;
   }
 
   if (isPresent(body, 'discountCode')) {
@@ -240,7 +247,7 @@ export function parseSiteAnnouncementPatchBody(
         error: `discountCode must be at most ${ANNOUNCEMENT_LIMITS.discountCode.max} characters`,
       };
     }
-    update.discountCode = discountCode;
+    update.discountCode = discountCode ?? null;
   }
 
   if (isPresent(body, 'activeCountries')) {

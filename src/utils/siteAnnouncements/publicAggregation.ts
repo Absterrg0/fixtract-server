@@ -8,13 +8,14 @@ export function buildPublicAnnouncementAggregationPipeline(
   now: Date = new Date(),
 ): PipelineStage[] {
   const query = buildPublicListQuery(filters, now);
+  const localeBase = filters.locale.split('-')[0] || filters.locale;
 
   return [
     { $match: query },
     {
       $addFields: {
         localeExact: {
-          $cond: [{ $eq: ['$locale', filters.locale] }, 1, 0],
+          $cond: [{ $in: ['$locale', [filters.locale, localeBase]] }, 1, 0],
         },
       },
     },

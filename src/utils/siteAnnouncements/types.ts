@@ -12,9 +12,9 @@ export interface SiteAnnouncementWriteInput {
   type: AnnouncementType;
   title: string;
   message: string;
-  ctaLabel?: string;
-  ctaUrl?: string;
-  discountCode?: string;
+  ctaLabel?: string | null;
+  ctaUrl?: string | null;
+  discountCode?: string | null;
   activeCountries: string[];
   locale: string;
   startsAt: Date;

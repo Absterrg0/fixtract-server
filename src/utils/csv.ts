@@ -1,7 +1,9 @@
 export const escapeCsv = (value: unknown): string => {
   if (value === null || value === undefined) return '';
   let str = String(value);
-  if (/^[=+\-@\t\r]/.test(str)) {
+  // Neutralize spreadsheet formulas even when preceded by leading whitespace,
+  // without stripping the whitespace from the exported cell.
+  if (/^\s*[=+\-@\t\r]/.test(str)) {
     str = `'${str}`;
   }
   if (/[",\n\r]/.test(str)) {

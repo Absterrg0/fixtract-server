@@ -41,12 +41,14 @@ export const listSiteAnnouncements = async (
     const filters = parseAdminListFilters(req.query);
     const query = buildAdminListQuery(filters);
 
-    const total = await SiteAnnouncement.countDocuments(query);
-    const announcements = await SiteAnnouncement.find(query)
-      .sort({ priority: -1, createdAt: -1 })
-      .skip((filters.page - 1) * filters.limit)
-      .limit(filters.limit)
-      .lean();
+    const [total, announcements] = await Promise.all([
+      SiteAnnouncement.countDocuments(query),
+      SiteAnnouncement.find(query)
+        .sort({ priority: -1, createdAt: -1 })
+        .skip((filters.page - 1) * filters.limit)
+        .limit(filters.limit)
+        .lean(),
+    ]);
 
     return res.status(200).json({
       success: true,
@@ -169,7 +171,24 @@ export const updateSiteAnnouncement = async (
       return res.status(400).json({ success: false, msg: parsed.error });
     }
 
-    const updated = await SiteAnnouncement.findByIdAndUpdate(id, parsed.value, {
+    const $set: Record<string, unknown> = {};
+    const $unset: Record<string, 1> = {};
+    for (const [key, value] of Object.entries(parsed.value)) {
+      if (value === null && (key === 'ctaLabel' || key === 'ctaUrl' || key === 'discountCode')) {
+        $unset[key] = 1;
+      } else if (value !== undefined) {
+        $set[key] = value;
+      }
+    }
+    const updateDoc =
+      Object.keys($unset).length > 0
+        ? {
+            ...(Object.keys($set).length > 0 ? { $set } : {}),
+            $unset,
+          }
+        : $set;
+
+    const updated = await SiteAnnouncement.findByIdAndUpdate(id, updateDoc, {
       new: true,
       runValidators: true,
     });

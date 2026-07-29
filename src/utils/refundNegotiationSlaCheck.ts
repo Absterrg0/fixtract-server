@@ -1,7 +1,6 @@
 import CancellationRequest from "../models/cancellationRequest";
 import Booking from "../models/booking";
-import User from "../models/user";
-import { sendRefundEscalatedEmail } from "./emailService";
+import { notifyAsync } from "./notifications/notify";
 
 export interface RefundSlaCheckResult {
   scanned: number;
@@ -52,18 +51,35 @@ export const runRefundNegotiationSlaCheck = async (): Promise<RefundSlaCheckResu
       }
 
       try {
-        const booking = await Booking.findById(request.booking).select("customer").lean();
-        const customer = booking?.customer
-          ? await User.findById(booking.customer).select("email name").lean()
-          : null;
-        await sendRefundEscalatedEmail({
-          bookingId: String(request.booking),
-          reason: "no_response",
-          customerEmail: customer?.email,
-          customerName: customer?.name || "Customer",
-        });
+        const booking = await Booking.findById(request.booking).select("customer professional").lean();
+        const customerId = booking?.customer?.toString();
+        const professionalId = booking?.professional?.toString();
+        if (customerId) {
+          notifyAsync({
+            userId: customerId,
+            eventKey: "customer.refund_escalated",
+            entityType: "booking",
+            entityId: String(request.booking),
+            context: {
+              bookingId: String(request.booking),
+              escalationReason: "no_response",
+            },
+          });
+        }
+        if (professionalId) {
+          notifyAsync({
+            userId: professionalId,
+            eventKey: "professional.refund_escalated",
+            entityType: "booking",
+            entityId: String(request.booking),
+            context: {
+              bookingId: String(request.booking),
+              escalationReason: "no_response",
+            },
+          });
+        }
       } catch (emailError: any) {
-        console.error(`[refundSla] escalation email failed for ${request._id}:`, emailError?.message || emailError);
+        console.error(`[refundSla] escalation notify failed for ${request._id}:`, emailError?.message || emailError);
       }
     } catch (error: any) {
       console.error(`[refundSla] Failed to escalate request ${request._id}:`, error?.message || error);

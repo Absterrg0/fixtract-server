@@ -23,6 +23,17 @@ describe('toDate', () => {
     expect(toDate(new Date('invalid'))).toBeNull();
     expect(toDate('2026-02-30T00:00:00.000Z')).toBeNull();
     expect(toDate('2026-02-30')).toBeNull();
+    expect(toDate({ $date: '2026-02-30T00:00:00.000Z' })).toBeNull();
+  });
+
+  it('accepts offset-bearing ISO timestamps whose UTC day differs', () => {
+    const parsed = toDate('2026-07-25T00:30:00+01:00');
+    expect(parsed?.toISOString()).toBe('2026-07-24T23:30:00.000Z');
+  });
+
+  it('rejects offset-less date-time strings', () => {
+    expect(toDate('2026-07-25T10:00:00')).toBeNull();
+    expect(toDate({ $date: '2026-07-25T10:00:00' })).toBeNull();
   });
 
   it('powers toISOString', () => {

@@ -60,11 +60,9 @@ describe('parseSiteAnnouncementWriteBody', () => {
   });
 
   it('rejects unsafe ctaUrl', () => {
-    const result = parseSiteAnnouncementWriteBody({
-      ...validBody,
-      ctaUrl: 'javascript:alert(1)',
-    });
-    expect(result.ok).toBe(false);
+    for (const ctaUrl of ['javascript:alert(1)', '//evil.com', '/\\evil.com']) {
+      expect(parseSiteAnnouncementWriteBody({ ...validBody, ctaUrl }).ok).toBe(false);
+    }
   });
 
   it('rejects non-ISO country codes', () => {
@@ -107,6 +105,20 @@ describe('parseSiteAnnouncementPatchBody', () => {
   it('validates schedule bounds against the existing document', () => {
     const result = parseSiteAnnouncementPatchBody({ endsAt: '2026-06-01' }, existing);
     expect(result.ok).toBe(false);
+  });
+
+  it('clears optional fields when present but empty', () => {
+    const result = parseSiteAnnouncementPatchBody(
+      { ctaLabel: '  ', ctaUrl: '', discountCode: '' },
+      { ...existing, ctaLabel: 'Go', ctaUrl: '/services', discountCode: 'SAVE' },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toEqual({
+      ctaLabel: null,
+      ctaUrl: null,
+      discountCode: null,
+    });
   });
 });
 

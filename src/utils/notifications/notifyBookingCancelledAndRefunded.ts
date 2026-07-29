@@ -1,0 +1,73 @@
+import { getProfessionalDisplayName } from '../displayName';
+import type { IUser } from '../../models/user';
+import { notifyAsync } from './notify';
+
+type CancelledBy = 'customer' | 'professional' | 'admin';
+
+type PartyUser = Pick<IUser, '_id'> & { name?: string };
+type ProfessionalPartyUser = Pick<IUser, '_id' | 'name'> & {
+  username?: string;
+  businessInfo?: { companyName?: string };
+};
+
+export interface NotifyBookingCancelledAndRefundedArgs {
+  bookingId: string;
+  reason?: string;
+  cancelledBy: CancelledBy;
+  customerUser?: PartyUser | null;
+  professionalUser?: ProfessionalPartyUser | null;
+  refundAmount?: number;
+  currency?: string;
+  isPartialRefund?: boolean;
+}
+
+export function notifyBookingCancelledAndRefunded(
+  args: NotifyBookingCancelledAndRefundedArgs,
+): void {
+  const cancelContext = {
+    bookingId: args.bookingId,
+    reason: args.reason,
+    cancelledBy: args.cancelledBy,
+    customerName: args.customerUser?.name,
+    professionalName: args.professionalUser
+      ? getProfessionalDisplayName(args.professionalUser)
+      : undefined,
+  };
+
+  const customerId = args.customerUser?._id?.toString?.();
+  const professionalId = args.professionalUser?._id?.toString?.();
+
+  if (customerId) {
+    if (typeof args.refundAmount === 'number' && args.refundAmount > 0) {
+      notifyAsync({
+        userId: customerId,
+        eventKey: 'customer.refund_processed',
+        entityType: 'booking',
+        entityId: args.bookingId,
+        context: {
+          bookingId: args.bookingId,
+          refundAmount: args.refundAmount,
+          currency: args.currency || 'EUR',
+          isPartialRefund: Boolean(args.isPartialRefund),
+        },
+      });
+    }
+    notifyAsync({
+      userId: customerId,
+      eventKey: 'customer.booking_cancelled_refunded',
+      entityType: 'booking',
+      entityId: args.bookingId,
+      context: cancelContext,
+    });
+  }
+
+  if (professionalId) {
+    notifyAsync({
+      userId: professionalId,
+      eventKey: 'professional.booking_cancelled_refunded',
+      entityType: 'booking',
+      entityId: args.bookingId,
+      context: cancelContext,
+    });
+  }
+}

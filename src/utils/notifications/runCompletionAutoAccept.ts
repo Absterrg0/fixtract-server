@@ -16,8 +16,6 @@ import {
   getUnpaidMilestoneCount,
   markMilestonesCompleted,
 } from '../bookingHelpers';
-import { sendCustomerConfirmedCompletionEmail } from '../emailService';
-import { getProfessionalDisplayName } from '../displayName';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
 import User from '../../models/user';
 import { notifyAsync } from './notify';
@@ -217,13 +215,17 @@ export async function finalizeBookingCompletion(args: {
           context: { bookingId: String(finalizedBooking._id) },
         });
       }
-    } else if (professionalUser?.email) {
-      await sendCustomerConfirmedCompletionEmail(
-        professionalUser.email,
-        getProfessionalDisplayName(professionalUser),
-        customerUser?.name || 'Customer',
-        String(finalizedBooking._id),
-      );
+    } else if (proId) {
+      notifyAsync({
+        userId: proId,
+        eventKey: 'professional.completion_confirmed_by_customer',
+        entityType: 'booking',
+        entityId: String(finalizedBooking._id),
+        context: {
+          bookingId: String(finalizedBooking._id),
+          customerName: customerUser?.name,
+        },
+      });
     }
 
     if (customerUser?._id) {

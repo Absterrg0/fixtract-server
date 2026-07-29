@@ -5,12 +5,9 @@ import User from '../../models/user';
 import CancellationRequest from '../../models/cancellationRequest';
 import { executeRefund, RefundError } from '../Stripe/payment';
 import { getProfessionalDisplayName } from '../../utils/displayName';
-import {
-  sendRefundProcessedEmail,
-  sendRefundCounterOfferEmail,
-  sendRefundEscalatedEmail,
-} from '../../utils/emailService';
 import { params } from '../../utils/requestParams';
+import { notifyBookingCancelledAndRefunded } from '../../utils/notifications/notifyBookingCancelledAndRefunded';
+import { notifyAsync } from '../../utils/notifications/notify';
 
 const REFUND_FINALIZED_BOOKING_STATUS = 'cancelled';
 
@@ -192,8 +189,8 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
     request.professionalNote = typeof note === 'string' ? note.trim().slice(0, 1000) : undefined;
 
     const [customerUser, professionalUser] = await Promise.all([
-      User.findById(booking.customer).select('email name').lean(),
-      User.findById(booking.professional).select('email name username').lean(),
+      User.findById(booking.customer).select('_id name').lean(),
+      User.findById(booking.professional).select('_id name businessInfo username').lean(),
     ]);
 
     if (decision === 'approve') {
@@ -203,29 +200,17 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
         return res.status(result.status).json({ success: false, msg: result.message, code: result.code });
       }
       try {
-        if (customerUser?.email) {
-          await sendRefundProcessedEmail(customerUser.email, customerUser.name || 'Customer', result.refundAmount, booking.payment?.currency || 'EUR', false, String(booking._id));
-        }
-        const { notifyAsync } = await import('../../utils/notifications/notify');
-        if (customerUser?._id) {
-          notifyAsync({
-            userId: customerUser._id.toString(),
-            eventKey: 'customer.booking_cancelled_refunded',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: { bookingId: String(booking._id) },
-          });
-        }
-        if (professionalUser?._id) {
-          notifyAsync({
-            userId: professionalUser._id.toString(),
-            eventKey: 'professional.booking_cancelled_refunded',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: { bookingId: String(booking._id) },
-          });
-        }
-      } catch (e) { console.error('refund email failed', e); }
+        notifyBookingCancelledAndRefunded({
+          bookingId: String(booking._id),
+          reason: request.reason,
+          cancelledBy: 'professional',
+          customerUser,
+          professionalUser,
+          refundAmount: result.refundAmount,
+          currency: booking.payment?.currency || 'EUR',
+          isPartialRefund: false,
+        });
+      } catch (e) { console.error('refund notify failed', e); }
       return res.json({ success: true, data: { status: 'approved', refundAmount: result.refundAmount } });
     }
 
@@ -239,18 +224,22 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
       request.status = 'negotiating';
       await request.save();
       try {
-        if (customerUser?.email) {
-          await sendRefundCounterOfferEmail({
-            customerEmail: customerUser.email,
-            customerName: customerUser.name || 'Customer',
-            professionalName: getProfessionalDisplayName(professionalUser),
-            amount: request.counterOfferAmount,
-            note: request.professionalNote,
-            bookingId: String(booking._id),
-            currency: booking.payment?.currency || 'EUR',
+        if (customerUser?._id) {
+          notifyAsync({
+            userId: customerUser._id.toString(),
+            eventKey: 'customer.refund_counter_offer',
+            entityType: 'booking',
+            entityId: String(booking._id),
+            context: {
+              bookingId: String(booking._id),
+              professionalName: getProfessionalDisplayName(professionalUser),
+              refundAmount: request.counterOfferAmount,
+              responseNote: request.professionalNote,
+              currency: booking.payment?.currency || 'EUR',
+            },
           });
         }
-      } catch (e) { console.error('counter-offer email failed', e); }
+      } catch (e) { console.error('counter-offer notify failed', e); }
       return res.json({ success: true, data: { status: 'negotiating', counterOfferAmount: request.counterOfferAmount } });
     }
 
@@ -258,13 +247,31 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
     request.professionalDecision = 'rejected';
     await escalateRequest(request, 'rejected');
     try {
-      await sendRefundEscalatedEmail({
-        bookingId: String(booking._id),
-        reason: 'rejected',
-        customerEmail: customerUser?.email,
-        customerName: customerUser?.name || 'Customer',
-      });
-    } catch (e) { console.error('escalation email failed', e); }
+      if (customerUser?._id) {
+        notifyAsync({
+          userId: customerUser._id.toString(),
+          eventKey: 'customer.refund_escalated',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            escalationReason: 'rejected',
+          },
+        });
+      }
+      if (professionalUser?._id) {
+        notifyAsync({
+          userId: professionalUser._id.toString(),
+          eventKey: 'professional.refund_escalated',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            escalationReason: 'rejected',
+          },
+        });
+      }
+    } catch (e) { console.error('escalation notify failed', e); }
     return res.json({ success: true, data: { status: 'escalated', escalationReason: 'rejected' } });
   } catch (error: any) {
     console.error('professionalRespondToCancellation error:', error);
@@ -305,31 +312,30 @@ export const customerRespondToCounterOffer = async (req: Request, res: Response)
         return res.status(result.status).json({ success: false, msg: result.message, code: result.code });
       }
       try {
-        const customerUser = await User.findById(booking.customer).select('email name').lean();
-        const professionalUser = await User.findById(booking.professional).select('_id').lean();
-        if (customerUser?.email) {
-          await sendRefundProcessedEmail(customerUser.email, customerUser.name || 'Customer', result.refundAmount, booking.payment?.currency || 'EUR', false, String(booking._id));
-        }
-        const { notifyAsync } = await import('../../utils/notifications/notify');
-        if (customerUser?._id) {
-          notifyAsync({
-            userId: customerUser._id.toString(),
-            eventKey: 'customer.booking_cancelled_refunded',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: { bookingId: String(booking._id) },
-          });
-        }
-        if (professionalUser?._id) {
-          notifyAsync({
-            userId: professionalUser._id.toString(),
-            eventKey: 'professional.booking_cancelled_refunded',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: { bookingId: String(booking._id) },
-          });
-        }
-      } catch (e) { console.error('refund email failed', e); }
+        const customerUser = await User.findById(booking.customer).select('_id name').lean();
+        const professionalUser = await User.findById(booking.professional).select('_id name businessInfo username').lean();
+        // Prefer totalWithVat when present; never default a missing amount to 0
+        // (that would mark positive refunds as full refunds in customer copy).
+        const rawBookingTotal = booking.payment?.totalWithVat ?? booking.payment?.amount;
+        const bookingPrice =
+          typeof rawBookingTotal === 'number' && Number.isFinite(rawBookingTotal) && rawBookingTotal > 0
+            ? rawBookingTotal
+            : null;
+        const isPartialRefund =
+          bookingPrice == null
+            ? true
+            : result.refundAmount < bookingPrice;
+        notifyBookingCancelledAndRefunded({
+          bookingId: String(booking._id),
+          reason: request.reason,
+          cancelledBy: 'customer',
+          customerUser,
+          professionalUser,
+          refundAmount: result.refundAmount,
+          currency: booking.payment?.currency || 'EUR',
+          isPartialRefund,
+        });
+      } catch (e) { console.error('refund notify failed', e); }
       return res.json({ success: true, data: { status: 'approved', refundAmount: result.refundAmount } });
     }
 
@@ -337,14 +343,33 @@ export const customerRespondToCounterOffer = async (req: Request, res: Response)
     request.customerDecision = 'refused';
     await escalateRequest(request, 'refused');
     try {
-      const customerUser = await User.findById(booking.customer).select('email name').lean();
-      await sendRefundEscalatedEmail({
-        bookingId: String(booking._id),
-        reason: 'refused',
-        customerEmail: customerUser?.email,
-        customerName: customerUser?.name || 'Customer',
-      });
-    } catch (e) { console.error('escalation email failed', e); }
+      const customerUser = await User.findById(booking.customer).select('_id').lean();
+      const professionalUser = await User.findById(booking.professional).select('_id').lean();
+      if (customerUser?._id) {
+        notifyAsync({
+          userId: customerUser._id.toString(),
+          eventKey: 'customer.refund_escalated',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            escalationReason: 'refused',
+          },
+        });
+      }
+      if (professionalUser?._id) {
+        notifyAsync({
+          userId: professionalUser._id.toString(),
+          eventKey: 'professional.refund_escalated',
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            escalationReason: 'refused',
+          },
+        });
+      }
+    } catch (e) { console.error('escalation notify failed', e); }
     return res.json({ success: true, data: { status: 'escalated', escalationReason: 'refused' } });
   } catch (error: any) {
     console.error('customerRespondToCounterOffer error:', error);

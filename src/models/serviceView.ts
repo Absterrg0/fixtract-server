@@ -6,6 +6,7 @@ export interface IServiceView extends Document {
   visitorKey: string;
   dayKey: string;
   city?: string | null;
+  country?: string | null;
   createdAt: Date;
 }
 
@@ -16,6 +17,7 @@ const serviceViewSchema = new Schema<IServiceView>(
     visitorKey: { type: String, required: true },
     dayKey: { type: String, required: true },
     city: { type: String, default: null, trim: true },
+    country: { type: String, default: null, trim: true },
   },
   { timestamps: { createdAt: true, updatedAt: false } }
 );
@@ -26,6 +28,7 @@ serviceViewSchema.index(
 );
 serviceViewSchema.index({ serviceId: 1, createdAt: -1 });
 serviceViewSchema.index({ city: 1, createdAt: -1 });
+serviceViewSchema.index({ country: 1, createdAt: -1 });
 
 export default (mongoose.models.ServiceView as mongoose.Model<IServiceView>) ||
   mongoose.model<IServiceView>('ServiceView', serviceViewSchema);
