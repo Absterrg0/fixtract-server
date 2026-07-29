@@ -117,8 +117,11 @@ publicRouter.route("/cms/policy-links").get(listPublicPolicyLinks);
 publicRouter.route("/cms/:type").get(listPublicCmsContent);
 publicRouter.route("/cms/:type/:slug").get(getPublicCmsContentBySlug);
 
-// Marketing unsubscribe (public)
-publicRouter.route("/marketing/unsubscribe").get(unsubscribeMarketing).post(unsubscribeMarketing);
+// Marketing unsubscribe (public) — GET preview/verify only; POST mutates
+publicRouter
+  .route("/marketing/unsubscribe")
+  .get(schedulingRateLimiter, unsubscribeMarketing)
+  .post(schedulingRateLimiter, unsubscribeMarketing);
 
 // Cron entrypoints (secured via CRON_SECRET bearer token)
 publicRouter.route("/cron/notification-reminders").get(runNotificationRemindersCron);

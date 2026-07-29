@@ -31,14 +31,14 @@ function localesToSend(campaign: IMarketingCampaign): MarketingLocale[] {
   return available.filter((l) => requested.includes(l));
 }
 
-function injectUnsubscribeLink(html: string, email: string): string {
-  // For list sends we can't personalize per-recipient HTML easily via createEmailCampaign htmlContent.
-  // We inject a generic preferences + tokenized unsubscribe landing that verifies via query.
-  // Per-recipient tokens are still useful when we append a footer note using Brevo params later.
-  void email;
+function injectUnsubscribeLink(html: string, email?: string): string {
   const base = getFrontendUrl();
-  const unsubUrl = `${base}/unsubscribe`;
   const prefsUrl = `${base}/profile?tab=notifications`;
+  // Prefer a signed one-click URL when we have a recipient email; otherwise land on
+  // the confirmation page (GET verifies / preview only — POST completes unsubscribe).
+  const unsubUrl = email?.trim()
+    ? `${base}/unsubscribe?token=${encodeURIComponent(signUnsubscribePayload(email.trim()))}`
+    : `${base}/unsubscribe`;
   if (html.includes('{{unsubscribe}}') || html.includes('__UNSUBSCRIBE_URL__')) {
     return html
       .replace(/\{\{unsubscribe\}\}/g, unsubUrl)
@@ -55,6 +55,18 @@ function injectUnsubscribeLink(html: string, email: string): string {
 </div>`;
 }
 
+function defaultReengagementInactiveDays(): number {
+  const fromEnv = Number(process.env.MARKETING_REENGAGEMENT_INACTIVE_DAYS);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? Math.floor(fromEnv) : 60;
+}
+
+function resolveReengagementInactiveDays(campaign: IMarketingCampaign): number | undefined {
+  if (campaign.type !== 'reengagement') return undefined;
+  const raw = Number(campaign.inactiveDays);
+  if (Number.isFinite(raw) && raw > 0) return Math.floor(raw);
+  return defaultReengagementInactiveDays();
+}
+
 /** Append a one-click signed unsubscribe for single-recipient dry-run / future personalization. */
 export function personalizedUnsubscribeFooter(email: string): string {
   const token = signUnsubscribePayload(email);
@@ -66,10 +78,11 @@ export async function sendMarketingCampaign(
   campaignId: string,
   opts?: { forceNow?: boolean },
 ): Promise<{ ok: true; campaign: IMarketingCampaign } | { ok: false; error: string }> {
-  const campaign = await MarketingCampaign.findById(campaignId);
+  let campaign = await MarketingCampaign.findById(campaignId);
   if (!campaign) return { ok: false, error: 'Campaign not found' };
 
-  if (!['draft', 'scheduled', 'failed'].includes(campaign.status)) {
+  // 'sending' is allowed when cron already claimed scheduled→sending
+  if (!['draft', 'scheduled', 'failed', 'sending'].includes(campaign.status)) {
     return { ok: false, error: `Cannot send campaign in status ${campaign.status}` };
   }
 
@@ -88,13 +101,41 @@ export async function sendMarketingCampaign(
     return { ok: false, error: 'BREVO_API_KEY is not configured' };
   }
 
-  campaign.status = 'sending';
-  campaign.lastError = undefined;
-  campaign.deliveries = [];
-  await campaign.save();
+  if (campaign.status === 'sending') {
+    // Already claimed by cron — reset delivery tracking and continue
+    campaign.lastError = undefined;
+    campaign.deliveries = [];
+  } else {
+    // Atomic claim prevents double-send races (admin send / reengagement / overlapping callers)
+    const claimed = await MarketingCampaign.findOneAndUpdate(
+      {
+        _id: campaign._id,
+        status: { $in: ['draft', 'scheduled', 'failed'] },
+      },
+      {
+        $set: {
+          status: 'sending',
+          lastError: undefined,
+          deliveries: [],
+        },
+      },
+      { new: true },
+    );
+
+    if (!claimed) {
+      const current = await MarketingCampaign.findById(campaignId).select('status').lean();
+      return {
+        ok: false,
+        error: current
+          ? `Cannot send campaign in status ${current.status}`
+          : 'Campaign not found',
+      };
+    }
+    campaign = claimed;
+  }
 
   const members = await resolveCampaignAudience(campaign.audience, {
-    inactiveDays: campaign.type === 'reengagement' ? campaign.inactiveDays : undefined,
+    inactiveDays: resolveReengagementInactiveDays(campaign),
   });
 
   if (members.length === 0) {

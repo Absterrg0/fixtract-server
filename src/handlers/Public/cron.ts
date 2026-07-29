@@ -313,6 +313,25 @@ async function executeMarketingCampaignsDaily(): Promise<MarketingCampaignsDaily
 
   const scheduledResults: Array<{ id: string; ok: boolean; error?: string }> = [];
   for (const row of due) {
+    // Atomically claim scheduled → sending to prevent double-send races
+    const claimed = await MarketingCampaign.findOneAndUpdate(
+      {
+        _id: row._id,
+        status: 'scheduled',
+        scheduledAt: { $lte: new Date() },
+      },
+      { $set: { status: 'sending' } },
+      { new: true },
+    );
+    if (!claimed) {
+      scheduledResults.push({
+        id: String(row._id),
+        ok: false,
+        error: 'skipped: claim failed (already claimed or status changed)',
+      });
+      continue;
+    }
+
     const result = await sendMarketingCampaign(String(row._id), { forceNow: true });
     scheduledResults.push({
       id: String(row._id),

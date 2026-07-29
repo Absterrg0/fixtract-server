@@ -13,21 +13,35 @@ import { refreshCampaignStats, sendMarketingCampaign } from '../../utils/marketi
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
 
-function parseAudience(body: any) {
-  const countries = Array.isArray(body?.countries)
-    ? body.countries.map((c: any) => String(c).trim().toUpperCase()).filter(Boolean)
-    : [];
-  const interestedServices = Array.isArray(body?.interestedServices)
-    ? body.interestedServices.map((s: any) => String(s).trim()).filter(Boolean)
-    : [];
-  const locales = Array.isArray(body?.locales)
-    ? body.locales
+function parseAudience(body: any, existing?: {
+  countries?: string[];
+  interestedServices?: string[];
+  locales?: string[];
+  roles?: Array<'customer' | 'professional'>;
+}) {
+  const source = body && typeof body === 'object' ? body : {};
+  const countries = Array.isArray(source.countries)
+    ? source.countries.map((c: any) => String(c).trim().toUpperCase()).filter(Boolean)
+    : existing?.countries
+      ? [...existing.countries]
+      : [];
+  const interestedServices = Array.isArray(source.interestedServices)
+    ? source.interestedServices.map((s: any) => String(s).trim()).filter(Boolean)
+    : existing?.interestedServices
+      ? [...existing.interestedServices]
+      : [];
+  const locales = Array.isArray(source.locales)
+    ? source.locales
         .map((l: any) => String(l).trim().toLowerCase())
         .filter((l: string) => (MARKETING_LOCALES as readonly string[]).includes(l))
-    : [];
-  const roles = Array.isArray(body?.roles)
-    ? body.roles.filter((r: any) => r === 'customer' || r === 'professional')
-    : ['customer', 'professional'];
+    : existing?.locales
+      ? [...existing.locales]
+      : [];
+  const roles = Array.isArray(source.roles)
+    ? source.roles.filter((r: any) => r === 'customer' || r === 'professional')
+    : existing?.roles?.length
+      ? [...existing.roles]
+      : ['customer', 'professional'];
   return { countries, interestedServices, locales, roles };
 }
 
@@ -183,8 +197,15 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
 
     const { name, scheduledAt, inactiveDays, autoSend, utmCampaign } = req.body || {};
     if (typeof name === 'string' && name.trim().length >= 2) campaign.name = name.trim();
-    if (req.body?.audience || req.body?.countries || req.body?.interestedServices) {
-      campaign.audience = parseAudience(req.body?.audience || req.body) as any;
+    if (
+      req.body?.audience ||
+      req.body?.countries ||
+      req.body?.interestedServices ||
+      req.body?.locales ||
+      req.body?.roles
+    ) {
+      // Merge partial audience updates so unspecified filters are preserved
+      campaign.audience = parseAudience(req.body?.audience || req.body, campaign.audience as any) as any;
     }
     if (req.body?.content) {
       const content = parseContent(req.body);
@@ -208,7 +229,11 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
     }
     if (campaign.type === 'reengagement') {
       if (inactiveDays !== undefined) {
-        campaign.inactiveDays = Math.max(1, Math.floor(Number(inactiveDays)) || 60);
+        const parsed = Number(inactiveDays);
+        campaign.inactiveDays =
+          Number.isFinite(parsed) && parsed > 0
+            ? Math.max(1, Math.floor(parsed))
+            : Number(process.env.MARKETING_REENGAGEMENT_INACTIVE_DAYS) || 60;
       }
       if (autoSend !== undefined) campaign.autoSend = Boolean(autoSend);
     }
@@ -244,10 +269,13 @@ export const deleteMarketingCampaign = async (req: Request, res: Response) => {
 export const previewMarketingAudience = async (req: Request, res: Response) => {
   try {
     const audience = parseAudience(req.body?.audience || req.body);
+    const rawInactive = req.body?.inactiveDays != null ? Number(req.body.inactiveDays) : NaN;
     const inactiveDays =
-      req.body?.inactiveDays != null ? Math.max(1, Math.floor(Number(req.body.inactiveDays))) : undefined;
-    const count = await countCampaignAudience(audience, { inactiveDays });
-    return res.json({ success: true, data: { count, audience } });
+      Number.isFinite(rawInactive) && rawInactive > 0
+        ? Math.max(1, Math.floor(rawInactive))
+        : undefined;
+    const { count, truncated } = await countCampaignAudience(audience, { inactiveDays });
+    return res.json({ success: true, data: { count, truncated, audience } });
   } catch (error: any) {
     console.error('previewMarketingAudience:', error);
     return res.status(500).json({ success: false, msg: 'Failed to preview audience' });

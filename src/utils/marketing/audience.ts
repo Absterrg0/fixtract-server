@@ -46,14 +46,18 @@ export async function syncSubscribersFromUsers(): Promise<{
   upserted: number;
   unsubscribed: number;
 }> {
+  // Cap daily sync so cron cannot load an unbounded user set into memory.
+  // If you outgrow this, switch to a cursor/_id pagination loop.
+  const SYNC_USER_CAP = 5000;
   const users = await User.find({
     email: { $exists: true, $nin: [null, ''] },
     role: { $in: ['customer', 'professional'] },
     deletedAt: { $exists: false },
   })
     .select(
-      'email name role location companyAddress businessInfo notificationPreferences serviceCategories',
+      'email name role location companyAddress businessInfo notificationPreferences serviceCategories preferredLocale locale language',
     )
+    .limit(SYNC_USER_CAP)
     .lean();
 
   const emails = users.map((u) => String(u.email).toLowerCase().trim()).filter(Boolean);
@@ -92,6 +96,10 @@ export async function syncSubscribersFromUsers(): Promise<{
     const fromPro =
       Array.isArray((user as any).serviceCategories) ? (user as any).serviceCategories : [];
     const interestedServices = Array.from(new Set([...fromBookings, ...fromPro].map(String)));
+    // Seed locale from preference fields when present (schema may not declare them yet)
+    const locale = normalizeLocale(
+      (user as any).preferredLocale ?? (user as any).locale ?? (user as any).language,
+    );
 
     const existing = await MarketingSubscriber.findOne({ email });
     if (!optedIn) {
@@ -107,6 +115,7 @@ export async function syncSubscribersFromUsers(): Promise<{
       existing.userId = user._id as any;
       existing.region = region;
       existing.interestedServices = interestedServices;
+      if (!existing.locale || existing.locale === 'en') existing.locale = locale;
       if (existing.unsubscribedAt) existing.unsubscribedAt = null;
       if (!existing.unsubscribeToken) existing.unsubscribeToken = generateUnsubscribeToken();
       await existing.save();
@@ -117,7 +126,7 @@ export async function syncSubscribersFromUsers(): Promise<{
         userId: user._id,
         region,
         interestedServices,
-        locale: 'en',
+        locale,
         unsubscribeToken: generateUnsubscribeToken(),
         source: 'user_sync',
         subscribedAt: new Date(),
@@ -216,7 +225,8 @@ export async function resolveCampaignAudience(
 export async function countCampaignAudience(
   audience: ICampaignAudience,
   opts?: { inactiveDays?: number },
-): Promise<number> {
-  const members = await resolveCampaignAudience(audience, { ...opts, max: 10000 });
-  return members.length;
+): Promise<{ count: number; truncated: boolean }> {
+  const max = 10000;
+  const members = await resolveCampaignAudience(audience, { ...opts, max });
+  return { count: members.length, truncated: members.length >= max };
 }

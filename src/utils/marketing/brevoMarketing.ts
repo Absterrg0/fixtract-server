@@ -16,6 +16,16 @@ import {
 
 const FOLDER_NAME = 'Fixtract Campaigns';
 
+function maskEmail(email: string): string {
+  const trimmed = email.trim();
+  const at = trimmed.indexOf('@');
+  if (at <= 0) return '***';
+  const local = trimmed.slice(0, at);
+  const domain = trimmed.slice(at + 1);
+  const visible = local.slice(0, 1);
+  return `${visible}***@${domain}`;
+}
+
 function requireApiKey(): string {
   const key = process.env.BREVO_API_KEY?.trim();
   if (!key) throw new Error('BREVO_API_KEY is not configured');
@@ -109,10 +119,10 @@ export async function syncContactsToList(
             await api.addContactToList(listId, add);
             imported += 1;
           } catch (addErr) {
-            console.error('[Brevo] addContactToList failed for', c.email, addErr);
+            console.error('[Brevo] addContactToList failed for', maskEmail(c.email), addErr);
           }
         } else {
-          console.error('[Brevo] createContact failed for', c.email, err?.message || err);
+          console.error('[Brevo] createContact failed for', maskEmail(c.email), err?.message || err);
         }
       }
     }

@@ -2,13 +2,21 @@ import crypto from 'crypto';
 
 const TOKEN_BYTES = 24;
 
+function requireJwtSecret(): string {
+  const secret = process.env.JWT_SECRET?.trim();
+  if (!secret) {
+    throw new Error('JWT_SECRET is required to sign/verify unsubscribe tokens');
+  }
+  return secret;
+}
+
 export function generateUnsubscribeToken(): string {
   return crypto.randomBytes(TOKEN_BYTES).toString('hex');
 }
 
 /** Signed short-lived token for one-click unsubscribe links in campaign HTML. */
 export function signUnsubscribePayload(email: string, ttlSeconds = 60 * 60 * 24 * 90): string {
-  const secret = process.env.JWT_SECRET || process.env.BREVO_API_KEY || 'dev-unsubscribe';
+  const secret = requireJwtSecret();
   const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
   const payload = Buffer.from(JSON.stringify({ email: email.toLowerCase().trim(), exp }), 'utf8').toString(
     'base64url',
@@ -20,7 +28,12 @@ export function signUnsubscribePayload(email: string, ttlSeconds = 60 * 60 * 24 
 export function verifyUnsubscribePayload(
   token: string,
 ): { ok: true; email: string } | { ok: false; error: string } {
-  const secret = process.env.JWT_SECRET || process.env.BREVO_API_KEY || 'dev-unsubscribe';
+  let secret: string;
+  try {
+    secret = requireJwtSecret();
+  } catch {
+    return { ok: false, error: 'JWT_SECRET is not configured' };
+  }
   const [payload, sig] = token.split('.');
   if (!payload || !sig) return { ok: false, error: 'Invalid token' };
   const expected = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
