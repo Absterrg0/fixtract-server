@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { buildPublicListQuery } from '../buildQueries';
+import { buildPublicListQuery } from '../../../utils/siteAnnouncements/buildQueries';
 import {
   parseScheduleEnd,
   parseScheduleStart,
-} from '../scheduleDates';
+} from '../../../utils/siteAnnouncements/scheduleDates';
 
 describe('parseScheduleStart / parseScheduleEnd', () => {
   it('expands date-only start to start of day in Europe/Brussels', () => {

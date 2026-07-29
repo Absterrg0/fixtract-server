@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { toDate, toISOString } from '../dateUtils';
+import { toDate, toISOString } from '../../utils/dateUtils';
 
 describe('toDate', () => {
   it('parses ISO strings and Date instances', () => {

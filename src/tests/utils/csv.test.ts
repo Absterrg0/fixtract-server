@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { escapeCsv, buildCsv } from '../csv';
+import { escapeCsv, buildCsv } from '../../utils/csv';
 
 describe('escapeCsv', () => {
   it('prefixes formula characters at the start of a cell', () => {

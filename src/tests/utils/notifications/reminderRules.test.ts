@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { daysAgo, hasUnpaidExtras, shouldSendReminder } from '../reminderRules';
+import { daysAgo, hasUnpaidExtras, shouldSendReminder } from '../../../utils/notifications/reminderRules';
 
 describe('shouldSendReminder', () => {
   const now = Date.parse('2026-07-20T12:00:00.000Z');

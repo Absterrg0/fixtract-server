@@ -35,10 +35,10 @@ import {
   listSiteAnnouncements,
   setSiteAnnouncementActive,
   updateSiteAnnouncement,
-} from '../siteAnnouncements';
+} from '../../../handlers/Admin/siteAnnouncements';
 import {
   listPublicSiteAnnouncements,
-} from '../../Public/siteAnnouncements';
+} from '../../../handlers/Public/siteAnnouncements';
 
 function mockRes() {
   const res = {

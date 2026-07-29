@@ -6,7 +6,7 @@ vi.mock("../../models/serviceConfiguration", () => ({
   default: { findOne: findOneMock },
 }));
 
-import { resolveVatDecisionFromConfig, getVatRateOptionsFromConfig } from "../vatManagement";
+import { resolveVatDecisionFromConfig, getVatRateOptionsFromConfig } from "../../utils/vatManagement";
 
 const mockConfig = (config: unknown) => {
   findOneMock.mockReturnValue({ select: vi.fn().mockResolvedValue(config) });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { permissionsForRole, hasPermission, resolveAdminRole } from '../rolePermissions';
-import { permissionForAdminPath } from '../routePermissions';
+import { permissionsForRole, hasPermission, resolveAdminRole } from '../../../utils/adminRbac/rolePermissions';
+import { permissionForAdminPath } from '../../../utils/adminRbac/routePermissions';
 
 describe('admin RBAC role packs', () => {
   it('defaults missing role to super', () => {

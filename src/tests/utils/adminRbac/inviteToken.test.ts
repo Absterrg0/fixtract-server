@@ -4,7 +4,7 @@ import {
   buildAdminInviteUrl,
   generateAdminInviteToken,
   hashAdminInviteToken,
-} from '../inviteToken';
+} from '../../../utils/adminRbac/inviteToken';
 
 describe('admin invite token helpers', () => {
   it('hashes tokens deterministically', () => {
