@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isEligibleForAutoAccept } from '../autoAcceptEligibility';
+import { isEligibleForAutoAccept } from '../../../utils/notifications/autoAcceptEligibility';
 
 describe('completion auto-accept eligibility', () => {
   const now = new Date('2026-07-20T12:00:00.000Z');

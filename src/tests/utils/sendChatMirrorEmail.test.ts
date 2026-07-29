@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../emailLogger', () => ({
+vi.mock('../../utils/emailLogger', () => ({
   logEmail: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { sendChatMirrorEmail } from '../emailService';
-import { getEventDef } from '../notifications/registry';
+import { sendChatMirrorEmail } from '../../utils/emailService';
+import { getEventDef } from '../../utils/notifications/registry';
 
 describe('sendChatMirrorEmail', () => {
   const logs: string[] = [];

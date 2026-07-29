@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { duplicateKeyField, duplicateKeyMessage, duplicateKeyResponse } from '../mongoErrors';
+import { duplicateKeyField, duplicateKeyMessage, duplicateKeyResponse } from '../../utils/mongoErrors';
 
 describe('mongoErrors', () => {
   it('detects duplicate phone errors', () => {

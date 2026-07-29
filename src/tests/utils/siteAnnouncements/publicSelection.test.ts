@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { buildPublicAnnouncementAggregationPipeline } from '../publicAggregation';
-import { selectPublicAnnouncementWinners } from '../selectPublicWinners';
-import type { PublicAnnouncementCandidate } from '../selectPublicWinners';
+import { buildPublicAnnouncementAggregationPipeline } from '../../../utils/siteAnnouncements/publicAggregation';
+import { selectPublicAnnouncementWinners } from '../../../utils/siteAnnouncements/selectPublicWinners';
+import type { PublicAnnouncementCandidate } from '../../../utils/siteAnnouncements/selectPublicWinners';
 
 const now = new Date('2026-07-15T12:00:00.000Z');
 

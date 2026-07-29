@@ -1919,6 +1919,88 @@ export const sendPaymentConfirmedEmail = async (
   });
 };
 
+const buildPaymentLink = (bookingId: string) =>
+  `${FRONTEND_URL}/bookings/${bookingId}/payment`;
+
+// Abandoned / unfinished checkout reminder
+export const sendUnfinishedCheckoutEmail = async (
+  custEmail: string,
+  custName: string,
+  bookingId: string,
+  projectTitle?: string,
+  discountCode?: string,
+): Promise<boolean> => {
+  const link = buildPaymentLink(bookingId);
+  const titleLabel = projectTitle ? escapeHtml(projectTitle) : 'your booking';
+  const discountBlock = discountCode
+    ? `
+        <div style="background: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 16px; margin: 20px 0;">
+          <p style="color: #065f46; margin: 0 0 8px 0; font-weight: 600;">Complete your booking and save</p>
+          <p style="color: #047857; margin: 0; font-size: 18px; letter-spacing: 1px;"><strong>${escapeHtml(discountCode)}</strong></p>
+          <p style="color: #047857; margin: 8px 0 0 0; font-size: 14px;">Apply this code at checkout.</p>
+        </div>
+      `
+    : '';
+
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Finish Your Booking')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(custName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          You started booking <strong>${titleLabel}</strong> but haven't completed payment yet.
+          Your slot isn't confirmed until checkout is finished.
+        </p>
+        ${discountBlock}
+        <p style="color: #666; line-height: 1.6;">
+          It only takes a minute to pick up where you left off.
+        </p>
+        ${buildEmailButton(link, 'Complete Payment', '#667eea')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+
+  return sendEmail(custEmail, 'Finish Your Booking - Fixtract', content, {
+    template: 'unfinished_checkout',
+    relatedBooking: bookingId,
+  });
+};
+
+// Instant failed payment nudge (Stripe webhook)
+export const sendPaymentFailedEmail = async (
+  custEmail: string,
+  custName: string,
+  bookingId: string,
+  projectTitle?: string,
+): Promise<boolean> => {
+  const link = buildPaymentLink(bookingId);
+  const titleLabel = projectTitle ? escapeHtml(projectTitle) : 'your booking';
+
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Payment Failed')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(custName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          We couldn't process payment for <strong>${titleLabel}</strong>.
+          Your booking is still on hold — please try again with a different card or payment method.
+        </p>
+        <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
+          <p style="color: #333; margin: 0;">No charge was completed. You can retry payment safely from your booking page.</p>
+        </div>
+        ${buildEmailButton(link, 'Retry Payment', '#dc2626')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+
+  return sendEmail(custEmail, 'Payment Failed - Fixtract', content, {
+    template: 'payment_failed',
+    relatedBooking: bookingId,
+  });
+};
+
 /** Confirmed/paid booking → professional (mail for professional.booking_created). */
 export const sendProfessionalNewBookingEmail = async (
   profEmail: string,

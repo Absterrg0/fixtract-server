@@ -417,6 +417,30 @@ async function handlePaymentIntentFailed(paymentIntent: Stripe.PaymentIntent) {
     { status: 'failed' }
   );
 
+  const customerId = booking.customer?.toString();
+  if (customerId) {
+    try {
+      const { notify } = await import('../../utils/notifications/notify');
+      await notify({
+        userId: customerId,
+        eventKey: 'customer.payment_failed',
+        entityType: 'booking',
+        entityId: String(booking._id),
+        context: {
+          bookingId: String(booking._id),
+          projectTitle: booking.rfqData?.serviceType,
+        },
+      });
+    } catch (notifyError: any) {
+      // Match refund_processed: await delivery so transient failures are logged;
+      // do not fail the webhook ack (booking status already persisted for retry).
+      console.error(
+        'Failed to notify payment-failed:',
+        notifyError?.message || notifyError,
+      );
+    }
+  }
+
   console.log(`Payment failed via webhook for booking ${bookingId}`);
 }
 

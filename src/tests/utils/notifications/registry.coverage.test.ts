@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { listRegistryEventKeys, getEventDef } from '../registry';
+import { listRegistryEventKeys, getEventDef } from '../../../utils/notifications/registry';
 
 /** Spec event keys that must exist in the registry (Phases 0–3 + inbox-unify). */
 const REQUIRED_EVENT_KEYS = [
@@ -7,6 +7,7 @@ const REQUIRED_EVENT_KEYS = [
   'customer.rfq_rejected',
   'customer.unfinished_checkout',
   'customer.payment_confirmed',
+  'customer.payment_failed',
   'customer.rfq_accepted',
   'customer.quotation_received',
   'customer.quotation_updated',

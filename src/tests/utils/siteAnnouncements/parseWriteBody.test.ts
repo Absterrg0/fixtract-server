@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { parseIsActiveBody, parseSiteAnnouncementPatchBody, parseSiteAnnouncementWriteBody } from '../parseWriteBody';
+import { parseIsActiveBody, parseSiteAnnouncementPatchBody, parseSiteAnnouncementWriteBody } from '../../../utils/siteAnnouncements/parseWriteBody';
 
-import type { SiteAnnouncementActiveBody, SiteAnnouncementWriteBody } from '../types';
+import type { SiteAnnouncementActiveBody, SiteAnnouncementWriteBody } from '../../../utils/siteAnnouncements/types';
 
 const validBody: SiteAnnouncementWriteBody = {
   name: 'Summer BE promo',
