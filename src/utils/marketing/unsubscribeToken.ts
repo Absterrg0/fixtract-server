@@ -14,13 +14,18 @@ export function generateUnsubscribeToken(): string {
   return crypto.randomBytes(TOKEN_BYTES).toString('hex');
 }
 
-/** Signed short-lived token for one-click unsubscribe links in campaign HTML. */
-export function signUnsubscribePayload(email: string, ttlSeconds = 60 * 60 * 24 * 90): string {
+/**
+ * Sign an unsubscribe payload. Campaign links do not expire by default: an old
+ * marketing email must keep offering a working opt-out. A TTL remains available
+ * for callers that need a time-bound confirmation link.
+ */
+export function signUnsubscribePayload(email: string, ttlSeconds?: number): string {
   const secret = requireJwtSecret();
-  const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
-  const payload = Buffer.from(JSON.stringify({ email: email.toLowerCase().trim(), exp }), 'utf8').toString(
-    'base64url',
-  );
+  const data: { email: string; exp?: number } = { email: email.toLowerCase().trim() };
+  if (ttlSeconds !== undefined) {
+    data.exp = Math.floor(Date.now() / 1000) + ttlSeconds;
+  }
+  const payload = Buffer.from(JSON.stringify(data), 'utf8').toString('base64url');
   const sig = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
   return `${payload}.${sig}`;
 }
@@ -50,7 +55,10 @@ export function verifyUnsubscribePayload(
     if (!parsed.email || typeof parsed.email !== 'string') {
       return { ok: false, error: 'Invalid token payload' };
     }
-    if (typeof parsed.exp !== 'number' || parsed.exp < Math.floor(Date.now() / 1000)) {
+    if (parsed.exp !== undefined && (
+      typeof parsed.exp !== 'number' ||
+      parsed.exp < Math.floor(Date.now() / 1000)
+    )) {
       return { ok: false, error: 'Token expired' };
     }
     return { ok: true, email: parsed.email.toLowerCase().trim() };

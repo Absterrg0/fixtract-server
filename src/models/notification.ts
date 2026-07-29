@@ -19,6 +19,7 @@ export interface INotification extends Document {
   pushAttempted: boolean;
   pushSent: boolean;
   meta?: Record<string, unknown>;
+  deliveryKey?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -46,6 +47,7 @@ const notificationSchema = new Schema<INotification>(
     pushAttempted: { type: Boolean, default: false },
     pushSent: { type: Boolean, default: false },
     meta: { type: Schema.Types.Mixed },
+    deliveryKey: { type: String, trim: true, maxlength: 200 },
   },
   { timestamps: true },
 );
@@ -54,6 +56,7 @@ notificationSchema.index({ userId: 1, createdAt: -1 });
 notificationSchema.index({ userId: 1, createdAt: -1, _id: -1 });
 notificationSchema.index({ userId: 1, readAt: 1, createdAt: -1 });
 notificationSchema.index({ userId: 1, eventKey: 1, entityId: 1, createdAt: -1 });
+notificationSchema.index({ deliveryKey: 1 }, { unique: true, sparse: true });
 
 const Notification = mongoose.model<INotification>('Notification', notificationSchema);
 

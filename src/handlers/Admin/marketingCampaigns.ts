@@ -9,9 +9,17 @@ import MarketingCampaign, {
 import { params } from '../../utils/requestParams';
 import { countCampaignAudience, syncSubscribersFromUsers } from '../../utils/marketing/audience';
 import { refreshCampaignStats, sendMarketingCampaign } from '../../utils/marketing/sendCampaign';
+import { listActiveBrevoTemplates } from '../../utils/marketing/brevoMarketing';
 
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
+
+class MarketingInputError extends Error {}
+
+function configuredInactiveDays(): number {
+  const value = Math.floor(Number(process.env.MARKETING_REENGAGEMENT_INACTIVE_DAYS));
+  return Number.isFinite(value) && value > 0 ? value : 60;
+}
 
 function parseAudience(body: any, existing?: {
   countries?: string[];
@@ -20,6 +28,37 @@ function parseAudience(body: any, existing?: {
   roles?: Array<'customer' | 'professional'>;
 }) {
   const source = body && typeof body === 'object' ? body : {};
+  if (Array.isArray(source.locales) && source.locales.length === 0) {
+    throw new MarketingInputError('Select at least one campaign locale');
+  }
+  if (Array.isArray(source.roles) && source.roles.length === 0) {
+    throw new MarketingInputError('Select at least one audience role');
+  }
+  if (
+    Array.isArray(source.locales) &&
+    source.locales.some(
+      (locale: unknown) =>
+        typeof locale !== 'string' ||
+        !(MARKETING_LOCALES as readonly string[]).includes(locale.trim().toLowerCase()),
+    )
+  ) {
+    throw new MarketingInputError('locales may only contain en, nl, or fr');
+  }
+  if (
+    Array.isArray(source.roles) &&
+    source.roles.some((role: unknown) => role !== 'customer' && role !== 'professional')
+  ) {
+    throw new MarketingInputError('roles may only contain customer or professional');
+  }
+  if (
+    Array.isArray(source.countries) &&
+    source.countries.some(
+      (country: unknown) =>
+        typeof country !== 'string' || !/^[A-Za-z]{2}$/.test(country.trim()),
+    )
+  ) {
+    throw new MarketingInputError('countries must contain two-letter ISO country codes');
+  }
   const countries = Array.isArray(source.countries)
     ? source.countries.map((c: any) => String(c).trim().toUpperCase()).filter(Boolean)
     : existing?.countries
@@ -56,11 +95,13 @@ function parseContent(body: any): Record<string, { subject: string; htmlContent:
     const previewText =
       typeof block.previewText === 'string' ? block.previewText.trim() : undefined;
     const brevoTemplateId =
-      block.brevoTemplateId != null && Number.isFinite(Number(block.brevoTemplateId))
+      block.brevoTemplateId != null &&
+      Number.isInteger(Number(block.brevoTemplateId)) &&
+      Number(block.brevoTemplateId) > 0
         ? Number(block.brevoTemplateId)
         : undefined;
     if (!subject) continue;
-    if (!htmlContent && !brevoTemplateId) continue;
+    if ((!htmlContent || htmlContent.trim().length <= 10) && !brevoTemplateId) continue;
     out[locale] = { subject, htmlContent: htmlContent || '<p></p>', previewText, brevoTemplateId };
   }
   return out;
@@ -129,6 +170,19 @@ export const getMarketingCampaign = async (req: Request, res: Response) => {
   }
 };
 
+export const listMarketingTemplates = async (_req: Request, res: Response) => {
+  try {
+    const templates = await listActiveBrevoTemplates();
+    return res.json({ success: true, data: { templates } });
+  } catch (error: unknown) {
+    console.error(
+      'listMarketingTemplates:',
+      error instanceof Error ? error.message : 'Brevo template lookup failed',
+    );
+    return res.status(502).json({ success: false, msg: 'Failed to load active Brevo templates' });
+  }
+};
+
 export const createMarketingCampaign = async (req: Request, res: Response) => {
   try {
     const { name, type, scheduledAt, inactiveDays, autoSend, utmCampaign } = req.body || {};
@@ -167,7 +221,7 @@ export const createMarketingCampaign = async (req: Request, res: Response) => {
         type === 'reengagement' && Number.isFinite(Number(inactiveDays))
           ? Math.max(1, Math.floor(Number(inactiveDays)))
           : type === 'reengagement'
-            ? Number(process.env.MARKETING_REENGAGEMENT_INACTIVE_DAYS) || 60
+            ? configuredInactiveDays()
             : undefined,
       autoSend: type === 'reengagement' ? Boolean(autoSend) : false,
       scheduledAt: scheduled,
@@ -178,6 +232,9 @@ export const createMarketingCampaign = async (req: Request, res: Response) => {
 
     return res.status(201).json({ success: true, data: serializeCampaign(campaign) });
   } catch (error: any) {
+    if (error instanceof MarketingInputError) {
+      return res.status(400).json({ success: false, msg: error.message });
+    }
     console.error('createMarketingCampaign:', error);
     return res.status(500).json({ success: false, msg: 'Failed to create campaign' });
   }
@@ -193,6 +250,12 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
     if (!campaign) return res.status(404).json({ success: false, msg: 'Campaign not found' });
     if (['sending', 'sent'].includes(campaign.status)) {
       return res.status(400).json({ success: false, msg: 'Sent campaigns cannot be edited' });
+    }
+    if (campaign.deliveries.some((delivery) => delivery.brevoCampaignId)) {
+      return res.status(400).json({
+        success: false,
+        msg: 'Partially delivered campaigns are immutable; create a new campaign instead',
+      });
     }
 
     const { name, scheduledAt, inactiveDays, autoSend, utmCampaign } = req.body || {};
@@ -229,16 +292,11 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
     }
     if (campaign.type === 'reengagement') {
       if (inactiveDays !== undefined) {
-        const configuredInactiveDays = Math.floor(
-          Number(process.env.MARKETING_REENGAGEMENT_INACTIVE_DAYS),
-        );
         const parsed = Number(inactiveDays);
         campaign.inactiveDays =
           Number.isFinite(parsed) && parsed > 0
             ? Math.max(1, Math.floor(parsed))
-            : Number.isFinite(configuredInactiveDays) && configuredInactiveDays > 0
-              ? configuredInactiveDays
-              : 60;
+            : configuredInactiveDays();
       }
       if (autoSend !== undefined) campaign.autoSend = Boolean(autoSend);
     }
@@ -247,6 +305,9 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
     await campaign.save();
     return res.json({ success: true, data: serializeCampaign(campaign) });
   } catch (error: any) {
+    if (error instanceof MarketingInputError) {
+      return res.status(400).json({ success: false, msg: error.message });
+    }
     console.error('updateMarketingCampaign:', error);
     return res.status(500).json({ success: false, msg: 'Failed to update campaign' });
   }
@@ -260,8 +321,14 @@ export const deleteMarketingCampaign = async (req: Request, res: Response) => {
     }
     const campaign = await MarketingCampaign.findById(id);
     if (!campaign) return res.status(404).json({ success: false, msg: 'Campaign not found' });
-    if (campaign.status === 'sending') {
-      return res.status(400).json({ success: false, msg: 'Cannot delete a campaign that is sending' });
+    if (
+      ['sending', 'sent'].includes(campaign.status) ||
+      campaign.deliveries.some((delivery) => delivery.brevoCampaignId)
+    ) {
+      return res.status(400).json({
+        success: false,
+        msg: 'Started campaigns are retained for delivery audit history',
+      });
     }
     await campaign.deleteOne();
     return res.json({ success: true, msg: 'Campaign deleted' });
@@ -274,7 +341,11 @@ export const deleteMarketingCampaign = async (req: Request, res: Response) => {
 export const previewMarketingAudience = async (req: Request, res: Response) => {
   try {
     const audience = parseAudience(req.body?.audience || req.body);
-    const rawInactive = req.body?.inactiveDays != null ? Number(req.body.inactiveDays) : NaN;
+    const hasInactiveDays = req.body?.inactiveDays != null;
+    const rawInactive = hasInactiveDays ? Number(req.body.inactiveDays) : NaN;
+    if (hasInactiveDays && (!Number.isFinite(rawInactive) || rawInactive <= 0)) {
+      return res.status(400).json({ success: false, msg: 'inactiveDays must be a positive number' });
+    }
     const inactiveDays =
       Number.isFinite(rawInactive) && rawInactive > 0
         ? Math.max(1, Math.floor(rawInactive))
@@ -282,6 +353,9 @@ export const previewMarketingAudience = async (req: Request, res: Response) => {
     const { count, truncated } = await countCampaignAudience(audience, { inactiveDays });
     return res.json({ success: true, data: { count, truncated, audience } });
   } catch (error: any) {
+    if (error instanceof MarketingInputError) {
+      return res.status(400).json({ success: false, msg: error.message });
+    }
     console.error('previewMarketingAudience:', error);
     return res.status(500).json({ success: false, msg: 'Failed to preview audience' });
   }
@@ -349,7 +423,12 @@ export const listMarketingSubscribers = async (req: Request, res: Response) => {
     }
 
     const [rows, total] = await Promise.all([
-      MarketingSubscriber.find(query).sort({ subscribedAt: -1 }).skip(skip).limit(limitNumber).lean(),
+      MarketingSubscriber.find(query)
+        .select('-unsubscribeToken')
+        .sort({ subscribedAt: -1 })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
       MarketingSubscriber.countDocuments(query),
     ]);
 

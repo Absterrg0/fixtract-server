@@ -364,12 +364,12 @@ export const denyCancellationRequest = async (req: Request, res: Response) => {
     try {
       const requester: any = cancellation.requestedBy;
       if (requester?._id) {
-        const { notifyAsync } = await import("../../utils/notifications/notify");
+        const { notify } = await import("../../utils/notifications/notify");
         const eventKey =
           cancellation.requestedRole === "professional"
             ? "professional.refund_denied"
             : "customer.refund_denied";
-        notifyAsync({
+        await notify({
           userId: requester._id.toString(),
           eventKey,
           entityType: "booking",

@@ -56,12 +56,21 @@ async function resolveUnsubscribeEmail(req: Request): Promise<
 
 async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
   const normalized = email.toLowerCase().trim();
+  await User.updateMany(
+    { email: normalized },
+    {
+      $set: { 'notificationPreferences.promotions.email': false },
+      $unset: { marketingConsentAt: 1 },
+    },
+  );
+
   const sub = await MarketingSubscriber.findOne({ email: normalized });
   let already = false;
   if (sub) {
     already = Boolean(sub.unsubscribedAt);
     if (!sub.unsubscribedAt) {
       sub.unsubscribedAt = new Date();
+      sub.consentVerifiedAt = null;
       await sub.save();
     }
   } else {
@@ -85,11 +94,6 @@ async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
       already = true;
     }
   }
-
-  await User.updateMany(
-    { email: normalized },
-    { $set: { 'notificationPreferences.promotions.email': false } },
-  );
 
   return { already };
 }

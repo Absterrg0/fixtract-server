@@ -128,6 +128,19 @@ export function parseSiteAnnouncementWriteBody(
       numberOr(body.delaySeconds, ANNOUNCEMENT_LIMITS.delaySeconds.default),
     ),
   );
+  const dismissible =
+    typeof body.dismissible === 'boolean' ? body.dismissible : true;
+  if (
+    body.type !== 'top_bar' &&
+    !dismissible &&
+    !ctaUrl &&
+    !discountCode
+  ) {
+    return {
+      ok: false,
+      error: 'Non-dismissible overlays require a CTA URL or discount code',
+    };
+  }
 
   return {
     ok: true,
@@ -146,7 +159,7 @@ export function parseSiteAnnouncementWriteBody(
       isActive: typeof body.isActive === 'boolean' ? body.isActive : true,
       priority: numberOr(body.priority, 0),
       delaySeconds,
-      dismissible: typeof body.dismissible === 'boolean' ? body.dismissible : true,
+      dismissible,
       requireMarketingConsent:
         typeof body.requireMarketingConsent === 'boolean'
           ? body.requireMarketingConsent
@@ -332,6 +345,26 @@ export function parseSiteAnnouncementPatchBody(
       return { ok: false, error: 'requireMarketingConsent must be a boolean' };
     }
     update.requireMarketingConsent = body.requireMarketingConsent;
+  }
+
+  const type = update.type ?? existing.type;
+  const dismissible = update.dismissible ?? existing.dismissible;
+  const ctaUrl =
+    update.ctaUrl === null ? undefined : update.ctaUrl ?? existing.ctaUrl;
+  const discountCode =
+    update.discountCode === null
+      ? undefined
+      : update.discountCode ?? existing.discountCode;
+  if (
+    type !== 'top_bar' &&
+    dismissible === false &&
+    !ctaUrl &&
+    !discountCode
+  ) {
+    return {
+      ok: false,
+      error: 'Non-dismissible overlays require a CTA URL or discount code',
+    };
   }
 
   return { ok: true, value: update };

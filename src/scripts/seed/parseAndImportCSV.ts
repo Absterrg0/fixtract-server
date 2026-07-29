@@ -304,21 +304,35 @@ async function importFromCSV() {
     console.log(`✅ Converted ${serviceConfigs.length} service configurations`);
 
     // Connect to MongoDB
-    const mongoURI =
-      process.env.MONGODB_URI || "mongodb://localhost:27017/fixera";
+    const mongoURI = process.env.MONGODB_URI || process.env.MONGO_URI;
+    if (!mongoURI) {
+      throw new Error("MONGODB_URI or MONGO_URI is required; refusing to guess a database");
+    }
     await mongoose.connect(mongoURI);
     console.log("✅ Connected to MongoDB");
 
-    // Clear existing
-    const deleteResult = await ServiceConfiguration.deleteMany({});
-    console.log(
-      `🗑️  Cleared ${deleteResult.deletedCount} existing service configurations`,
+    await Promise.all(
+      serviceConfigs.map((serviceConfig) =>
+        new ServiceConfiguration(serviceConfig).validate(),
+      ),
     );
 
-    // Insert all
-    const insertResult = await ServiceConfiguration.insertMany(serviceConfigs);
+    const session = await mongoose.startSession();
+    let insertedCount = 0;
+    try {
+      await session.withTransaction(async () => {
+        const deleteResult = await ServiceConfiguration.deleteMany({}, { session });
+        console.log(
+          `🗑️  Cleared ${deleteResult.deletedCount} existing service configurations`,
+        );
+        const insertResult = await ServiceConfiguration.insertMany(serviceConfigs, { session });
+        insertedCount = insertResult.length;
+      });
+    } finally {
+      await session.endSession();
+    }
     console.log(
-      `✅ Successfully imported ${insertResult.length} service configurations`,
+      `✅ Successfully imported ${insertedCount} service configurations`,
     );
 
     // Show summary

@@ -27,7 +27,7 @@ import {
 } from "../../utils/s3Upload";
 import { SYSTEM_USER_ID } from "../../constants/system";
 import { denyUnlessPermission } from "../../utils/adminRbac/assertPermission";
-import { notifyAsync } from "../../utils/notifications/notify";
+import { notify } from "../../utils/notifications/notify";
 import { getProfessionalDisplayName } from "../../utils/displayName";
 import { params } from "../../utils/requestParams";
 
@@ -720,7 +720,7 @@ export const openWarrantyClaim = async (req: Request, res: Response) => {
         User.findById(professionalId).select('_id name businessInfo username').lean(),
       ]);
       if (professionalUser?._id) {
-        notifyAsync({
+        await notify({
           userId: professionalUser._id.toString(),
           eventKey: 'professional.warranty_claim_opened',
           entityType: 'booking',
@@ -969,7 +969,7 @@ export const submitWarrantyProposal = async (req: Request, res: Response) => {
         User.findById(claim.professional).select('name businessInfo username').lean(),
       ]);
       if (customerUser?._id) {
-        notifyAsync({
+        await notify({
           userId: customerUser._id.toString(),
           eventKey: 'customer.warranty_proposal_sent',
           entityType: 'booking',

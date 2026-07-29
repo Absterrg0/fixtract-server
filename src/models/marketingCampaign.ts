@@ -36,6 +36,7 @@ export interface ICampaignLocaleDelivery {
   locale: MarketingLocale;
   brevoListId?: number;
   brevoCampaignId?: number;
+  brevoStatus?: 'created' | 'sent';
   recipientCount: number;
   stats?: {
     sent: number;
@@ -103,6 +104,7 @@ const deliverySchema = new Schema<ICampaignLocaleDelivery>(
     locale: { type: String, enum: MARKETING_LOCALES, required: true },
     brevoListId: { type: Number },
     brevoCampaignId: { type: Number },
+    brevoStatus: { type: String, enum: ['created', 'sent'] },
     recipientCount: { type: Number, default: 0 },
     stats: {
       sent: { type: Number, default: 0 },

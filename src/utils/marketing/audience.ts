@@ -17,6 +17,8 @@ export type AudienceMember = {
   subscriberId?: string;
 };
 
+export const MARKETING_AUDIENCE_LIMIT = 5000;
+
 function normalizeCountry(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim().toUpperCase();
@@ -63,7 +65,7 @@ export async function syncSubscribersFromUsers(): Promise<{
       lastUserId ? { ...baseQuery, _id: { $gt: lastUserId } } : baseQuery,
     )
       .select(
-        'email name role location companyAddress businessInfo notificationPreferences serviceCategories preferredLocale locale language',
+        'email name role location companyAddress businessInfo notificationPreferences serviceCategories preferredLocale locale language updatedAt marketingConsentAt',
       )
       .sort({ _id: 1 })
       .limit(SYNC_BATCH_SIZE)
@@ -88,13 +90,35 @@ export async function syncSubscribersFromUsers(): Promise<{
     for (const row of bookingServices) {
       serviceInterestByUser.set(String(row._id), (row.services || []).filter(Boolean));
     }
+    const bookingActivity = await Booking.aggregate<{ _id: unknown; lastEngagedAt: Date }>([
+      {
+        $match: {
+          $or: [{ customer: { $in: userIds } }, { professional: { $in: userIds } }],
+        },
+      },
+      { $project: { actors: ['$customer', '$professional'], updatedAt: 1 } },
+      { $unwind: '$actors' },
+      { $match: { actors: { $in: userIds } } },
+      { $group: { _id: '$actors', lastEngagedAt: { $max: '$updatedAt' } } },
+    ]);
+    const bookingActivityByUser = new Map(
+      bookingActivity.map((row) => [String(row._id), row.lastEngagedAt]),
+    );
+
+    const emails = users
+      .map((user) => String(user.email || '').toLowerCase().trim())
+      .filter(Boolean);
+    const existingSubscribers = await MarketingSubscriber.find({ email: { $in: emails } }).lean();
+    const existingByEmail = new Map(existingSubscribers.map((sub) => [sub.email, sub]));
+    const operations: Parameters<typeof MarketingSubscriber.bulkWrite>[0] = [];
 
     for (const user of users) {
       const email = String(user.email).toLowerCase().trim();
       if (!email) continue;
 
       const promotionsEmail = (user as any).notificationPreferences?.promotions?.email;
-      const optedIn = promotionsEmail !== false;
+      const optedIn =
+        promotionsEmail === true && (user as any).marketingConsentAt instanceof Date;
       const region = userCountry(user);
       const fromBookings = serviceInterestByUser.get(String(user._id)) || [];
       const fromPro =
@@ -104,40 +128,65 @@ export async function syncSubscribersFromUsers(): Promise<{
       const locale = normalizeLocale(
         (user as any).preferredLocale ?? (user as any).locale ?? (user as any).language,
       );
+      const existing = existingByEmail.get(email);
+      const bookingEngagement = bookingActivityByUser.get(String(user._id));
+      const userUpdatedAt = user.updatedAt instanceof Date ? user.updatedAt : undefined;
+      const lastEngagedAt =
+        bookingEngagement && userUpdatedAt
+          ? new Date(Math.max(bookingEngagement.getTime(), userUpdatedAt.getTime()))
+          : bookingEngagement || userUpdatedAt;
 
-      const existing = await MarketingSubscriber.findOne({ email });
       if (!optedIn) {
         if (existing && !existing.unsubscribedAt) {
-          existing.unsubscribedAt = new Date();
-          await existing.save();
+          operations.push({
+            updateOne: {
+              filter: { _id: existing._id, unsubscribedAt: null },
+              update: {
+                $set: { unsubscribedAt: new Date() },
+                $unset: { consentVerifiedAt: 1 },
+              },
+            },
+          });
           unsubscribed += 1;
         }
         continue;
       }
 
-      if (existing) {
-        existing.userId = user._id as any;
-        existing.region = region;
-        existing.interestedServices = interestedServices;
-        if (!existing.locale || existing.locale === 'en') existing.locale = locale;
-        if (existing.unsubscribedAt) existing.unsubscribedAt = null;
-        if (!existing.unsubscribeToken) existing.unsubscribeToken = generateUnsubscribeToken();
-        await existing.save();
-        upserted += 1;
-      } else {
-        await MarketingSubscriber.create({
-          email,
-          userId: user._id,
-          region,
-          interestedServices,
-          locale,
-          unsubscribeToken: generateUnsubscribeToken(),
-          source: 'user_sync',
-          subscribedAt: new Date(),
-          unsubscribedAt: null,
-        });
-        upserted += 1;
-      }
+      const metadata: Record<string, unknown> = {
+        userId: user._id,
+        role: user.role,
+        interestedServices,
+        locale,
+        lastEngagedAt,
+        consentVerifiedAt: user.marketingConsentAt,
+      };
+      if (typeof user.name === 'string' && user.name.trim()) metadata.name = user.name.trim();
+      if (region) metadata.region = region;
+      const unset: Record<string, 1> = {};
+      if (!metadata.name) unset.name = 1;
+      if (!region) unset.region = 1;
+
+      operations.push({
+        updateOne: {
+          filter: { email },
+          update: {
+            $set: metadata,
+            ...(Object.keys(unset).length > 0 ? { $unset: unset } : {}),
+            $setOnInsert: {
+              unsubscribeToken: generateUnsubscribeToken(),
+              source: 'user_sync',
+              subscribedAt: new Date(),
+              unsubscribedAt: null,
+            },
+          },
+          upsert: true,
+        },
+      });
+      upserted += 1;
+    }
+
+    if (operations.length > 0) {
+      await MarketingSubscriber.bulkWrite(operations, { ordered: false });
     }
 
     lastUserId = users[users.length - 1]._id;
@@ -147,80 +196,67 @@ export async function syncSubscribersFromUsers(): Promise<{
   return { upserted, unsubscribed };
 }
 
-function matchesAudience(sub: IMarketingSubscriber | any, audience: ICampaignAudience): boolean {
-  if (sub.unsubscribedAt) return false;
-
+function audienceQuery(
+  audience: ICampaignAudience,
+  opts?: { inactiveDays?: number },
+): Record<string, unknown> {
+  const clauses: Record<string, unknown>[] = [
+    { unsubscribedAt: null },
+    { consentVerifiedAt: { $type: 'date' } },
+  ];
   const countries = (audience.countries || []).map((c) => c.trim().toUpperCase()).filter(Boolean);
-  if (countries.length > 0) {
-    const region = normalizeCountry(sub.region);
-    if (!region || !countries.includes(region)) return false;
-  }
-
-  const services = (audience.interestedServices || []).map((s) => s.trim()).filter(Boolean);
-  if (services.length > 0) {
-    const set = new Set((sub.interestedServices || []).map(String));
-    if (!services.some((s) => set.has(s))) return false;
-  }
+  if (countries.length > 0) clauses.push({ region: { $in: countries } });
 
   const locales = (audience.locales || []) as MarketingLocale[];
-  if (locales.length > 0) {
-    const locale = normalizeLocale(sub.locale);
-    if (!locales.includes(locale)) return false;
+  if (locales.length > 0) clauses.push({ locale: { $in: locales } });
+
+  const services = (audience.interestedServices || []).map((s) => s.trim()).filter(Boolean);
+  if (services.length > 0) clauses.push({ interestedServices: { $in: services } });
+
+  const roles = audience.roles?.length ? audience.roles : ['customer', 'professional'];
+  if (!(roles.includes('customer') && roles.includes('professional'))) {
+    clauses.push(
+      roles.includes('customer')
+        ? { $or: [{ role: 'customer' }, { role: null }, { role: { $exists: false } }] }
+        : { role: 'professional' },
+    );
   }
 
-  return true;
+  if (opts?.inactiveDays && opts.inactiveDays > 0) {
+    const cutoff = new Date(Date.now() - opts.inactiveDays * 24 * 60 * 60 * 1000);
+    clauses.push({
+      $or: [
+        { lastEngagedAt: { $lte: cutoff } },
+        { lastEngagedAt: null },
+        { lastEngagedAt: { $exists: false } },
+      ],
+    });
+    clauses.push({ subscribedAt: { $lte: cutoff } });
+  }
+
+  return clauses.length === 1 ? clauses[0] : { $and: clauses };
 }
 
 /** Resolve active subscribers matching campaign audience filters. */
 export async function resolveCampaignAudience(
   audience: ICampaignAudience,
-  opts?: { inactiveDays?: number; max?: number },
+  opts?: { inactiveDays?: number; max?: number; rejectTruncated?: boolean },
 ): Promise<AudienceMember[]> {
-  const query: Record<string, unknown> = { unsubscribedAt: null };
-  const countries = (audience.countries || []).map((c) => c.trim().toUpperCase()).filter(Boolean);
-  if (countries.length > 0) query.region = { $in: countries };
-
-  const locales = (audience.locales || []) as MarketingLocale[];
-  if (locales.length > 0) query.locale = { $in: locales };
-
-  const services = (audience.interestedServices || []).map((s) => s.trim()).filter(Boolean);
-  if (services.length > 0) query.interestedServices = { $in: services };
-
-  if (opts?.inactiveDays && opts.inactiveDays > 0) {
-    const cutoff = new Date(Date.now() - opts.inactiveDays * 24 * 60 * 60 * 1000);
-    query.$or = [
-      { lastCampaignSentAt: { $lte: cutoff } },
-      { lastCampaignSentAt: null },
-      { lastCampaignSentAt: { $exists: false } },
-    ];
-    query.subscribedAt = { $lte: cutoff };
+  const query = audienceQuery(audience, opts);
+  const limit = Math.min(Math.max(opts?.max || MARKETING_AUDIENCE_LIMIT, 1), 10000);
+  if (opts?.rejectTruncated) {
+    const count = await MarketingSubscriber.countDocuments(query);
+    if (count > limit) {
+      throw new Error(
+        `Audience has ${count} recipients, exceeding the configured delivery limit of ${limit}`,
+      );
+    }
   }
+  const subs = await MarketingSubscriber.find(query).sort({ _id: 1 }).limit(limit).lean();
 
-  const limit = Math.min(Math.max(opts?.max || 5000, 1), 10000);
-  const subs = await MarketingSubscriber.find(query).limit(limit).lean();
-
-  // Role filter via linked user when roles are restricted
-  const roles = audience.roles?.length ? audience.roles : ['customer', 'professional'];
-  const needRoleFilter =
-    !(roles.includes('customer') && roles.includes('professional')) || roles.length === 1;
-
-  let filtered = subs.filter((s) => matchesAudience(s as any, audience));
-
-  if (needRoleFilter) {
-    const userIds = filtered.map((s) => s.userId).filter(Boolean);
-    const users = await User.find({ _id: { $in: userIds } })
-      .select('role')
-      .lean();
-    const roleById = new Map(users.map((u) => [String(u._id), u.role]));
-    filtered = filtered.filter((s) => {
-      if (!s.userId) return roles.includes('customer'); // orphan subscribers treated as customers
-      const role = roleById.get(String(s.userId));
-      return role === 'customer' || role === 'professional' ? roles.includes(role as any) : false;
-    });
-  }
-
-  return filtered.map((s) => ({
+  return subs.map((s) => ({
     email: s.email,
+    name: s.name || undefined,
     locale: normalizeLocale(s.locale),
     region: s.region || undefined,
     userId: s.userId ? String(s.userId) : undefined,
@@ -232,7 +268,6 @@ export async function countCampaignAudience(
   audience: ICampaignAudience,
   opts?: { inactiveDays?: number },
 ): Promise<{ count: number; truncated: boolean }> {
-  const max = 10000;
-  const members = await resolveCampaignAudience(audience, { ...opts, max });
-  return { count: members.length, truncated: members.length >= max };
+  const count = await MarketingSubscriber.countDocuments(audienceQuery(audience, opts));
+  return { count, truncated: count > MARKETING_AUDIENCE_LIMIT };
 }

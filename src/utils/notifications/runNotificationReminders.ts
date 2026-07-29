@@ -55,23 +55,59 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
 
   // --- Unfinished checkout (payment_pending ≥ 24h, then every 3d) ---
   try {
-    const bookings = await Booking.find({
+    const eligibleUnfinishedCheckout = {
       status: 'payment_pending',
+      customer: { $exists: true, $ne: null },
       updatedAt: { $lte: daysAgo(1) },
-    }).select('_id customer notificationReminders updatedAt rfqData.serviceType').limit(200);
+      $and: [
+        {
+          $or: [
+            { 'notificationReminders.unfinishedCheckoutCount': { $exists: false } },
+            { 'notificationReminders.unfinishedCheckoutCount': { $lt: MAX_REMINDERS } },
+          ],
+        },
+        {
+          $or: [
+            { 'notificationReminders.unfinishedCheckoutLastSentAt': { $exists: false } },
+            { 'notificationReminders.unfinishedCheckoutLastSentAt': { $lte: daysAgo(3) } },
+          ],
+        },
+      ],
+    };
+    const bookings = await Booking.find(eligibleUnfinishedCheckout)
+      .select('_id')
+      .sort({ updatedAt: 1, _id: 1 })
+      .limit(200);
 
     const recoveryDiscountCode = process.env.MARKETING_ABANDONED_CHECKOUT_DISCOUNT_CODE?.trim() || '';
 
-    for (const booking of bookings) {
+    for (const candidate of bookings) {
+      const booking = await Booking.findOneAndUpdate(
+        { _id: candidate._id, ...eligibleUnfinishedCheckout },
+        {
+          $set: { 'notificationReminders.unfinishedCheckoutLastSentAt': now },
+          $inc: { 'notificationReminders.unfinishedCheckoutCount': 1 },
+        },
+        {
+          new: false,
+          projection: {
+            _id: 1,
+            customer: 1,
+            notificationReminders: 1,
+            'rfqData.serviceType': 1,
+          },
+        },
+      );
+      if (!booking) continue;
+
       const rem = booking.notificationReminders || {};
-      if (!shouldSend(rem.unfinishedCheckoutLastSentAt, rem.unfinishedCheckoutCount, 3)) continue;
       const customerId = booking.customer?.toString();
       if (!customerId) continue;
       const reminderNumber = (rem.unfinishedCheckoutCount ?? 0) + 1;
       const discountCode =
         recoveryDiscountCode && reminderNumber >= 2 ? recoveryDiscountCode : undefined;
       try {
-        await notify({
+        const result = await notify({
           userId: customerId,
           eventKey: 'customer.unfinished_checkout',
           entityType: 'booking',
@@ -82,15 +118,25 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
             discountCode,
           },
         });
-        await Booking.updateOne(
-          { _id: booking._id },
-          {
-            $set: { 'notificationReminders.unfinishedCheckoutLastSentAt': now },
-            $inc: { 'notificationReminders.unfinishedCheckoutCount': 1 },
-          },
-        );
+        if (result.emailOutcome === 'failed') {
+          throw new Error('unfinished checkout email delivery failed');
+        }
         counts.unfinishedCheckout++;
       } catch (e: any) {
+        const rollback =
+          rem.unfinishedCheckoutLastSentAt
+            ? { $set: { 'notificationReminders.unfinishedCheckoutLastSentAt': rem.unfinishedCheckoutLastSentAt } }
+            : { $unset: { 'notificationReminders.unfinishedCheckoutLastSentAt': 1 } };
+        await Booking.updateOne(
+          {
+            _id: booking._id,
+            'notificationReminders.unfinishedCheckoutLastSentAt': now,
+          },
+          {
+            ...rollback,
+            $inc: { 'notificationReminders.unfinishedCheckoutCount': -1 },
+          },
+        );
         counts.errors.push(`unfinishedCheckout ${booking._id}: ${e?.message || e}`);
       }
     }

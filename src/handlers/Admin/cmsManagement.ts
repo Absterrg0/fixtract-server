@@ -473,6 +473,13 @@ export const updateCmsContent = async (req: Request, res: Response) => {
         previousCoverToCleanup = doc.coverImage;
       }
       doc.coverImage = nextCover;
+      if (
+        previousCoverToCleanup &&
+        typeof body.coverImageAlt !== "string" &&
+        body.coverImageAlt !== null
+      ) {
+        doc.coverImageAlt = undefined;
+      }
     }
 
     if (

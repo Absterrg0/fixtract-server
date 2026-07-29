@@ -7,7 +7,7 @@ import { executeRefund, RefundError } from '../Stripe/payment';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
 import { notifyBookingCancelledAndRefunded } from '../../utils/notifications/notifyBookingCancelledAndRefunded';
-import { notifyAsync } from '../../utils/notifications/notify';
+import { notify } from '../../utils/notifications/notify';
 
 const REFUND_FINALIZED_BOOKING_STATUS = 'cancelled';
 
@@ -225,7 +225,7 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
       await request.save();
       try {
         if (customerUser?._id) {
-          notifyAsync({
+          await notify({
             userId: customerUser._id.toString(),
             eventKey: 'customer.refund_counter_offer',
             entityType: 'booking',
@@ -248,7 +248,7 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
     await escalateRequest(request, 'rejected');
     try {
       if (customerUser?._id) {
-        notifyAsync({
+        await notify({
           userId: customerUser._id.toString(),
           eventKey: 'customer.refund_escalated',
           entityType: 'booking',
@@ -260,7 +260,7 @@ export const professionalRespondToCancellation = async (req: Request, res: Respo
         });
       }
       if (professionalUser?._id) {
-        notifyAsync({
+        await notify({
           userId: professionalUser._id.toString(),
           eventKey: 'professional.refund_escalated',
           entityType: 'booking',
@@ -346,7 +346,7 @@ export const customerRespondToCounterOffer = async (req: Request, res: Response)
       const customerUser = await User.findById(booking.customer).select('_id').lean();
       const professionalUser = await User.findById(booking.professional).select('_id').lean();
       if (customerUser?._id) {
-        notifyAsync({
+        await notify({
           userId: customerUser._id.toString(),
           eventKey: 'customer.refund_escalated',
           entityType: 'booking',
@@ -358,7 +358,7 @@ export const customerRespondToCounterOffer = async (req: Request, res: Response)
         });
       }
       if (professionalUser?._id) {
-        notifyAsync({
+        await notify({
           userId: professionalUser._id.toString(),
           eventKey: 'professional.refund_escalated',
           entityType: 'booking',

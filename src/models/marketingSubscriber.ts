@@ -5,14 +5,18 @@ export type MarketingLocale = (typeof MARKETING_LOCALES)[number];
 
 export interface IMarketingSubscriber extends Document {
   email: string;
+  name?: string;
   userId?: mongoose.Types.ObjectId;
+  role?: 'customer' | 'professional';
   region?: string;
   interestedServices: string[];
   locale: MarketingLocale;
   subscribedAt: Date;
+  consentVerifiedAt?: Date | null;
   unsubscribedAt?: Date | null;
   unsubscribeToken: string;
   source: 'user_sync' | 'manual' | 'signup';
+  lastEngagedAt?: Date | null;
   lastCampaignSentAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -26,11 +30,16 @@ const marketingSubscriberSchema = new Schema<IMarketingSubscriber>(
       unique: true,
       lowercase: true,
       trim: true,
-      index: true,
     },
+    name: { type: String, trim: true },
     userId: {
       type: Schema.Types.ObjectId,
       ref: 'User',
+      index: true,
+    },
+    role: {
+      type: String,
+      enum: ['customer', 'professional'],
       index: true,
     },
     region: {
@@ -53,16 +62,19 @@ const marketingSubscriberSchema = new Schema<IMarketingSubscriber>(
       type: Date,
       default: Date.now,
     },
+    consentVerifiedAt: {
+      type: Date,
+      default: null,
+    },
     unsubscribedAt: {
       type: Date,
       default: null,
-      index: true,
     },
     unsubscribeToken: {
       type: String,
       required: true,
       unique: true,
-      index: true,
+      select: false,
     },
     source: {
       type: String,
@@ -73,11 +85,20 @@ const marketingSubscriberSchema = new Schema<IMarketingSubscriber>(
       type: Date,
       default: null,
     },
+    lastEngagedAt: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true },
 );
 
 marketingSubscriberSchema.index({ unsubscribedAt: 1, region: 1, locale: 1 });
+marketingSubscriberSchema.index({ consentVerifiedAt: 1, unsubscribedAt: 1 });
+marketingSubscriberSchema.index({ unsubscribedAt: 1, role: 1, subscribedAt: 1 });
+marketingSubscriberSchema.index({ unsubscribedAt: 1, lastCampaignSentAt: 1, subscribedAt: 1 });
+marketingSubscriberSchema.index({ unsubscribedAt: 1, lastEngagedAt: 1, subscribedAt: 1 });
+marketingSubscriberSchema.index({ subscribedAt: -1 });
 
 const MarketingSubscriber = mongoose.model<IMarketingSubscriber>(
   'MarketingSubscriber',

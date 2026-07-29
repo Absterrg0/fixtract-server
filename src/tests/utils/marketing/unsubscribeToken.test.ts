@@ -33,6 +33,23 @@ describe('unsubscribeToken', () => {
     expect(result).toEqual({ ok: true, email: 'user@example.com' });
   });
 
+  it('keeps campaign unsubscribe links valid without an expiry', () => {
+    const token = signUnsubscribePayload('old-campaign@example.com');
+    const [payload] = token.split('.');
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+
+    expect(decoded).toEqual({ email: 'old-campaign@example.com' });
+    expect(verifyUnsubscribePayload(token)).toEqual({
+      ok: true,
+      email: 'old-campaign@example.com',
+    });
+  });
+
+  it('rejects expired time-bound payloads', () => {
+    const token = signUnsubscribePayload('expired@example.com', -1);
+    expect(verifyUnsubscribePayload(token)).toEqual({ ok: false, error: 'Token expired' });
+  });
+
   it('rejects tampered tokens', () => {
     const token = signUnsubscribePayload('a@b.com');
     const [payload] = token.split('.');

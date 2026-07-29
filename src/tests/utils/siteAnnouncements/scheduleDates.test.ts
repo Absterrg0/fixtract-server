@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { buildPublicListQuery } from '../../../utils/siteAnnouncements/buildQueries';
+import {
+  buildAdminListQuery,
+  buildPublicListQuery,
+} from '../../../utils/siteAnnouncements/buildQueries';
 import {
   parseScheduleEnd,
   parseScheduleStart,
@@ -51,5 +54,20 @@ describe('buildPublicListQuery', () => {
   it('includes base language for region-tagged locales', () => {
     const query = buildPublicListQuery({ locale: 'nl-be' }, now);
     expect(query.locale).toEqual({ $in: ['nl-be', 'nl', 'en'] });
+  });
+});
+
+describe('buildAdminListQuery', () => {
+  const now = new Date('2026-07-15T12:00:00.000Z');
+
+  it('keeps scheduled and expired results separate from disabled announcements', () => {
+    expect(buildAdminListQuery({ status: 'scheduled' }, now)).toEqual({
+      isActive: true,
+      startsAt: { $gt: now },
+    });
+    expect(buildAdminListQuery({ status: 'expired' }, now)).toEqual({
+      isActive: true,
+      endsAt: { $lt: now },
+    });
   });
 });

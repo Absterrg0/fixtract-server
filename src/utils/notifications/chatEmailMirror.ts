@@ -108,18 +108,28 @@ export function formatMirrorInboxBody(lines: ChatMirrorLine[], counterpartyName?
   return `${prefix}${preview} (+${lines.length - 1} more unread)`;
 }
 
-export function unreadChatConversationFilter(cutoff: Date) {
+export function unreadChatConversationFilter(cutoff: Date, reminderBefore = daysAgo(1)) {
   return {
     status: 'active' as const,
     lastMessageAt: { $lte: cutoff },
-    $or: [
+    $and: [
       {
-        type: 'direct' as const,
-        $or: [{ customerUnreadCount: { $gt: 0 } }, { professionalUnreadCount: { $gt: 0 } }],
+        $or: [
+          { unreadChatReminderLastSentAt: { $exists: false } },
+          { unreadChatReminderLastSentAt: { $lte: reminderBefore } },
+        ],
       },
       {
-        type: 'support' as const,
-        $or: [{ customerUnreadCount: { $gt: 0 } }, { professionalUnreadCount: { $gt: 0 } }],
+        $or: [
+          {
+            type: 'direct' as const,
+            $or: [{ customerUnreadCount: { $gt: 0 } }, { professionalUnreadCount: { $gt: 0 } }],
+          },
+          {
+            type: 'support' as const,
+            $or: [{ customerUnreadCount: { $gt: 0 } }, { professionalUnreadCount: { $gt: 0 } }],
+          },
+        ],
       },
     ],
   };

@@ -71,9 +71,10 @@ export function hasAnyPermission(
 }
 
 /** Resolve adminRole for legacy admins missing the field. */
-export function resolveAdminRole(adminRole: unknown): AdminRole {
+export function resolveAdminRole(adminRole: unknown): AdminRole | null {
   if (typeof adminRole === 'string' && adminRole in ROLE_PERMISSIONS) {
     return adminRole as AdminRole;
   }
-  return 'super';
+  // Legacy admins predate the field and retain their previous full access.
+  return adminRole == null ? 'super' : null;
 }

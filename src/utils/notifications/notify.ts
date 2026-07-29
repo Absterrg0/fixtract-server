@@ -22,6 +22,8 @@ export interface NotifyArgs {
   meta?: Record<string, unknown>;
   context?: NotifyContext;
   delivery?: NotifyDeliveryOptions;
+  /** Stable key for retryable producers such as payment webhooks. */
+  idempotencyKey?: string;
 }
 
 export type EmailDeliveryOutcome = 'sent' | 'not_eligible' | 'failed';
@@ -72,9 +74,11 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
       : undefined;
 
   let notificationId: string | null = null;
+  let existingEmailSent = false;
+  let existingPushSent = false;
   if (persistInbox) {
     try {
-      const doc = await Notification.create({
+      const notificationData = {
         userId: user._id,
         eventKey: args.eventKey,
         category: def.category,
@@ -89,8 +93,18 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
         pushAttempted: false,
         pushSent: false,
         meta: args.meta,
-      });
+        ...(args.idempotencyKey ? { deliveryKey: args.idempotencyKey } : {}),
+      };
+      const doc = args.idempotencyKey
+        ? await Notification.findOneAndUpdate(
+            { deliveryKey: args.idempotencyKey },
+            { $setOnInsert: notificationData },
+            { upsert: true, new: true },
+          )
+        : await Notification.create(notificationData);
       notificationId = doc._id.toString();
+      existingEmailSent = doc.emailSent;
+      existingPushSent = doc.pushSent;
     } catch (err) {
       console.error(`[notify] Failed to persist inbox for ${args.eventKey}:`, err);
       // Continue to attempt channels even if persist failed (best-effort)
@@ -104,7 +118,10 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
   let pushSent = false;
   let emailOutcome: EmailDeliveryOutcome | undefined;
 
-  if (sendEmail && built.sendEmail && user.email) {
+  if (existingEmailSent) {
+    emailSent = true;
+    emailOutcome = 'sent';
+  } else if (sendEmail && built.sendEmail && user.email) {
     try {
       if (notificationId) {
         await Notification.findByIdAndUpdate(notificationId, { emailAttempted: true });
@@ -126,7 +143,7 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
     emailOutcome = 'not_eligible';
   }
 
-  if (sendPush) {
+  if (sendPush && !existingPushSent) {
     try {
       if (notificationId) {
         await Notification.findByIdAndUpdate(notificationId, { pushAttempted: true });

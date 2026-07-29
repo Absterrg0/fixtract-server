@@ -15,7 +15,7 @@ import { addWorkingDays } from '../../utils/workingDays';
 import { getNextSequence } from '../../utils/counterSequence';
 import { createPaymentIntent } from '../Stripe/payment';
 import { getVatRateOptionsFromConfig, resolveVatDecisionFromConfig } from '../../utils/vatManagement';
-import { notifyAsync } from '../../utils/notifications/notify';
+import { notify } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
 
@@ -404,7 +404,7 @@ export const respondToRFQ = async (req: Request, res: Response) => {
       try {
         const customerId = customer._id?.toString?.() || customer.id;
         if (customerId) {
-          notifyAsync({
+          await notify({
             userId: customerId,
             eventKey: 'customer.rfq_accepted',
             entityType: 'booking',
@@ -448,7 +448,7 @@ export const respondToRFQ = async (req: Request, res: Response) => {
     try {
       const customerId = customer._id?.toString?.() || customer.id;
       if (customerId) {
-        notifyAsync({
+        await notify({
           userId: customerId,
           eventKey: 'customer.rfq_rejected',
           entityType: 'booking',
@@ -626,7 +626,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
       const isDirect = booking.rfqResponse === undefined || booking.rfqResponse === null;
       const customerId = customer._id?.toString?.() || customer.id;
       if (customerId) {
-        notifyAsync({
+        await notify({
           userId: customerId,
           eventKey: 'customer.quotation_received',
           entityType: 'booking',
@@ -793,7 +793,7 @@ export const editQuotation = async (req: Request, res: Response) => {
     try {
       const customerId = customer._id?.toString?.() || customer.id;
       if (customerId) {
-        notifyAsync({
+        await notify({
           userId: customerId,
           eventKey: 'customer.quotation_updated',
           entityType: 'booking',
@@ -885,7 +885,7 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
       try {
         const professionalId = professional._id?.toString?.() || professional.id;
         if (professionalId) {
-          notifyAsync({
+          await notify({
             userId: professionalId,
             eventKey: 'professional.quote_rejected',
             entityType: 'booking',
@@ -947,7 +947,7 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
     try {
       const professionalId = professional._id?.toString?.() || professional.id;
       if (professionalId) {
-        notifyAsync({
+        await notify({
           userId: professionalId,
           eventKey: 'professional.quote_accepted',
           entityType: 'booking',
@@ -1269,6 +1269,7 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
     const milestone = booking.milestonePayments[milestoneIndex];
     const previousMilestones = booking.milestonePayments.slice(0, milestoneIndex);
     const now = new Date();
+    let customerEvent: 'customer.booking_started' | 'customer.completion_requested' | null = null;
 
     if (milestone.workStatus === 'completed') {
       return res.status(400).json({ success: false, error: { code: 'MILESTONE_ALREADY_COMPLETED', message: 'Completed milestones cannot be modified' } });
@@ -1293,21 +1294,7 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
           note: `Milestone started: ${milestone.title}`,
         });
 
-        const customerId = booking.customer?.toString?.() || (booking as any).customer?._id?.toString?.();
-        if (customerId) {
-          notifyAsync({
-            userId: customerId,
-            eventKey: 'customer.booking_started',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: {
-              bookingId: String(booking._id),
-              professionalName: getProfessionalDisplayName(
-                await User.findById(userId).select('name username businessInfo').lean()
-              ),
-            },
-          });
-        }
+        customerEvent = 'customer.booking_started';
       }
     }
 
@@ -1331,26 +1318,38 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
           note: 'All milestones completed',
         });
 
-        const customerId = booking.customer?.toString?.();
-        if (customerId) {
-          notifyAsync({
-            userId: customerId,
-            eventKey: 'customer.completion_requested',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: {
-              bookingId: String(booking._id),
-              professionalName: getProfessionalDisplayName(
-                await User.findById(userId).select('name username businessInfo').lean()
-              ),
-              extraCostTotal: 0,
-            },
-          });
-        }
+        customerEvent = 'customer.completion_requested';
       }
     }
 
     await booking.save();
+
+    const customerId = booking.customer?.toString?.();
+    if (customerId && customerEvent) {
+      try {
+        const professional = await User.findById(userId)
+          .select('name username businessInfo')
+          .lean();
+        await notify({
+          userId: customerId,
+          eventKey: customerEvent,
+          entityType: 'booking',
+          entityId: String(booking._id),
+          context: {
+            bookingId: String(booking._id),
+            professionalName: getProfessionalDisplayName(professional),
+            ...(customerEvent === 'customer.completion_requested'
+              ? { extraCostTotal: 0 }
+              : {}),
+          },
+        });
+      } catch (notificationError: any) {
+        console.error(
+          `Failed to notify ${customerEvent} after saving booking ${booking._id}:`,
+          notificationError?.message || notificationError,
+        );
+      }
+    }
 
     return res.json({
       success: true,

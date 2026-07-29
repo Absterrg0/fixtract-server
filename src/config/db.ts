@@ -9,10 +9,10 @@ const connectDB = async () => {
   // so skip when already connected (1) or currently connecting (2).
   const state = mongoose.connection.readyState;
   if (state === mongoose.ConnectionStates.connected || state === mongoose.ConnectionStates.connecting) return;
-  const mongoUri = process.env.MONGODB_URI;
+  const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
   if (!mongoUri) {
-    console.error('❌ MONGODB_URI is not defined in .env file');
-    throw new Error('MONGODB_URI is not defined');
+    console.error('❌ MONGODB_URI or MONGO_URI is not defined in .env file');
+    throw new Error('MONGODB_URI or MONGO_URI is not defined');
   }
   try {
     console.log('🟡 Connecting to MongoDB...');

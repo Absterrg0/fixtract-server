@@ -34,6 +34,8 @@ describe('toDate', () => {
   it('rejects offset-less date-time strings', () => {
     expect(toDate('2026-07-25T10:00:00')).toBeNull();
     expect(toDate({ $date: '2026-07-25T10:00:00' })).toBeNull();
+    expect(toDate('07/25/2026')).toBeNull();
+    expect(toDate('July 25, 2026')).toBeNull();
   });
 
   it('powers toISOString', () => {

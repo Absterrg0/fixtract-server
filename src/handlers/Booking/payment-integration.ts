@@ -29,7 +29,7 @@ import {
   resolveSubprojectIndex,
   normalizeExtraOptions,
 } from '../../utils/bookingHelpers';
-import { notifyAsync } from '../../utils/notifications/notify';
+import { notify } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { MAX_RESCHEDULES_PER_BOOKING } from '../../constants/booking';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
@@ -727,7 +727,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           try {
             const customerId = booking.customer?.toString?.() || String(booking.customer);
             if (customerId) {
-              notifyAsync({
+              await notify({
                 userId: customerId,
                 eventKey: 'customer.review_request',
                 entityType: 'booking',
@@ -736,7 +736,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
               });
             }
             if (proId) {
-              notifyAsync({
+              await notify({
                 userId: proId,
                 eventKey: 'professional.review_request',
                 entityType: 'booking',
@@ -827,7 +827,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         try {
           const customerId = booking.customer?.toString?.() || String(booking.customer);
           if (customerId) {
-            notifyAsync({
+            await notify({
               userId: customerId,
               eventKey: 'customer.review_request',
               entityType: 'booking',
@@ -836,7 +836,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
             });
           }
           if (proId2) {
-            notifyAsync({
+            await notify({
               userId: proId2,
               eventKey: 'professional.review_request',
               entityType: 'booking',
@@ -906,7 +906,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         } catch {
           // non-critical
         }
-        notifyAsync({
+        await notify({
           userId: customerId,
           eventKey: 'customer.booking_started',
           entityType: 'booking',
@@ -1147,7 +1147,7 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       const customer = booking.customer as any;
       const professionalId = professional?._id?.toString?.() || professional?.id;
       if (professionalId) {
-        notifyAsync({
+        await notify({
           userId: professionalId,
           eventKey: 'professional.booking_scheduled',
           entityType: 'booking',
@@ -1308,7 +1308,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
       const newDate = booking.rescheduleRequest?.proposedSchedule?.scheduledStartDate;
       // Notify the party who must respond (not the requester)
       if (isProfessional && customerId) {
-        notifyAsync({
+        await notify({
           userId: customerId,
           eventKey: 'customer.reschedule_requested',
           entityType: 'booking',
@@ -1322,7 +1322,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
           },
         });
       } else if (isCustomer && professionalId) {
-        notifyAsync({
+        await notify({
           userId: professionalId,
           eventKey: 'professional.reschedule_requested',
           entityType: 'booking',
@@ -1533,7 +1533,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
         const professional = booking.professional as any;
         const professionalId = professional?._id?.toString?.() || professional?.id;
         if (professionalId) {
-          notifyAsync({
+          await notify({
             userId: professionalId,
             eventKey:
               normalizedAction === 'accept'

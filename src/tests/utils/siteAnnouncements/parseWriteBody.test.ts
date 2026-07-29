@@ -72,6 +72,20 @@ describe('parseSiteAnnouncementWriteBody', () => {
     });
     expect(result.ok).toBe(false);
   });
+
+  it('rejects a non-dismissible overlay without an action', () => {
+    const result = parseSiteAnnouncementWriteBody({
+      ...validBody,
+      type: 'modal',
+      dismissible: false,
+      ctaUrl: '',
+      discountCode: '',
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: 'Non-dismissible overlays require a CTA URL or discount code',
+    });
+  });
 });
 
 describe('parseSiteAnnouncementPatchBody', () => {
@@ -119,6 +133,14 @@ describe('parseSiteAnnouncementPatchBody', () => {
       ctaUrl: null,
       discountCode: null,
     });
+  });
+
+  it('does not allow a patch to remove the only exit from a locked overlay', () => {
+    const result = parseSiteAnnouncementPatchBody(
+      { ctaUrl: '', discountCode: '', dismissible: false },
+      { ...existing, type: 'exit_intent', ctaUrl: '/services' },
+    );
+    expect(result.ok).toBe(false);
   });
 });
 

@@ -8,11 +8,12 @@ import { randomUUID } from 'node:crypto';
 import { getFrontendUrl } from '../frontendUrl';
 import { resolveCampaignAudience } from './audience';
 import {
-  createAndSendBrevoCampaign,
+  createBrevoCampaign,
   createCampaignList,
   fetchBrevoCampaignStats,
   isBrevoMarketingConfigured,
   isMarketingDryRun,
+  sendBrevoCampaignNow,
   syncContactsToList,
 } from './brevoMarketing';
 import { signUnsubscribePayload } from './unsubscribeToken';
@@ -32,21 +33,11 @@ function localesToSend(campaign: IMarketingCampaign): MarketingLocale[] {
   return available.filter((l) => requested.includes(l));
 }
 
-function injectUnsubscribeLink(html: string, email?: string): string {
+function campaignFooterHtml(): string {
   const base = getFrontendUrl();
   const prefsUrl = `${base}/profile?tab=notifications`;
-  // Prefer a signed one-click URL when we have a recipient email; otherwise land on
-  // the confirmation page (GET verifies / preview only — POST completes unsubscribe).
-  const unsubUrl = email?.trim()
-    ? `${base}/unsubscribe?token=${encodeURIComponent(signUnsubscribePayload(email.trim()))}`
-    : `${base}/unsubscribe`;
-  if (html.includes('{{unsubscribe}}') || html.includes('__UNSUBSCRIBE_URL__')) {
-    return html
-      .replace(/\{\{unsubscribe\}\}/g, unsubUrl)
-      .replace(/__UNSUBSCRIBE_URL__/g, unsubUrl);
-  }
-  return `${html}
-<div style="margin-top:32px;padding-top:16px;border-top:1px solid #e5e7eb;font-size:12px;color:#6b7280;text-align:center;">
+  const unsubUrl = `${base}/unsubscribe?token={{ contact.UNSUB_TOKEN }}`;
+  return `<div style="margin-top:32px;padding-top:16px;border-top:1px solid #e5e7eb;font-size:12px;color:#6b7280;text-align:center;">
   <p style="margin:0 0 8px 0;">You received this because you opted in to Fixtract promotions.</p>
   <p style="margin:0;">
     <a href="${unsubUrl}" style="color:#6b7280;text-decoration:underline;">Unsubscribe</a>
@@ -66,13 +57,6 @@ function resolveReengagementInactiveDays(campaign: IMarketingCampaign): number |
   const raw = Number(campaign.inactiveDays);
   if (Number.isFinite(raw) && raw > 0) return Math.floor(raw);
   return defaultReengagementInactiveDays();
-}
-
-/** Append a one-click signed unsubscribe for single-recipient dry-run / future personalization. */
-export function personalizedUnsubscribeFooter(email: string): string {
-  const token = signUnsubscribePayload(email);
-  const url = `${getFrontendUrl()}/unsubscribe?token=${encodeURIComponent(token)}`;
-  return `<p style="font-size:12px;color:#6b7280;text-align:center;"><a href="${url}">Unsubscribe</a></p>`;
 }
 
 export const MARKETING_SEND_LEASE_MS = 30 * 60 * 1000;
@@ -182,6 +166,7 @@ export async function sendMarketingCampaign(
   try {
     members = await resolveCampaignAudience(campaign.audience, {
       inactiveDays: resolveReengagementInactiveDays(campaign),
+      rejectTruncated: true,
     });
   } catch (err: any) {
     const error = err?.message || String(err) || 'Failed to resolve campaign audience';
@@ -200,7 +185,8 @@ export async function sendMarketingCampaign(
   const deliveries: IMarketingCampaign['deliveries'] = campaign.deliveries.map((delivery) => ({
     locale: delivery.locale,
     brevoListId: delivery.brevoListId,
-    brevoCampaignId: delivery.brevoCampaignId,
+      brevoCampaignId: delivery.brevoCampaignId,
+      brevoStatus: delivery.brevoStatus,
     recipientCount: delivery.recipientCount,
     stats: delivery.stats,
     error: delivery.error,
@@ -221,7 +207,10 @@ export async function sendMarketingCampaign(
   try {
     for (const locale of locales) {
       const completed = deliveries.find(
-        (delivery) => delivery.locale === locale && delivery.brevoCampaignId,
+        (delivery) =>
+          delivery.locale === locale &&
+          delivery.brevoCampaignId &&
+          delivery.brevoStatus !== 'created',
       );
       if (completed) continue;
 
@@ -235,11 +224,9 @@ export async function sendMarketingCampaign(
       const localeMembers = members.filter((m) => m.locale === locale);
       // Fallback: if no one has this locale, only send en to unmatched when locale===en
       const recipients =
-        localeMembers.length > 0
-          ? localeMembers
-          : locale === 'en'
-            ? members.filter((m) => !locales.includes(m.locale) || m.locale === 'en')
-            : [];
+        locale === 'en'
+          ? members.filter((m) => m.locale === 'en' || !locales.includes(m.locale))
+          : localeMembers;
 
       if (recipients.length === 0) {
         recordDelivery({
@@ -273,8 +260,20 @@ export async function sendMarketingCampaign(
         continue;
       }
 
+      const previous = deliveries.find((delivery) => delivery.locale === locale);
       const listName = `fx-${campaign.type}-${locale}-${stamp}`.slice(0, 100);
-      const listId = await createCampaignList(listName);
+      const listId = previous?.brevoListId || (await createCampaignList(listName));
+      recordDelivery({
+        locale,
+        brevoListId: listId,
+        brevoCampaignId: previous?.brevoCampaignId,
+        brevoStatus: previous?.brevoStatus,
+        recipientCount: recipients.length,
+      });
+      if (!(await checkpoint())) {
+        return { ok: false, error: 'Campaign send claim was lost before contact import' };
+      }
+
       await syncContactsToList(
         listId,
         recipients.map((r) => ({
@@ -283,26 +282,44 @@ export async function sendMarketingCampaign(
             REGION: r.region || '',
             LOCALE: r.locale,
             FIRSTNAME: r.name || '',
+            UNSUB_TOKEN: signUnsubscribePayload(r.email),
           },
         })),
       );
 
-      const html = injectUnsubscribeLink(content.htmlContent, '');
-      const { campaignId: brevoCampaignId } = await createAndSendBrevoCampaign({
-        name: `${campaign.name} [${locale}]`,
-        subject: content.subject,
-        htmlContent: html,
-        previewText: content.previewText,
-        listId,
-        templateId: content.brevoTemplateId,
-        scheduledAt: opts?.forceNow ? null : campaign.scheduledAt,
-        utmCampaign: campaign.utmCampaign || `fixtract_${campaign.type}_${campaign._id}`,
-      });
+      let brevoCampaignId = previous?.brevoCampaignId;
+      if (!brevoCampaignId) {
+        const created = await createBrevoCampaign({
+          name: `${campaign.name} [${locale}]`,
+          subject: content.subject,
+          htmlContent: content.htmlContent,
+          previewText: content.previewText,
+          listId,
+          templateId: content.brevoTemplateId,
+          scheduledAt: null,
+          utmCampaign: campaign.utmCampaign || `Fixtract ${campaign.type} ${campaign._id}`,
+          footer: campaignFooterHtml(),
+        });
+        brevoCampaignId = created.campaignId;
+        recordDelivery({
+          locale,
+          brevoListId: listId,
+          brevoCampaignId,
+          brevoStatus: 'created',
+          recipientCount: recipients.length,
+        });
+        if (!(await checkpoint())) {
+          return { ok: false, error: 'Campaign send claim was lost after Brevo draft creation' };
+        }
+      }
+
+      await sendBrevoCampaignNow(brevoCampaignId);
 
       recordDelivery({
         locale,
         brevoListId: listId,
         brevoCampaignId,
+        brevoStatus: 'sent',
         recipientCount: recipients.length,
       });
       if (!(await checkpoint())) {
@@ -345,27 +362,35 @@ export async function refreshCampaignStats(campaignId: string): Promise<IMarketi
   const campaign = await MarketingCampaign.findById(campaignId);
   if (!campaign) return null;
   if (isMarketingDryRun()) return campaign;
+  if (campaign.status !== 'sent') {
+    throw new Error('Campaign statistics can only be refreshed after delivery');
+  }
 
   for (const delivery of campaign.deliveries) {
     if (!delivery.brevoCampaignId) continue;
     try {
-      const stats = await fetchBrevoCampaignStats(delivery.brevoCampaignId);
-      delivery.stats = {
-        sent: stats.sent,
-        delivered: stats.delivered,
-        uniqueViews: stats.uniqueViews,
-        uniqueClicks: stats.uniqueClicks,
-        unsubscriptions: stats.unsubscriptions,
-        softBounces: stats.softBounces,
-        hardBounces: stats.hardBounces,
+      const remoteStats = await fetchBrevoCampaignStats(delivery.brevoCampaignId);
+      const stats = {
+        sent: remoteStats.sent,
+        delivered: remoteStats.delivered,
+        uniqueViews: remoteStats.uniqueViews,
+        uniqueClicks: remoteStats.uniqueClicks,
+        unsubscriptions: remoteStats.unsubscriptions,
+        softBounces: remoteStats.softBounces,
+        hardBounces: remoteStats.hardBounces,
       };
+      await MarketingCampaign.updateOne(
+        { _id: campaignId, status: 'sent', 'deliveries.locale': delivery.locale },
+        { $set: { 'deliveries.$.stats': stats }, $unset: { 'deliveries.$.error': 1 } },
+      );
     } catch (err: any) {
-      delivery.error = err?.message || 'Failed to refresh stats';
+      await MarketingCampaign.updateOne(
+        { _id: campaignId, status: 'sent', 'deliveries.locale': delivery.locale },
+        { $set: { 'deliveries.$.error': err?.message || 'Failed to refresh stats' } },
+      );
     }
   }
-  campaign.markModified('deliveries');
-  await campaign.save();
-  return campaign;
+  return MarketingCampaign.findById(campaignId);
 }
 
 /** Daily re-engagement: send the newest autoSend reengagement campaign that is draft/scheduled. */
@@ -378,7 +403,10 @@ export async function runReengagementSweep(): Promise<{
   const campaign = await MarketingCampaign.findOne({
     type: 'reengagement',
     autoSend: true,
-    status: { $in: ['draft', 'scheduled'] },
+    $or: [
+      { status: 'draft' },
+      { status: 'scheduled', scheduledAt: { $lte: new Date() } },
+    ],
   }).sort({ updatedAt: -1 });
 
   if (!campaign) return { attempted: false };

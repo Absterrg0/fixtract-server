@@ -33,6 +33,7 @@ import {
   runKpiMonthlyReportCron,
   runMarketingCampaignsCron,
 } from "../../handlers/Public/cron";
+import { optionalProtect } from "../../middlewares/auth";
 
 // Public routes - accessible without authentication
 const publicRouter = Router();
@@ -89,12 +90,12 @@ publicRouter
 // Profile view tracking (public, rate-limited, dedup per visitor/day)
 publicRouter
   .route("/professionals/:id/view")
-  .post(schedulingRateLimiter, recordProfessionalView);
+  .post(schedulingRateLimiter, optionalProtect, recordProfessionalView);
 
 // Service-page view tracking (public, rate-limited, dedup per visitor/day)
 publicRouter
   .route("/services/:serviceId/view")
-  .post(schedulingRateLimiter, recordServiceView);
+  .post(schedulingRateLimiter, optionalProtect, recordServiceView);
 
 // Public favorite counts (social proof)
 publicRouter

@@ -143,7 +143,10 @@ export const handleWebhook = async (req: Request, res: Response) => {
         break;
 
       case 'payment_intent.payment_failed':
-        await handlePaymentIntentFailed(event.data.object as Stripe.PaymentIntent);
+        await handlePaymentIntentFailed(
+          event.data.object as Stripe.PaymentIntent,
+          event.id,
+        );
         break;
 
       case 'payment_intent.canceled':
@@ -401,42 +404,72 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
 /**
  * Handle payment_intent.payment_failed event
  */
-async function handlePaymentIntentFailed(paymentIntent: Stripe.PaymentIntent) {
+async function handlePaymentIntentFailed(
+  paymentIntent: Stripe.PaymentIntent,
+  stripeEventId: string,
+) {
   const bookingId = paymentIntent.metadata.bookingId;
   if (!bookingId) return;
 
-  const booking = await Booking.findById(bookingId);
-  if (!booking || !booking.payment) return;
+  const currentBooking = await Booking.findById(bookingId).select(
+    'payment.stripePaymentIntentId payment.status payment.milestoneIndex status',
+  );
+  if (
+    !currentBooking?.payment ||
+    currentBooking.payment.stripePaymentIntentId !== paymentIntent.id
+  ) {
+    return;
+  }
 
-  booking.payment.status = 'failed';
-  booking.status = 'payment_pending'; // Allow retry
-  await booking.save();
+  const isMilestone = typeof currentBooking.payment.milestoneIndex === 'number';
+  const booking = await Booking.findOneAndUpdate(
+    {
+      _id: currentBooking._id,
+      'payment.stripePaymentIntentId': paymentIntent.id,
+      'payment.status': { $in: ['pending', 'failed'] },
+      ...(isMilestone
+        ? {}
+        : { status: { $in: ['quote_accepted', 'payment_pending'] } }),
+    },
+    {
+      $set: {
+        'payment.status': 'failed',
+        ...(!isMilestone ? { status: 'payment_pending' } : {}),
+      },
+    },
+    { new: true },
+  );
+  if (!booking) return;
 
   await Payment.findOneAndUpdate(
-    { booking: booking._id },
+    {
+      booking: booking._id,
+      stripePaymentIntentId: paymentIntent.id,
+      status: { $in: ['pending', 'failed'] },
+    },
     { status: 'failed' }
   );
 
   const customerId = booking.customer?.toString();
   if (customerId) {
-    try {
-      const { notify } = await import('../../utils/notifications/notify');
-      await notify({
-        userId: customerId,
-        eventKey: 'customer.payment_failed',
-        entityType: 'booking',
-        entityId: String(booking._id),
-        context: {
-          bookingId: String(booking._id),
-          projectTitle: booking.rfqData?.serviceType,
-        },
-      });
-    } catch (notifyError: any) {
-      // Match refund_processed: await delivery so transient failures are logged;
-      // do not fail the webhook ack (booking status already persisted for retry).
-      console.error(
-        'Failed to notify payment-failed:',
-        notifyError?.message || notifyError,
+    const { notify } = await import('../../utils/notifications/notify');
+    const notification = await notify({
+      userId: customerId,
+      eventKey: 'customer.payment_failed',
+      entityType: 'booking',
+      entityId: String(booking._id),
+      idempotencyKey: `stripe:${stripeEventId}:customer.payment_failed`,
+      context: {
+        bookingId: String(booking._id),
+        projectTitle: booking.rfqData?.serviceType,
+      },
+    });
+    if (
+      notification.emailOutcome === 'failed' ||
+      (!notification.emailOutcome && !notification.skipped)
+    ) {
+      throw new Error(
+        `Failed-payment email was not delivered (${notification.emailOutcome || 'unknown'})`,
       );
     }
   }
@@ -550,9 +583,9 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
 
   if (booking.payment.status === 'refunded' || booking.payment.status === 'partially_refunded') {
     try {
-      const { notifyAsync } = await import('../../utils/notifications/notify');
+      const { notify } = await import('../../utils/notifications/notify');
       if (booking.customer) {
-        notifyAsync({
+        await notify({
           userId: String(booking.customer),
           eventKey: 'customer.booking_cancelled_refunded',
           entityType: 'booking',
@@ -562,7 +595,7 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
         });
       }
       if (booking.professional) {
-        notifyAsync({
+        await notify({
           userId: String(booking.professional),
           eventKey: 'professional.booking_cancelled_refunded',
           entityType: 'booking',
