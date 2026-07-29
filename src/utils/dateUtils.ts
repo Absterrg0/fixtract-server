@@ -32,6 +32,8 @@ function parseStrictIsoString(value: string): Date | null {
 
   const dateTime = /^(\d{4})-(\d{2})-(\d{2})T/.exec(trimmed);
   if (dateTime) {
+    // Require Z or an explicit numeric offset so parsing is not host-local.
+    if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)) return null;
     const year = Number(dateTime[1]);
     const month = Number(dateTime[2]);
     const day = Number(dateTime[3]);

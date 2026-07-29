@@ -40,8 +40,8 @@ export function selectPublicAnnouncementWinners(
 
   const sorted = [...eligible].sort((a, b) => {
     if (b.priority !== a.priority) return b.priority - a.priority;
-    const aExact = a.locale === filters.locale ? 1 : 0;
-    const bExact = b.locale === filters.locale ? 1 : 0;
+    const aExact = a.locale === filters.locale || a.locale === localeBase ? 1 : 0;
+    const bExact = b.locale === filters.locale || b.locale === localeBase ? 1 : 0;
     if (bExact !== aExact) return bExact - aExact;
     return b.createdAt.getTime() - a.createdAt.getTime();
   });
