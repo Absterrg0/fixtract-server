@@ -14,6 +14,7 @@ import {
   ProcessApiApiKeys,
   CreateAttribute,
   RemoveContactFromList,
+  UpdateContact,
   TransactionalEmailsApi,
   TransactionalEmailsApiApiKeys,
 } from '@getbrevo/brevo';
@@ -83,6 +84,29 @@ export function isBrevoMarketingConfigured(): boolean {
 
 export function isMarketingDryRun(): boolean {
   return process.env.EMAIL_DEV_NO_SEND === 'true' || process.env.MARKETING_CAMPAIGN_DRY_RUN === 'true';
+}
+
+/**
+ * Globally suppress a contact in Brevo so an opt-out applies to any Brevo
+ * campaign/list, not only future Fixtract audience resolutions.
+ * Returns false when delivery is intentionally disabled and should be retried
+ * after Brevo is configured.
+ */
+export async function suppressBrevoMarketingContact(email: string): Promise<boolean> {
+  if (!isBrevoMarketingConfigured() || isMarketingDryRun()) return false;
+
+  const contact = new UpdateContact();
+  contact.emailBlacklisted = true;
+  try {
+    await createContactsApi().updateContact(email.trim().toLowerCase(), contact);
+    return true;
+  } catch (error) {
+    const details = sanitizedBrevoError(error);
+    // No Brevo contact means there is nothing provider-side left to suppress.
+    if (Number(details.status) === 404) return true;
+    console.error('[Brevo] contact suppression failed', { email: maskEmail(email), ...details });
+    throw new Error('Brevo contact suppression failed');
+  }
 }
 
 export async function listActiveBrevoTemplates(): Promise<

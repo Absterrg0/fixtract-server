@@ -5,6 +5,7 @@ import {
   generateUnsubscribeToken,
   verifyUnsubscribePayload,
 } from '../../utils/marketing/unsubscribeToken';
+import { syncPendingBrevoUnsubscribes } from '../../utils/marketing/audience';
 
 function isDuplicateKeyError(error: unknown): boolean {
   return Boolean(
@@ -127,6 +128,9 @@ export const unsubscribeMarketing = async (req: Request, res: Response) => {
     }
 
     const result = await applyUnsubscribe(email);
+    // Local consent is authoritative immediately. Brevo suppression is retried
+    // by the daily cron if the provider is unavailable right now.
+    await syncPendingBrevoUnsubscribes(1, email);
     return res.json({
       success: true,
       data: {

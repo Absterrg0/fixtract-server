@@ -11,6 +11,7 @@ import User from '../../models/user';
 import Conversation from '../../models/conversation';
 import ChatMessage from '../../models/chatMessage';
 import PlatformSettings from '../../models/platformSettings';
+import Project from '../../models/project';
 import { addWorkingDays } from '../../utils/workingDays';
 import { getNextSequence } from '../../utils/counterSequence';
 import { createPaymentIntent } from '../Stripe/payment';
@@ -1018,7 +1019,6 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
       }
     }
     if (projectId && mongoose.Types.ObjectId.isValid(projectId)) {
-      const { default: Project } = await import('../../models/project');
       linkedProject = await Project.findById(projectId).select('title subprojects professionalId status services category service areaOfWork serviceConfigurationId');
       if (!linkedProject) {
         return res.status(400).json({ success: false, error: { code: 'INVALID_PROJECT', message: 'Project not found' } });
@@ -1166,7 +1166,6 @@ export const getActiveProjects = async (req: Request, res: Response) => {
       return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
     }
 
-    const { default: Project } = await import('../../models/project');
     const projects = await Project.find({
       professionalId: new mongoose.Types.ObjectId(userId),
       status: 'published',

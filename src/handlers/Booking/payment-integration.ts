@@ -13,6 +13,7 @@ import { stripe } from '../../services/stripe';
 import { generateIdempotencyKey, computeGrossBookingAmount } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
+import { updateUserLoyalty } from '../../utils/loyaltySystem';
 import { addPoints } from '../../utils/pointsSystem';
 import PointsConfig from '../../models/pointsConfig';
 import PointTransaction from '../../models/pointTransaction';
@@ -704,7 +705,6 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           }
 
           try {
-            const { updateUserLoyalty } = await import('../../utils/loyaltySystem');
             await updateUserLoyalty(String(booking.customer), booking.payment?.amount || 0);
           } catch (e) {
             console.error('Error updating customer loyalty:', e);
@@ -804,7 +804,6 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
         }
 
         try {
-          const { updateUserLoyalty } = await import('../../utils/loyaltySystem');
           await updateUserLoyalty(String(booking.customer), booking.payment?.amount || 0);
         } catch (e) {
           console.error('Error updating customer loyalty:', e);

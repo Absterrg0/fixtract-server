@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcrypt';
 import User from '../../models/user';
+import LoyaltyConfig from '../../models/loyaltyConfig';
 import connectDB from '../../config/db';
 
 const seedAdmin = async () => {
@@ -69,7 +70,6 @@ const seedAdmin = async () => {
     console.log('');
 
     // Also create loyalty configuration if it doesn't exist
-    const LoyaltyConfig = (await import('../../models/loyaltyConfig')).default;
     await LoyaltyConfig.getCurrentConfig();
     console.log('✅ Loyalty system initialized with default configuration');
 

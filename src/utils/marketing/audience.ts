@@ -7,6 +7,7 @@ import MarketingSubscriber, {
 } from '../../models/marketingSubscriber';
 import type { ICampaignAudience } from '../../models/marketingCampaign';
 import { generateUnsubscribeToken } from './unsubscribeToken';
+import { suppressBrevoMarketingContact } from './brevoMarketing';
 
 export type AudienceMember = {
   email: string;
@@ -108,8 +109,15 @@ export async function syncSubscribersFromUsers(): Promise<{
     const emails = users
       .map((user) => String(user.email || '').toLowerCase().trim())
       .filter(Boolean);
-    const existingSubscribers = await MarketingSubscriber.find({ email: { $in: emails } }).lean();
+    const existingSubscribers = await MarketingSubscriber.find({
+      $or: [{ email: { $in: emails } }, { userId: { $in: userIds } }],
+    }).lean();
     const existingByEmail = new Map(existingSubscribers.map((sub) => [sub.email, sub]));
+    const existingByUserId = new Map(
+      existingSubscribers
+        .filter((sub) => sub.userId)
+        .map((sub) => [String(sub.userId), sub]),
+    );
     const operations: Parameters<typeof MarketingSubscriber.bulkWrite>[0] = [];
 
     for (const user of users) {
@@ -128,15 +136,17 @@ export async function syncSubscribersFromUsers(): Promise<{
       const locale = normalizeLocale(
         (user as any).preferredLocale ?? (user as any).locale ?? (user as any).language,
       );
-      const existing = existingByEmail.get(email);
+      const existingByCurrentEmail = existingByEmail.get(email);
+      const existingByUser = existingByUserId.get(String(user._id));
+      const existing = existingByCurrentEmail || existingByUser;
       const bookingEngagement = bookingActivityByUser.get(String(user._id));
       const lastEngagedAt = bookingEngagement;
 
       if (!optedIn) {
-        if (existing && !existing.unsubscribedAt) {
+        if (existing) {
           operations.push({
-            updateOne: {
-              filter: { _id: existing._id, unsubscribedAt: null },
+            updateMany: {
+              filter: { $or: [{ userId: user._id }, { email }] },
               update: {
                 $set: { unsubscribedAt: new Date() },
                 $unset: { consentVerifiedAt: 1 },
@@ -162,22 +172,41 @@ export async function syncSubscribersFromUsers(): Promise<{
       if (!metadata.name) unset.name = 1;
       if (!region) unset.region = 1;
 
-      operations.push({
-        updateOne: {
-          filter: { email },
-          update: {
-            $set: metadata,
-            ...(Object.keys(unset).length > 0 ? { $unset: unset } : {}),
-            $setOnInsert: {
-              unsubscribeToken: generateUnsubscribeToken(),
-              source: 'user_sync',
-              subscribedAt: new Date(),
-              unsubscribedAt: null,
+      if (existing) {
+        operations.push({
+          updateOne: {
+            filter: { _id: existing._id },
+            update: {
+              $set: { ...metadata, email, unsubscribedAt: null },
+              ...(Object.keys(unset).length > 0 ? { $unset: unset } : {}),
             },
           },
-          upsert: true,
-        },
-      });
+        });
+        if (existingByUser && String(existingByUser._id) !== String(existing._id)) {
+          operations.push({
+            updateOne: {
+              filter: { _id: existingByUser._id },
+              update: { $set: { unsubscribedAt: new Date() }, $unset: { consentVerifiedAt: 1 } },
+            },
+          });
+        }
+      } else {
+        operations.push({
+          updateOne: {
+            filter: { email },
+            update: {
+              $set: { ...metadata, unsubscribedAt: null },
+              ...(Object.keys(unset).length > 0 ? { $unset: unset } : {}),
+              $setOnInsert: {
+                unsubscribeToken: generateUnsubscribeToken(),
+                source: 'user_sync',
+                subscribedAt: new Date(),
+              },
+            },
+            upsert: true,
+          },
+        });
+      }
       upserted += 1;
     }
 
@@ -190,6 +219,46 @@ export async function syncSubscribersFromUsers(): Promise<{
   }
 
   return { upserted, unsubscribed };
+}
+
+/** Retry Brevo suppression for locally unsubscribed contacts. */
+export async function syncPendingBrevoUnsubscribes(limit = 100, email?: string): Promise<{
+  synced: number;
+  pending: number;
+}> {
+  const subscribers = await MarketingSubscriber.find({
+    unsubscribedAt: { $ne: null },
+    brevoUnsubscribedAt: null,
+    ...(email ? { email: email.toLowerCase().trim() } : {}),
+  })
+    .select('email')
+    .limit(limit)
+    .lean();
+  let synced = 0;
+
+  for (const subscriber of subscribers) {
+    try {
+      const suppressed = await suppressBrevoMarketingContact(subscriber.email);
+      if (!suppressed) continue;
+      await MarketingSubscriber.updateOne(
+        { _id: subscriber._id, unsubscribedAt: { $ne: null } },
+        { $set: { brevoUnsubscribedAt: new Date() }, $unset: { brevoUnsubscribeError: 1 } },
+      );
+      synced += 1;
+    } catch (error) {
+      await MarketingSubscriber.updateOne(
+        { _id: subscriber._id, unsubscribedAt: { $ne: null } },
+        {
+          $set: {
+            brevoUnsubscribeError:
+              error instanceof Error ? error.message : 'Brevo suppression failed',
+          },
+        },
+      );
+    }
+  }
+
+  return { synced, pending: subscribers.length - synced };
 }
 
 function audienceQuery(

@@ -4,6 +4,7 @@ import Booking from '../models/booking';
 import PointTransaction from '../models/pointTransaction';
 import ProfessionalLevelConfig, { ProfessionalLevelName } from '../models/professionalLevelConfig';
 import { deductPoints } from './pointsSystem';
+import { notifyAsync } from './notifications/notify';
 
 const PROFESSIONAL_LEVEL_RANK: Record<ProfessionalLevelName, number> = {
   New: 0,
@@ -288,7 +289,6 @@ export const updateProfessionalLevel = async (
     // Defer notify when inside a transaction — caller must flush after commit.
     if (leveledUp && !opts?.session) {
       try {
-        const { notifyAsync } = await import('./notifications/notify');
         notifyAsync({
           userId: professionalId.toString(),
           eventKey: 'professional.leveling_up',
@@ -364,7 +364,6 @@ export const applyPointsBoost = async (
     // Notify only after commit, and only for upward transitions
     if (leveledUp) {
       try {
-        const { notifyAsync } = await import('./notifications/notify');
         notifyAsync({
           userId: professionalId.toString(),
           eventKey: 'professional.leveling_up',

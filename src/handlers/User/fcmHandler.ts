@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { Request, Response } from 'express';
 import User from '../../models/user';
 import MarketingSubscriber from '../../models/marketingSubscriber';
@@ -246,7 +247,15 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
               subscribedAt: consentUpdatedAt,
               consentVerifiedAt: consentUpdatedAt,
             },
+            $setOnInsert: {
+              email: normalizedEmail,
+              interestedServices: [],
+              locale: 'en',
+              unsubscribeToken: crypto.randomUUID().replace(/-/g, ''),
+              source: 'user_sync',
+            },
           },
+          { upsert: true },
         );
       } else {
         await MarketingSubscriber.updateMany(

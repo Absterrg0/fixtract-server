@@ -18,6 +18,7 @@ import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
 import { deductPoints } from '../../utils/pointsSystem';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
+import { notify } from '../../utils/notifications/notify';
 
 const reserveWebhookEvent = async (event: Stripe.Event): Promise<{ shouldProcess: boolean }> => {
   const now = new Date();
@@ -358,7 +359,6 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
       const currency = (paymentIntent.currency || 'EUR').toUpperCase();
       try {
         if (customerUser?._id) {
-          const { notify } = await import('../../utils/notifications/notify');
           await notify({
             userId: customerUser._id.toString(),
             eventKey: 'customer.payment_confirmed',
@@ -380,7 +380,6 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
       // Await notify on serverless — fire-and-forget can be frozen before inbox/email complete.
       try {
         if (professionalUser?._id) {
-          const { notify } = await import('../../utils/notifications/notify');
           await notify({
             userId: professionalUser._id.toString(),
             eventKey: 'professional.booking_created',
@@ -452,7 +451,6 @@ async function handlePaymentIntentFailed(
 
   const customerId = booking.customer?.toString();
   if (customerId) {
-    const { notify } = await import('../../utils/notifications/notify');
     const notification = await notify({
       userId: customerId,
       eventKey: 'customer.payment_failed',
@@ -561,7 +559,6 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
     if (booking.customer) {
       const customerUser = await User.findById(booking.customer).select('_id').lean();
       const isPartial = booking.payment.status === 'partially_refunded';
-      const { notify } = await import('../../utils/notifications/notify');
       if (customerUser?._id) {
         await notify({
           userId: customerUser._id.toString(),
@@ -583,7 +580,6 @@ async function handleChargeRefunded(charge: Stripe.Charge) {
 
   if (booking.payment.status === 'refunded' || booking.payment.status === 'partially_refunded') {
     try {
-      const { notify } = await import('../../utils/notifications/notify');
       if (booking.customer) {
         await notify({
           userId: String(booking.customer),

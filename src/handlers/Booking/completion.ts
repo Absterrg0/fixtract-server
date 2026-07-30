@@ -22,7 +22,7 @@ import {
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
 import LoyaltyConfig from '../../models/loyaltyConfig';
-import { getCurrentTier } from '../../utils/loyaltySystem';
+import { getCurrentTier, updateUserLoyalty } from '../../utils/loyaltySystem';
 import Payment from '../../models/payment';
 import {
   awardBookingCompletionPoints,
@@ -698,7 +698,6 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
     }
 
     try {
-      const { updateUserLoyalty } = await import('../../utils/loyaltySystem');
       const bookingAmount = (finalizedBooking.payment?.amount || 0) + Math.max(0, extraCostTotal);
       await updateUserLoyalty(String(finalizedBooking.customer), bookingAmount);
     } catch (e) {

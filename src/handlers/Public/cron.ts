@@ -3,7 +3,7 @@ import User from '../../models/user';
 import CronJobLock from '../../models/cronJobLock';
 import { runNotificationReminders } from '../../utils/notifications/runNotificationReminders';
 import { hasPermission, resolveAdminRole } from '../../utils/adminRbac/rolePermissions';
-import { syncSubscribersFromUsers } from '../../utils/marketing/audience';
+import { syncPendingBrevoUnsubscribes, syncSubscribersFromUsers } from '../../utils/marketing/audience';
 import {
   MARKETING_SEND_LEASE_MS,
   runReengagementSweep,
@@ -11,6 +11,9 @@ import {
 } from '../../utils/marketing/sendCampaign';
 import MarketingCampaign from '../../models/marketingCampaign';
 import { randomUUID } from 'node:crypto';
+import { generateKpiPdf } from '../../utils/kpiReport';
+import { sendKpiReportEmail } from '../../utils/emailService';
+import { uploadBufferToS3 } from '../../utils/s3Upload';
 
 function isAuthorizedCron(req: Request): boolean {
   const secret = process.env.CRON_SECRET;
@@ -42,6 +45,7 @@ type KpiMonthlyReportResult = {
 
 type AdminRecipient = { _id?: unknown; email?: string | null };
 const KPI_LOCK_LEASE_MS = 30 * 60 * 1000;
+class KpiLockLostError extends Error {}
 
 function kpiReportEmailOverride(): string[] {
   return (process.env.KPI_REPORT_EMAILS || '')
@@ -67,7 +71,6 @@ async function notifyKpiFailure(
   }
 
   try {
-    const { sendKpiReportEmail } = await import('../../utils/emailService');
     for (const admin of notifyList) {
       if (!admin.email) continue;
       try {
@@ -90,7 +93,7 @@ async function notifyKpiFailure(
  * Kept callable from the daily Vercel cron (Hobby = 1 cron) and the manual HTTP route.
  */
 async function executeKpiMonthlyReport(
-  lock?: { key: string; sentRecipients: Set<string> },
+  lock?: { key: string; claimId: string; sentRecipients: Set<string> },
 ): Promise<KpiMonthlyReportResult> {
   const { from, to } = previousCalendarMonthUtc();
   const startedAt = Date.now();
@@ -134,10 +137,6 @@ async function executeKpiMonthlyReport(
       };
     }
 
-    const { generateKpiPdf } = await import('../../utils/kpiReport');
-    const { sendKpiReportEmail } = await import('../../utils/emailService');
-    const { uploadBufferToS3 } = await import('../../utils/s3Upload');
-
     const buffer = await generateKpiPdf(from, to);
     const key = `kpi-reports/monthly/${from.toISOString().slice(0, 7)}.pdf`;
     const reportUrl = await uploadBufferToS3(buffer, key, 'application/pdf');
@@ -154,12 +153,16 @@ async function executeKpiMonthlyReport(
         sent += 1;
         if (lock) {
           lock.sentRecipients.add(email);
-          await CronJobLock.updateOne(
-            { key: lock.key, completedAt: { $exists: false } },
+          const checkpoint = await CronJobLock.updateOne(
+            { key: lock.key, claimId: lock.claimId, completedAt: { $exists: false } },
             { $addToSet: { sentRecipients: email } },
           );
+          if (checkpoint.matchedCount !== 1) {
+            throw new KpiLockLostError('KPI lock ownership was lost');
+          }
         }
       } catch (err: any) {
+        if (err instanceof KpiLockLostError) throw err;
         failed += 1;
         errors.push(`${email}: ${err?.message || 'send failed'}`);
       }
@@ -189,7 +192,8 @@ async function maybeRunKpiMonthly(): Promise<
   const monthKey = previousCalendarMonthUtc().from.toISOString().slice(0, 7);
   const lockKey = `kpi_monthly:${monthKey}`;
   const staleBefore = new Date(Date.now() - KPI_LOCK_LEASE_MS);
-  let lock: { sentRecipients?: string[] } | null = null;
+  const claimId = randomUUID();
+  let lock: { sentRecipients?: string[]; claimId?: string } | null = null;
 
   try {
     lock = await CronJobLock.findOneAndUpdate(
@@ -202,7 +206,7 @@ async function maybeRunKpiMonthly(): Promise<
         ],
       },
       {
-        $set: { claimedAt: new Date() },
+        $set: { claimedAt: new Date(), claimId },
         $setOnInsert: { key: lockKey, sentRecipients: [] },
       },
       { upsert: true, new: true },
@@ -230,16 +234,17 @@ async function maybeRunKpiMonthly(): Promise<
   try {
     const result = await executeKpiMonthlyReport({
       key: lockKey,
+      claimId,
       sentRecipients: new Set(lock.sentRecipients || []),
     });
     if (result.failed === 0) {
       await CronJobLock.updateOne(
-        { key: lockKey },
+        { key: lockKey, claimId },
         { $set: { completedAt: new Date() } },
       );
     } else {
       await CronJobLock.updateOne(
-        { key: lockKey },
+        { key: lockKey, claimId, completedAt: { $exists: false } },
         { $set: { claimedAt: new Date(0) } },
       );
     }
@@ -247,7 +252,7 @@ async function maybeRunKpiMonthly(): Promise<
   } catch (error: unknown) {
     try {
       await CronJobLock.updateOne(
-        { key: lockKey, completedAt: { $exists: false } },
+        { key: lockKey, claimId, completedAt: { $exists: false } },
         { $set: { claimedAt: new Date(0) } },
       );
     } catch (unlockErr) {
@@ -310,7 +315,11 @@ export const runNotificationRemindersCron = async (req: Request, res: Response) 
   const kpiError =
     kpiMonthly &&
     ('error' in kpiMonthly || (!kpiMonthly.skipped && kpiMonthly.failed > 0));
-  const marketingError = marketing && 'error' in marketing;
+  const marketingError =
+    marketing &&
+    ('error' in marketing ||
+      marketing.scheduledResults.some((result) => !result.ok) ||
+      Boolean(marketing.reengagement.error));
 
   if (remindersError || kpiError || marketingError) {
     return res.status(500).json({
@@ -347,8 +356,8 @@ export const runKpiMonthlyReportCron = async (req: Request, res: Response) => {
   }
 
   try {
-    const data = await executeKpiMonthlyReport();
-    if (data.failed > 0) {
+    const data = await maybeRunKpiMonthly();
+    if (data && ('error' in data || (!data.skipped && data.failed > 0))) {
       return res.status(502).json({
         success: false,
         msg: 'Monthly KPI report email delivery failed',
@@ -366,7 +375,9 @@ export const runKpiMonthlyReportCron = async (req: Request, res: Response) => {
 };
 
 type MarketingCampaignsDailyResult = {
-  sync: Awaited<ReturnType<typeof syncSubscribersFromUsers>>;
+  sync: Awaited<ReturnType<typeof syncSubscribersFromUsers>> & {
+    brevoUnsubscribes: Awaited<ReturnType<typeof syncPendingBrevoUnsubscribes>>;
+  };
   scheduledResults: Array<{ id: string; ok: boolean; error?: string }>;
   reengagement: Awaited<ReturnType<typeof runReengagementSweep>>;
   durationMs: number;
@@ -376,6 +387,7 @@ type MarketingCampaignsDailyResult = {
 async function executeMarketingCampaignsDaily(): Promise<MarketingCampaignsDailyResult> {
   const startedAt = Date.now();
   const sync = await syncSubscribersFromUsers();
+  const brevoUnsubscribes = await syncPendingBrevoUnsubscribes();
   const staleSendBefore = new Date(Date.now() - MARKETING_SEND_LEASE_MS);
   const claimableSend = {
     $or: [
@@ -448,7 +460,7 @@ async function executeMarketingCampaignsDaily(): Promise<MarketingCampaignsDaily
     reengagement,
   });
 
-  return { sync, scheduledResults, reengagement, durationMs };
+  return { sync: { ...sync, brevoUnsubscribes }, scheduledResults, reengagement, durationMs };
 }
 
 /**

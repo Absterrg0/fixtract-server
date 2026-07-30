@@ -6,6 +6,7 @@ import MarketingCampaign, {
   type MarketingCampaignType,
   type MarketingLocale,
 } from '../../models/marketingCampaign';
+import MarketingSubscriber from '../../models/marketingSubscriber';
 import { params } from '../../utils/requestParams';
 import { countCampaignAudience, syncSubscribersFromUsers } from '../../utils/marketing/audience';
 import { refreshCampaignStats, sendMarketingCampaign } from '../../utils/marketing/sendCampaign';
@@ -107,6 +108,18 @@ function parseContent(body: any): Record<string, { subject: string; htmlContent:
   return out;
 }
 
+function validateLocaleContent(
+  content: Record<string, { subject: string; htmlContent: string; brevoTemplateId?: number }>,
+  audience: { locales?: string[] },
+): void {
+  const missing = (audience.locales || []).filter((locale) => !content[locale]);
+  if (missing.length > 0) {
+    throw new MarketingInputError(
+      `Provide campaign content for every selected locale: ${missing.join(', ')}`,
+    );
+  }
+}
+
 function serializeCampaign(doc: any) {
   const obj = doc.toObject ? doc.toObject() : doc;
   return {
@@ -202,6 +215,7 @@ export const createMarketingCampaign = async (req: Request, res: Response) => {
     }
 
     const audience = parseAudience(req.body?.audience || req.body);
+    validateLocaleContent(content, audience);
     let scheduled: Date | null = null;
     if (scheduledAt) {
       const d = new Date(scheduledAt);
@@ -302,6 +316,7 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
     }
     if (typeof utmCampaign === 'string') campaign.utmCampaign = utmCampaign.trim();
 
+    validateLocaleContent(campaign.content as any, campaign.audience as any);
     await campaign.save();
     return res.json({ success: true, data: serializeCampaign(campaign) });
   } catch (error: any) {
@@ -405,7 +420,6 @@ export const syncMarketingSubscribers = async (_req: Request, res: Response) => 
 
 export const listMarketingSubscribers = async (req: Request, res: Response) => {
   try {
-    const MarketingSubscriber = (await import('../../models/marketingSubscriber')).default;
     const { page, limit, q, region, locale, status } = req.query;
     const pageNumber = Math.max(Math.floor(Number(page) || 1), 1);
     const limitNumber = Math.min(Math.max(Math.floor(Number(limit) || DEFAULT_LIMIT), 1), MAX_LIMIT);

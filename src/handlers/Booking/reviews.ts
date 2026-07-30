@@ -8,6 +8,8 @@ import mongoose from "mongoose";
 import { moderateText } from "../../utils/contentModeration";
 import { uploadToS3, generateFileName, validateImageFileBuffer, deleteFromS3, presignS3Url } from "../../utils/s3Upload";
 import { params } from "../../utils/requestParams";
+import { notifyAsync } from '../../utils/notifications/notify';
+import { getProfessionalDisplayName } from '../../utils/displayName';
 
 const MAX_COMMENT_LENGTH = 1000;
 
@@ -181,7 +183,6 @@ export const submitCustomerReview = async (req: Request, res: Response, next: Ne
           $inc: { professionalUnreadCount: 1 },
         });
 
-        const { notifyAsync } = await import('../../utils/notifications/notify');
         notifyAsync({
           userId: professionalId,
           eventKey: 'professional.review_received',
@@ -265,9 +266,7 @@ export const submitProfessionalReview = async (req: Request, res: Response, next
     try {
       const customerId = booking.customer?.toString();
       if (customerId) {
-        const { notifyAsync } = await import('../../utils/notifications/notify');
         const professional = await User.findById(userId).select('name username businessInfo').lean();
-        const { getProfessionalDisplayName } = await import('../../utils/displayName');
         notifyAsync({
           userId: customerId,
           eventKey: 'customer.review_received',

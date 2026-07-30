@@ -8,6 +8,7 @@ import {
 } from '../payment';
 import { processReferralCompletion } from '../referralSystem';
 import { updateProfessionalLevel } from '../professionalLevelSystem';
+import { updateUserLoyalty } from '../loyaltySystem';
 import PlatformSettings from '../../models/platformSettings';
 import {
   awardBookingCompletionPoints,
@@ -163,7 +164,6 @@ export async function finalizeBookingCompletion(args: {
   }
 
   try {
-    const { updateUserLoyalty } = await import('../loyaltySystem');
     const bookingAmount = (finalizedBooking.payment?.amount || 0) + Math.max(0, extraCostTotal);
     await updateUserLoyalty(String(finalizedBooking.customer), bookingAmount);
   } catch (e) {
