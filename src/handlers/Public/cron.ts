@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { generateKpiPdf } from '../../utils/kpiReport';
 import { sendKpiReportEmail } from '../../utils/emailService';
 import { uploadBufferToS3 } from '../../utils/s3Upload';
+import { shouldRunScheduledKpiMonthly } from '../../utils/cronSchedule';
 
 function isAuthorizedCron(req: Request): boolean {
   const secret = process.env.CRON_SECRET;
@@ -186,9 +187,11 @@ async function executeKpiMonthlyReport(
   }
 }
 
-async function maybeRunKpiMonthly(): Promise<
+async function maybeRunKpiMonthly(opts?: { force?: boolean }): Promise<
   KpiMonthlyReportResult | { error: string; skipped?: boolean; reason?: string } | undefined
 > {
+  if (!opts?.force && !shouldRunScheduledKpiMonthly()) return undefined;
+
   const monthKey = previousCalendarMonthUtc().from.toISOString().slice(0, 7);
   const lockKey = `kpi_monthly:${monthKey}`;
   const staleBefore = new Date(Date.now() - KPI_LOCK_LEASE_MS);
@@ -294,7 +297,7 @@ export const runNotificationRemindersCron = async (req: Request, res: Response) 
     console.error('[Cron] Notification reminders failed:', error);
   }
 
-  // The completed lock makes this cheap after success and allows retries on later days.
+  // The completed lock makes retries safe on the scheduled first UTC day.
   const kpiMonthly = await maybeRunKpiMonthly();
 
   let marketing:
@@ -315,19 +318,23 @@ export const runNotificationRemindersCron = async (req: Request, res: Response) 
   const kpiError =
     kpiMonthly &&
     ('error' in kpiMonthly || (!kpiMonthly.skipped && kpiMonthly.failed > 0));
+  const reminderJobError =
+    reminders && reminders.errors.length > 0
+      ? reminders.errors.join('; ')
+      : undefined;
   const marketingError =
     marketing &&
     ('error' in marketing ||
       marketing.scheduledResults.some((result) => !result.ok) ||
       Boolean(marketing.reengagement.error));
 
-  if (remindersError || kpiError || marketingError) {
+  if (remindersError || reminderJobError || kpiError || marketingError) {
     return res.status(500).json({
       success: false,
       msg: 'One or more scheduled jobs failed',
       data: {
         durationMs,
-        error: remindersError,
+        error: remindersError || reminderJobError,
         ...(kpiMonthly ? { kpiMonthly } : {}),
         ...(marketing ? { marketing } : {}),
       },
@@ -356,7 +363,7 @@ export const runKpiMonthlyReportCron = async (req: Request, res: Response) => {
   }
 
   try {
-    const data = await maybeRunKpiMonthly();
+    const data = await maybeRunKpiMonthly({ force: true });
     if (data && ('error' in data || (!data.skipped && data.failed > 0))) {
       return res.status(502).json({
         success: false,

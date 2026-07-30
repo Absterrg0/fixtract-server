@@ -464,6 +464,7 @@ async function handlePaymentIntentFailed(
     });
     if (
       notification.emailOutcome === 'failed' ||
+      notification.emailOutcome === 'in_progress' ||
       (!notification.emailOutcome && !notification.skipped)
     ) {
       throw new Error(
