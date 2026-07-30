@@ -296,6 +296,9 @@ export async function sendMarketingCampaign(
           previewText: content.previewText,
           listId,
           templateId: content.brevoTemplateId,
+          // The application claims this campaign only after its persisted scheduledAt is due.
+          // Brevo must send immediately at that point; passing the original timestamp here can
+          // schedule it again (or leave it unsent when that timestamp is already in the past).
           scheduledAt: null,
           utmCampaign: campaign.utmCampaign || `Fixtract ${campaign.type} ${campaign._id}`,
           footer: campaignFooterHtml(),
