@@ -1,8 +1,8 @@
-import crypto from 'node:crypto';
 import { Request, Response } from 'express';
 import User from '../../models/user';
 import MarketingSubscriber from '../../models/marketingSubscriber';
 import { syncPendingBrevoResubscribes } from '../../utils/marketing/audience';
+import { generateUnsubscribeToken } from '../../utils/marketing/unsubscribeToken';
 import {
   getOriginFromRequest,
   isAllowedOrigin,
@@ -252,7 +252,7 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
               email: normalizedEmail,
               interestedServices: [],
               locale: 'en',
-              unsubscribeToken: crypto.randomUUID().replace(/-/g, ''),
+              unsubscribeToken: generateUnsubscribeToken(),
               source: 'user_sync',
             },
           },

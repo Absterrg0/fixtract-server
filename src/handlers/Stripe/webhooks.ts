@@ -440,36 +440,50 @@ async function handlePaymentIntentFailed(
   );
   if (!booking) return;
 
-  await Payment.findOneAndUpdate(
+  const payment = await Payment.findOneAndUpdate(
     {
       booking: booking._id,
       stripePaymentIntentId: paymentIntent.id,
       status: { $in: ['pending', 'failed'] },
     },
-    { status: 'failed' }
+    { status: 'failed' },
+    { new: true },
   );
+  if (!payment) {
+    // Booking was marked failed above; surface for ops/repair rather than
+    // acknowledging an inconsistent Booking-only failure state as success.
+    throw new Error(
+      `Payment row missing for failed payment intent ${paymentIntent.id} on booking ${bookingId}`,
+    );
+  }
 
   const customerId = booking.customer?.toString();
   if (customerId) {
-    const notification = await notify({
-      userId: customerId,
-      eventKey: 'customer.payment_failed',
-      entityType: 'booking',
-      entityId: String(booking._id),
-      idempotencyKey: `stripe:${stripeEventId}:customer.payment_failed`,
-      context: {
-        bookingId: String(booking._id),
-        projectTitle: booking.rfqData?.serviceType,
-      },
-    });
-    if (
-      notification.emailOutcome === 'failed' ||
-      notification.emailOutcome === 'in_progress' ||
-      (!notification.emailOutcome && !notification.skipped)
-    ) {
-      throw new Error(
-        `Failed-payment email was not delivered (${notification.emailOutcome || 'unknown'})`,
-      );
+    // Notification is best-effort after payment state is persisted. Do not fail
+    // the Stripe webhook on in_progress/failed delivery — that just causes retry noise.
+    try {
+      const notification = await notify({
+        userId: customerId,
+        eventKey: 'customer.payment_failed',
+        entityType: 'booking',
+        entityId: String(booking._id),
+        idempotencyKey: `stripe:${stripeEventId}:customer.payment_failed`,
+        context: {
+          bookingId: String(booking._id),
+          projectTitle: booking.rfqData?.serviceType,
+        },
+      });
+      if (
+        notification.emailOutcome === 'failed' ||
+        notification.emailOutcome === 'in_progress' ||
+        (!notification.emailOutcome && !notification.skipped)
+      ) {
+        console.error(
+          `Failed-payment email not confirmed for booking ${bookingId}: ${notification.emailOutcome || 'unknown'}`,
+        );
+      }
+    } catch (notifyError) {
+      console.error(`Failed-payment notify error for booking ${bookingId}:`, notifyError);
     }
   }
 

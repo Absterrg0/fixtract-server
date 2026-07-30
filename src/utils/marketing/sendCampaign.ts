@@ -307,6 +307,11 @@ export async function sendMarketingCampaign(
           },
         })),
       );
+      // Renew lease after the long contact import so another runner cannot reclaim
+      // before we persist the Brevo draft id.
+      if (!(await checkpoint())) {
+        return { ok: false, error: 'Campaign send claim was lost after contact import' };
+      }
 
       let brevoCampaignId = previous?.brevoCampaignId;
       if (!brevoCampaignId) {

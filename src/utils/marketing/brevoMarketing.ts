@@ -86,6 +86,30 @@ export function isMarketingDryRun(): boolean {
   return process.env.EMAIL_DEV_NO_SEND === 'true' || process.env.MARKETING_CAMPAIGN_DRY_RUN === 'true';
 }
 
+async function setBrevoContactBlacklist(
+  email: string,
+  emailBlacklisted: boolean,
+  operationLabel: 'suppression' | 'reactivation',
+): Promise<boolean> {
+  if (!isBrevoMarketingConfigured() || isMarketingDryRun()) return false;
+
+  const contact = new UpdateContact();
+  contact.emailBlacklisted = emailBlacklisted;
+  try {
+    await createContactsApi().updateContact(email.trim().toLowerCase(), contact);
+    return true;
+  } catch (error) {
+    const details = sanitizedBrevoError(error);
+    // No Brevo contact means there is nothing provider-side left to change.
+    if (Number(details.status) === 404) return true;
+    console.error(`[Brevo] contact ${operationLabel} failed`, {
+      email: maskEmail(email),
+      ...details,
+    });
+    throw new Error(`Brevo contact ${operationLabel} failed`);
+  }
+}
+
 /**
  * Globally suppress a contact in Brevo so an opt-out applies to any Brevo
  * campaign/list, not only future Fixtract audience resolutions.
@@ -93,20 +117,7 @@ export function isMarketingDryRun(): boolean {
  * after Brevo is configured.
  */
 export async function suppressBrevoMarketingContact(email: string): Promise<boolean> {
-  if (!isBrevoMarketingConfigured() || isMarketingDryRun()) return false;
-
-  const contact = new UpdateContact();
-  contact.emailBlacklisted = true;
-  try {
-    await createContactsApi().updateContact(email.trim().toLowerCase(), contact);
-    return true;
-  } catch (error) {
-    const details = sanitizedBrevoError(error);
-    // No Brevo contact means there is nothing provider-side left to suppress.
-    if (Number(details.status) === 404) return true;
-    console.error('[Brevo] contact suppression failed', { email: maskEmail(email), ...details });
-    throw new Error('Brevo contact suppression failed');
-  }
+  return setBrevoContactBlacklist(email, true, 'suppression');
 }
 
 /**
@@ -115,19 +126,7 @@ export async function suppressBrevoMarketingContact(email: string): Promise<bool
  * import will create it without a blacklist.
  */
 export async function restoreBrevoMarketingContact(email: string): Promise<boolean> {
-  if (!isBrevoMarketingConfigured() || isMarketingDryRun()) return false;
-
-  const contact = new UpdateContact();
-  contact.emailBlacklisted = false;
-  try {
-    await createContactsApi().updateContact(email.trim().toLowerCase(), contact);
-    return true;
-  } catch (error) {
-    const details = sanitizedBrevoError(error);
-    if (Number(details.status) === 404) return true;
-    console.error('[Brevo] contact reactivation failed', { email: maskEmail(email), ...details });
-    throw new Error('Brevo contact reactivation failed');
-  }
+  return setBrevoContactBlacklist(email, false, 'reactivation');
 }
 
 export async function listActiveBrevoTemplates(): Promise<

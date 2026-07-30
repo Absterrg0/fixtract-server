@@ -43,6 +43,15 @@ async function acquireSuperAdminGuard(): Promise<string | null> {
   }
 }
 
+/** Keep the demotion lease alive across count + save so another request cannot reclaim mid-flight. */
+async function renewSuperAdminGuard(claimId: string): Promise<boolean> {
+  const result = await CronJobLock.updateOne(
+    { key: SUPER_ADMIN_GUARD_KEY, claimId },
+    { $set: { claimedAt: new Date() } },
+  );
+  return result.matchedCount === 1;
+}
+
 /**
  * User.phone is required + unique. When invite omits a real phone we store a
  * synthetic placeholder so the row can be created — never mark it verified.
@@ -409,6 +418,12 @@ export const updateStaff = async (req: Request, res: Response) => {
           msg: 'Another super-admin update is in progress; retry shortly',
         });
       }
+      if (!(await renewSuperAdminGuard(superAdminGuard))) {
+        return res.status(409).json({
+          success: false,
+          msg: 'Another super-admin update is in progress; retry shortly',
+        });
+      }
       const activeSuperCount = await User.countDocuments({
         role: 'admin',
         deletedAt: null,
@@ -431,6 +446,12 @@ export const updateStaff = async (req: Request, res: Response) => {
         return res.status(400).json({
           success: false,
           msg: 'At least one active super admin must remain',
+        });
+      }
+      if (!(await renewSuperAdminGuard(superAdminGuard))) {
+        return res.status(409).json({
+          success: false,
+          msg: 'Another super-admin update is in progress; retry shortly',
         });
       }
     }

@@ -176,9 +176,7 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
       } else if (emailClaim?.state === 'in_progress') {
         emailOutcome = 'in_progress';
       } else {
-        if (notificationId) {
-          await Notification.findByIdAndUpdate(notificationId, { emailAttempted: true });
-        }
+        // claimDelivery already sets emailAttempted when the lease is acquired.
         emailSent = await built.sendEmail({
           email: user.email,
           name: user.name || 'User',
@@ -205,9 +203,10 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
     try {
       pushClaim = notificationId ? await claimDelivery(notificationId, 'push') : null;
       if (pushClaim?.state === 'sent' || pushClaim?.state === 'in_progress') {
+        if (pushClaim.state === 'sent') pushSent = true;
         return { notificationId, emailSent, pushSent, emailOutcome };
       }
-      if (notificationId) await Notification.findByIdAndUpdate(notificationId, { pushAttempted: true });
+      // claimDelivery already sets pushAttempted when the lease is acquired.
       await sendPushToUser(
         user._id.toString(),
         {

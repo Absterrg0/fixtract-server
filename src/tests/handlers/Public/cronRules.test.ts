@@ -12,10 +12,25 @@ describe('shouldRunScheduledKpiMonthly', () => {
 });
 
 describe('buildMarketingClaimableSendQuery', () => {
-  it('includes bounded retries for due scheduled and auto-send re-engagement failures', () => {
+  it('includes due scheduled, stale sending reclaim, and bounded failed retries', () => {
     const now = new Date('2026-08-02T08:00:00.000Z');
-    const query = buildMarketingClaimableSendQuery(30 * 60 * 1000, 3, now);
-    const failed = (query.$or as Array<Record<string, unknown>>)[2];
+    const leaseMs = 30 * 60 * 1000;
+    const query = buildMarketingClaimableSendQuery(leaseMs, 3, now);
+    const [scheduled, sending, failed] = query.$or as Array<Record<string, unknown>>;
+
+    expect(scheduled).toEqual({
+      status: 'scheduled',
+      scheduledAt: { $lte: now },
+    });
+
+    expect(sending).toEqual({
+      status: 'sending',
+      $or: [
+        { sendStartedAt: { $lte: new Date(now.getTime() - leaseMs) } },
+        { sendStartedAt: null },
+        { sendStartedAt: { $exists: false } },
+      ],
+    });
 
     expect(failed.status).toBe('failed');
     expect(failed.$and).toEqual([

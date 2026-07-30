@@ -61,7 +61,7 @@ const seedAdmin = async () => {
 
     console.log('🎉 Admin user created successfully!');
     console.log('');
-    console.log(`📋 Admin email: ${initialEmail}`);
+    console.log('📋 Admin email: [redacted]');
     console.log('');
     console.log('🚀 Admin can now access:');
     console.log('   • Professional approvals');

@@ -67,31 +67,45 @@ async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
 
   const now = new Date();
   let already = false;
-  try {
-    const previous = await MarketingSubscriber.findOneAndUpdate(
-      { email: normalized },
-      {
-        $set: { unsubscribedAt: now },
-        $unset: { consentVerifiedAt: 1 },
-        $setOnInsert: {
-          interestedServices: [],
-          locale: 'en',
-          unsubscribeToken: generateUnsubscribeToken(),
-          source: 'manual',
-          subscribedAt: now,
-        },
-      },
-      { upsert: true, new: false },
-    );
-    already = Boolean(previous?.unsubscribedAt);
-  } catch (error: unknown) {
-    if (!isDuplicateKeyError(error)) throw error;
-    // A simultaneous upsert won the unique-email race. Its final state is also unsubscribed.
+  const existing = await MarketingSubscriber.findOne({ email: normalized })
+    .select('+unsubscribeToken unsubscribedAt')
+    .lean();
+  if (existing) {
+    already = Boolean(existing.unsubscribedAt);
     await MarketingSubscriber.updateOne(
-      { email: normalized },
-      { $set: { unsubscribedAt: now }, $unset: { consentVerifiedAt: 1 } },
+      { _id: existing._id },
+      {
+        ...(already ? {} : { $set: { unsubscribedAt: now } }),
+        $unset: { consentVerifiedAt: 1 },
+      },
     );
-    already = true;
+  } else {
+    try {
+      await MarketingSubscriber.create({
+        email: normalized,
+        unsubscribedAt: now,
+        interestedServices: [],
+        locale: 'en',
+        unsubscribeToken: generateUnsubscribeToken(),
+        source: 'manual',
+        subscribedAt: now,
+      });
+    } catch (error: unknown) {
+      if (!isDuplicateKeyError(error)) throw error;
+      // A simultaneous create won the unique-email race — preserve its opt-out stamp.
+      const raced = await MarketingSubscriber.findOneAndUpdate(
+        { email: normalized, unsubscribedAt: null },
+        { $set: { unsubscribedAt: now }, $unset: { consentVerifiedAt: 1 } },
+        { new: false },
+      );
+      already = true;
+      if (!raced) {
+        await MarketingSubscriber.updateOne(
+          { email: normalized },
+          { $unset: { consentVerifiedAt: 1 } },
+        );
+      }
+    }
   }
 
   return { already };

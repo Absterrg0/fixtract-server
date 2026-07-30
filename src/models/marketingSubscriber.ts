@@ -98,6 +98,14 @@ const marketingSubscriberSchema = new Schema<IMarketingSubscriber>(
 
 marketingSubscriberSchema.index({ unsubscribedAt: 1, region: 1, locale: 1 });
 marketingSubscriberSchema.index({ consentVerifiedAt: 1, unsubscribedAt: 1 });
+// Reconciliation: pending Brevo suppress/restore sweeps.
+marketingSubscriberSchema.index({ unsubscribedAt: 1, brevoUnsubscribedAt: 1, updatedAt: 1 });
+marketingSubscriberSchema.index({
+  unsubscribedAt: 1,
+  consentVerifiedAt: 1,
+  brevoUnsubscribedAt: 1,
+  updatedAt: 1,
+});
 marketingSubscriberSchema.index({ unsubscribedAt: 1, role: 1, subscribedAt: 1 });
 marketingSubscriberSchema.index({ unsubscribedAt: 1, lastCampaignSentAt: 1, subscribedAt: 1 });
 marketingSubscriberSchema.index({ unsubscribedAt: 1, lastEngagedAt: 1, subscribedAt: 1 });

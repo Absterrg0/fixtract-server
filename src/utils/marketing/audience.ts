@@ -185,14 +185,14 @@ export async function syncSubscribersFromUsers(): Promise<{
             },
           },
         });
-        if (existingByUser && String(existingByUser._id) !== String(existing._id)) {
-          operations.push({
-            updateOne: {
-              filter: { _id: existingByUser._id },
-              update: { $set: { unsubscribedAt: new Date() }, $unset: { consentVerifiedAt: 1 } },
-            },
-          });
-        }
+        // Demote every other subscriber row owned by this user (not only the
+        // email-collision match), so stale addresses cannot stay opted-in.
+        operations.push({
+          updateMany: {
+            filter: { userId: user._id, _id: { $ne: existing._id } },
+            update: { $set: { unsubscribedAt: new Date() }, $unset: { consentVerifiedAt: 1 } },
+          },
+        });
       } else {
         operations.push({
           updateOne: {
@@ -229,12 +229,23 @@ export async function syncPendingBrevoUnsubscribes(limit = 100, email?: string):
   synced: number;
   pending: number;
 }> {
+  const startOfUtcDay = new Date();
+  startOfUtcDay.setUTCHours(0, 0, 0, 0);
   const subscribers = await MarketingSubscriber.find({
     unsubscribedAt: { $ne: null },
     brevoUnsubscribedAt: null,
-    ...(email ? { email: email.toLowerCase().trim() } : {}),
+    ...(email
+      ? { email: email.toLowerCase().trim() }
+      : {
+          $or: [
+            { brevoUnsubscribeError: { $exists: false } },
+            { brevoUnsubscribeError: null },
+            { updatedAt: { $lt: startOfUtcDay } },
+          ],
+        }),
   })
     .select('email')
+    .sort({ updatedAt: 1 })
     .limit(limit)
     .lean();
   let synced = 0;
@@ -243,11 +254,11 @@ export async function syncPendingBrevoUnsubscribes(limit = 100, email?: string):
     try {
       const suppressed = await suppressBrevoMarketingContact(subscriber.email);
       if (!suppressed) continue;
-      await MarketingSubscriber.updateOne(
+      const updated = await MarketingSubscriber.updateOne(
         { _id: subscriber._id, unsubscribedAt: { $ne: null } },
         { $set: { brevoUnsubscribedAt: new Date() }, $unset: { brevoUnsubscribeError: 1 } },
       );
-      synced += 1;
+      if (updated.matchedCount > 0) synced += 1;
     } catch (error) {
       await MarketingSubscriber.updateOne(
         { _id: subscriber._id, unsubscribedAt: { $ne: null } },
@@ -269,13 +280,24 @@ export async function syncPendingBrevoResubscribes(limit = 100, email?: string):
   synced: number;
   pending: number;
 }> {
+  const startOfUtcDay = new Date();
+  startOfUtcDay.setUTCHours(0, 0, 0, 0);
   const subscribers = await MarketingSubscriber.find({
     unsubscribedAt: null,
     consentVerifiedAt: { $type: 'date' },
     brevoUnsubscribedAt: { $ne: null },
-    ...(email ? { email: email.toLowerCase().trim() } : {}),
+    ...(email
+      ? { email: email.toLowerCase().trim() }
+      : {
+          $or: [
+            { brevoResubscribeError: { $exists: false } },
+            { brevoResubscribeError: null },
+            { updatedAt: { $lt: startOfUtcDay } },
+          ],
+        }),
   })
     .select('email')
+    .sort({ updatedAt: 1 })
     .limit(limit)
     .lean();
   let synced = 0;
@@ -284,7 +306,7 @@ export async function syncPendingBrevoResubscribes(limit = 100, email?: string):
     try {
       const restored = await restoreBrevoMarketingContact(subscriber.email);
       if (!restored) continue;
-      await MarketingSubscriber.updateOne(
+      const updated = await MarketingSubscriber.updateOne(
         {
           _id: subscriber._id,
           unsubscribedAt: null,
@@ -295,7 +317,7 @@ export async function syncPendingBrevoResubscribes(limit = 100, email?: string):
           $unset: { brevoResubscribeError: 1, brevoUnsubscribeError: 1 },
         },
       );
-      synced += 1;
+      if (updated.matchedCount > 0) synced += 1;
     } catch (error) {
       await MarketingSubscriber.updateOne(
         {

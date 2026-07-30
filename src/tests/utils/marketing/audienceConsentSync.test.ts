@@ -42,6 +42,7 @@ import {
 function mockSubscriberFind(rows: Array<{ _id: string; email: string }>) {
   subscriberFind.mockReturnValue({
     select: vi.fn().mockReturnThis(),
+    sort: vi.fn().mockReturnThis(),
     limit: vi.fn().mockReturnThis(),
     lean: vi.fn().mockResolvedValue(rows),
   });
@@ -102,5 +103,17 @@ describe('marketing consent provider reconciliation', () => {
         $and: expect.arrayContaining([{ brevoUnsubscribedAt: null }]),
       }),
     );
+  });
+
+  it('does not count a race where the subscriber no longer matches the restore filter', async () => {
+    mockSubscriberFind([{ _id: 'subscriber-1', email: 'person@example.com' }]);
+    restoreBrevoMarketingContact.mockResolvedValue(true);
+    subscriberUpdateOne.mockResolvedValue({ matchedCount: 0 });
+
+    await expect(syncPendingBrevoResubscribes(1, 'person@example.com')).resolves.toEqual({
+      synced: 0,
+      pending: 1,
+    });
+    expect(subscriberUpdateOne).toHaveBeenCalled();
   });
 });
