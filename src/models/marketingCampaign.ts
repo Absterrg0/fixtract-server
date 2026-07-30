@@ -69,6 +69,10 @@ export interface IMarketingCampaign extends Document {
   sendClaimId?: string;
   /** Lease timestamp used to recover abandoned sending campaigns. */
   sendStartedAt?: Date | null;
+  /** Number of delivery claims since the campaign was last edited. */
+  sendAttempts: number;
+  /** Earliest time the daily scheduler may retry a failed delivery. */
+  nextRetryAt?: Date | null;
   lastError?: string;
   utmCampaign?: string;
   createdAt: Date;
@@ -160,6 +164,8 @@ const marketingCampaignSchema = new Schema<IMarketingCampaign>(
     deliveries: { type: [deliverySchema], default: [] },
     sendClaimId: { type: String, index: true },
     sendStartedAt: { type: Date, default: null },
+    sendAttempts: { type: Number, default: 0, min: 0 },
+    nextRetryAt: { type: Date, default: null, index: true },
     lastError: { type: String },
     utmCampaign: { type: String, trim: true },
   },

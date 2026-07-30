@@ -3,9 +3,14 @@ import User from '../../models/user';
 import CronJobLock from '../../models/cronJobLock';
 import { runNotificationReminders } from '../../utils/notifications/runNotificationReminders';
 import { hasPermission, resolveAdminRole } from '../../utils/adminRbac/rolePermissions';
-import { syncPendingBrevoUnsubscribes, syncSubscribersFromUsers } from '../../utils/marketing/audience';
+import {
+  syncPendingBrevoResubscribes,
+  syncPendingBrevoUnsubscribes,
+  syncSubscribersFromUsers,
+} from '../../utils/marketing/audience';
 import {
   MARKETING_SEND_LEASE_MS,
+  MARKETING_MAX_SEND_ATTEMPTS,
   runReengagementSweep,
   sendMarketingCampaign,
 } from '../../utils/marketing/sendCampaign';
@@ -14,7 +19,10 @@ import { randomUUID } from 'node:crypto';
 import { generateKpiPdf } from '../../utils/kpiReport';
 import { sendKpiReportEmail } from '../../utils/emailService';
 import { uploadBufferToS3 } from '../../utils/s3Upload';
-import { shouldRunScheduledKpiMonthly } from '../../utils/cronSchedule';
+import {
+  buildMarketingClaimableSendQuery,
+  shouldRunScheduledKpiMonthly,
+} from '../../utils/cronSchedule';
 
 function isAuthorizedCron(req: Request): boolean {
   const secret = process.env.CRON_SECRET;
@@ -384,6 +392,7 @@ export const runKpiMonthlyReportCron = async (req: Request, res: Response) => {
 type MarketingCampaignsDailyResult = {
   sync: Awaited<ReturnType<typeof syncSubscribersFromUsers>> & {
     brevoUnsubscribes: Awaited<ReturnType<typeof syncPendingBrevoUnsubscribes>>;
+    brevoResubscribes: Awaited<ReturnType<typeof syncPendingBrevoResubscribes>>;
   };
   scheduledResults: Array<{ id: string; ok: boolean; error?: string }>;
   reengagement: Awaited<ReturnType<typeof runReengagementSweep>>;
@@ -395,23 +404,12 @@ async function executeMarketingCampaignsDaily(): Promise<MarketingCampaignsDaily
   const startedAt = Date.now();
   const sync = await syncSubscribersFromUsers();
   const brevoUnsubscribes = await syncPendingBrevoUnsubscribes();
-  const staleSendBefore = new Date(Date.now() - MARKETING_SEND_LEASE_MS);
-  const claimableSend = {
-    $or: [
-      {
-        status: 'scheduled',
-        scheduledAt: { $lte: new Date() },
-      },
-      {
-        status: 'sending',
-        $or: [
-          { sendStartedAt: { $lte: staleSendBefore } },
-          { sendStartedAt: null },
-          { sendStartedAt: { $exists: false } },
-        ],
-      },
-    ],
-  };
+  const brevoResubscribes = await syncPendingBrevoResubscribes();
+  const claimableSend = buildMarketingClaimableSendQuery(
+    MARKETING_SEND_LEASE_MS,
+    MARKETING_MAX_SEND_ATTEMPTS,
+    new Date(),
+  );
 
   const due = await MarketingCampaign.find(claimableSend)
     .select('_id')
@@ -433,6 +431,7 @@ async function executeMarketingCampaignsDaily(): Promise<MarketingCampaignsDaily
           sendClaimId: claimId,
           sendStartedAt: new Date(),
         },
+        $inc: { sendAttempts: 1 },
         $unset: { lastError: 1 },
       },
       { new: true },
@@ -467,7 +466,12 @@ async function executeMarketingCampaignsDaily(): Promise<MarketingCampaignsDaily
     reengagement,
   });
 
-  return { sync: { ...sync, brevoUnsubscribes }, scheduledResults, reengagement, durationMs };
+  return {
+    sync: { ...sync, brevoUnsubscribes, brevoResubscribes },
+    scheduledResults,
+    reengagement,
+    durationMs,
+  };
 }
 
 /**

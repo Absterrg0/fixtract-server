@@ -240,7 +240,7 @@ export const createMarketingCampaign = async (req: Request, res: Response) => {
       autoSend: type === 'reengagement' ? Boolean(autoSend) : false,
       scheduledAt: scheduled,
       utmCampaign: typeof utmCampaign === 'string' ? utmCampaign.trim() : undefined,
-      createdBy: (req as any).user?._id,
+      createdBy: (req as any).admin?._id ?? (req as any).user?._id,
       deliveries: [],
     });
 
@@ -271,6 +271,7 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
         msg: 'Partially delivered campaigns are immutable; create a new campaign instead',
       });
     }
+    const wasFailed = campaign.status === 'failed';
 
     const { name, scheduledAt, inactiveDays, autoSend, utmCampaign } = req.body || {};
     if (typeof name === 'string' && name.trim().length >= 2) campaign.name = name.trim();
@@ -315,6 +316,16 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
       if (autoSend !== undefined) campaign.autoSend = Boolean(autoSend);
     }
     if (typeof utmCampaign === 'string') campaign.utmCampaign = utmCampaign.trim();
+    if (wasFailed) {
+      campaign.sendAttempts = 0;
+      campaign.nextRetryAt = null;
+      if (campaign.status === 'failed') {
+        campaign.status =
+          campaign.scheduledAt && campaign.scheduledAt.getTime() > Date.now()
+            ? 'scheduled'
+            : 'draft';
+      }
+    }
 
     validateLocaleContent(campaign.content as any, campaign.audience as any);
     await campaign.save();

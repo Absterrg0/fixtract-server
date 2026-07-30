@@ -16,6 +16,7 @@ export interface IMarketingSubscriber extends Document {
   unsubscribedAt?: Date | null;
   brevoUnsubscribedAt?: Date | null;
   brevoUnsubscribeError?: string;
+  brevoResubscribeError?: string;
   unsubscribeToken: string;
   source: 'user_sync' | 'manual' | 'signup';
   lastEngagedAt?: Date | null;
@@ -71,6 +72,7 @@ const marketingSubscriberSchema = new Schema<IMarketingSubscriber>(
     unsubscribedAt: { type: Date, default: null },
     brevoUnsubscribedAt: { type: Date, default: null },
     brevoUnsubscribeError: { type: String },
+    brevoResubscribeError: { type: String },
     unsubscribeToken: {
       type: String,
       required: true,

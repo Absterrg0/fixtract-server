@@ -7,7 +7,10 @@ import MarketingSubscriber, {
 } from '../../models/marketingSubscriber';
 import type { ICampaignAudience } from '../../models/marketingCampaign';
 import { generateUnsubscribeToken } from './unsubscribeToken';
-import { suppressBrevoMarketingContact } from './brevoMarketing';
+import {
+  restoreBrevoMarketingContact,
+  suppressBrevoMarketingContact,
+} from './brevoMarketing';
 
 export type AudienceMember = {
   email: string;
@@ -261,6 +264,58 @@ export async function syncPendingBrevoUnsubscribes(limit = 100, email?: string):
   return { synced, pending: subscribers.length - synced };
 }
 
+/** Retry provider reactivation for users who explicitly restored consent. */
+export async function syncPendingBrevoResubscribes(limit = 100, email?: string): Promise<{
+  synced: number;
+  pending: number;
+}> {
+  const subscribers = await MarketingSubscriber.find({
+    unsubscribedAt: null,
+    consentVerifiedAt: { $type: 'date' },
+    brevoUnsubscribedAt: { $ne: null },
+    ...(email ? { email: email.toLowerCase().trim() } : {}),
+  })
+    .select('email')
+    .limit(limit)
+    .lean();
+  let synced = 0;
+
+  for (const subscriber of subscribers) {
+    try {
+      const restored = await restoreBrevoMarketingContact(subscriber.email);
+      if (!restored) continue;
+      await MarketingSubscriber.updateOne(
+        {
+          _id: subscriber._id,
+          unsubscribedAt: null,
+          consentVerifiedAt: { $type: 'date' },
+        },
+        {
+          $set: { brevoUnsubscribedAt: null },
+          $unset: { brevoResubscribeError: 1, brevoUnsubscribeError: 1 },
+        },
+      );
+      synced += 1;
+    } catch (error) {
+      await MarketingSubscriber.updateOne(
+        {
+          _id: subscriber._id,
+          unsubscribedAt: null,
+          consentVerifiedAt: { $type: 'date' },
+        },
+        {
+          $set: {
+            brevoResubscribeError:
+              error instanceof Error ? error.message : 'Brevo reactivation failed',
+          },
+        },
+      );
+    }
+  }
+
+  return { synced, pending: subscribers.length - synced };
+}
+
 function audienceQuery(
   audience: ICampaignAudience,
   opts?: { inactiveDays?: number },
@@ -268,6 +323,9 @@ function audienceQuery(
   const clauses: Record<string, unknown>[] = [
     { unsubscribedAt: null },
     { consentVerifiedAt: { $type: 'date' } },
+    // A contact that is still globally blacklisted at Brevo is not deliverable,
+    // even if local consent has just been restored. The retry sync clears this.
+    { brevoUnsubscribedAt: null },
   ];
   const countries = (audience.countries || []).map((c) => c.trim().toUpperCase()).filter(Boolean);
   if (countries.length > 0) clauses.push({ region: { $in: countries } });

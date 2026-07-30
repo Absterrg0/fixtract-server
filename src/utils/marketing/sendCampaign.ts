@@ -60,17 +60,26 @@ function resolveReengagementInactiveDays(campaign: IMarketingCampaign): number |
 }
 
 export const MARKETING_SEND_LEASE_MS = 30 * 60 * 1000;
+export const MARKETING_MAX_SEND_ATTEMPTS = 3;
+const MARKETING_RETRY_BASE_MS = 15 * 60 * 1000;
+
+function nextCampaignRetryAt(attempt: number): Date {
+  const exponent = Math.max(0, Math.min(attempt - 1, 5));
+  return new Date(Date.now() + MARKETING_RETRY_BASE_MS * 2 ** exponent);
+}
 
 async function failOwnedCampaign(
   campaignId: string,
   claimId: string,
   error: string,
   deliveries?: IMarketingCampaign['deliveries'],
+  attempt = 1,
 ): Promise<{ ok: false; error: string }> {
   const set: Record<string, unknown> = {
     status: 'failed',
     lastError: error,
     sendStartedAt: null,
+    nextRetryAt: nextCampaignRetryAt(attempt),
   };
   if (deliveries) set.deliveries = deliveries;
 
@@ -132,6 +141,7 @@ export async function sendMarketingCampaign(
           sendClaimId: claimId,
           sendStartedAt: new Date(),
         },
+        $inc: { sendAttempts: 1 },
         $unset: { lastError: 1 },
       },
       { new: true },
@@ -148,6 +158,7 @@ export async function sendMarketingCampaign(
     }
     campaign = claimed;
   }
+  const sendAttempt = Math.max(1, campaign.sendAttempts || 1);
 
   const locales = localesToSend(campaign);
   if (locales.length === 0) {
@@ -155,11 +166,19 @@ export async function sendMarketingCampaign(
       campaignId,
       claimId,
       'Add at least one locale with subject and HTML (or Brevo template id)',
+      undefined,
+      sendAttempt,
     );
   }
 
   if (!isBrevoMarketingConfigured() && !isMarketingDryRun()) {
-    return failOwnedCampaign(campaignId, claimId, 'BREVO_API_KEY is not configured');
+    return failOwnedCampaign(
+      campaignId,
+      claimId,
+      'BREVO_API_KEY is not configured',
+      undefined,
+      sendAttempt,
+    );
   }
 
   let members;
@@ -170,7 +189,7 @@ export async function sendMarketingCampaign(
     });
   } catch (err: any) {
     const error = err?.message || String(err) || 'Failed to resolve campaign audience';
-    return failOwnedCampaign(campaignId, claimId, error);
+    return failOwnedCampaign(campaignId, claimId, error, undefined, sendAttempt);
   }
 
   if (members.length === 0) {
@@ -178,6 +197,8 @@ export async function sendMarketingCampaign(
       campaignId,
       claimId,
       'Audience is empty — sync subscribers and check filters',
+      undefined,
+      sendAttempt,
     );
   }
 
@@ -347,7 +368,7 @@ export async function sendMarketingCampaign(
           sentAt: new Date(),
           sendStartedAt: null,
         },
-        $unset: { sendClaimId: 1, lastError: 1 },
+        $unset: { sendClaimId: 1, lastError: 1, nextRetryAt: 1 },
       },
       { new: true },
     );
@@ -357,7 +378,7 @@ export async function sendMarketingCampaign(
     return { ok: true, campaign: completed };
   } catch (err: any) {
     const error = err?.message || String(err) || 'Send failed';
-    return failOwnedCampaign(campaignId, claimId, error, deliveries);
+    return failOwnedCampaign(campaignId, claimId, error, deliveries, sendAttempt);
   }
 }
 

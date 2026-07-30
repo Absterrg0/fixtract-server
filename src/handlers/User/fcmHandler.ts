@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { Request, Response } from 'express';
 import User from '../../models/user';
 import MarketingSubscriber from '../../models/marketingSubscriber';
+import { syncPendingBrevoResubscribes } from '../../utils/marketing/audience';
 import {
   getOriginFromRequest,
   isAllowedOrigin,
@@ -257,6 +258,10 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
           },
           { upsert: true },
         );
+        // Local consent is authoritative immediately, while a previously
+        // blacklisted Brevo contact remains outside campaign audiences until
+        // this provider reconciliation succeeds (or the daily retry does).
+        await syncPendingBrevoResubscribes(1, normalizedEmail);
       } else {
         await MarketingSubscriber.updateMany(
           { $or: [{ userId: updatedUser._id }, { email: normalizedEmail }] },

@@ -109,6 +109,27 @@ export async function suppressBrevoMarketingContact(email: string): Promise<bool
   }
 }
 
+/**
+ * Reverse a previous global marketing suppression after the user explicitly
+ * opts back in. A missing provider contact is already safe: the next audience
+ * import will create it without a blacklist.
+ */
+export async function restoreBrevoMarketingContact(email: string): Promise<boolean> {
+  if (!isBrevoMarketingConfigured() || isMarketingDryRun()) return false;
+
+  const contact = new UpdateContact();
+  contact.emailBlacklisted = false;
+  try {
+    await createContactsApi().updateContact(email.trim().toLowerCase(), contact);
+    return true;
+  } catch (error) {
+    const details = sanitizedBrevoError(error);
+    if (Number(details.status) === 404) return true;
+    console.error('[Brevo] contact reactivation failed', { email: maskEmail(email), ...details });
+    throw new Error('Brevo contact reactivation failed');
+  }
+}
+
 export async function listActiveBrevoTemplates(): Promise<
   Array<{ id: number; name: string; subject: string; tag: string; modifiedAt: string }>
 > {
