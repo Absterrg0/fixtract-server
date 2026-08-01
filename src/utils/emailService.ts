@@ -2468,6 +2468,7 @@ export const sendRefundEscalatedEmail = async (params: {
     adminSent = false;
   }
 
+  let customerSent = !customerEmail;
   if (customerEmail) {
     const customerContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
@@ -2480,13 +2481,16 @@ export const sendRefundEscalatedEmail = async (params: {
         </div>
       </div>
     `;
-    await sendEmail(customerEmail, 'Refund Escalated to Fixtract', customerContent, {
+    customerSent = await sendEmail(customerEmail, 'Refund Escalated to Fixtract', customerContent, {
       template: 'refund_escalated_customer',
       relatedBooking: bookingId,
     });
   }
 
-  return adminSent;
+  if (!adminSent) {
+    console.error('[refund_escalated] Admin escalation email was not delivered');
+  }
+  return customerSent;
 };
 
 // Refund denied → requester
@@ -2834,4 +2838,3 @@ export const sendKpiReportEmail = async (
     template: isError ? 'kpi_report_failed' : 'kpi_report_ready',
   });
 };
-

@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from "express";
+import PlatformSettings from '../../models/platformSettings';
 import { VerifyPhone } from "../../handlers/User/verify/phone";
 import { VerifyPhoneCheck } from "../../handlers/User/verify/phone";
 import emailVerificationRoutes from "./verify/email";
@@ -171,7 +172,6 @@ userRouter.route("/backlinks/:id").get(getBacklinkById)
 // Platform commission (read-only for professionals)
 userRouter.route("/commission-rate").get(async (req, res) => {
   try {
-    const PlatformSettings = (await import("../../models/platformSettings")).default;
     const config = await PlatformSettings.getCurrentConfig();
     return res.status(200).json({ success: true, data: { commissionPercent: config.commissionPercent } });
   } catch (error) {

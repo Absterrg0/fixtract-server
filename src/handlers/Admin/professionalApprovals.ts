@@ -67,41 +67,44 @@ const serializeProfessionalForAdmin = async (professional: any) => {
 
 export const requireAdmin = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    if (req.user && req.user.role === 'admin') {
-      req.admin = req.user as IUser;
-      return next();
-    }
-
     let token = req.cookies?.['auth-token'];
 
     if (!token && req.headers.authorization?.startsWith('Bearer ')) {
       token = req.headers.authorization.split(' ')[1];
     }
 
-    if (!token) {
+    const authenticatedUserId = (req.user as IUser | undefined)?._id;
+    if (!token && !authenticatedUserId) {
       return res.status(401).json({
         success: false,
         msg: "Authentication required"
       });
     }
 
-    let decoded: { id: string } | null = null;
-    try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
-    } catch (err) {
-      return res.status(401).json({
-        success: false,
-        msg: "Invalid authentication token"
-      });
+    let userId = authenticatedUserId?.toString();
+    if (!userId) {
+      try {
+        userId = (jwt.verify(token!, process.env.JWT_SECRET!) as { id: string }).id;
+      } catch (err) {
+        return res.status(401).json({
+          success: false,
+          msg: "Invalid authentication token"
+        });
+      }
     }
 
     await connecToDatabase();
-    const adminUser = await User.findById(decoded.id);
+    const adminUser = await User.findById(userId);
 
-    if (!adminUser || adminUser.role !== 'admin') {
+    if (
+      !adminUser ||
+      adminUser.role !== 'admin' ||
+      adminUser.deletedAt ||
+      ['suspended', 'rejected'].includes(adminUser.accountStatus || '')
+    ) {
       return res.status(403).json({
         success: false,
-        msg: "Admin access required"
+        msg: "Active admin access required"
       });
     }
 

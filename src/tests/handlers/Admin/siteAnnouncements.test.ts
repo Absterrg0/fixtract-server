@@ -7,6 +7,7 @@ const {
   find,
   findById,
   findByIdAndUpdate,
+  findOneAndUpdate,
   create,
 } = vi.hoisted(() => ({
   aggregate: vi.fn(),
@@ -14,6 +15,7 @@ const {
   find: vi.fn(),
   findById: vi.fn(),
   findByIdAndUpdate: vi.fn(),
+  findOneAndUpdate: vi.fn(),
   create: vi.fn(),
 }));
 
@@ -24,6 +26,7 @@ vi.mock('../../../models/siteAnnouncement', () => ({
     find,
     findById,
     findByIdAndUpdate,
+    findOneAndUpdate,
     create,
   },
 }));
@@ -141,7 +144,7 @@ describe('admin site announcement handlers', () => {
       dismissible: true,
       requireMarketingConsent: true,
     });
-    findByIdAndUpdate.mockResolvedValue({ _id: '507f1f77bcf86cd799439011', title: 'New title' });
+    findOneAndUpdate.mockResolvedValue({ _id: '507f1f77bcf86cd799439011', title: 'New title' });
 
     const res = mockRes();
     await updateSiteAnnouncement(
@@ -154,8 +157,8 @@ describe('admin site announcement handlers', () => {
     );
 
     expect(res.statusCode).toBe(200);
-    expect(findByIdAndUpdate).toHaveBeenCalledWith(
-      '507f1f77bcf86cd799439011',
+    expect(findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: '507f1f77bcf86cd799439011' },
       { title: 'New title' },
       { new: true, runValidators: true },
     );
@@ -180,7 +183,7 @@ describe('admin site announcement handlers', () => {
       dismissible: true,
       requireMarketingConsent: true,
     });
-    findByIdAndUpdate.mockResolvedValue({ _id: '507f1f77bcf86cd799439011' });
+    findOneAndUpdate.mockResolvedValue({ _id: '507f1f77bcf86cd799439011' });
 
     const res = mockRes();
     await updateSiteAnnouncement(
@@ -193,8 +196,8 @@ describe('admin site announcement handlers', () => {
     );
 
     expect(res.statusCode).toBe(200);
-    expect(findByIdAndUpdate).toHaveBeenCalledWith(
-      '507f1f77bcf86cd799439011',
+    expect(findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: '507f1f77bcf86cd799439011' },
       { $unset: { ctaLabel: 1, ctaUrl: 1, discountCode: 1 } },
       { new: true, runValidators: true },
     );

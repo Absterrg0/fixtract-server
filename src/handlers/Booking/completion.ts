@@ -22,7 +22,7 @@ import {
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
 import LoyaltyConfig from '../../models/loyaltyConfig';
-import { getCurrentTier } from '../../utils/loyaltySystem';
+import { getCurrentTier, updateUserLoyalty } from '../../utils/loyaltySystem';
 import Payment from '../../models/payment';
 import {
   awardBookingCompletionPoints,
@@ -32,7 +32,7 @@ import {
   markMilestonesCompleted,
 } from '../../utils/bookingHelpers';
 import { sendDisputeRaisedAdminEmail } from '../../utils/emailService';
-import { notifyAsync } from '../../utils/notifications/notify';
+import { notify } from '../../utils/notifications/notify';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
 
@@ -358,7 +358,7 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
         const emailExtraCostTotal = extraCostTotal > 0
           ? (await computeExtraCostCustomerCharge(customerUser, extraCostTotal)).customerChargeAmount
           : extraCostTotal;
-        notifyAsync({
+        await notify({
           userId: customerUser._id.toString(),
           eventKey: 'customer.completion_requested',
           entityType: 'booking',
@@ -698,7 +698,6 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
     }
 
     try {
-      const { updateUserLoyalty } = await import('../../utils/loyaltySystem');
       const bookingAmount = (finalizedBooking.payment?.amount || 0) + Math.max(0, extraCostTotal);
       await updateUserLoyalty(String(finalizedBooking.customer), bookingAmount);
     } catch (e) {
@@ -732,7 +731,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       ]);
       try {
         if (professionalUser?._id) {
-          notifyAsync({
+          await notify({
             userId: professionalUser._id.toString(),
             eventKey: 'professional.completion_confirmed_by_customer',
             entityType: 'booking',
@@ -749,7 +748,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
 
       // Ask both parties for reviews (independent of email delivery)
       if (customerUser?._id) {
-        notifyAsync({
+        await notify({
           userId: customerUser._id.toString(),
           eventKey: 'customer.review_request',
           entityType: 'booking',
@@ -758,7 +757,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
         });
       }
       if (proId) {
-        notifyAsync({
+        await notify({
           userId: proId,
           eventKey: 'professional.review_request',
           entityType: 'booking',
@@ -916,7 +915,7 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
 
     try {
       if (proId) {
-        notifyAsync({
+        await notify({
           userId: proId,
           eventKey: 'professional.dispute_started',
           entityType: 'booking',
@@ -925,7 +924,7 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
         });
       }
       if (customerUser?._id) {
-        notifyAsync({
+        await notify({
           userId: customerUser._id.toString(),
           eventKey: 'customer.dispute_started',
           entityType: 'booking',

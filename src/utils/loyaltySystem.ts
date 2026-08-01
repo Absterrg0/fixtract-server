@@ -1,5 +1,6 @@
 import User, { IUser } from "../models/user";
 import LoyaltyConfig, { ILoyaltyTier } from "../models/loyaltyConfig";
+import { notifyAsync } from './notifications/notify';
 
 type LoyaltyLevel = 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Diamond';
 const VALID_LOYALTY_LEVELS: Set<string> = new Set(['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond']);
@@ -168,7 +169,6 @@ export const updateUserLoyalty = async (
         const overrideLeveledUp = isLoyaltyUpgrade(oldLevel, overrideLevel);
         if (overrideLeveledUp) {
           try {
-            const { notifyAsync } = await import('./notifications/notify');
             notifyAsync({
               userId: String(result._id),
               eventKey: 'customer.loyalty_tier_up',
@@ -219,7 +219,6 @@ export const updateUserLoyalty = async (
       if (leveledUp) {
         console.log(`Loyalty: Level up! ${result.email} ${oldLevel} → ${newLevel}`);
         try {
-          const { notifyAsync } = await import('./notifications/notify');
           notifyAsync({
             userId: String(result._id),
             eventKey: 'customer.loyalty_tier_up',

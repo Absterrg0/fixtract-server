@@ -9,6 +9,9 @@ import CmsContent from '../../models/cmsContent';
 import { buildCsv } from '../../utils/csv';
 import { toSlug } from '../../utils/slug';
 import { STRIPE_CONFIG } from '../../services/stripe';
+import { generateKpiPdf } from '../../utils/kpiReport';
+import { sendKpiReportEmail } from '../../utils/emailService';
+import { uploadBufferToS3 } from '../../utils/s3Upload';
 
 const REPORTING_CURRENCY = STRIPE_CONFIG.defaultCurrency || 'EUR';
 
@@ -1253,9 +1256,6 @@ export const triggerKpiEmailReport = async (req: Request, res: Response) => {
 
     setImmediate(async () => {
       try {
-        const { generateKpiPdf } = await import('../../utils/kpiReport');
-        const { sendKpiReportEmail } = await import('../../utils/emailService');
-        const { uploadBufferToS3 } = await import('../../utils/s3Upload');
         const buffer = await generateKpiPdf(from, to);
         const key = `kpi-reports/${adminId}/${new Date().toISOString().replace(/[:.]/g, '-')}.pdf`;
         const reportUrl = await uploadBufferToS3(buffer, key, 'application/pdf');
@@ -1263,7 +1263,6 @@ export const triggerKpiEmailReport = async (req: Request, res: Response) => {
       } catch (e) {
         console.error('KPI background report failed', e);
         try {
-          const { sendKpiReportEmail } = await import('../../utils/emailService');
           await sendKpiReportEmail(adminEmail, { from, to, error: (e as Error)?.message || 'Unknown error' });
         } catch (innerErr) {
           console.error('Failed to send KPI failure email', innerErr);

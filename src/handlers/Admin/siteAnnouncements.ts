@@ -188,12 +188,22 @@ export const updateSiteAnnouncement = async (
           }
         : $set;
 
-    const updated = await SiteAnnouncement.findByIdAndUpdate(id, updateDoc, {
+    const scheduleGuard: Record<string, unknown> = { _id: id };
+    if (parsed.value.startsAt && !parsed.value.endsAt) {
+      scheduleGuard.endsAt = { $gt: parsed.value.startsAt };
+    } else if (parsed.value.endsAt && !parsed.value.startsAt) {
+      scheduleGuard.startsAt = { $lt: parsed.value.endsAt };
+    }
+
+    const updated = await SiteAnnouncement.findOneAndUpdate(scheduleGuard, updateDoc, {
       new: true,
       runValidators: true,
     });
     if (!updated) {
-      return res.status(404).json({ success: false, msg: 'Announcement not found' });
+      return res.status(409).json({
+        success: false,
+        msg: 'Announcement schedule changed; reload and try again',
+      });
     }
 
     return res.status(200).json({ success: true, data: { announcement: updated } });

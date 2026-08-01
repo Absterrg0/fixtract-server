@@ -26,7 +26,9 @@ This runs, in order:
 2. `seed:admin` — creates the first admin user and loyalty defaults (skips if admin exists)
 3. `seed:cms` — seeds published policy pages (requires an admin user)
 
-Change the default admin password after first login.
+Set `INITIAL_ADMIN_EMAIL`, `INITIAL_ADMIN_PASSWORD` (minimum 12 characters), and
+`INITIAL_ADMIN_PHONE` before running the bootstrap. The seed has no default
+credentials.
 
 ### Optional index fixes
 
@@ -83,6 +85,7 @@ Most scripts accept `MONGODB_URI` or `MONGO_URI`. A few scripts connect via `con
 | Variable | Used by |
 |----------|---------|
 | `MONGODB_URI` / `MONGO_URI` | All scripts |
+| `INITIAL_ADMIN_EMAIL` / `INITIAL_ADMIN_PASSWORD` / `INITIAL_ADMIN_PHONE` | `seed:admin`, `seed:prod` |
 | `GOOGLE_MAPS_API_KEY` | `maintenance:backfill-project-geo` |
 | `DRY_RUN` | `maintenance:backfill-project-geo` |
 | `GEOCODE_DELAY_MS` | `maintenance:backfill-project-geo` |

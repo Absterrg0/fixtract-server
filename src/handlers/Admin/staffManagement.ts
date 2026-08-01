@@ -14,6 +14,43 @@ import {
 } from '../../utils/adminRbac/inviteToken';
 import { ADMIN_ROLE_LABELS } from '../../utils/adminRbac/types';
 import { sendHandlerError } from '../../utils/handlerErrors';
+import CronJobLock from '../../models/cronJobLock';
+
+const SUPER_ADMIN_GUARD_KEY = 'admin_super_role_guard';
+const SUPER_ADMIN_GUARD_LEASE_MS = 30_000;
+
+async function acquireSuperAdminGuard(): Promise<string | null> {
+  const claimId = crypto.randomUUID();
+  try {
+    const lock = await CronJobLock.findOneAndUpdate(
+      {
+        key: SUPER_ADMIN_GUARD_KEY,
+        $or: [
+          { claimedAt: { $lte: new Date(Date.now() - SUPER_ADMIN_GUARD_LEASE_MS) } },
+          { claimedAt: { $exists: false } },
+        ],
+      },
+      {
+        $set: { claimedAt: new Date(), claimId },
+        $setOnInsert: { key: SUPER_ADMIN_GUARD_KEY },
+      },
+      { upsert: true, new: true },
+    );
+    return lock?.claimId === claimId ? claimId : null;
+  } catch (error: any) {
+    if (error?.code === 11000) return null;
+    throw error;
+  }
+}
+
+/** Keep the demotion lease alive across count + save so another request cannot reclaim mid-flight. */
+async function renewSuperAdminGuard(claimId: string): Promise<boolean> {
+  const result = await CronJobLock.updateOne(
+    { key: SUPER_ADMIN_GUARD_KEY, claimId },
+    { $set: { claimedAt: new Date() } },
+  );
+  return result.matchedCount === 1;
+}
 
 /**
  * User.phone is required + unique. When invite omits a real phone we store a
@@ -343,6 +380,7 @@ export const resendStaffInvite = async (req: Request, res: Response) => {
 };
 
 export const updateStaff = async (req: Request, res: Response) => {
+  let superAdminGuard: string | null = null;
   try {
     const admin = req.admin as IUser;
     const { staffId } = req.params;
@@ -361,6 +399,60 @@ export const updateStaff = async (req: Request, res: Response) => {
       }
       if (adminRole && adminRole !== 'super') {
         return res.status(400).json({ success: false, msg: 'You cannot remove your own super role' });
+      }
+    }
+
+    const targetIsActiveSuper =
+      resolveAdminRole(staff.adminRole) === 'super' &&
+      !['suspended', 'rejected'].includes(staff.accountStatus || '') &&
+      !staff.deletedAt &&
+      (!staff.adminStaff?.invitedAt || Boolean(staff.adminStaff.inviteAcceptedAt));
+    const removesSuperAccess =
+      (adminRole !== undefined && adminRole !== 'super') ||
+      (accountStatus !== undefined && accountStatus !== 'active');
+    if (targetIsActiveSuper && removesSuperAccess) {
+      superAdminGuard = await acquireSuperAdminGuard();
+      if (!superAdminGuard) {
+        return res.status(409).json({
+          success: false,
+          msg: 'Another super-admin update is in progress; retry shortly',
+        });
+      }
+      if (!(await renewSuperAdminGuard(superAdminGuard))) {
+        return res.status(409).json({
+          success: false,
+          msg: 'Another super-admin update is in progress; retry shortly',
+        });
+      }
+      const activeSuperCount = await User.countDocuments({
+        role: 'admin',
+        deletedAt: null,
+        accountStatus: { $nin: ['suspended', 'rejected'] },
+        $or: [
+          { adminRole: 'super' },
+          { adminRole: null },
+          { adminRole: { $exists: false } },
+        ],
+        $and: [
+          {
+            $or: [
+              { 'adminStaff.invitedAt': { $exists: false } },
+              { 'adminStaff.inviteAcceptedAt': { $type: 'date' } },
+            ],
+          },
+        ],
+      });
+      if (activeSuperCount <= 1) {
+        return res.status(400).json({
+          success: false,
+          msg: 'At least one active super admin must remain',
+        });
+      }
+      if (!(await renewSuperAdminGuard(superAdminGuard))) {
+        return res.status(409).json({
+          success: false,
+          msg: 'Another super-admin update is in progress; retry shortly',
+        });
       }
     }
 
@@ -389,6 +481,12 @@ export const updateStaff = async (req: Request, res: Response) => {
     return res.json({ success: true, data: serializeStaff(staff) });
   } catch (error) {
     return sendHandlerError(res, error, 'Failed to update staff');
+  } finally {
+    if (superAdminGuard) {
+      await CronJobLock.deleteOne({ key: SUPER_ADMIN_GUARD_KEY, claimId: superAdminGuard }).catch((error) => {
+        console.error('Failed to release super-admin update guard:', error);
+      });
+    }
   }
 };
 

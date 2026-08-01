@@ -44,6 +44,7 @@ export function buildPublicAnnouncementAggregationPipeline(
         requireMarketingConsent: 1,
         startsAt: 1,
         endsAt: 1,
+        updatedAt: 1,
       },
     },
   ];

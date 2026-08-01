@@ -14,7 +14,7 @@ import { sendCancellationRequestAdminEmail } from "../../utils/emailService";
 import { getProfessionalDisplayName } from "../../utils/displayName";
 import CancellationRequest, { ACTIVE_CANCELLATION_STATUSES, CANCELLATION_REASON_CATEGORIES, CANCELLATION_REASON_LABELS, CancellationReasonCategory } from "../../models/cancellationRequest";
 import { addBusinessDays, REFUND_RESPONSE_BUSINESS_DAYS } from "../../utils/businessDays";
-import { notifyAsync } from "../../utils/notifications/notify";
+import { notify } from "../../utils/notifications/notify";
 import { IUser } from "../../models/user";
 import { applyB2BInvoiceRule, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
 import ServiceConfiguration from "../../models/serviceConfiguration";
@@ -845,7 +845,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     // Notify the professional (non-blocking)
     const notifyProfessionalId = populated.professional?._id?.toString();
     if (notifyProfessionalId) {
-      notifyAsync({
+      await notify({
         userId: notifyProfessionalId,
         eventKey: 'professional.rfq_received',
         entityType: 'booking',
@@ -1593,7 +1593,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
 
       const otherPartyUserId = isCustomer ? professionalUser?._id : customerUser?._id;
       if (otherPartyUserId) {
-        notifyAsync({
+        await notify({
           userId: otherPartyUserId.toString(),
           eventKey: isCustomer
             ? 'professional.cancellation_request_received'
@@ -1610,7 +1610,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
 
       // Inbox + push for both parties in the negotiation flow
       if (isCustomer && professionalUser?._id) {
-        notifyAsync({
+        await notify({
           userId: professionalUser._id.toString(),
           eventKey: 'professional.refund_request',
           entityType: 'booking',
@@ -1618,7 +1618,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
           context: { bookingId: String(booking._id) },
         });
         if (customerUser?._id) {
-          notifyAsync({
+          await notify({
             userId: customerUser._id.toString(),
             eventKey: 'customer.refund_negotiation',
             entityType: 'booking',
@@ -1627,7 +1627,7 @@ export const cancelBooking = async (req: Request, res: Response, next: NextFunct
           });
         }
       } else if (!isCustomer && customerUser?._id) {
-        notifyAsync({
+        await notify({
           userId: customerUser._id.toString(),
           eventKey: 'customer.refund_negotiation',
           entityType: 'booking',

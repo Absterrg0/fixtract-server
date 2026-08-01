@@ -18,8 +18,10 @@ export function buildAdminListQuery(
     query.startsAt = { $lte: now };
     query.endsAt = { $gte: now };
   } else if (filters.status === 'scheduled') {
+    query.isActive = true;
     query.startsAt = { $gt: now };
   } else if (filters.status === 'expired') {
+    query.isActive = true;
     query.endsAt = { $lt: now };
   } else if (filters.status === 'disabled') {
     query.isActive = false;

@@ -3,9 +3,9 @@ import { permissionsForRole, hasPermission, resolveAdminRole } from '../../../ut
 import { permissionForAdminPath } from '../../../utils/adminRbac/routePermissions';
 
 describe('admin RBAC role packs', () => {
-  it('defaults missing role to super', () => {
+  it('defaults only legacy missing roles to super and rejects malformed roles', () => {
     expect(resolveAdminRole(undefined)).toBe('super');
-    expect(resolveAdminRole('nope')).toBe('super');
+    expect(resolveAdminRole('nope')).toBeNull();
   });
 
   it('gives care chat + disputes but not payments or staff', () => {

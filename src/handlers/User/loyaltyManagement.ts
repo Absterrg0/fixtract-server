@@ -7,6 +7,7 @@ import {
 } from "../../utils/loyaltySystem";
 import { getPointsBalance, getPointHistory } from "../../utils/pointsSystem";
 import { calculateProfessionalLevel } from "../../utils/professionalLevelSystem";
+import { applyPointsBoost } from '../../utils/professionalLevelSystem';
 import LoyaltyConfig from "../../models/loyaltyConfig";
 import mongoose from 'mongoose';
 
@@ -165,7 +166,6 @@ export const boostProfessionalLevel = async (req: Request, res: Response, next: 
       return res.status(403).json({ success: false, msg: "Only professionals can boost their level" });
     }
 
-    const { applyPointsBoost } = await import('../../utils/professionalLevelSystem');
     const result = await applyPointsBoost(userId, pointsToSpend);
 
     return res.status(200).json({

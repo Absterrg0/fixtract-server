@@ -90,6 +90,35 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
   }
 };
 
+/** Attach an active user when a valid token is present without making auth mandatory. */
+export const optionalProtect = async (
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+) => {
+  try {
+    const token =
+      req.cookies?.['auth-token'] ||
+      (req.headers.authorization?.startsWith('Bearer ')
+        ? req.headers.authorization.split(' ')[1]
+        : undefined);
+    if (!token) return next();
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string };
+    const user = await User.findById(decoded.id).select('-password');
+    if (
+      user &&
+      !user.deletedAt &&
+      !['suspended', 'rejected'].includes(user.accountStatus || '')
+    ) {
+      req.user = user;
+    }
+  } catch {
+    // Public endpoints remain public when an optional credential is stale.
+  }
+  return next();
+};
+
 /**
  * Role-based authorization middleware
  * @param allowedRoles - Array of roles that are allowed to access the route
@@ -192,4 +221,3 @@ export const authMiddleware = (allowedRoles: string[]) => {
     }
   };
 };
-

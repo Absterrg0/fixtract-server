@@ -145,7 +145,7 @@ export async function processUnreadChatMirrorReminders(): Promise<{
     .select(
       '_id type customerId professionalId supportAdminId supportTargetUserId customerUnreadCount professionalUnreadCount lastMessageSenderId unreadChatReminderLastSentAt lastMessageAt',
     )
-    .sort({ lastMessageAt: 1 })
+    .sort({ unreadChatReminderLastSentAt: 1, lastMessageAt: 1, _id: 1 })
     .limit(300);
 
   const now = new Date();

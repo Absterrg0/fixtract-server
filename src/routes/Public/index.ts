@@ -25,9 +25,15 @@ import {
 } from "../../handlers/Public/cms";
 import { getPublicSiteSettings } from "../../handlers/Public/siteSettings";
 import { listPublicSiteAnnouncements } from "../../handlers/Public/siteAnnouncements";
+import { unsubscribeMarketing } from "../../handlers/Public/marketingUnsubscribe";
 import { recordProfessionalView } from "../../handlers/Public/profileView";
 import { recordServiceView } from "../../handlers/Public/serviceView";
-import { runNotificationRemindersCron, runKpiMonthlyReportCron } from "../../handlers/Public/cron";
+import {
+  runNotificationRemindersCron,
+  runKpiMonthlyReportCron,
+  runMarketingCampaignsCron,
+} from "../../handlers/Public/cron";
+import { optionalProtect } from "../../middlewares/auth";
 
 // Public routes - accessible without authentication
 const publicRouter = Router();
@@ -84,12 +90,12 @@ publicRouter
 // Profile view tracking (public, rate-limited, dedup per visitor/day)
 publicRouter
   .route("/professionals/:id/view")
-  .post(schedulingRateLimiter, recordProfessionalView);
+  .post(schedulingRateLimiter, optionalProtect, recordProfessionalView);
 
 // Service-page view tracking (public, rate-limited, dedup per visitor/day)
 publicRouter
   .route("/services/:serviceId/view")
-  .post(schedulingRateLimiter, recordServiceView);
+  .post(schedulingRateLimiter, optionalProtect, recordServiceView);
 
 // Public favorite counts (social proof)
 publicRouter
@@ -112,10 +118,19 @@ publicRouter.route("/cms/policy-links").get(listPublicPolicyLinks);
 publicRouter.route("/cms/:type").get(listPublicCmsContent);
 publicRouter.route("/cms/:type/:slug").get(getPublicCmsContentBySlug);
 
+// Marketing unsubscribe (public) — GET preview/verify only; POST mutates
+publicRouter
+  .route("/marketing/unsubscribe")
+  .get(schedulingRateLimiter, unsubscribeMarketing)
+  .post(schedulingRateLimiter, unsubscribeMarketing);
+
 // Cron entrypoints (secured via CRON_SECRET bearer token)
 publicRouter.route("/cron/notification-reminders").get(runNotificationRemindersCron);
 publicRouter.route("/cron/notification-reminders").post(runNotificationRemindersCron);
 publicRouter.route("/cron/kpi-monthly-report").get(runKpiMonthlyReportCron);
 publicRouter.route("/cron/kpi-monthly-report").post(runKpiMonthlyReportCron);
+// Manual entrypoint — not a separate Vercel cron (Hobby limit = 1; piggybacked daily)
+publicRouter.route("/cron/marketing-campaigns").get(runMarketingCampaignsCron);
+publicRouter.route("/cron/marketing-campaigns").post(runMarketingCampaignsCron);
 
 export default publicRouter;

@@ -21,6 +21,7 @@ export const ADMIN_PERMISSIONS = [
   'audit.read',
   'email_logs.read',
   'cms.manage',
+  'campaigns.manage',
   'discounts.manage',
   'loyalty.manage',
   'referrals.manage',
