@@ -239,6 +239,7 @@ export const getPopularProjects = async (req: Request, res: Response) => {
       };
     });
 
+    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
     res.json({ projects: results });
   } catch (error) {
     console.error("Failed to fetch popular projects:", { error, query: req.query });

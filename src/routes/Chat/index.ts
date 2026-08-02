@@ -3,6 +3,7 @@ import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import {
   createOrGetConversation,
   listMyConversations,
+  getMyUnreadConversationCount,
   getConversationMessages,
   sendMessage,
   markConversationRead,
@@ -83,6 +84,7 @@ const chatSearchLimiter = rateLimit({
 router.use(protect);
 
 router.post("/conversations", createOrGetConversation);
+router.get("/conversations/unread-count", getMyUnreadConversationCount);
 router.get("/conversations", listMyConversations);
 router.get("/conversations/:conversationId/messages", getConversationMessages);
 router.get("/conversations/:conversationId/info", chatReadLimiter, getConversationInfo);

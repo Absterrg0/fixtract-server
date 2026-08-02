@@ -84,10 +84,12 @@ export const search = async (req: Request, res: Response) => {
     const minRatingValue = Number.isFinite(minRatingNum) && minRatingNum > 0 ? minRatingNum : 0;
     const sortByValue = typeof sortBy === "string" ? sortBy : undefined;
 
-    console.log("Search request:", { q, loc, type, priceMin, priceMax, category, availability, customerLat, customerLon, customerCountry, customerState, customerCity, customerAddress, page, limit, sortBy: sortByValue, professionalLevels: levelsList, adminTags: tagsList, minRating: minRatingValue });
-
-    const pageNum = parseInt(page as string, 10);
-    const limitNum = parseInt(limit as string, 10);
+    const parsedPage = parseInt(page as string, 10);
+    const parsedLimit = parseInt(limit as string, 10);
+    const pageNum = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+    const limitNum = Number.isFinite(parsedLimit)
+      ? Math.min(Math.max(parsedLimit, 1), 50)
+      : 20;
     const skip = (pageNum - 1) * limitNum;
 
     if (type === "professionals") {

@@ -8,9 +8,7 @@ export const validateAddress = async (req: Request, res: Response) => {
   try {
     const { address } = req.body;
 
-    console.log('📍 Address validation request:', address);
-
-    if (!address) {
+    if (typeof address !== "string" || !address.trim()) {
       return res.status(400).json({
         success: false,
         message: "Address is required"
@@ -29,27 +27,13 @@ export const validateAddress = async (req: Request, res: Response) => {
 
     const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${apiKey}`;
 
-    console.log('🌐 Calling Google Maps Geocoding API...');
-    const response = await fetch(url);
+    const response = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+    if (!response.ok) {
+      throw new Error(`Google geocoding request failed (${response.status})`);
+    }
     const data = await response.json();
 
-    console.log('📊 Google Maps API response:', {
-      status: data.status,
-      resultsCount: data.results?.length || 0,
-      errorMessage: data.error_message
-    });
-
     const isValid = data.status === 'OK' && data.results && data.results.length > 0;
-
-    if (!isValid) {
-      console.log('❌ Address validation FAILED:', {
-        status: data.status,
-        error: data.error_message,
-        address
-      });
-    } else {
-      console.log('✅ Address validation PASSED:', data.results[0].formatted_address);
-    }
 
     return res.status(200).json({
       success: true,
@@ -58,10 +42,11 @@ export const validateAddress = async (req: Request, res: Response) => {
     });
 
   } catch (error: any) {
-    console.error("❌ Address validation error:", error);
+    const timedOut = error instanceof Error && error.name === "TimeoutError";
+    console.error("Address validation error:", timedOut ? "Google request timed out" : error);
     return res.status(500).json({
       success: false,
-      message: "Failed to validate address"
+      message: timedOut ? "Address validation timed out" : "Failed to validate address"
     });
   }
 };
@@ -83,6 +68,7 @@ export const getGoogleMapsConfig = async (req: Request, res: Response) => {
 
     // Return the script URL with the API key
     // This is a public endpoint for loading the Maps JavaScript library
+    res.set("Cache-Control", "public, max-age=3600, stale-while-revalidate=86400");
     return res.status(200).json({
       success: true,
       scriptUrl: `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places`
