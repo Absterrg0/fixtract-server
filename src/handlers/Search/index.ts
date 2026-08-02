@@ -86,11 +86,16 @@ export const search = async (req: Request, res: Response) => {
 
     const parsedPage = parseInt(page as string, 10);
     const parsedLimit = parseInt(limit as string, 10);
-    const pageNum = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+    const pageNum = Number.isSafeInteger(parsedPage) && parsedPage > 0
+      ? Math.min(parsedPage, 10_000)
+      : 1;
     const limitNum = Number.isFinite(parsedLimit)
       ? Math.min(Math.max(parsedLimit, 1), 50)
       : 20;
     const skip = (pageNum - 1) * limitNum;
+    if (!Number.isSafeInteger(skip)) {
+      return res.status(400).json({ error: "Pagination offset is too large" });
+    }
 
     if (type === "professionals") {
       return await searchProfessionals(

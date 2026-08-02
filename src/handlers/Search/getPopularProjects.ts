@@ -157,6 +157,7 @@ export const getPopularProjects = async (req: Request, res: Response) => {
     ]);
 
     if (projects.length === 0) {
+      res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
       return res.json({ projects: [] });
     }
 
