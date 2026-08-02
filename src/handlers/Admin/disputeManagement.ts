@@ -9,6 +9,7 @@ import { stripe, STRIPE_CONFIG } from '../../services/stripe';
 import { generateIdempotencyKey, convertToStripeAmount } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
+import { updateUserLoyalty } from '../../utils/loyaltySystem';
 import {
   awardBookingCompletionPoints,
   ensureWarrantyCoverageSnapshot,
@@ -20,6 +21,7 @@ import { getProfessionalDisplayName } from '../../utils/displayName';
 import { presignS3Url } from '../../utils/s3Upload';
 import { buildProjectScheduleWindow } from '../../utils/scheduleEngine';
 import { param, params } from '../../utils/requestParams';
+import { notify } from '../../utils/notifications/notify';
 
 const presignAttachments = async (urls?: unknown): Promise<string[]> => {
   if (!Array.isArray(urls) || urls.length === 0) return [];
@@ -703,7 +705,6 @@ export const resolveDispute = async (req: Request, res: Response) => {
       }
 
       try {
-        const { updateUserLoyalty } = await import('../../utils/loyaltySystem');
         const bookingAmount = (resolvedBooking.payment?.amount || 0) + Math.max(0, finalExtraCostAmount);
         await updateUserLoyalty(String(resolvedBooking.customer), bookingAmount);
       } catch (e) {
@@ -723,9 +724,8 @@ export const resolveDispute = async (req: Request, res: Response) => {
       }
 
       try {
-        const { notifyAsync } = await import('../../utils/notifications/notify');
         if (resolvedBooking.customer) {
-          notifyAsync({
+          await notify({
             userId: String(resolvedBooking.customer),
             eventKey: 'customer.review_request',
             entityType: 'booking',
@@ -734,7 +734,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
           });
         }
         if (proId) {
-          notifyAsync({
+          await notify({
             userId: proId,
             eventKey: 'professional.review_request',
             entityType: 'booking',
@@ -752,7 +752,6 @@ export const resolveDispute = async (req: Request, res: Response) => {
         User.findById(resolvedBooking.customer).select('_id email name').lean(),
         proId ? User.findById(proId).select('_id email name username businessInfo').lean() : null,
       ]);
-      const { notifyAsync } = await import('../../utils/notifications/notify');
       const disputeContext = {
         bookingId: String(resolvedBooking._id),
         resolution,
@@ -763,7 +762,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
         currency: (resolvedBooking as any).payment?.currency || 'EUR',
       };
       if (customerUser?._id) {
-        notifyAsync({
+        await notify({
           userId: customerUser._id.toString(),
           eventKey: 'customer.dispute_resolved',
           entityType: 'booking',
@@ -772,7 +771,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
         });
       }
       if (professionalUser?._id) {
-        notifyAsync({
+        await notify({
           userId: professionalUser._id.toString(),
           eventKey: 'professional.dispute_resolved',
           entityType: 'booking',

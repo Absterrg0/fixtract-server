@@ -1,5 +1,8 @@
 import { Request, Response } from 'express';
 import User from '../../models/user';
+import MarketingSubscriber from '../../models/marketingSubscriber';
+import { syncPendingBrevoResubscribes } from '../../utils/marketing/audience';
+import { generateUnsubscribeToken } from '../../utils/marketing/unsubscribeToken';
 import {
   getOriginFromRequest,
   isAllowedOrigin,
@@ -152,15 +155,26 @@ export const getNotificationPreferences = async (req: Request, res: Response): P
       return;
     }
 
-    const user = await User.findById(userId).select('notificationPreferences');
+    const user = await User.findById(userId).select(
+      'notificationPreferences marketingConsentAt',
+    );
     if (!user) {
       res.status(404).json({ success: false, msg: 'User not found' });
       return;
     }
 
+    const preferences = { ...(user.notificationPreferences || {}) };
+    preferences.promotions = {
+      ...(preferences.promotions || {}),
+      email: Boolean(
+        preferences.promotions?.email === true &&
+          user.marketingConsentAt instanceof Date,
+      ),
+    };
+
     res.status(200).json({
       success: true,
-      data: user.notificationPreferences ?? {},
+      data: preferences,
     });
   } catch (err) {
     console.error('getNotificationPreferences error:', err);
@@ -203,7 +217,61 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
     }
 
     const updatePath = `notificationPreferences.${type}.${channel}`;
-    await User.findByIdAndUpdate(userId, { $set: { [updatePath]: enabled } });
+    const userUpdate: Record<string, Record<string, unknown>> = {
+      $set: { [updatePath]: enabled },
+    };
+    if (type === 'promotions' && channel === 'email') {
+      if (enabled) {
+        userUpdate.$set.marketingConsentAt = new Date();
+      } else {
+        userUpdate.$unset = { marketingConsentAt: 1 };
+      }
+    }
+    const updatedUser = await User.findByIdAndUpdate(userId, userUpdate, {
+      new: true,
+    }).select('email');
+    if (!updatedUser) {
+      res.status(404).json({ success: false, msg: 'User not found' });
+      return;
+    }
+
+    if (type === 'promotions' && channel === 'email') {
+      const normalizedEmail = updatedUser.email.toLowerCase().trim();
+      const consentUpdatedAt = new Date();
+      if (enabled) {
+        await MarketingSubscriber.updateOne(
+          { email: normalizedEmail },
+          {
+            $set: {
+              userId: updatedUser._id,
+              unsubscribedAt: null,
+              subscribedAt: consentUpdatedAt,
+              consentVerifiedAt: consentUpdatedAt,
+            },
+            $setOnInsert: {
+              email: normalizedEmail,
+              interestedServices: [],
+              locale: 'en',
+              unsubscribeToken: generateUnsubscribeToken(),
+              source: 'user_sync',
+            },
+          },
+          { upsert: true },
+        );
+        // Local consent is authoritative immediately, while a previously
+        // blacklisted Brevo contact remains outside campaign audiences until
+        // this provider reconciliation succeeds (or the daily retry does).
+        await syncPendingBrevoResubscribes(1, normalizedEmail);
+      } else {
+        await MarketingSubscriber.updateMany(
+          { $or: [{ userId: updatedUser._id }, { email: normalizedEmail }] },
+          {
+            $set: { unsubscribedAt: consentUpdatedAt },
+            $unset: { consentVerifiedAt: 1 },
+          },
+        );
+      }
+    }
 
     res.status(200).json({ success: true, msg: 'Preference updated' });
   } catch (err) {

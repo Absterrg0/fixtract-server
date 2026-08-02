@@ -79,6 +79,39 @@ async function fixConversationIndexes() {
     }
   }
 
+  const supportComposite = indexes.find(
+    (idx) =>
+      JSON.stringify(idx.key) ===
+      JSON.stringify({ supportAdminId: 1, supportTargetUserId: 1 }),
+  );
+  if (supportComposite?.name) {
+    const duplicateTargets = await collection
+      .aggregate([
+        { $match: { type: "support", supportTargetUserId: { $ne: null } } },
+        {
+          $group: {
+            _id: "$supportTargetUserId",
+            count: { $sum: 1 },
+            conversationIds: { $push: "$_id" },
+          },
+        },
+        { $match: { count: { $gt: 1 } } },
+        { $limit: 20 },
+      ])
+      .toArray();
+    if (duplicateTargets.length > 0) {
+      throw new Error(
+        `Cannot enforce one support thread per user; merge duplicate targets first: ${JSON.stringify(
+          duplicateTargets,
+        )}`,
+      );
+    }
+    console.log(
+      `Dropping obsolete per-admin support index "${supportComposite.name}"...`,
+    );
+    await collection.dropIndex(supportComposite.name);
+  }
+
   // Re-create any missing schema indexes (the correct partial one) WITHOUT
   // dropping other existing indexes.
   console.log("Ensuring schema indexes exist...");

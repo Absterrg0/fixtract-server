@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcrypt';
 import User from '../../models/user';
+import LoyaltyConfig from '../../models/loyaltyConfig';
 import connectDB from '../../config/db';
 
 const seedAdmin = async () => {
@@ -22,13 +23,26 @@ const seedAdmin = async () => {
       process.exit(0);
     }
 
-    // Admin user data
+    const initialEmail = process.env.INITIAL_ADMIN_EMAIL?.trim().toLowerCase();
+    const initialPassword = process.env.INITIAL_ADMIN_PASSWORD;
+    const initialPhone = process.env.INITIAL_ADMIN_PHONE?.trim();
+    if (!initialEmail || !initialPassword || !initialPhone) {
+      throw new Error(
+        'INITIAL_ADMIN_EMAIL, INITIAL_ADMIN_PASSWORD, and INITIAL_ADMIN_PHONE are required',
+      );
+    }
+    if (initialPassword.length < 12) {
+      throw new Error('INITIAL_ADMIN_PASSWORD must be at least 12 characters');
+    }
+
     const adminData = {
       name: 'Fixtract Admin',
-      email: 'admin@fixtract.com',
-      phone: '+1234567890',
-      password: 'admin123456', // Will be hashed
+      email: initialEmail,
+      phone: initialPhone,
+      password: initialPassword,
       role: 'admin',
+      adminRole: 'super',
+      accountStatus: 'active',
       isEmailVerified: true,
       isPhoneVerified: true
     };
@@ -47,11 +61,7 @@ const seedAdmin = async () => {
 
     console.log('🎉 Admin user created successfully!');
     console.log('');
-    console.log('📋 Admin Login Credentials:');
-    console.log('   Email: admin@fixtract.com');
-    console.log('   Password: admin123456');
-    console.log('');
-    console.log('🔒 IMPORTANT: Change the password after first login!');
+    console.log('📋 Admin email: [redacted]');
     console.log('');
     console.log('🚀 Admin can now access:');
     console.log('   • Professional approvals');
@@ -60,7 +70,6 @@ const seedAdmin = async () => {
     console.log('');
 
     // Also create loyalty configuration if it doesn't exist
-    const LoyaltyConfig = (await import('../../models/loyaltyConfig')).default;
     await LoyaltyConfig.getCurrentConfig();
     console.log('✅ Loyalty system initialized with default configuration');
 

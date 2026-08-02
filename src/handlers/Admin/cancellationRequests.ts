@@ -9,6 +9,7 @@ import { releaseScheduleSlots } from "../../utils/scheduleRelease";
 import { notifyBookingCancelledAndRefunded } from "../../utils/notifications/notifyBookingCancelledAndRefunded";
 import { auditLog } from "../../utils/auditLogger";
 import { param, params } from "../../utils/requestParams";
+import { notify } from '../../utils/notifications/notify';
 
 const VALID_STATUSES = ["pending", "processing", "negotiating", "escalated", "approved", "denied"] as const;
 const ADMIN_ACTIONABLE_STATUSES = ["pending", "escalated"];
@@ -364,12 +365,11 @@ export const denyCancellationRequest = async (req: Request, res: Response) => {
     try {
       const requester: any = cancellation.requestedBy;
       if (requester?._id) {
-        const { notifyAsync } = await import("../../utils/notifications/notify");
         const eventKey =
           cancellation.requestedRole === "professional"
             ? "professional.refund_denied"
             : "customer.refund_denied";
-        notifyAsync({
+        await notify({
           userId: requester._id.toString(),
           eventKey,
           entityType: "booking",

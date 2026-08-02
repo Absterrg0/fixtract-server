@@ -26,7 +26,7 @@ import { calculateVAT } from '../../utils/vat';
 import { calculateVatFromPricingLines } from '../../utils/vatLineCalculation';
 import { requiresVatRfqReview } from '../../utils/vatManagement';
 import PlatformSettings from '../../models/platformSettings';
-import { calculateAutoDiscount } from '../../utils/discountEngine';
+import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
 import { auditLog } from '../../utils/auditLogger';
@@ -392,7 +392,6 @@ export const createPaymentIntent = async (
 
     let codeInfo: any = null;
     if (discountCode) {
-      const { validateDiscountCode } = await import('../../utils/discountEngine');
       const validation = await validateDiscountCode(
         discountCode,
         customer._id.toString(),

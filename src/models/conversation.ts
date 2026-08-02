@@ -153,9 +153,10 @@ ConversationSchema.index(
 ConversationSchema.index({ supportTargetUserId: 1, lastMessageAt: -1 });
 ConversationSchema.index({ supportAdminId: 1, lastMessageAt: -1 });
 ConversationSchema.index(
-  { supportAdminId: 1, supportTargetUserId: 1 },
+  { supportTargetUserId: 1 },
   { unique: true, partialFilterExpression: { type: "support" } }
 );
+ConversationSchema.index({ status: 1, unreadChatReminderLastSentAt: 1, lastMessageAt: 1 });
 ConversationSchema.index({ starredBy: 1 });
 ConversationSchema.index({ archivedBy: 1 });
 ConversationSchema.index({ "labels.userId": 1, "labels.label": 1 });

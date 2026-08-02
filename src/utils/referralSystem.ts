@@ -3,6 +3,7 @@ import Referral from '../models/referral';
 import ReferralConfig from '../models/referralConfig';
 import mongoose from 'mongoose';
 import { addPoints } from './pointsSystem';
+import { notifyAsync } from './notifications/notify';
 
 /**
  * Generate a unique referral code for a user.
@@ -189,7 +190,6 @@ export const processReferralCompletion = async (
     await User.findByIdAndUpdate(referral.referrer, { $inc: { completedReferrals: 1 } });
     console.log(`Referral completed: referrer=${referral.referrer} (${rewardType}), reward amount is 0 — no points issued`);
     try {
-      const { notifyAsync } = await import('./notifications/notify');
       notifyAsync({
         userId: referral.referrer.toString(),
         eventKey: referrer.role === 'professional' ? 'professional.referral_rewarded' : 'customer.referral_completed',
@@ -223,7 +223,6 @@ export const processReferralCompletion = async (
     console.log(`Referral completed: referrer=${referral.referrer} (${rewardType}) earned ${rewardAmount} points for referred user=${userId}`);
 
     try {
-      const { notifyAsync } = await import('./notifications/notify');
       const eventKey = referrer.role === 'professional'
         ? 'professional.referral_rewarded'
         : 'customer.referral_completed';

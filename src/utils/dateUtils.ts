@@ -44,8 +44,7 @@ function parseStrictIsoString(value: string): Date | null {
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
 
-  const parsed = new Date(trimmed);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
+  return null;
 }
 
 /**

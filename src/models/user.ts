@@ -182,6 +182,7 @@ export interface IUser extends Document {
         promotions?: { push?: boolean; email?: boolean };
         system?: { push?: boolean; email?: boolean };
     };
+    marketingConsentAt?: Date;
     // Stripe Connect fields (for professionals)
     stripe?: {
         accountId?: string;
@@ -665,13 +666,14 @@ const UserSchema = new Schema({
         },
         promotions: {
             push: { type: Boolean, default: false },
-            email: { type: Boolean, default: true }
+            email: { type: Boolean, default: false }
         },
         system: {
             push: { type: Boolean, default: true },
             email: { type: Boolean, default: true }
         }
     },
+    marketingConsentAt: { type: Date, default: null },
     // Customer-specific fields
     businessName: {
         type: String,

@@ -106,6 +106,27 @@ import {
   updateDiscountCode,
   deleteDiscountCode,
 } from "../../handlers/Admin/discountCodes";
+import {
+  listSiteAnnouncements,
+  getSiteAnnouncement,
+  createSiteAnnouncement,
+  updateSiteAnnouncement,
+  setSiteAnnouncementActive,
+  deleteSiteAnnouncement,
+} from "../../handlers/Admin/siteAnnouncements";
+import {
+  listMarketingCampaigns,
+  getMarketingCampaign,
+  createMarketingCampaign,
+  updateMarketingCampaign,
+  deleteMarketingCampaign,
+  previewMarketingAudience,
+  sendMarketingCampaignNow,
+  refreshMarketingCampaignStats,
+  syncMarketingSubscribers,
+  listMarketingSubscribers,
+  listMarketingTemplates,
+} from "../../handlers/Admin/marketingCampaigns";
 import { uploadProfileImage as cmsImageMulter, upload as adminFileUpload } from "../../utils/s3Upload";
 import { getAdminSiteSettings, updateAdminSiteSettings } from "../../handlers/Admin/siteSettings";
 import {
@@ -275,6 +296,21 @@ adminRouter.route('/support/meeting-requests/:id').patch(adminUpdateMeetingReque
 // Discount code management routes
 adminRouter.route('/discount-codes').get(listDiscountCodes).post(createDiscountCode);
 adminRouter.route('/discount-codes/:id').get(getDiscountCode).patch(updateDiscountCode).delete(deleteDiscountCode);
+
+// Site announcement / marketing promo surfaces
+adminRouter.route('/site-announcements').get(listSiteAnnouncements).post(createSiteAnnouncement);
+adminRouter.route('/site-announcements/:id/active').patch(setSiteAnnouncementActive);
+adminRouter.route('/site-announcements/:id').get(getSiteAnnouncement).patch(updateSiteAnnouncement).delete(deleteSiteAnnouncement);
+
+// Marketing email campaigns (Brevo)
+adminRouter.route('/marketing-campaigns').get(listMarketingCampaigns).post(createMarketingCampaign);
+adminRouter.route('/marketing-campaigns/preview-audience').post(previewMarketingAudience);
+adminRouter.route('/marketing-campaigns/templates').get(listMarketingTemplates);
+adminRouter.route('/marketing-campaigns/:id/send').post(sendMarketingCampaignNow);
+adminRouter.route('/marketing-campaigns/:id/stats').post(refreshMarketingCampaignStats);
+adminRouter.route('/marketing-campaigns/:id').get(getMarketingCampaign).patch(updateMarketingCampaign).delete(deleteMarketingCampaign);
+adminRouter.route('/marketing-subscribers').get(listMarketingSubscribers);
+adminRouter.route('/marketing-subscribers/sync').post(syncMarketingSubscribers);
 
 // CMS management routes
 adminRouter.route('/cms').get(listCmsContent).post(createCmsContent);

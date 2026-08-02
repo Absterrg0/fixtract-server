@@ -8,7 +8,7 @@
     "dev": "nodemon --exec \"npx tsx src/index.ts\"",
     "build": "tsc",
     "start": "node dist/index.js",
-    "seed:prod": "npm run seed:csv && npm run seed:admin && npm run seed:cms",
+    "seed:prod": "npm run seed:admin && npm run seed:csv && npm run seed:cms",
     "seed:admin": "npx tsx src/scripts/seed/seedAdmin.ts",
     "seed:cms": "npx tsx src/scripts/seed/seedCmsDefaults.ts",
     "seed:csv": "npx tsx src/scripts/seed/parseAndImportCSV.ts",
