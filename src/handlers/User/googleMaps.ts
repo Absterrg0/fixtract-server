@@ -6,7 +6,7 @@ import { Request, Response } from "express";
  */
 export const validateAddress = async (req: Request, res: Response) => {
   try {
-    const { address } = req.body;
+    const address = req.body?.address;
 
     if (typeof address !== "string" || !address.trim()) {
       return res.status(400).json({
