@@ -37,8 +37,11 @@ app.use(cors({
 app.use('/api/stripe/webhooks', express.raw({ type: 'application/json' }));
 
 // Body and cookie parsers
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+// Project drafts still embed media as data URLs, so keep the legacy-compatible
+// ceiling until that flow is migrated to direct object-storage uploads.
+const BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || '50mb';
+app.use(express.json({ limit: BODY_LIMIT }));
+app.use(express.urlencoded({ limit: BODY_LIMIT, extended: true }));
 app.use(cookieParser());
 
 // Health check and root routes

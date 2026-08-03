@@ -20,7 +20,8 @@ export const getActiveServiceCategories = async (
       activeCountries: country,
     })
       .select("category service areaOfWork pricingModel certificationRequired icon")
-      .sort({ category: 1, service: 1 });
+      .sort({ category: 1, service: 1 })
+      .lean();
 
     // Category-level icon mapping
     const categoryIconMap: Record<string, string> = {
@@ -88,6 +89,7 @@ export const getActiveServiceCategories = async (
       return orderA - orderB;
     });
 
+    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
     res.json(categories);
   } catch (error) {
     console.error("Failed to fetch active service categories:", error);

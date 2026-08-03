@@ -248,7 +248,8 @@ export const listMyConversations = async (
       .populate("supportTargetUserId", "name email")
       .sort({ lastMessageAt: -1, updatedAt: -1 })
       .skip(skip)
-      .limit(limit),
+      .limit(limit)
+      .lean(),
     Conversation.countDocuments(baseQuery),
   ]);
 
@@ -263,6 +264,60 @@ export const listMyConversations = async (
         totalPages: Math.ceil(total / limit),
       },
     },
+  });
+};
+
+export const getMyUnreadConversationCount = async (
+  req: Request,
+  res: Response,
+) => {
+  const userId = getRequestUserId(req);
+  const userRole = req.user?.role;
+
+  if (!userId) {
+    return res.status(401).json({ success: false, msg: "Authentication required" });
+  }
+
+  if (userRole !== "customer" && userRole !== "professional") {
+    return res.status(403).json({
+      success: false,
+      msg: "Only customers and professionals can access conversations",
+    });
+  }
+
+  const userOid = toObjectId(userId);
+  const directParticipantField = userRole === "customer" ? "customerId" : "professionalId";
+  const directUnreadField = userRole === "customer" ? "$customerUnreadCount" : "$professionalUnreadCount";
+
+  const result = await Conversation.aggregate<{ count: number }>([
+    {
+      $match: {
+        archivedBy: { $ne: userOid },
+        $or: [
+          { type: "direct", [directParticipantField]: userOid },
+          { type: "support", supportTargetUserId: userOid },
+        ],
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        count: {
+          $sum: {
+            $cond: [
+              { $eq: ["$type", "support"] },
+              { $ifNull: ["$customerUnreadCount", 0] },
+              { $ifNull: [directUnreadField, 0] },
+            ],
+          },
+        },
+      },
+    },
+  ]);
+
+  return res.status(200).json({
+    success: true,
+    data: { count: result[0]?.count ?? 0 },
   });
 };
 

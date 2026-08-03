@@ -10,43 +10,28 @@ export const getPopularServices = async (req: Request, res: Response) => {
     const { limit = "10" } = req.query;
     const limitNum = parseInt(limit as string, 10);
 
-    // Get all published projects
-    const projects = await Project.find({ status: "published" })
-      .select("category service")
-      .lean();
-
-    if (projects.length === 0) {
-      // If no published projects, return empty array
-      return res.json({ services: [] });
-    }
-
-    // Extract unique services with their categories
-    const serviceMap = new Map<string, { service: string; category: string; count: number }>();
-
-    projects.forEach((project) => {
-      const key = `${project.category}-${project.service}`;
-      if (serviceMap.has(key)) {
-        const existing = serviceMap.get(key)!;
-        existing.count += 1;
-      } else {
-        serviceMap.set(key, {
-          service: project.service,
-          category: project.category,
+    const cappedLimit = Math.min(Math.max(Number.isFinite(limitNum) ? limitNum : 10, 1), 50);
+    const popularServices = await Project.aggregate([
+      { $match: { status: "published" } },
+      {
+        $group: {
+          _id: { category: "$category", service: "$service" },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { count: -1, "_id.service": 1 } },
+      { $limit: cappedLimit },
+      {
+        $project: {
+          _id: 0,
+          name: "$_id.service",
+          category: "$_id.category",
           count: 1,
-        });
-      }
-    });
+        },
+      },
+    ]);
 
-    // Convert to array and sort by count (most popular first)
-    const popularServices = Array.from(serviceMap.values())
-      .sort((a, b) => b.count - a.count)
-      .slice(0, limitNum)
-      .map((item) => ({
-        name: item.service,
-        category: item.category,
-        count: item.count,
-      }));
-
+    res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
     res.json({ services: popularServices });
   } catch (error) {
     console.error("Failed to fetch popular services:", error);
