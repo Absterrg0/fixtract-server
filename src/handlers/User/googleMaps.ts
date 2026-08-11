@@ -34,11 +34,18 @@ export const validateAddress = async (req: Request, res: Response) => {
     const data = await response.json();
 
     const isValid = data.status === 'OK' && data.results && data.results.length > 0;
+    const result = isValid ? data.results[0] : null;
+    const location = result?.geometry?.location;
+    const lat = typeof location?.lat === 'number' ? location.lat : undefined;
+    const lng = typeof location?.lng === 'number' ? location.lng : undefined;
+    const coordinates =
+      lat !== undefined && lng !== undefined ? { lat, lng } : null;
 
     return res.status(200).json({
       success: true,
       isValid,
-      data: isValid ? data.results[0] : null
+      coordinates,
+      data: result
     });
 
   } catch (error: any) {

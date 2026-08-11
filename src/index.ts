@@ -28,6 +28,11 @@ import favoritesRouter from './routes/Favorites';
 
 const app: Express = express();
 
+// Vercel (and similar hosts) terminate TLS and forward the real client IP in
+// X-Forwarded-For. Trust one proxy hop so req.ip / express-rate-limit key on
+// the client, not the edge. Use `1` (not `true`) to avoid permissive trust.
+app.set('trust proxy', 1);
+
 // 🚨 Allow ALL origins but still allow credentials (cookies)
 app.use(cors({
   origin: true, // Reflects the request's Origin header
