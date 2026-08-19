@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import Project from "../../models/project";
 import User from "../../models/user";
+import { popularServiceMatch } from "../../utils/popularServiceMatch";
 import { aggregateProjectRatings } from "./aggregateRatings";
 
 /**
@@ -18,11 +19,10 @@ export const getPopularProjects = async (req: Request, res: Response) => {
     const serviceFilter =
       typeof service === "string" && service.trim() ? service.trim() : null;
 
-    const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
     const match: Record<string, unknown> = { status: "published" };
-    if (serviceFilter) {
-      match.service = { $regex: `^${escapeRegex(serviceFilter)}$`, $options: "i" };
+    const serviceMatch = serviceFilter ? popularServiceMatch(serviceFilter) : null;
+    if (serviceMatch) {
+      Object.assign(match, serviceMatch);
     }
 
     const projects: any[] = await Project.aggregate([
