@@ -531,6 +531,13 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("[PROJECT] Auto-save error:", error);
     console.error("Error stack:", error.stack);
+    if (error?.name === "ValidationError" && error.errors) {
+      const messages = Object.values(error.errors).map((entry: any) => entry.message || String(entry));
+      return res.status(400).json({
+        error: "Project is missing required fields",
+        details: messages.join(" | "),
+      });
+    }
     res
       .status(500)
       .json({ error: "Failed to save project draft", details: error.message });
