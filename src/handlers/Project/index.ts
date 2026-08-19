@@ -534,7 +534,7 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
     if (error?.name === "ValidationError" && error.errors) {
       const messages = Object.values(error.errors).map((entry: any) => entry.message || String(entry));
       return res.status(400).json({
-        error: "Project is missing required fields",
+        error: "Project validation failed",
         details: messages.join(" | "),
       });
     }
