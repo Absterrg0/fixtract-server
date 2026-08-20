@@ -189,6 +189,16 @@ describe("resolveVatDecisionFromConfig", () => {
     expect(decision.appliedRate).toBe(0);
   });
 
+  it("does not treat an unrecognized two-letter country code as a real country", async () => {
+    const decision = await resolveVatDecisionFromConfig({
+      country: "XX",
+      customerType: "individual",
+    });
+    expect(decision.country).toBe("");
+    expect(decision.action).toBe("rfq");
+    expect(decision.appliedRate).toBe(0);
+  });
+
   it("requires VAT review when place-of-supply context is present but unknown", async () => {
     const decision = await resolveVatDecisionFromConfig({
       bookingCountry: "Atlantis",

@@ -522,18 +522,9 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
         });
       }
 
-      // Footer
-      const tableContentBottom = data.vatExplanation ? rowY + 100 : rowY + 40;
-      const contentBottom = Math.max(doc.y, tableContentBottom);
-      const footerHeight = 30;
-      const footerPadding = 20;
-      const maxFooterY = doc.page.height - doc.page.margins.bottom - footerHeight;
-      let footerY = contentBottom + footerPadding;
-
-      if (footerY > maxFooterY) {
-        doc.addPage();
-        footerY = doc.page.margins.top;
-      }
+      // Footer. Keep it anchored to the page bottom so a long description does
+      // not create a blank page containing only a misnumbered footer.
+      const footerY = doc.page.height - doc.page.margins.bottom - 30;
 
       doc
         .fontSize(8)

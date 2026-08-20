@@ -417,7 +417,10 @@ export const createManualPaymentArtifact = async (req: Request, res: Response) =
     const lineNet = roundManualNumber(lines.reduce((sum: number, line: any) => sum + line.amount, 0));
     const expectedVat = reverseCharge
       ? 0
-      : roundManualNumber(lines.reduce((sum: number, line: any) => sum + line.amount * line.vatRate / 100, 0));
+      : roundManualNumber(lines.reduce(
+        (sum: number, line: any) => sum + roundManualNumber(line.amount * line.vatRate / 100),
+        0,
+      ));
     if (Math.abs(lineNet - netAmount) > 0.02) return res.status(400).json({ success: false, msg: `Line net total (${lineNet.toFixed(2)}) must match payment net amount (${netAmount.toFixed(2)}).` });
     if (Math.abs(expectedVat - vatAmount) > 0.02) return res.status(400).json({ success: false, msg: `Line VAT total (${expectedVat.toFixed(2)}) must match payment VAT amount (${vatAmount.toFixed(2)}).` });
     if (Math.abs(roundManualNumber(netAmount + vatAmount) - totalWithVat) > 0.02) return res.status(400).json({ success: false, msg: 'Total with VAT must equal net amount plus VAT amount.' });

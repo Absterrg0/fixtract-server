@@ -505,6 +505,13 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         msg: "A service address must include valid coordinates; please select the address from the map suggestions",
       });
     }
+    const customerCountry = parseVatCountryCode(customer.location?.country);
+    if (requestedServiceCountry && !hasServiceCoords && requestedServiceCountry !== customerCountry) {
+      return res.status(400).json({
+        success: false,
+        msg: "A service country different from the customer's address requires valid service-location coordinates",
+      });
+    }
 
     // Create booking payload (base fields)
     const bookingData: any = {

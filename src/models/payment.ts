@@ -288,7 +288,11 @@ PaymentSchema.index({ status: 1 });
 PaymentSchema.index({ customer: 1, status: 1 });
 PaymentSchema.index({ professional: 1, status: 1 });
 PaymentSchema.index({ bookingNumber: 1 });
-PaymentSchema.index({ stripePaymentIntentId: 1 }, { unique: true, sparse: true });
+// Ignore legacy null/missing values while enforcing uniqueness for real Stripe IDs.
+PaymentSchema.index(
+  { stripePaymentIntentId: 1 },
+  { unique: true, partialFilterExpression: { stripePaymentIntentId: { $type: 'string' } } },
+);
 
 const Payment = model<IPayment>("Payment", PaymentSchema);
 

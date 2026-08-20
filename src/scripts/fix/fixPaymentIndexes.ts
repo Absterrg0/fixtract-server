@@ -10,6 +10,12 @@ type DuplicateGroup = {
   count: number;
 };
 
+type DuplicateIntentGroup = {
+  _id: string;
+  ids: mongoose.Types.ObjectId[];
+  count: number;
+};
+
 /**
  * Rebuild the payment uniqueness indexes after the milestone-payment schema
  * change. The script refuses to delete or merge financial records: duplicate
@@ -42,11 +48,29 @@ export default async function fixPaymentIndexes() {
       { $limit: 50 },
     ]);
 
-    if (duplicateMilestones.length || duplicateBasePayments.length) {
+    const duplicateStripePaymentIntents = await Payment.aggregate<DuplicateIntentGroup>([
+      { $match: { stripePaymentIntentId: { $type: 'string' } } },
+      { $group: { _id: '$stripePaymentIntentId', ids: { $push: '$_id' }, count: { $sum: 1 } } },
+      { $match: { count: { $gt: 1 } } },
+      { $limit: 50 },
+    ]);
+
+    if (duplicateMilestones.length || duplicateBasePayments.length || duplicateStripePaymentIntents.length) {
       throw new Error(
         `Payment index migration aborted: ${duplicateMilestones.length} duplicate milestone group(s) and ` +
-        `${duplicateBasePayments.length} duplicate base-payment group(s) require manual reconciliation.`,
+        `${duplicateBasePayments.length} duplicate base-payment group(s) and ` +
+        `${duplicateStripePaymentIntents.length} duplicate Stripe payment-intent group(s) require manual reconciliation.`,
       );
+    }
+
+    // The previous sparse unique index included explicit null values. Drop that
+    // legacy definition before syncing the partial index from the schema.
+    const existingIndexes = await Payment.collection.listIndexes().toArray();
+    const legacyStripeIndex = existingIndexes.find((index) =>
+      index.name === 'stripePaymentIntentId_1' && index.sparse === true,
+    );
+    if (legacyStripeIndex?.name) {
+      await Payment.collection.dropIndex(legacyStripeIndex.name);
     }
 
     await Payment.syncIndexes();

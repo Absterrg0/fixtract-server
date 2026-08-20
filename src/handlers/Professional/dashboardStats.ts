@@ -52,12 +52,7 @@ export const getProfessionalDashboardStats = async (req: Request, res: Response)
     const baseMatch: any = { professional: professionalId, ...dateFilter };
 
     const activeStatuses = ['booked', 'in_progress', 'professional_completed', 'completed'];
-    const settledPayoutMatch = {
-      $or: [
-        { 'payment.transferStatus': 'succeeded' },
-        { 'payment.transferStatus': { $exists: false }, 'payment.stripeTransferId': { $exists: true, $ne: null } },
-      ],
-    };
+    const settledPayoutMatch = { $expr: buildSettledTransferExpression('payment') };
     const settledPayoutExpression = buildSettledTransferExpression('payment');
 
     const [

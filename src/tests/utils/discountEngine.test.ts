@@ -95,7 +95,7 @@ describe("payment safety invariants", () => {
   it("reuses a transfer key only for the same transfer payload", () => {
     const base = {
       bookingId: "booking-1",
-      amount: 10000,
+      amountMinor: 10000,
       currency: "eur",
       destination: "acct_123",
       sourceTransaction: "ch_123",
@@ -103,7 +103,7 @@ describe("payment safety invariants", () => {
     };
     expect(buildTransferIdempotencyKey(base)).toBe(buildTransferIdempotencyKey(base));
     expect(buildTransferIdempotencyKey(base)).not.toBe(
-      buildTransferIdempotencyKey({ ...base, amount: 9000 }),
+      buildTransferIdempotencyKey({ ...base, amountMinor: 9000 }),
     );
     expect(buildTransferIdempotencyKey(base)).not.toBe(
       buildTransferIdempotencyKey({ ...base, attempt: 1 }),

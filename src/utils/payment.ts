@@ -273,14 +273,15 @@ export function buildPaymentIntentIdempotencyKey(params: {
  */
 export function buildTransferIdempotencyKey(params: {
   bookingId: string;
-  amount: number;
+  /** Stripe transfer amount in minor units, exactly as sent to Stripe. */
+  amountMinor: number;
   currency: string;
   destination: string;
   sourceTransaction: string;
   attempt?: number;
 }): string {
   const fingerprint = JSON.stringify({
-    amount: params.amount,
+    amountMinor: Math.round(params.amountMinor),
     currency: params.currency.toUpperCase(),
     destination: params.destination,
     sourceTransaction: params.sourceTransaction,

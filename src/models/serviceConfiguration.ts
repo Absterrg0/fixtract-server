@@ -49,7 +49,6 @@ export interface IVatQuestion {
     unit?: string;
     options?: string[];
     isRequired: boolean;
-    audience?: 'customer' | 'professional';
 }
 
 export interface IVatLogicCondition {
@@ -192,7 +191,6 @@ const VatQuestionSchema = new Schema<IVatQuestion>({
     unit: { type: String, trim: true },
     options: [{ type: String }],
     isRequired: { type: Boolean, default: true },
-    audience: { type: String, enum: ['customer', 'professional'] }
 }, { _id: false });
 
 const VatLogicConditionSchema = new Schema<IVatLogicCondition>({

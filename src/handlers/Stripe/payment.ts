@@ -1008,7 +1008,7 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
 
     const transferIdempotencyKey = buildTransferIdempotencyKey({
       bookingId: booking._id.toString(),
-      amount: transferAmount,
+      amountMinor: transferAmount,
       currency: transferCurrency,
       destination: destinationAccountId,
       sourceTransaction,

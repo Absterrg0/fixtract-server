@@ -5,7 +5,7 @@
 
 import { Request, Response } from 'express';
 import Payment from '../../models/payment';
-import { getTransferStatus } from '../../utils/paymentSafety';
+import { buildSettledTransferExpression, getTransferStatus } from '../../utils/paymentSafety';
 
 /**
  * Get payment stats for the authenticated professional
@@ -26,10 +26,7 @@ export const getPaymentStats = async (req: Request, res: Response) => {
         { $match: {
           professional: userId,
           status: 'completed',
-          $or: [
-            { transferStatus: 'succeeded' },
-            { transferStatus: { $exists: false }, stripeTransferId: { $exists: true, $ne: null } },
-          ],
+          $expr: buildSettledTransferExpression(),
         } },
         {
           $group: {
@@ -46,6 +43,7 @@ export const getPaymentStats = async (req: Request, res: Response) => {
             { status: 'authorized' },
             { status: 'completed', $or: [
               { transferStatus: { $in: ['pending', 'failed'] } },
+              { transferStatus: { $exists: false }, 'metadata.transferFailed': true },
               { transferStatus: { $exists: false }, stripeTransferId: { $exists: null } },
             ] },
           ],

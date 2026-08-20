@@ -91,22 +91,23 @@ const computeExtraCostCustomerCharge = async (
   const commissionPercent = await getPlatformCommissionPercent();
   const subtotalInclCommission = roundToTwo(extraCostTotal * (1 + commissionPercent / 100));
   const loyalty = await computeCustomerLoyaltyDiscount(customer, subtotalInclCommission);
-  const platformMargin = roundToTwo(subtotalInclCommission - extraCostTotal);
-  const cappedLoyalty = Math.max(0, Math.min(loyalty.amount, platformMargin));
   const breakdown = calculateExtraCostBreakdown({
     extraCostNetAmount: extraCostTotal,
     commissionPercent,
-    customerDiscount: cappedLoyalty,
+    customerDiscount: loyalty.amount,
   });
-  (loyalty as any).cappedAmount = cappedLoyalty;
-  (loyalty as any).amount = breakdown.customerDiscount;
+  const appliedLoyalty = {
+    ...loyalty,
+    requestedAmount: loyalty.amount,
+    amount: breakdown.customerDiscount,
+  };
   const customerNetChargeAmount = breakdown.customerChargeAmount;
   const vatAmount = reverseCharge ? 0 : roundToTwo(customerNetChargeAmount * Math.max(0, vatRate) / 100);
   const customerChargeAmount = roundToTwo(customerNetChargeAmount + vatAmount);
   return {
     commissionPercent,
     subtotalInclCommission,
-    loyalty,
+    loyalty: appliedLoyalty,
     cappedLoyalty: breakdown.customerDiscount,
     customerNetChargeAmount,
     vatAmount,
