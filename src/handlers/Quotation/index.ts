@@ -82,7 +82,8 @@ const validatePricingLinesAgainstAllowedVat = async (booking: any, lines: Array<
   const allowedRates = new Set(options.map(option => Number(option.rate)));
   const invalidLine = lines.find(line => {
     const rate = Number(line.vatRate);
-    return line.vatLabel !== 'Custom VAT rate' && !allowedRates.has(rate);
+    const isCustomVat = String(line.vatLabel || '').trim().toLowerCase().startsWith('custom vat rate');
+    return !isCustomVat && !allowedRates.has(rate);
   });
   if (invalidLine) {
     return {

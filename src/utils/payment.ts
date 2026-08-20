@@ -4,6 +4,7 @@
  */
 
 import { SupportedCurrency, IdempotencyKeyParams } from '../Types/stripe';
+import { createHash } from 'crypto';
 
 const ZERO_DECIMAL_CURRENCIES = new Set([
   'BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA',
@@ -28,7 +29,10 @@ export function convertToStripeAmount(amount: number, currency: string = "EUR"):
 }
 
 type GrossBookingAmountInput = {
-  quote?: { amount?: number };
+  quote?: {
+    amount?: number;
+    breakdown?: Array<{ item?: string; totalPrice?: number }>;
+  };
   selectedExtraOptions?: Array<{ bookedPrice?: number } | number>;
   checkoutSnapshot?: {
     baseSubtotal?: number;
@@ -62,6 +66,10 @@ export function quoteAmountIncludesSelectedExtras(booking: GrossBookingAmountInp
   if (extrasTotal <= 0) return false;
   const quoteAmount = Number(booking.quote?.amount || 0);
   const snapshot = booking.checkoutSnapshot;
+  const computedTotalLine = booking.quote?.breakdown?.find((line) => line.item === 'checkout_snapshot:computed_total');
+  if (computedTotalLine && moneyClose(quoteAmount, Number(computedTotalLine.totalPrice))) {
+    return true;
+  }
   if (
     snapshot &&
     Number(snapshot.extraOptionsTotal) > 0 &&
@@ -220,6 +228,66 @@ export function generateIdempotencyKey(params: IdempotencyKeyParams): string {
   }
 
   return key;
+}
+
+/**
+ * Build a deterministic key for one logical payment-intent attempt.
+ *
+ * The amount/configuration is part of the fingerprint so a deliberate retry
+ * after a changed quote or discount gets a new Stripe intent, while two
+ * concurrent requests for the same attempt are deduplicated by Stripe.
+ */
+export function buildPaymentIntentIdempotencyKey(params: {
+  bookingId: string;
+  amount: number;
+  currency: string;
+  milestoneIndex?: number | null;
+  pointsToRedeem?: number;
+  discountCode?: string | null;
+  quoteVersion?: number | null;
+}): string {
+  const fingerprint = JSON.stringify({
+    amountMinor: convertToStripeAmount(params.amount, params.currency),
+    currency: params.currency.toUpperCase(),
+    milestoneIndex: params.milestoneIndex ?? null,
+    pointsToRedeem: params.pointsToRedeem ?? 0,
+    discountCode: params.discountCode?.trim().toUpperCase() || null,
+    quoteVersion: params.quoteVersion ?? null,
+  });
+  const digest = createHash('sha256').update(fingerprint).digest('hex').slice(0, 32);
+  return generateIdempotencyKey({
+    bookingId: params.bookingId,
+    operation: 'payment-intent',
+    version: `v2-${digest}`,
+  });
+}
+
+/**
+ * Build a stable key for the exact Connect transfer payload. A corrected payout,
+ * destination, settlement currency, or source charge intentionally gets a new
+ * key; repeating the same transfer after a transient failure reuses the key.
+ */
+export function buildTransferIdempotencyKey(params: {
+  bookingId: string;
+  amount: number;
+  currency: string;
+  destination: string;
+  sourceTransaction: string;
+  attempt?: number;
+}): string {
+  const fingerprint = JSON.stringify({
+    amount: params.amount,
+    currency: params.currency.toUpperCase(),
+    destination: params.destination,
+    sourceTransaction: params.sourceTransaction,
+    attempt: params.attempt ?? 0,
+  });
+  const digest = createHash('sha256').update(fingerprint).digest('hex').slice(0, 32);
+  return generateIdempotencyKey({
+    bookingId: params.bookingId,
+    operation: 'transfer',
+    version: `v2-${digest}`,
+  });
 }
 
 // ==================== Payment Amount Calculations ====================
@@ -390,7 +458,7 @@ export function buildTransferMetadata(
     bookingId,
     bookingNumber,
     type: 'booking_completion_payout',
-    payoutDate,
+    ...(payoutDate ? { payoutDate } : {}),
     environment: computedEnv,
   };
 }
@@ -406,6 +474,8 @@ export default {
   getCurrencyByCountry,
   calculateStripeFee,
   generateIdempotencyKey,
+  buildPaymentIntentIdempotencyKey,
+  buildTransferIdempotencyKey,
   calculateProfessionalPayout,
   calculatePlatformCommission,
   determineBookingCurrency,

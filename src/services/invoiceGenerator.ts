@@ -86,9 +86,52 @@ interface InvoiceData {
   vatExplanation?: string;
 }
 
+export type ManualInvoiceLine = {
+  description: string;
+  amount: number;
+  vatRate: number;
+  vatLabel?: string;
+  quantity?: number;
+  unitPrice?: number;
+  unit?: string;
+};
+
+export type ManualInvoicePartyOverride = {
+  name?: string;
+  email?: string;
+  businessName?: string;
+  address?: string;
+  postalCode?: string;
+  city?: string;
+  country?: string;
+  vatNumber?: string;
+};
+
+export type ManualInvoiceOverride = {
+  lines: ManualInvoiceLine[];
+  serviceDescription?: string;
+  payment: {
+    netAmount: number;
+    vatAmount: number;
+    vatRate: number;
+    totalWithVat: number;
+    currency: string;
+    reverseCharge?: boolean;
+    vatLabel?: string;
+  };
+  customer?: ManualInvoicePartyOverride;
+  professional?: ManualInvoicePartyOverride;
+};
+
 interface InvoiceBooking {
   _id: { toString(): string } | string;
   bookingNumber?: string;
+  location?: {
+    address?: string;
+    city?: string;
+    country?: string;
+    postalCode?: string;
+  };
   quote?: { description?: string; amount?: number };
   rfqData?: { description?: string; serviceType?: string };
   quoteVersions?: Array<{
@@ -222,12 +265,13 @@ export async function generateInvoiceNumber(prefix: "FIX" | "SUP" | "INV" = "FIX
   return `${prefix}-${year}-${String(sequence.value).padStart(6, "0")}`;
 }
 
-export async function generateCreditNoteNumber(): Promise<string> {
+export async function generateCreditNoteNumber(prefix?: "FIX" | "SUP"): Promise<string> {
   const year = new Date().getFullYear();
+  const kind = prefix === "SUP" ? "supplier_credit_note" : "credit_note";
   const sequence = await InvoiceSequence.findOneAndUpdate(
-    { year, kind: "credit_note" },
+    { year, kind },
     {
-      $setOnInsert: { year, kind: "credit_note" },
+      $setOnInsert: { year, kind },
       $inc: { value: 1 },
     },
     { new: true, upsert: true, setDefaultsOnInsert: true }
@@ -237,7 +281,7 @@ export async function generateCreditNoteNumber(): Promise<string> {
     throw new Error("Failed to generate credit note sequence");
   }
 
-  return `CN-${year}-${String(sequence.value).padStart(6, "0")}`;
+  return `${prefix ? `${prefix}-` : ""}CN-${year}-${String(sequence.value).padStart(6, "0")}`;
 }
 
 /**
@@ -488,19 +532,86 @@ export async function generateBookingInvoice(
     creditNote?: boolean;
     relatedInvoiceNumber?: string;
     kind?: "customer" | "self_bill";
+    manualOverride?: ManualInvoiceOverride;
   }
 ): Promise<{ invoiceNumber: string; pdfBuffer: Buffer }> {
+  const manualOverride = options?.manualOverride;
+  if (manualOverride) {
+    const customerOverride = manualOverride.customer;
+    const professionalOverride = manualOverride.professional;
+    booking = {
+      ...(booking as any),
+      customer: customerOverride
+        ? {
+            ...(booking.customer as any),
+            name: customerOverride.name ?? booking.customer.name,
+            email: customerOverride.email ?? booking.customer.email,
+            businessName: customerOverride.businessName ?? booking.customer.businessName,
+            vatNumber: customerOverride.vatNumber ?? booking.customer.vatNumber,
+            companyAddress: {
+              ...((booking.customer as any).companyAddress || {}),
+              address: customerOverride.address ?? (booking.customer as any).companyAddress?.address,
+              postalCode: customerOverride.postalCode ?? (booking.customer as any).companyAddress?.postalCode,
+              city: customerOverride.city ?? (booking.customer as any).companyAddress?.city,
+              country: customerOverride.country ?? (booking.customer as any).companyAddress?.country,
+            },
+          }
+        : booking.customer,
+      professional: professionalOverride
+        ? {
+            ...(booking.professional as any),
+            name: professionalOverride.name ?? booking.professional.name,
+            vatNumber: professionalOverride.vatNumber ?? booking.professional.vatNumber,
+            businessInfo: {
+              ...((booking.professional as any).businessInfo || {}),
+              companyName: professionalOverride.businessName ?? (booking.professional as any).businessInfo?.companyName,
+              address: professionalOverride.address ?? (booking.professional as any).businessInfo?.address,
+              postalCode: professionalOverride.postalCode ?? (booking.professional as any).businessInfo?.postalCode,
+              city: professionalOverride.city ?? (booking.professional as any).businessInfo?.city,
+              country: professionalOverride.country ?? (booking.professional as any).businessInfo?.country,
+            },
+          }
+        : booking.professional,
+      payment: {
+        ...(booking.payment as any),
+        ...manualOverride.payment,
+        vatBreakdown: manualOverride.lines.map((line) => ({
+          description: line.description,
+          netAmount: line.amount,
+          vatRate: line.vatRate,
+          vatAmount: manualOverride.payment.reverseCharge ? 0 : Math.round(line.amount * line.vatRate) / 100,
+          vatLabel: line.vatLabel,
+        })),
+      },
+      selectedExtraOptions: [],
+      extraCosts: [],
+      __manualInvoiceLines: manualOverride.lines,
+    } as InvoiceBooking;
+  }
   const kind = options?.kind || "customer";
   const invoiceNumber = options?.creditNote
-    ? await generateCreditNoteNumber()
+    ? await generateCreditNoteNumber(kind === "self_bill" ? "SUP" : "FIX")
     : await generateInvoiceNumber(kind === "self_bill" ? "SUP" : "FIX");
   const invoiceDate = new Date();
   const sign = options?.creditNote ? -1 : 1;
 
   const customer = booking.customer;
   const professional = booking.professional;
-  const customerCountry = customer.companyAddress?.country || customer.location?.country || "BE";
+  const customerCountry = parseVatCountryCode(
+    booking.vatDecision?.country || booking.location?.country || customer.companyAddress?.country || customer.location?.country,
+  );
   const settings = await PlatformSettings.getCurrentConfig();
+  const professionalCountry = parseVatCountryCode(professional.businessInfo?.country);
+  const issuerCountry = parseVatCountryCode(settings.companyAddress?.country);
+  if (!customerCountry) {
+    throw new Error("Cannot generate invoice: customer/service VAT country is missing or invalid.");
+  }
+  if (!professionalCountry) {
+    throw new Error("Cannot generate invoice: professional business country is missing or invalid.");
+  }
+  if (!issuerCountry) {
+    throw new Error("Cannot generate invoice: platform VAT country is missing or invalid.");
+  }
   const currentQuote = booking.quoteVersions?.find((quote) => quote.version === booking.currentQuoteVersion)
     || booking.quoteVersions?.[booking.quoteVersions.length - 1];
   const checkoutQuantity = booking.checkoutSnapshot?.pricingType === "unit"
@@ -509,7 +620,18 @@ export async function generateBookingInvoice(
   const checkoutUnitPrice = booking.checkoutSnapshot?.pricingType === "unit"
     ? Number(booking.checkoutSnapshot.unitAmount)
     : undefined;
-  const quoteLines = booking.payment.vatBreakdown?.length
+  const manualLines = (booking as any).__manualInvoiceLines as ManualInvoiceLine[] | undefined;
+  const quoteLines = manualLines?.length
+    ? manualLines.map((line) => ({
+        description: line.description,
+        amount: line.amount * sign,
+        vatRate: line.vatRate,
+        vatLabel: line.vatLabel,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice,
+        unit: line.unit,
+      }))
+    : booking.payment.vatBreakdown?.length
     ? booking.payment.vatBreakdown.map((line, index) => ({
         description: line.description,
         amount: line.netAmount * sign,
@@ -566,7 +688,7 @@ export async function generateBookingInvoice(
       ? Number(booking.payment.extraCostAmount)
       : rawExtraCostTotal;
   const extraCostScale = rawExtraCostTotal > 0 ? customerExtraCostNet / rawExtraCostTotal : 1;
-  const extraCostLines = (booking.extraCosts || []).map((cost) => {
+  const extraCostLines = manualLines?.length ? [] : (booking.extraCosts || []).map((cost) => {
     const unitDetail =
       cost.type === "unit_adjustment" &&
       Number.isFinite(cost.actualUnits) &&
@@ -618,8 +740,12 @@ export async function generateBookingInvoice(
     propertyNature: booking.vatDecision?.propertyNature || "movable",
     exemptFromBelgianReverseCharge: booking.vatDecision?.exemptFromBelgianReverseCharge,
   });
-  const supplierReverseCharge = Boolean(supplierVatDecision.reverseCharge);
-  const supplierVatRate = supplierReverseCharge ? 0 : supplierVatDecision.appliedRate;
+  const supplierReverseCharge = manualLines?.length && selfBilling
+    ? Boolean(booking.payment.reverseCharge)
+    : Boolean(supplierVatDecision.reverseCharge);
+  const supplierVatRate = manualLines?.length && selfBilling
+    ? (supplierReverseCharge ? 0 : Number(booking.payment.vatRate ?? 0))
+    : (supplierReverseCharge ? 0 : supplierVatDecision.appliedRate);
   const supplierServiceNet = calculateSupplierInvoiceNet({
     quoteAmount: currentQuote?.totalAmount ?? booking.quote?.amount,
     checkoutSnapshot: booking.checkoutSnapshot,
@@ -659,18 +785,27 @@ export async function generateBookingInvoice(
     quantity: Number.isFinite(Number(cost.actualUnits)) ? Number(cost.actualUnits) : undefined,
     unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) : undefined,
   }));
-  const supplierLines = [
-    {
-      description: serviceLabel,
-      amount: (supplierServiceNet - supplierOptionTotal) * sign,
-      vatRate: supplierVatRate,
-      quantity: hasUnits ? unitQuantity : undefined,
-      unitPrice: hasUnitPrice ? unitPrice : undefined,
-      unit: hasUnits ? "units" : undefined,
-    },
-    ...supplierOptionLines,
-    ...supplierExtraCostLines,
-  ];
+  const supplierLines = manualLines?.length
+    ? manualLines.map((line) => ({
+        description: line.description,
+        amount: line.amount * sign,
+        vatRate: line.vatRate,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice,
+        unit: line.unit,
+      }))
+    : [
+        {
+          description: serviceLabel,
+          amount: (supplierServiceNet - supplierOptionTotal) * sign,
+          vatRate: supplierVatRate,
+          quantity: hasUnits ? unitQuantity : undefined,
+          unitPrice: hasUnitPrice ? unitPrice : undefined,
+          unit: hasUnits ? "units" : undefined,
+        },
+        ...supplierOptionLines,
+        ...supplierExtraCostLines,
+      ];
   const supplierTotals = calculateInvoiceSideTotals({
     lines: supplierLines,
     reverseCharge: supplierReverseCharge,
@@ -744,7 +879,7 @@ export async function generateBookingInvoice(
         selectedSubproject?.description ? `Package details: ${selectedSubproject.description}` : undefined,
         booking.rfqData?.serviceType ? `Service: ${booking.rfqData.serviceType}` : undefined,
         currentQuote?.scope ? `Scope: ${currentQuote.scope}` : undefined,
-        currentQuote?.description || booking.quote?.description || booking.rfqData?.description || "Property service",
+        manualOverride?.serviceDescription || currentQuote?.description || booking.quote?.description || booking.rfqData?.description || "Property service",
         (selectedSubproject?.materialsIncluded && selectedSubproject.materials?.length
           ? selectedSubproject.materials
           : currentQuote?.materials || []).length
@@ -808,8 +943,8 @@ export async function generateBookingInvoice(
           return [...serviceLinesWithOptions, ...extraCostLines];
         })(),
     discounts,
-    actualStartDate: booking.actualStartDate || booking.scheduledStartDate,
-    actualEndDate: booking.actualEndDate || booking.scheduledExecutionEndDate,
+    actualStartDate: booking.actualStartDate,
+    actualEndDate: booking.actualEndDate,
     selfBilling,
     issuer,
 

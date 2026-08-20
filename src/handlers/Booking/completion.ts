@@ -36,6 +36,7 @@ import { notify } from '../../utils/notifications/notify';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
 import { calculateExtraCostBreakdown } from '../../utils/extraCostAccounting';
+import { getTransferStatus } from '../../utils/paymentSafety';
 
 const ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
@@ -516,6 +517,7 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
       amount: convertToStripeAmount(customerChargeAmount, currency),
       currency,
       payment_method_types: ['card'],
+      capture_method: 'automatic',
       transfer_data: {
         destination: professional.stripe.accountId,
       },
@@ -552,6 +554,7 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     booking.set('payment.extraCostProfessionalPayout', extraCostTotal);
     booking.set('payment.extraCostStatus', 'pending');
     booking.set('payment.extraCostPaymentSucceeded', false);
+    booking.set('payment.extraCostTransferStatus', 'pending');
     await Payment.findOneAndUpdate(
       { booking: booking._id },
       {
@@ -567,6 +570,7 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
           extraCostStatus: 'pending',
           extraCostPaymentSucceeded: false,
           extraCostStripePaymentIntentId: paymentIntent.id,
+          extraCostTransferStatus: 'pending',
         },
         $setOnInsert: {
           booking: booking._id,
@@ -672,6 +676,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       {
         $set: {
           status: COMPLETED_BOOKING_STATUS,
+          actualStartDate: booking.actualStartDate || completionDate,
           actualEndDate: completionDate,
           ...(booking.extraCosts && booking.extraCosts.length > 0 ? { extraCostStatus: 'confirmed' } : {}),
         },
@@ -715,6 +720,36 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
     const paymentStatus = refreshedBooking?.payment?.status ? String(refreshedBooking.payment.status) : '';
 
     if (!transferResult.success) {
+      const transferFailed = getTransferStatus({
+        transferStatus: refreshedBooking?.payment?.transferStatus,
+        stripeTransferId: refreshedBooking?.payment?.stripeTransferId,
+        metadata: undefined,
+      }) === 'failed';
+      if (transferFailed) {
+        await Booking.findOneAndUpdate(
+          { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },
+          {
+            $set: { status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
+            $push: {
+              statusHistory: {
+                status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
+                timestamp: new Date(),
+                updatedBy: authUser._id,
+                note: `Completion is awaiting professional payout recovery: ${transferResult.error?.message || 'transfer failed'}`,
+              },
+            },
+          },
+        );
+        return res.status(502).json({
+          success: false,
+          error: {
+            code: 'PAYOUT_RECOVERY_REQUIRED',
+            message: 'Payment was captured, but the professional transfer failed. Completion can be retried after the transfer is recovered.',
+            cause: transferResult.error,
+          },
+          data: { transferStatus: 'failed', paymentStatus },
+        });
+      }
       if (paymentStatus !== 'completed' && paymentStatus !== 'captured') {
         await Booking.findOneAndUpdate(
           { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },

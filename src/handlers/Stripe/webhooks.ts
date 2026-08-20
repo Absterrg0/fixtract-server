@@ -19,6 +19,8 @@ import { deductPoints } from '../../utils/pointsSystem';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { notify } from '../../utils/notifications/notify';
 
+const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60 * 1000;
+
 const reserveWebhookEvent = async (event: Stripe.Event): Promise<{ shouldProcess: boolean }> => {
   const now = new Date();
 
@@ -44,6 +46,25 @@ const reserveWebhookEvent = async (event: Stripe.Event): Promise<{ shouldProcess
     }
 
     const existing = await StripeEvent.findOne({ eventId: event.id }).lean();
+    if (
+      existing?.status === 'processing' &&
+      (!existing.lastAttemptAt || existing.lastAttemptAt.getTime() < now.getTime() - WEBHOOK_PROCESSING_LEASE_MS)
+    ) {
+      const claimResult = await StripeEvent.updateOne(
+        {
+          eventId: event.id,
+          status: 'processing',
+          lastAttemptAt: { $lt: new Date(now.getTime() - WEBHOOK_PROCESSING_LEASE_MS) },
+        },
+        {
+          $set: { lastAttemptAt: now, lastError: undefined },
+          $inc: { attempts: 1 },
+        },
+      );
+      if (claimResult.modifiedCount === 1) {
+        return { shouldProcess: true };
+      }
+    }
     if (existing?.status === 'failed') {
       const claimResult = await StripeEvent.updateOne(
         { eventId: event.id, status: 'failed' },
@@ -399,6 +420,29 @@ async function handleExtraCostPaymentSucceeded(paymentIntent: Stripe.PaymentInte
   const bookingId = paymentIntent.metadata.bookingId;
   if (!bookingId) return;
   const now = new Date();
+  let extraCostChargeId: string | undefined;
+  let extraCostTransferId: string | undefined;
+  try {
+    const rawCharge = paymentIntent.latest_charge;
+    extraCostChargeId = typeof rawCharge === 'string' ? rawCharge : rawCharge?.id;
+    if (extraCostChargeId) {
+      const charge = await stripe.charges.retrieve(extraCostChargeId, { expand: ['transfer'] });
+      const transfer = (charge as any).transfer;
+      extraCostTransferId = typeof transfer === 'string' ? transfer : transfer?.id;
+    }
+  } catch (chargeError: any) {
+    console.warn(`[WEBHOOK][EXTRA_COST] Could not reconcile charge/transfer for ${paymentIntent.id}:`, chargeError?.message || chargeError);
+  }
+  const transferFields = {
+    ...(extraCostChargeId ? { 'payment.extraCostStripeChargeId': extraCostChargeId } : {}),
+    ...(extraCostTransferId
+      ? {
+          'payment.extraCostTransferId': extraCostTransferId,
+          'payment.extraCostTransferStatus': 'succeeded',
+          'payment.extraCostTransferAttemptedAt': now,
+        }
+      : { 'payment.extraCostTransferStatus': 'pending' }),
+  };
   const booking = await Booking.findOneAndUpdate(
     {
       _id: bookingId,
@@ -410,6 +454,7 @@ async function handleExtraCostPaymentSucceeded(paymentIntent: Stripe.PaymentInte
         'payment.extraCostStatus': 'succeeded',
         'payment.extraCostPaymentSucceeded': true,
         'payment.extraCostPaidAt': now,
+        ...transferFields,
       },
     },
     { new: true },
@@ -423,6 +468,14 @@ async function handleExtraCostPaymentSucceeded(paymentIntent: Stripe.PaymentInte
         extraCostStatus: 'succeeded',
         extraCostPaymentSucceeded: true,
         extraCostPaidAt: now,
+        ...(extraCostChargeId ? { extraCostStripeChargeId: extraCostChargeId } : {}),
+        ...(extraCostTransferId
+          ? {
+              extraCostTransferId,
+              extraCostTransferStatus: 'succeeded',
+              extraCostTransferAttemptedAt: now,
+            }
+          : { extraCostTransferStatus: 'pending' }),
       },
     },
   );
@@ -830,21 +883,59 @@ async function handleDisputeClosed(dispute: Stripe.Dispute) {
  */
 async function handleTransferCreated(transfer: Stripe.Transfer) {
   const bookingId = transfer.metadata.bookingId;
-  if (!bookingId) return;
-
-  const booking = await Booking.findById(bookingId);
+  const sourceTransaction = typeof transfer.source_transaction === 'string' ? transfer.source_transaction : undefined;
+  const booking = bookingId
+    ? await Booking.findById(bookingId)
+    : await Booking.findOne({
+        $or: [
+          { 'payment.stripeTransferId': transfer.id },
+          { 'payment.extraCostTransferId': transfer.id },
+          ...(sourceTransaction ? [{ 'payment.extraCostStripeChargeId': sourceTransaction }] : []),
+        ],
+      });
   if (!booking || !booking.payment) return;
+
+  const isExtraCostTransfer = Boolean(
+    booking.payment.extraCostStripeChargeId && sourceTransaction === booking.payment.extraCostStripeChargeId,
+  );
+  if (isExtraCostTransfer) {
+    booking.payment.extraCostTransferId = transfer.id;
+    booking.payment.extraCostTransferStatus = 'succeeded';
+    booking.payment.extraCostTransferFailureReason = undefined;
+    booking.payment.extraCostTransferAttemptedAt = new Date();
+    await booking.save();
+    await Payment.findOneAndUpdate(
+      { booking: booking._id },
+      { $set: {
+        extraCostTransferId: transfer.id,
+        extraCostTransferStatus: 'succeeded',
+        extraCostTransferFailureReason: undefined,
+        extraCostTransferAttemptedAt: new Date(),
+      } },
+    );
+    console.log(`Extra-cost transfer created via webhook for booking ${booking._id}: ${transfer.id}`);
+    return;
+  }
 
   booking.payment.stripeTransferId = transfer.id;
   booking.payment.transferredAt = new Date();
+  booking.payment.transferStatus = 'succeeded';
+  booking.payment.transferFailureReason = undefined;
   await booking.save();
 
   await Payment.findOneAndUpdate(
     { booking: booking._id },
-    { stripeTransferId: transfer.id, transferredAt: new Date() }
+    {
+      $set: {
+        stripeTransferId: transfer.id,
+        transferredAt: new Date(),
+        transferStatus: 'succeeded',
+        transferFailureReason: undefined,
+      },
+    },
   );
 
-  console.log(`Transfer created via webhook for booking ${bookingId}: ${transfer.id}`);
+  console.log(`Transfer created via webhook for booking ${booking._id}: ${transfer.id}`);
 }
 
 /**
@@ -852,12 +943,59 @@ async function handleTransferCreated(transfer: Stripe.Transfer) {
  */
 async function handleTransferReversed(transfer: Stripe.Transfer) {
   const bookingId = transfer.metadata.bookingId;
-  if (!bookingId) return;
-
-  const booking = await Booking.findById(bookingId);
+  const sourceTransaction = typeof transfer.source_transaction === 'string' ? transfer.source_transaction : undefined;
+  const booking = bookingId
+    ? await Booking.findById(bookingId)
+    : await Booking.findOne({
+        $or: [
+          { 'payment.stripeTransferId': transfer.id },
+          { 'payment.extraCostTransferId': transfer.id },
+          ...(sourceTransaction ? [{ 'payment.extraCostStripeChargeId': sourceTransaction }] : []),
+        ],
+      });
   if (!booking || !booking.payment) return;
 
-  console.log(`Transfer reversed via webhook for booking ${bookingId}`);
+  const isExtraCostTransfer = Boolean(
+    booking.payment.extraCostStripeChargeId && sourceTransaction === booking.payment.extraCostStripeChargeId,
+  );
+  if (isExtraCostTransfer) {
+    booking.payment.extraCostTransferStatus = 'failed';
+    booking.payment.extraCostTransferFailureReason = `Stripe extra-cost transfer ${transfer.id} was reversed`;
+    booking.payment.extraCostTransferAttemptedAt = new Date();
+    await booking.save();
+    await Payment.findOneAndUpdate(
+      { booking: booking._id },
+      { $set: {
+        extraCostTransferStatus: 'failed',
+        extraCostTransferFailureReason: `Stripe extra-cost transfer ${transfer.id} was reversed`,
+        extraCostTransferAttemptedAt: new Date(),
+      } },
+    );
+    console.log(`Extra-cost transfer reversed via webhook for booking ${booking._id}: ${transfer.id}`);
+    return;
+  }
+
+  const retryAttempt = (booking.payment.transferAttempt || 0) + 1;
+  booking.payment.transferStatus = 'failed';
+  booking.payment.transferFailureReason = `Stripe transfer ${transfer.id} was reversed`;
+  booking.payment.transferAttemptedAt = new Date();
+  booking.payment.transferAttempt = retryAttempt;
+  booking.payment.transferIdempotencyKey = undefined;
+  await booking.save();
+  await Payment.findOneAndUpdate(
+    { booking: booking._id },
+    {
+      $set: {
+        transferStatus: 'failed',
+        transferFailureReason: `Stripe transfer ${transfer.id} was reversed`,
+        transferAttemptedAt: new Date(),
+        transferAttempt: retryAttempt,
+      },
+      $unset: { transferIdempotencyKey: 1 },
+    },
+  );
+
+  console.log(`Transfer reversed via webhook for booking ${booking._id}; retry attempt ${retryAttempt}`);
 }
 
 /**

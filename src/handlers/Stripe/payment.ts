@@ -11,21 +11,25 @@ import Booking from '../../models/booking';
 import User from '../../models/user';
 import Payment from '../../models/payment';
 import {
+  buildPaymentIntentIdempotencyKey,
+  buildTransferIdempotencyKey,
   generateIdempotencyKey,
   convertToStripeAmount,
   calculateProfessionalPayout,
   calculatePlatformCommission,
   calculateStripeFee,
   validatePaymentAmount,
+  validateCurrency,
   buildPaymentMetadata,
   buildTransferMetadata,
   determineBookingCurrency,
   computeGrossBookingAmount,
   quoteAmountIncludesSelectedExtras,
 } from '../../utils/payment';
+import { canRetryTransfer, getTransferStatus, requireProfessionalPayout } from '../../utils/paymentSafety';
 import { calculateVAT } from '../../utils/vat';
 import { calculateVatFromPricingLines } from '../../utils/vatLineCalculation';
-import { requiresVatRfqReview } from '../../utils/vatManagement';
+import { parseVatCountryCode, requiresVatRfqReview } from '../../utils/vatManagement';
 import PlatformSettings from '../../models/platformSettings';
 import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
@@ -54,6 +58,11 @@ const ALLOWED_PAYMENT_OVERRIDE_KEYS = new Set([
   'stripeChargeId',
   'stripeTransferId',
   'stripeDestinationPayment',
+  'transferStatus',
+  'transferIdempotencyKey',
+  'transferAttempt',
+  'transferFailureReason',
+  'transferAttemptedAt',
   'authorizedAt',
   'capturedAt',
   'transferredAt',
@@ -90,7 +99,11 @@ const ALLOWED_PAYMENT_OVERRIDE_KEYS = new Set([
   'extraCostPaymentSucceeded',
   'extraCostPaidAt',
   'extraCostStripePaymentIntentId',
+  'extraCostStripeChargeId',
   'extraCostTransferId',
+  'extraCostTransferStatus',
+  'extraCostTransferFailureReason',
+  'extraCostTransferAttemptedAt',
 ]);
 
 const filterPaymentOverrides = (overrides: Record<string, any>) =>
@@ -125,6 +138,11 @@ const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {
     vatBreakdown: paymentSummary.vatBreakdown,
     platformCommission: paymentSummary.platformCommission,
     professionalPayout: paymentSummary.professionalPayout,
+    transferStatus: paymentSummary.transferStatus,
+    transferIdempotencyKey: paymentSummary.transferIdempotencyKey,
+    transferAttempt: paymentSummary.transferAttempt,
+    transferFailureReason: paymentSummary.transferFailureReason,
+    transferAttemptedAt: paymentSummary.transferAttemptedAt,
     invoiceNumber: paymentSummary.invoiceNumber,
     invoiceUrl: paymentSummary.invoiceUrl,
     invoiceUblUrl: paymentSummary.invoiceUblUrl,
@@ -153,7 +171,11 @@ const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {
     extraCostPaymentSucceeded: paymentSummary.extraCostPaymentSucceeded,
     extraCostPaidAt: paymentSummary.extraCostPaidAt,
     extraCostStripePaymentIntentId: paymentSummary.extraCostStripePaymentIntentId,
+    extraCostStripeChargeId: paymentSummary.extraCostStripeChargeId,
     extraCostTransferId: paymentSummary.extraCostTransferId,
+    extraCostTransferStatus: paymentSummary.extraCostTransferStatus,
+    extraCostTransferFailureReason: paymentSummary.extraCostTransferFailureReason,
+    extraCostTransferAttemptedAt: paymentSummary.extraCostTransferAttemptedAt,
     ...filterPaymentOverrides(overrides),
   };
 };
@@ -496,6 +518,19 @@ export const createPaymentIntent = async (
     const quotePricingVatCalculation = configuredVatDecision?.reverseCharge
       ? null
       : getQuotePricingVatCalculation(booking, discountedQuoteAmount);
+    const vatCountry = parseVatCountryCode(
+      configuredVatDecision?.country || booking.location?.country || customer.location?.country,
+    );
+    if (!vatCountry) {
+      return {
+        success: false,
+        error: {
+          code: 'VAT_COUNTRY_REQUIRED',
+          message: 'A valid service or place-of-supply country is required before payment can be created.',
+        },
+      };
+    }
+
     const vatCalculation = quotePricingVatCalculation
       ? quotePricingVatCalculation
       : configuredVatDecision && !requiresVatRfqReview(configuredVatDecision)
@@ -511,10 +546,10 @@ export const createPaymentIntent = async (
           })()
         : calculateVAT({
           amount: discountedQuoteAmount,
-          customerCountry: customer.location?.country || 'BE',
+          customerCountry: vatCountry,
           customerVATNumber: customer.isVatVerified ? customer.vatNumber || null : null,
           customerVatVerified: customer.isVatVerified === true,
-          professionalCountry: professional.businessInfo?.country || 'BE',
+          professionalCountry: professional.businessInfo?.country,
           customerType: customer.customerType || 'individual',
         });
 
@@ -539,11 +574,13 @@ export const createPaymentIntent = async (
       console.log(`Discount applied for booking ${booking._id}: loyalty=${discountBreakdown.loyaltyDiscount.amount}, repeat=${discountBreakdown.repeatBuyerDiscount.amount}, points=${discountBreakdown.pointsDiscount.discountAmount}, total=${discountBreakdown.totalDiscount}`);
     }
 
-    // Create Payment Intent with immediate charge
+    // Capture the card payment immediately. The platform's payout transfer is
+    // the escrow/release boundary and is handled separately at completion.
     const paymentIntent = await stripe.paymentIntents.create({
       amount: convertToStripeAmount(totalAmount, currency),
       currency: currency.toLowerCase(),
       payment_method_types: ['card'],
+      capture_method: 'automatic',
       metadata: buildPaymentMetadata(
         booking._id.toString(),
         booking.bookingNumber || '',
@@ -554,10 +591,14 @@ export const createPaymentIntent = async (
       ),
       description: `Fixtract Booking #${booking.bookingNumber} - ${projectInfo?.title || 'Service'}`,
     }, {
-      idempotencyKey: generateIdempotencyKey({
+      idempotencyKey: buildPaymentIntentIdempotencyKey({
         bookingId: booking._id.toString(),
-        operation: 'payment-intent',
-        timestamp: Date.now(),
+        amount: totalAmount,
+        currency,
+        milestoneIndex,
+        pointsToRedeem,
+        discountCode,
+        quoteVersion: booking.currentQuoteVersion,
       })
     });
 
@@ -567,6 +608,7 @@ export const createPaymentIntent = async (
       currency: currency,
       method: 'card',
       status: 'pending',
+      transferStatus: 'pending',
       stripePaymentIntentId: paymentIntent.id,
       stripeClientSecret: paymentIntent.client_secret || undefined,
       stripeFeeAmount: stripeFee,
@@ -613,6 +655,7 @@ export const createPaymentIntent = async (
         booking,
         {
           status: 'pending',
+          transferStatus: 'pending',
           method: 'card',
           currency,
           amount: netAmount,
@@ -823,21 +866,74 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
       return { success: false, error: { code: 'NO_PAYMENT', message: 'No payment to capture' } };
     }
 
-    if (booking.payment.status !== 'authorized') {
+    const transferStatus = getTransferStatus({
+      transferStatus: booking.payment.transferStatus,
+      stripeTransferId: booking.payment.stripeTransferId,
+      metadata: (booking.payment as any).metadata,
+    });
+    const isTransferRetry = canRetryTransfer({
+      status: booking.payment.status,
+      transferStatus,
+      stripeTransferId: booking.payment.stripeTransferId,
+      metadata: (booking.payment as any).metadata,
+    });
+    if (booking.payment.status !== 'authorized' && !isTransferRetry) {
       return { success: false, error: { code: 'INVALID_STATUS', message: 'Payment not authorized' } };
+    }
+
+    if (booking.payment.stripeTransferId && transferStatus === 'succeeded') {
+      return { success: true };
     }
 
     const professional = booking.professional as any;
 
     // Payment already captured (automatic capture) — proceed to transfer
-    const latestChargeId = booking.payment.stripeChargeId;
+    let latestChargeId = booking.payment.stripeChargeId;
+    if (!latestChargeId) {
+      try {
+        const paymentIntent = await stripe.paymentIntents.retrieve(booking.payment.stripePaymentIntentId, {
+          expand: ['latest_charge'],
+        });
+        const latestCharge = paymentIntent.latest_charge;
+        latestChargeId = typeof latestCharge === 'string' ? latestCharge : latestCharge?.id;
+        if (latestChargeId) {
+          booking.payment.stripeChargeId = latestChargeId;
+        }
+      } catch (paymentIntentError: any) {
+        return {
+          success: false,
+          error: {
+            code: 'CHARGE_RECONCILIATION_FAILED',
+            message: `The captured Stripe payment could not be reconciled before transfer: ${paymentIntentError?.message || 'payment intent lookup failed'}`,
+          },
+        };
+      }
+    }
+    if (!latestChargeId) {
+      return {
+        success: false,
+        error: {
+          code: 'CHARGE_RECONCILIATION_REQUIRED',
+          message: 'The Stripe charge is not available yet; the professional transfer is blocked until settlement is reconciled.',
+        },
+      };
+    }
 
     console.log(`Transferring payment for booking ${booking._id} (already captured)`);
 
     // Step 2: Transfer to professional (money goes from Fixtract -> Professional)
-    const payoutMajorAmount = Number(
-      booking.payment.professionalPayout ?? booking.payment.totalWithVat ?? booking.payment.amount ?? 0
-    );
+    let payoutMajorAmount: number;
+    try {
+      payoutMajorAmount = requireProfessionalPayout(booking.payment);
+    } catch (payoutError: any) {
+      return {
+        success: false,
+        error: {
+          code: 'PAYOUT_AMOUNT_MISSING',
+          message: payoutError?.message || 'Professional payout is missing or invalid; transfer is blocked.',
+        },
+      };
+    }
     const bookingCurrency = (booking.payment.currency || 'EUR').toLowerCase();
     const destinationAccountId = professional?.stripe?.accountId;
     if (!destinationAccountId) {
@@ -852,7 +948,7 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
 
     let transferCurrency = bookingCurrency;
     let transferAmount = convertToStripeAmount(payoutMajorAmount, transferCurrency);
-    let sourceTransaction: string | undefined;
+    let sourceTransaction = latestChargeId;
 
     // If Stripe settled the charge in another currency (e.g., USD), source_transaction transfers
     // must use that settlement currency. We compute payout proportionally in minor units.
@@ -863,9 +959,9 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
           expand: ['balance_transaction'],
         });
 
-        const balanceTransaction =
+        let balanceTransaction: Stripe.BalanceTransaction | null =
           typeof charge.balance_transaction === 'string'
-            ? null
+            ? await stripe.balanceTransactions.retrieve(charge.balance_transaction)
             : (charge.balance_transaction as Stripe.BalanceTransaction);
 
         if (balanceTransaction?.currency) {
@@ -874,18 +970,52 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
           transferCurrency = charge.currency.toLowerCase();
         }
 
-        if (typeof balanceTransaction?.amount === 'number' && balanceTransaction.amount > 0) {
-          const bookingTotal = Number(booking.payment.totalWithVat ?? booking.payment.amount ?? payoutMajorAmount);
-          const payoutRatio = bookingTotal > 0 ? clamp(payoutMajorAmount / bookingTotal, 0, 1) : 1;
-          transferAmount = Math.max(1, Math.round(balanceTransaction.amount * payoutRatio));
+        if (typeof balanceTransaction?.amount !== 'number' || balanceTransaction.amount <= 0) {
+          throw new Error('Stripe balance transaction amount is unavailable');
+        }
+        const bookingTotal = Number(booking.payment.totalWithVat ?? booking.payment.amount);
+        if (!Number.isFinite(bookingTotal) || bookingTotal <= 0) {
+          throw new Error('Reconciled booking total is missing or invalid');
+        }
+        const payoutRatio = payoutMajorAmount / bookingTotal;
+        transferAmount = Math.round(balanceTransaction.amount * payoutRatio);
+        if (transferAmount <= 0 || transferAmount > balanceTransaction.amount) {
+          throw new Error('Professional payout does not reconcile to a valid settled Stripe amount');
         }
       } catch (chargeInspectError: any) {
-        console.warn(
-          `[TRANSFER] Could not inspect charge ${latestChargeId} for booking ${booking._id}. Falling back to booking currency.`,
-          chargeInspectError?.message || chargeInspectError
-        );
+        return {
+          success: false,
+          error: {
+            code: 'CHARGE_RECONCILIATION_FAILED',
+            message: `The Stripe charge could not be reconciled before transfer: ${chargeInspectError?.message || 'settlement lookup failed'}`,
+          },
+        };
       }
     }
+
+    if (!validateCurrency(transferCurrency.toUpperCase())) {
+      return {
+        success: false,
+        error: {
+          code: 'UNSUPPORTED_TRANSFER_CURRENCY',
+          message: `Stripe settlement currency ${transferCurrency.toUpperCase()} is not supported for professional transfers.`,
+        },
+      };
+    }
+
+    const transferIdempotencyKey = buildTransferIdempotencyKey({
+      bookingId: booking._id.toString(),
+      amount: transferAmount,
+      currency: transferCurrency,
+      destination: destinationAccountId,
+      sourceTransaction,
+      attempt: booking.payment.transferAttempt || 0,
+    });
+    const transferAttemptedAt = booking.payment.transferAttemptedAt || new Date();
+    booking.payment.transferAttemptedAt = transferAttemptedAt;
+    booking.payment.transferIdempotencyKey = transferIdempotencyKey;
+    booking.payment.stripeChargeId = latestChargeId;
+    await booking.save();
 
     let transfer;
     try {
@@ -898,7 +1028,7 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
           ...buildTransferMetadata(
             booking._id.toString(),
             booking.bookingNumber || '',
-            new Date().toISOString(),
+            '',
             STRIPE_CONFIG.environment as 'production' | 'test'
           ),
           bookingCurrency,
@@ -906,16 +1036,21 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
         },
         description: `Payout for Booking #${booking.bookingNumber}`,
       }, {
-        idempotencyKey: generateIdempotencyKey({
-          bookingId: booking._id.toString(),
-          operation: 'transfer',
-        })
+        idempotencyKey: transferIdempotencyKey
       });
     } catch (transferError: any) {
       // Capture succeeded but transfer failed — record the state for manual recovery
       console.error(`Transfer FAILED after capture for booking ${booking._id}:`, transferError.message);
 
-      booking.payment.status = 'completed'; // Money is captured
+      // A corrected retry must use a fresh idempotency key. Keep the failed
+      // attempt number so concurrent retries remain deterministic per attempt.
+      const failedTransferAttempt = (booking.payment.transferAttempt || 0) + 1;
+      booking.payment.status = 'completed'; // Money is captured; transfer remains recoverable.
+      booking.payment.transferStatus = 'failed';
+      booking.payment.transferAttempt = failedTransferAttempt;
+      booking.payment.transferIdempotencyKey = undefined;
+      booking.payment.transferFailureReason = transferError.message;
+      booking.payment.transferAttemptedAt = new Date();
       booking.payment.refundNotes = `Transfer failed after capture: ${transferError.message}. Funds held in platform account.`;
       await booking.save();
 
@@ -923,6 +1058,11 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
         { booking: booking._id },
         buildPaymentUpsertBase(booking, {
           status: 'completed',
+          transferStatus: 'failed',
+          transferAttempt: failedTransferAttempt,
+          transferIdempotencyKey: undefined,
+          transferFailureReason: transferError.message,
+          transferAttemptedAt: booking.payment.transferAttemptedAt,
           capturedAt: booking.payment.capturedAt,
           stripeChargeId: booking.payment.stripeChargeId,
           metadata: {
@@ -940,7 +1080,7 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
         success: false,
         error: {
           code: 'TRANSFER_FAILED',
-          message: 'Payment captured but transfer to professional failed. Admin will handle manually.'
+          message: 'Payment captured but transfer to professional failed. Retry the transfer after correcting the issue.'
         }
       };
     }
@@ -953,6 +1093,9 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
     booking.payment.stripeDestinationPayment = transfer.destination_payment as string;
     booking.payment.transferCurrency = transferCurrency;
     booking.payment.transferAmount = transferAmount;
+    booking.payment.transferStatus = 'succeeded';
+    booking.payment.transferFailureReason = undefined;
+    booking.payment.transferAttemptedAt = new Date();
     booking.payment.transferredAt = new Date();
     await booking.save();
 
@@ -964,6 +1107,10 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
         stripeChargeId: booking.payment.stripeChargeId,
         stripeTransferId: transfer.id,
         stripeDestinationPayment: transfer.destination_payment as string,
+        transferStatus: 'succeeded',
+        transferIdempotencyKey,
+        transferFailureReason: undefined,
+        transferAttemptedAt: booking.payment.transferAttemptedAt,
         capturedAt: booking.payment.capturedAt,
         transferredAt: booking.payment.transferredAt,
         professionalPayout: booking.payment.professionalPayout,

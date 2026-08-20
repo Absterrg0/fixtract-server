@@ -244,6 +244,11 @@ export interface IBooking extends Document {
     stripeDestinationPayment?: string;
     transferCurrency?: string;
     transferAmount?: number;
+    transferStatus?: 'pending' | 'succeeded' | 'failed';
+    transferIdempotencyKey?: string;
+    transferAttempt?: number;
+    transferFailureReason?: string;
+    transferAttemptedAt?: Date;
 
     // Financial breakdown
     stripeFeeAmount?: number;
@@ -293,7 +298,11 @@ export interface IBooking extends Document {
     extraCostStatus?: 'pending' | 'succeeded' | 'failed' | 'refunded';
     extraCostPaymentSucceeded?: boolean;
     extraCostPaidAt?: Date;
+    extraCostStripeChargeId?: string;
     extraCostTransferId?: string;
+    extraCostTransferStatus?: 'pending' | 'succeeded' | 'failed';
+    extraCostTransferFailureReason?: string;
+    extraCostTransferAttemptedAt?: Date;
 
     invoiceNumber?: string;
     invoiceUrl?: string;
@@ -317,7 +326,17 @@ export interface IBooking extends Document {
     creditNoteGeneratedAt?: Date;
     creditNoteRelatedInvoiceNumber?: string;
     creditNotePeppolDispatchStatus?: string;
+    creditNotePeppolDispatchReason?: string;
     creditNotePeppolDispatchReference?: string;
+    creditNoteGenerationClaim?: string;
+    supplierCreditNoteNumber?: string;
+    supplierCreditNoteUrl?: string;
+    supplierCreditNoteUblUrl?: string;
+    supplierCreditNoteGeneratedAt?: Date;
+    supplierCreditNoteRelatedInvoiceNumber?: string;
+    supplierCreditNotePeppolDispatchStatus?: string;
+    supplierCreditNotePeppolDispatchReason?: string;
+    supplierCreditNotePeppolDispatchReference?: string;
 
     // Auto-discount breakdown
     discount?: {
@@ -860,6 +879,11 @@ const BookingSchema = new Schema({
     stripeDestinationPayment: { type: String },
     transferCurrency: { type: String, enum: SUPPORTED_CURRENCIES },
     transferAmount: { type: Number, min: [0, 'transferAmount cannot be negative'] },
+    transferStatus: { type: String, enum: ['pending', 'succeeded', 'failed'] },
+    transferIdempotencyKey: { type: String },
+    transferAttempt: { type: Number, min: 0, default: 0 },
+    transferFailureReason: { type: String, maxlength: 1000 },
+    transferAttemptedAt: { type: Date },
 
     // Financial breakdown
     stripeFeeAmount: { type: Number },
@@ -923,7 +947,11 @@ const BookingSchema = new Schema({
     extraCostStatus: { type: String, enum: ['pending', 'succeeded', 'failed', 'refunded'] },
     extraCostPaymentSucceeded: { type: Boolean },
     extraCostPaidAt: { type: Date },
+    extraCostStripeChargeId: { type: String },
     extraCostTransferId: { type: String },
+    extraCostTransferStatus: { type: String, enum: ['pending', 'succeeded', 'failed'] },
+    extraCostTransferFailureReason: { type: String, maxlength: 1000 },
+    extraCostTransferAttemptedAt: { type: Date },
 
     // Invoice
     invoiceNumber: { type: String },
@@ -948,7 +976,17 @@ const BookingSchema = new Schema({
     creditNoteGeneratedAt: { type: Date },
     creditNoteRelatedInvoiceNumber: { type: String },
     creditNotePeppolDispatchStatus: { type: String },
+    creditNotePeppolDispatchReason: { type: String },
     creditNotePeppolDispatchReference: { type: String },
+    creditNoteGenerationClaim: { type: String },
+    supplierCreditNoteNumber: { type: String },
+    supplierCreditNoteUrl: { type: String },
+    supplierCreditNoteUblUrl: { type: String },
+    supplierCreditNoteGeneratedAt: { type: Date },
+    supplierCreditNoteRelatedInvoiceNumber: { type: String },
+    supplierCreditNotePeppolDispatchStatus: { type: String },
+    supplierCreditNotePeppolDispatchReason: { type: String },
+    supplierCreditNotePeppolDispatchReference: { type: String },
 
     // Auto-discount breakdown
     discount: {

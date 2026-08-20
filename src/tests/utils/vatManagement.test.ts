@@ -19,10 +19,10 @@ import {
 import type { IVatLogicRule } from "../../models/serviceConfiguration";
 
 describe("normalizeVatCountry", () => {
-  it("defaults to BE when empty", () => {
-    expect(normalizeVatCountry(undefined)).toBe("BE");
-    expect(normalizeVatCountry("")).toBe("BE");
-    expect(normalizeVatCountry("   ")).toBe("BE");
+  it("does not invent Belgium when the country is missing", () => {
+    expect(normalizeVatCountry(undefined)).toBe("");
+    expect(normalizeVatCountry("")).toBe("");
+    expect(normalizeVatCountry("   ")).toBe("");
   });
 
   it("passes through ISO-2 codes", () => {
@@ -313,6 +313,22 @@ describe("resolveSupplierB2BInvoiceDecision", () => {
     expect(result.country).toBe("BE");
     expect(result.appliedRate).toBe(0);
     expect(result.reverseCharge).toBe(true);
+  });
+
+  it("keeps the configured B2C rate for cross-border exception countries", () => {
+    const expectedRates: Record<string, number> = { CH: 8.1, LI: 8.1, NO: 25, GR: 24 };
+    for (const [buyerCountry, rate] of Object.entries(expectedRates)) {
+      const result = resolveSupplierB2BInvoiceDecision({
+        supplierCountry: "NL",
+        buyerCountry,
+        supplierVatNumber: "NL123456789B01",
+        buyerVatNumber: `${buyerCountry}123456789`,
+        propertyNature: "movable",
+      });
+      expect(result.country).toBe(buyerCountry);
+      expect(result.reverseCharge).toBe(false);
+      expect(result.appliedRate).toBe(rate);
+    }
   });
 });
 

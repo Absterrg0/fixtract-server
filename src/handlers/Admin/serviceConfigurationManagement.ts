@@ -210,14 +210,14 @@ export const createServiceConfiguration = async (req: Request, res: Response) =>
     try {
         const configurationData = req.body;
 
-        const vatError = validateVatManagement(configurationData?.vatManagement);
-        if (vatError) {
-            return res.status(400).json({ success: false, message: vatError });
-        }
-
         if (configurationData?.vatManagement) {
             configurationData.vatManagement.professionalVatQuestions =
                 withArticle47ProfessionalQuestion(configurationData.vatManagement);
+        }
+
+        const vatError = validateVatManagement(configurationData?.vatManagement);
+        if (vatError) {
+            return res.status(400).json({ success: false, message: vatError });
         }
 
         // Check if configuration already exists

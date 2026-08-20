@@ -13,7 +13,12 @@ import {
   calculateSupplierInvoiceNet,
   type InvoiceAccountingLine,
 } from "../utils/invoiceAccounting";
-import { generateBookingInvoice } from "./invoiceGenerator";
+import {
+  generateBookingInvoice,
+  type ManualInvoiceLine,
+  type ManualInvoiceOverride,
+  type ManualInvoicePartyOverride,
+} from "./invoiceGenerator";
 import { maybeDispatchPeppolInvoice } from "./peppolDispatch";
 import { notify } from "../utils/notifications/notify";
 
@@ -47,6 +52,24 @@ type CreditArtifactResult = {
   creditNoteUrl: string;
   creditNoteUblUrl?: string;
   creditNoteGeneratedAt: Date;
+  creditNoteRelatedInvoiceNumber?: string;
+  relatedInvoiceNumber?: string;
+  supplierCreditNoteNumber?: string;
+  supplierCreditNoteUrl?: string;
+  supplierCreditNoteUblUrl?: string;
+  supplierCreditNoteGeneratedAt?: Date;
+  supplierCreditNoteRelatedInvoiceNumber?: string;
+  creditNotePeppolDispatchStatus?: string;
+  creditNotePeppolDispatchReason?: string;
+  creditNotePeppolDispatchReference?: string;
+  supplierCreditNotePeppolDispatchStatus?: string;
+  supplierCreditNotePeppolDispatchReason?: string;
+  supplierCreditNotePeppolDispatchReference?: string;
+};
+
+export type ManualInvoiceCorrectionInput = ManualInvoiceOverride & {
+  side: "customer" | "supplier";
+  documentType: "invoice" | "credit_note";
   relatedInvoiceNumber?: string;
 };
 
@@ -70,7 +93,13 @@ const hasInvoiceArtifacts = (payment: any) =>
   );
 
 const hasCreditNoteArtifacts = (payment: any) =>
-  Boolean(payment?.creditNoteNumber && payment?.creditNoteUrl && !String(payment.creditNoteNumber).startsWith("GENERATING-CN-"));
+  Boolean(
+    payment?.creditNoteNumber &&
+    payment?.creditNoteUrl &&
+    !String(payment.creditNoteNumber).startsWith("GENERATING-CN-") &&
+    payment?.supplierCreditNoteNumber &&
+    payment?.supplierCreditNoteUrl
+  );
 
 const toInvoiceArtifactResult = (payment: any): InvoiceArtifactResult => ({
   invoiceNumber: payment.invoiceNumber,
@@ -95,6 +124,17 @@ const toCreditArtifactResult = (payment: any): CreditArtifactResult => ({
   creditNoteUblUrl: payment.creditNoteUblUrl,
   creditNoteGeneratedAt: payment.creditNoteGeneratedAt || new Date(),
   relatedInvoiceNumber: payment.invoiceNumber,
+  supplierCreditNoteNumber: payment.supplierCreditNoteNumber,
+  supplierCreditNoteUrl: payment.supplierCreditNoteUrl,
+  supplierCreditNoteUblUrl: payment.supplierCreditNoteUblUrl,
+  supplierCreditNoteGeneratedAt: payment.supplierCreditNoteGeneratedAt,
+  supplierCreditNoteRelatedInvoiceNumber: payment.supplierCreditNoteRelatedInvoiceNumber,
+  creditNotePeppolDispatchStatus: payment.creditNotePeppolDispatchStatus,
+  creditNotePeppolDispatchReason: payment.creditNotePeppolDispatchReason,
+  creditNotePeppolDispatchReference: payment.creditNotePeppolDispatchReference,
+  supplierCreditNotePeppolDispatchStatus: payment.supplierCreditNotePeppolDispatchStatus,
+  supplierCreditNotePeppolDispatchReason: payment.supplierCreditNotePeppolDispatchReason,
+  supplierCreditNotePeppolDispatchReference: payment.supplierCreditNotePeppolDispatchReference,
 });
 
 const claimInvoiceGeneration = async (bookingId: string) =>
@@ -129,25 +169,14 @@ const claimCreditNoteGeneration = async (bookingId: string) =>
     {
       _id: bookingId,
       "payment.invoiceNumber": { $exists: true, $nin: [null, ""] },
-      $and: [
-        {
-          $or: [
-            { "payment.creditNoteNumber": { $exists: false } },
-            { "payment.creditNoteNumber": null },
-            { "payment.creditNoteNumber": "" },
-            { "payment.creditNoteNumber": /^GENERATING-CN-/ },
-          ],
-        },
-        {
-          $or: [
-            { "payment.creditNoteUrl": { $exists: false } },
-            { "payment.creditNoteUrl": null },
-            { "payment.creditNoteUrl": "" },
-          ],
-        },
+      $or: [
+        { "payment.creditNoteGenerationClaim": { $exists: false } },
+        { "payment.creditNoteGenerationClaim": null },
+        { "payment.creditNoteGenerationClaim": "" },
+        { "payment.creditNoteGenerationClaim": /^GENERATING-CN-/ },
       ],
     },
-    { $set: { "payment.creditNoteNumber": `GENERATING-CN-${Date.now()}` } },
+    { $set: { "payment.creditNoteGenerationClaim": `GENERATING-CN-${Date.now()}` } },
     { new: true }
   );
 
@@ -160,8 +189,8 @@ const clearInvoiceGenerationClaim = async (bookingId: string) => {
 
 const clearCreditNoteGenerationClaim = async (bookingId: string) => {
   await Booking.updateOne(
-    { _id: bookingId, "payment.creditNoteNumber": /^GENERATING-CN-/ },
-    { $unset: { "payment.creditNoteNumber": "" } }
+    { _id: bookingId, "payment.creditNoteGenerationClaim": /^GENERATING-CN-/ },
+    { $unset: { "payment.creditNoteGenerationClaim": "" } }
   );
 };
 
@@ -182,11 +211,11 @@ const isStaleGenerationClaim = (value?: string | null, prefix = "GENERATING-"): 
 };
 
 const clearStaleGenerationClaimsIfNeeded = async (bookingId: string) => {
-  const booking = await Booking.findById(bookingId).select("payment.invoiceNumber payment.creditNoteNumber");
+  const booking = await Booking.findById(bookingId).select("payment.invoiceNumber payment.creditNoteGenerationClaim");
   if (isStaleGenerationClaim(booking?.payment?.invoiceNumber, "GENERATING-")) {
     await clearInvoiceGenerationClaim(bookingId);
   }
-  if (isStaleGenerationClaim(booking?.payment?.creditNoteNumber, "GENERATING-CN-")) {
+  if (isStaleGenerationClaim(booking?.payment?.creditNoteGenerationClaim, "GENERATING-CN-")) {
     await clearCreditNoteGenerationClaim(bookingId);
   }
 };
@@ -245,7 +274,10 @@ const buildUblAddress = (parts: {
   postalCode?: string;
   country?: string;
 }): string => {
-  const countryCode = normalizeVatCountry(parts.country) || "BE";
+  const countryCode = normalizeVatCountry(parts.country);
+  if (!countryCode) {
+    throw new Error("UBL address country is required and must be a valid country code.");
+  }
   return `
       <cac:PostalAddress>
         ${parts.street ? `<cbc:StreetName>${escapeXml(parts.street)}</cbc:StreetName>` : ""}
@@ -290,7 +322,7 @@ const getExtraCostLinesForUbl = (
       vatRate: lineVatRate,
       vatAmount: reverseCharge ? 0 : Math.round(price * lineVatRate) / 100,
       quantity: Number.isFinite(Number(cost.actualUnits)) ? Number(cost.actualUnits) : undefined,
-      unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) : undefined,
+      unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) * scale : undefined,
     };
   });
 };
@@ -311,6 +343,7 @@ const getPricingLinesForUbl = (
   options: { selfBilling: boolean; platform: UblPlatformParty }
 ): { lines: UblLine[]; totals: ReturnType<typeof calculateInvoiceSideTotals> } => {
   const currentQuote = getCurrentQuote(booking);
+  const manualLines = Array.isArray(booking.__manualInvoiceLines) ? booking.__manualInvoiceLines : undefined;
   const supplierVat = options.selfBilling ? getSupplierVatContext(booking, options.platform) : null;
   const reverseCharge = options.selfBilling
     ? Boolean(supplierVat?.reverseCharge)
@@ -318,6 +351,27 @@ const getPricingLinesForUbl = (
   const vatRate = options.selfBilling
     ? (supplierVat?.appliedRate || 0)
     : (booking.payment?.vatRate || 0);
+  if (manualLines?.length) {
+    const manualReverseCharge = Boolean(booking.payment?.reverseCharge);
+    const lines = manualLines.map((line: any) => ({
+      description: String(line.description || "Manual correction"),
+      amount: moneyNumber(line.amount),
+      price: moneyNumber(line.amount),
+      vatRate: moneyNumber(line.vatRate),
+      vatAmount: manualReverseCharge ? 0 : Math.round(moneyNumber(line.amount) * moneyNumber(line.vatRate)) / 100,
+      vatLabel: line.vatLabel,
+      quantity: Number.isFinite(Number(line.quantity)) ? Number(line.quantity) : undefined,
+      unitPrice: Number.isFinite(Number(line.unitPrice)) ? Number(line.unitPrice) : undefined,
+      unit: line.unit,
+    }));
+    const totals = calculateInvoiceSideTotals({
+      lines,
+      reverseCharge: manualReverseCharge,
+      vatRate: moneyNumber(booking.payment?.vatRate),
+      vatLabel: booking.payment?.vatLabel,
+    });
+    return { lines, totals };
+  }
   let baseLines: UblLine[] = Array.isArray(booking.payment?.vatBreakdown) && booking.payment.vatBreakdown.length > 0 && !options.selfBilling
     ? booking.payment.vatBreakdown.map((line: any) => ({
       description: line.description,
@@ -450,6 +504,14 @@ const getPricingLinesForUbl = (
   return { lines: lines.map((line) => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * (line.vatRate || vatRate) * 100) / 10000 })), totals };
 };
 
+const getPeppolLineItems = (pricing: { lines: UblLine[] }) => pricing.lines.map((line) => ({
+  description: line.description,
+  price: line.price,
+  vatRate: line.vatRate,
+  quantity: line.quantity,
+  unitPrice: line.unitPrice,
+}));
+
 const ublPartyXml = (
   tag: "AccountingSupplierParty" | "AccountingCustomerParty",
   party: { name: string; vatNumber?: string; peppolParticipantId?: string; street?: string; city?: string; postalCode?: string; country?: string }
@@ -571,33 +633,34 @@ const buildUblCreditNoteXml = (
   booking: any,
   creditNoteNumber: string,
   issuedAt: Date,
-  options?: { relatedInvoiceNumber?: string; platform?: UblPlatformParty }
+  options?: { relatedInvoiceNumber?: string; platform?: UblPlatformParty; selfBilling?: boolean }
 ): string => {
   const currency = booking.payment?.currency || "EUR";
   const sign = -1;
-  const reverseCharge = Boolean(booking.payment?.reverseCharge);
+  const selfBilling = options?.selfBilling === true;
   const platform = options?.platform || {};
-  const pricing = getPricingLinesForUbl(booking, { selfBilling: false, platform });
+  const pricing = getPricingLinesForUbl(booking, { selfBilling, platform });
   const pricingLines = pricing.lines;
+  const reverseCharge = pricing.totals.reverseCharge;
   const parties = buildUblPartiesAndTotals(booking, currency, sign, pricingLines, reverseCharge, {
-    selfBilling: false,
+    selfBilling,
     platform: options?.platform,
   }, pricing.totals);
   const creditNoteLines = pricingLines.map((line: any, index: number) => `
     <cac:CreditNoteLine>
       <cbc:ID>${index + 1}</cbc:ID>
-      <cbc:CreditedQuantity unitCode="C62">1</cbc:CreditedQuantity>
+      <cbc:CreditedQuantity unitCode="C62">${toMoney(Number(line.quantity || 1))}</cbc:CreditedQuantity>
       <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.price) * sign)}</cbc:LineExtensionAmount>
       <cac:Item>
         <cbc:Description>${escapeXml(line.description)}</cbc:Description>
         <cac:ClassifiedTaxCategory>
           <cbc:ID>${parties.taxCategoryId}</cbc:ID>
-          <cbc:Percent>${toMoney(line.vatRate ?? booking.payment?.vatRate ?? 0)}</cbc:Percent>
+          <cbc:Percent>${toMoney(reverseCharge ? 0 : (line.vatRate ?? booking.payment?.vatRate ?? 0))}</cbc:Percent>
           <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
         </cac:ClassifiedTaxCategory>
       </cac:Item>
       <cac:Price>
-        <cbc:PriceAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.price) * sign)}</cbc:PriceAmount>
+        <cbc:PriceAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.unitPrice ?? line.price) * sign)}</cbc:PriceAmount>
       </cac:Price>
     </cac:CreditNoteLine>`).join("");
 
@@ -605,11 +668,12 @@ const buildUblCreditNoteXml = (
 <CreditNote xmlns="urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2"
   xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
   xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
-  <cbc:CustomizationID>${COMMERCIAL_CUSTOMIZATION_ID}</cbc:CustomizationID>
-  <cbc:ProfileID>${COMMERCIAL_PROFILE_ID}</cbc:ProfileID>
+  <cbc:CustomizationID>${selfBilling ? SELF_BILLING_CUSTOMIZATION_ID : COMMERCIAL_CUSTOMIZATION_ID}</cbc:CustomizationID>
+  <cbc:ProfileID>${selfBilling ? SELF_BILLING_PROFILE_ID : COMMERCIAL_PROFILE_ID}</cbc:ProfileID>
   <cbc:ID>${escapeXml(creditNoteNumber)}</cbc:ID>
   <cbc:IssueDate>${issuedAt.toISOString().slice(0, 10)}</cbc:IssueDate>
   <cbc:CreditNoteTypeCode>381</cbc:CreditNoteTypeCode>
+  ${selfBilling ? `<cbc:Note>${escapeXml(SELF_BILLING_NOTE)}</cbc:Note>` : ""}
   ${reverseCharge ? `<cbc:Note>${escapeXml(B2B_VAT_EXEMPTION_NOTE)}</cbc:Note>` : ""}
   <cbc:DocumentCurrencyCode>${escapeXml(currency)}</cbc:DocumentCurrencyCode>
   <cbc:BuyerReference>${escapeXml(booking.bookingNumber || booking._id?.toString?.())}</cbc:BuyerReference>
@@ -636,6 +700,7 @@ const buildUblInvoiceXml = (
     return buildUblCreditNoteXml(booking, invoiceNumber, issuedAt, {
       relatedInvoiceNumber: options.relatedInvoiceNumber,
       platform: options.platform,
+      selfBilling: options.selfBilling,
     });
   }
 
@@ -755,7 +820,7 @@ const retryPeppolForExistingArtifacts = async (
   const booking = await loadBookingForInvoice(bookingId);
   if (!booking?.payment) return toInvoiceArtifactResult(existing.payment);
   const update: InvoiceArtifactResult = toInvoiceArtifactResult(existing.payment);
-  let platform: UblPlatformParty;
+  let platform: UblPlatformParty | undefined;
   try {
     platform = await getPlatformParty();
   } catch (error) {
@@ -793,6 +858,7 @@ const retryPeppolForExistingArtifacts = async (
         netAmount: customerPricing.totals.netAmount,
         vatRate: booking.payment?.vatRate,
         reverseCharge: booking.payment?.reverseCharge,
+        lineItems: getPeppolLineItems(customerPricing),
       });
       Object.assign(update, {
         peppolDispatchStatus: result.status,
@@ -823,6 +889,7 @@ const retryPeppolForExistingArtifacts = async (
         netAmount: supplierPricing.totals.netAmount,
         vatRate: supplierPricing.totals.vatRate,
         reverseCharge: supplierPricing.totals.reverseCharge,
+        lineItems: getPeppolLineItems(supplierPricing),
       });
       Object.assign(update, {
         supplierPeppolDispatchStatus: result.status,
@@ -976,6 +1043,7 @@ export async function ensureBookingInvoiceArtifacts(
         netAmount: getPricingLinesForUbl(booking, { selfBilling: false, platform }).totals.netAmount,
         vatRate: booking.payment?.vatRate,
         reverseCharge: booking.payment?.reverseCharge,
+        lineItems: getPeppolLineItems(getPricingLinesForUbl(booking, { selfBilling: false, platform })),
       });
       update.peppolDispatchStatus = peppolResult.status;
       update.peppolDispatchReference = peppolResult.reference;
@@ -1026,6 +1094,7 @@ export async function ensureBookingInvoiceArtifacts(
         netAmount: supplierPricing.totals.netAmount,
         vatRate: supplierPricing.totals.vatRate,
         reverseCharge: supplierPricing.totals.reverseCharge,
+        lineItems: getPeppolLineItems(supplierPricing),
       });
       update.supplierPeppolDispatchStatus = supplierPeppolResult.status;
       update.supplierPeppolDispatchReference = supplierPeppolResult.reference;
@@ -1073,6 +1142,105 @@ export async function ensureBookingInvoiceArtifacts(
   }
 }
 
+const retryPeppolForExistingCreditArtifacts = async (
+  bookingId: string,
+  paymentId: string | undefined,
+  existing: any,
+): Promise<CreditArtifactResult> => {
+  const booking = await loadBookingForInvoice(bookingId);
+  const update = toCreditArtifactResult(existing.payment);
+  if (!booking?.payment) return update;
+
+  let platform: UblPlatformParty | undefined;
+  try {
+    platform = await getPlatformParty();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    if (update.creditNotePeppolDispatchStatus !== "sent") {
+      update.creditNotePeppolDispatchStatus = "failed";
+      update.creditNotePeppolDispatchReason = reason;
+    }
+    if (update.supplierCreditNotePeppolDispatchStatus !== "sent") {
+      update.supplierCreditNotePeppolDispatchStatus = "failed";
+      update.supplierCreditNotePeppolDispatchReason = reason;
+    }
+  }
+
+  if (platform && update.creditNotePeppolDispatchStatus !== "sent") {
+    try {
+      if (!existing.payment.creditNoteUblUrl) throw new Error("Customer credit note UBL artifact is missing.");
+      const customerUblXml = buildUblInvoiceXml(booking, existing.payment.creditNoteNumber, new Date(), {
+        creditNote: true,
+        relatedInvoiceNumber: existing.payment.creditNoteRelatedInvoiceNumber || existing.payment.invoiceNumber,
+        selfBilling: false,
+        platform,
+      });
+      const customerPricing = getPricingLinesForUbl(booking, { selfBilling: false, platform });
+      const result = await maybeDispatchPeppolInvoice({
+        booking,
+        side: "customer",
+        invoiceNumber: existing.payment.creditNoteNumber,
+        ublXml: customerUblXml,
+        invoiceUblUrl: existing.payment.creditNoteUblUrl,
+        documentType: "credit_note",
+        netAmount: customerPricing.totals.netAmount,
+        vatRate: booking.payment?.vatRate,
+        reverseCharge: booking.payment?.reverseCharge,
+        lineItems: getPeppolLineItems(customerPricing),
+      });
+      update.creditNotePeppolDispatchStatus = result.status;
+      update.creditNotePeppolDispatchReason = result.reason;
+      update.creditNotePeppolDispatchReference = result.reference;
+    } catch (error) {
+      update.creditNotePeppolDispatchStatus = "failed";
+      update.creditNotePeppolDispatchReason = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  if (platform && update.supplierCreditNotePeppolDispatchStatus !== "sent") {
+    try {
+      if (!existing.payment.supplierCreditNoteUblUrl) throw new Error("Supplier credit note UBL artifact is missing.");
+      const supplierUblXml = buildUblInvoiceXml(booking, existing.payment.supplierCreditNoteNumber, new Date(), {
+        creditNote: true,
+        relatedInvoiceNumber: existing.payment.supplierCreditNoteRelatedInvoiceNumber || existing.payment.supplierInvoiceNumber,
+        selfBilling: true,
+        platform,
+      });
+      const supplierPricing = getPricingLinesForUbl(booking, { selfBilling: true, platform });
+      const result = await maybeDispatchPeppolInvoice({
+        booking,
+        side: "supplier",
+        invoiceNumber: existing.payment.supplierCreditNoteNumber,
+        ublXml: supplierUblXml,
+        invoiceUblUrl: existing.payment.supplierCreditNoteUblUrl,
+        documentType: "credit_note",
+        netAmount: supplierPricing.totals.netAmount,
+        vatRate: supplierPricing.totals.vatRate,
+        reverseCharge: supplierPricing.totals.reverseCharge,
+        lineItems: getPeppolLineItems(supplierPricing),
+      });
+      update.supplierCreditNotePeppolDispatchStatus = result.status;
+      update.supplierCreditNotePeppolDispatchReason = result.reason;
+      update.supplierCreditNotePeppolDispatchReference = result.reference;
+    } catch (error) {
+      update.supplierCreditNotePeppolDispatchStatus = "failed";
+      update.supplierCreditNotePeppolDispatchReason = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  const persisted = {
+    creditNotePeppolDispatchStatus: update.creditNotePeppolDispatchStatus,
+    creditNotePeppolDispatchReason: update.creditNotePeppolDispatchReason,
+    creditNotePeppolDispatchReference: update.creditNotePeppolDispatchReference,
+    supplierCreditNotePeppolDispatchStatus: update.supplierCreditNotePeppolDispatchStatus,
+    supplierCreditNotePeppolDispatchReason: update.supplierCreditNotePeppolDispatchReason,
+    supplierCreditNotePeppolDispatchReference: update.supplierCreditNotePeppolDispatchReference,
+  };
+  await Booking.updateOne({ _id: bookingId }, { $set: Object.fromEntries(Object.entries(persisted).map(([key, value]) => [`payment.${key}`, value])) });
+  await persistPaymentArtifactUpdate(bookingId, paymentId, persisted);
+  return update;
+};
+
 export async function ensureCreditInvoiceArtifacts(
   bookingId: string,
   paymentId?: string
@@ -1083,7 +1251,7 @@ export async function ensureCreditInvoiceArtifacts(
     return null;
   }
   if (hasCreditNoteArtifacts(existing.payment)) {
-    return toCreditArtifactResult(existing.payment);
+    return retryPeppolForExistingCreditArtifacts(bookingId, paymentId, existing);
   }
 
   const claimed = await claimCreditNoteGeneration(bookingId);
@@ -1103,40 +1271,100 @@ export async function ensureCreditInvoiceArtifacts(
     }
 
     const relatedInvoiceNumber = booking.payment.invoiceNumber;
-    const { invoiceNumber: creditNoteNumber, pdfBuffer } = await generateBookingInvoice(booking as any, {
-      creditNote: true,
-      relatedInvoiceNumber,
-      kind: "customer",
-    });
+    const supplierRelatedInvoiceNumber = booking.payment.supplierInvoiceNumber || relatedInvoiceNumber;
     const generatedAt = new Date();
-    const keyBase = `invoices/${booking._id.toString()}/${creditNoteNumber}`;
-    const creditNoteUrl = await uploadBufferToS3(
-      pdfBuffer,
-      `${keyBase}.pdf`,
-      "application/pdf",
-      `inline; filename="${creditNoteNumber}.pdf"`
+    const platform = await getPlatformParty();
+    const existingCustomerCredit = Boolean(
+      booking.payment.creditNoteNumber &&
+      booking.payment.creditNoteUrl &&
+      !String(booking.payment.creditNoteNumber).startsWith("GENERATING-CN-"),
     );
-    const ublXml = buildUblInvoiceXml(booking, creditNoteNumber, generatedAt, {
-      creditNote: true,
-      relatedInvoiceNumber,
-      platform: await getPlatformParty(),
-    });
-    const creditNoteUblUrl = await uploadBufferToS3(
-      Buffer.from(ublXml, "utf8"),
-      `${keyBase}.xml`,
-      "application/xml",
-      `attachment; filename="${creditNoteNumber}.xml"`
+    const existingSupplierCredit = Boolean(
+      booking.payment.supplierCreditNoteNumber && booking.payment.supplierCreditNoteUrl,
     );
 
+    let creditNoteNumber = booking.payment.creditNoteNumber;
+    let creditNoteUrl = booking.payment.creditNoteUrl;
+    let creditNoteUblUrl = booking.payment.creditNoteUblUrl;
+    let customerUblXml: string | undefined;
+    if (!existingCustomerCredit) {
+      const customerCredit = await generateBookingInvoice(booking as any, {
+        creditNote: true,
+        relatedInvoiceNumber,
+        kind: "customer",
+      });
+      creditNoteNumber = customerCredit.invoiceNumber;
+      const keyBase = `invoices/${booking._id.toString()}/${creditNoteNumber}`;
+      creditNoteUrl = await uploadBufferToS3(
+        customerCredit.pdfBuffer,
+        `${keyBase}.pdf`,
+        "application/pdf",
+        `inline; filename="${creditNoteNumber}.pdf"`
+      );
+      customerUblXml = buildUblInvoiceXml(booking, creditNoteNumber, generatedAt, {
+        creditNote: true,
+        relatedInvoiceNumber,
+        selfBilling: false,
+        platform,
+      });
+      creditNoteUblUrl = await uploadBufferToS3(
+        Buffer.from(customerUblXml, "utf8"),
+        `${keyBase}.xml`,
+        "application/xml",
+        `attachment; filename="${creditNoteNumber}.xml"`
+      );
+    }
+
+    let supplierCreditNoteNumber = booking.payment.supplierCreditNoteNumber;
+    let supplierCreditNoteUrl = booking.payment.supplierCreditNoteUrl;
+    let supplierCreditNoteUblUrl = booking.payment.supplierCreditNoteUblUrl;
+    let supplierUblXml: string | undefined;
+    if (!existingSupplierCredit) {
+      const supplierCredit = await generateBookingInvoice(booking as any, {
+        creditNote: true,
+        relatedInvoiceNumber: supplierRelatedInvoiceNumber,
+        kind: "self_bill",
+      });
+      supplierCreditNoteNumber = supplierCredit.invoiceNumber;
+      const supplierKeyBase = `invoices/${booking._id.toString()}/${supplierCreditNoteNumber}`;
+      supplierCreditNoteUrl = await uploadBufferToS3(
+        supplierCredit.pdfBuffer,
+        `${supplierKeyBase}.pdf`,
+        "application/pdf",
+        `inline; filename="${supplierCreditNoteNumber}.pdf"`
+      );
+      supplierUblXml = buildUblInvoiceXml(booking, supplierCreditNoteNumber, generatedAt, {
+        creditNote: true,
+        relatedInvoiceNumber: supplierRelatedInvoiceNumber,
+        selfBilling: true,
+        platform,
+      });
+      supplierCreditNoteUblUrl = await uploadBufferToS3(
+        Buffer.from(supplierUblXml, "utf8"),
+        `${supplierKeyBase}.xml`,
+        "application/xml",
+        `attachment; filename="${supplierCreditNoteNumber}.xml"`
+      );
+    }
+
     // Persist PDF/UBL before Peppol so a slow Odoo call cannot leave a stuck GENERATING-CN claim.
-    const update = {
-      creditNoteNumber,
-      creditNoteUrl,
+    const update: CreditArtifactResult = {
+      creditNoteNumber: creditNoteNumber!,
+      creditNoteUrl: creditNoteUrl!,
       creditNoteUblUrl,
       creditNoteGeneratedAt: generatedAt,
       creditNoteRelatedInvoiceNumber: relatedInvoiceNumber,
+      supplierCreditNoteNumber: supplierCreditNoteNumber!,
+      supplierCreditNoteUrl: supplierCreditNoteUrl!,
+      supplierCreditNoteUblUrl,
+      supplierCreditNoteGeneratedAt: generatedAt,
+      supplierCreditNoteRelatedInvoiceNumber: supplierRelatedInvoiceNumber,
       creditNotePeppolDispatchStatus: "skipped" as string | undefined,
+      creditNotePeppolDispatchReason: undefined as string | undefined,
       creditNotePeppolDispatchReference: undefined as string | undefined,
+      supplierCreditNotePeppolDispatchStatus: "skipped" as string | undefined,
+      supplierCreditNotePeppolDispatchReason: undefined as string | undefined,
+      supplierCreditNotePeppolDispatchReference: undefined as string | undefined,
     };
 
     await Booking.updateOne(
@@ -1148,59 +1376,350 @@ export async function ensureCreditInvoiceArtifacts(
           "payment.creditNoteUblUrl": update.creditNoteUblUrl,
           "payment.creditNoteGeneratedAt": update.creditNoteGeneratedAt,
           "payment.creditNoteRelatedInvoiceNumber": update.creditNoteRelatedInvoiceNumber,
+          "payment.supplierCreditNoteNumber": update.supplierCreditNoteNumber,
+          "payment.supplierCreditNoteUrl": update.supplierCreditNoteUrl,
+          "payment.supplierCreditNoteUblUrl": update.supplierCreditNoteUblUrl,
+          "payment.supplierCreditNoteGeneratedAt": update.supplierCreditNoteGeneratedAt,
+          "payment.supplierCreditNoteRelatedInvoiceNumber": update.supplierCreditNoteRelatedInvoiceNumber,
           "payment.creditNotePeppolDispatchStatus": update.creditNotePeppolDispatchStatus,
+          "payment.supplierCreditNotePeppolDispatchStatus": update.supplierCreditNotePeppolDispatchStatus,
         },
       }
     );
     await persistPaymentArtifactUpdate(booking._id, paymentId, update);
 
-    try {
-      const peppolResult = await maybeDispatchPeppolInvoice({
-        booking,
-        invoiceNumber: creditNoteNumber,
-        ublXml,
-        invoiceUblUrl: creditNoteUblUrl,
-        documentType: "credit_note",
-      });
-      update.creditNotePeppolDispatchStatus = peppolResult.status;
-      update.creditNotePeppolDispatchReference = peppolResult.reference;
-      await Booking.updateOne(
-        { _id: booking._id },
-        {
-          $set: {
-            "payment.creditNotePeppolDispatchStatus": peppolResult.status,
-            "payment.creditNotePeppolDispatchReference": peppolResult.reference,
-          },
-        }
-      );
-      await persistPaymentArtifactUpdate(booking._id, paymentId, {
-        creditNotePeppolDispatchStatus: peppolResult.status,
-        creditNotePeppolDispatchReference: peppolResult.reference,
-      });
-    } catch (peppolError) {
-      console.error(
-        `[INVOICE] Peppol credit-note dispatch failed for booking ${bookingId} after artifacts were saved:`,
-        peppolError instanceof Error ? peppolError.message : peppolError
-      );
-      update.creditNotePeppolDispatchStatus = "failed";
-      await Booking.updateOne(
-        { _id: booking._id },
-        { $set: { "payment.creditNotePeppolDispatchStatus": "failed" } }
-      );
-      await persistPaymentArtifactUpdate(booking._id, paymentId, {
-        creditNotePeppolDispatchStatus: "failed",
-      });
+    if (customerUblXml && update.creditNotePeppolDispatchStatus !== "sent") {
+      try {
+        const customerPricing = getPricingLinesForUbl(booking, { selfBilling: false, platform });
+        const peppolResult = await maybeDispatchPeppolInvoice({
+          booking,
+          side: "customer",
+          invoiceNumber: creditNoteNumber!,
+          ublXml: customerUblXml,
+          invoiceUblUrl: creditNoteUblUrl!,
+          documentType: "credit_note",
+          netAmount: customerPricing.totals.netAmount,
+          vatRate: booking.payment?.vatRate,
+          reverseCharge: booking.payment?.reverseCharge,
+          lineItems: getPeppolLineItems(customerPricing),
+        });
+        update.creditNotePeppolDispatchStatus = peppolResult.status;
+        update.creditNotePeppolDispatchReason = peppolResult.reason;
+        update.creditNotePeppolDispatchReference = peppolResult.reference;
+        await Booking.updateOne(
+          { _id: booking._id },
+          {
+            $set: {
+              "payment.creditNotePeppolDispatchStatus": peppolResult.status,
+              "payment.creditNotePeppolDispatchReason": peppolResult.reason,
+              "payment.creditNotePeppolDispatchReference": peppolResult.reference,
+            },
+          }
+        );
+        await persistPaymentArtifactUpdate(booking._id, paymentId, {
+          creditNotePeppolDispatchStatus: peppolResult.status,
+          creditNotePeppolDispatchReason: peppolResult.reason,
+          creditNotePeppolDispatchReference: peppolResult.reference,
+        });
+      } catch (peppolError) {
+        const reason = peppolError instanceof Error ? peppolError.message : String(peppolError);
+        console.error(`[INVOICE] Peppol customer credit-note dispatch failed for booking ${bookingId}:`, reason);
+        update.creditNotePeppolDispatchStatus = "failed";
+        update.creditNotePeppolDispatchReason = reason;
+        await Booking.updateOne(
+          { _id: booking._id },
+          { $set: {
+            "payment.creditNotePeppolDispatchStatus": "failed",
+            "payment.creditNotePeppolDispatchReason": reason,
+          } }
+        );
+        await persistPaymentArtifactUpdate(booking._id, paymentId, {
+          creditNotePeppolDispatchStatus: "failed",
+          creditNotePeppolDispatchReason: reason,
+        });
+      }
+    }
+
+    if (supplierUblXml && update.supplierCreditNotePeppolDispatchStatus !== "sent") {
+      try {
+        const supplierPricing = getPricingLinesForUbl(booking, { selfBilling: true, platform });
+        const supplierPeppolResult = await maybeDispatchPeppolInvoice({
+          booking,
+          side: "supplier",
+          invoiceNumber: supplierCreditNoteNumber!,
+          ublXml: supplierUblXml,
+          invoiceUblUrl: supplierCreditNoteUblUrl!,
+          documentType: "credit_note",
+          netAmount: supplierPricing.totals.netAmount,
+          vatRate: supplierPricing.totals.vatRate,
+          reverseCharge: supplierPricing.totals.reverseCharge,
+          lineItems: getPeppolLineItems(supplierPricing),
+        });
+        update.supplierCreditNotePeppolDispatchStatus = supplierPeppolResult.status;
+        update.supplierCreditNotePeppolDispatchReason = supplierPeppolResult.reason;
+        update.supplierCreditNotePeppolDispatchReference = supplierPeppolResult.reference;
+        await Booking.updateOne(
+          { _id: booking._id },
+          { $set: {
+            "payment.supplierCreditNotePeppolDispatchStatus": supplierPeppolResult.status,
+            "payment.supplierCreditNotePeppolDispatchReason": supplierPeppolResult.reason,
+            "payment.supplierCreditNotePeppolDispatchReference": supplierPeppolResult.reference,
+          } }
+        );
+        await persistPaymentArtifactUpdate(booking._id, paymentId, {
+          supplierCreditNotePeppolDispatchStatus: supplierPeppolResult.status,
+          supplierCreditNotePeppolDispatchReason: supplierPeppolResult.reason,
+          supplierCreditNotePeppolDispatchReference: supplierPeppolResult.reference,
+        });
+      } catch (supplierPeppolError) {
+        const reason = supplierPeppolError instanceof Error ? supplierPeppolError.message : String(supplierPeppolError);
+        console.error(`[INVOICE] Peppol supplier credit-note dispatch failed for booking ${bookingId}:`, reason);
+        update.supplierCreditNotePeppolDispatchStatus = "failed";
+        update.supplierCreditNotePeppolDispatchReason = reason;
+        await Booking.updateOne(
+          { _id: booking._id },
+          { $set: {
+            "payment.supplierCreditNotePeppolDispatchStatus": "failed",
+            "payment.supplierCreditNotePeppolDispatchReason": reason,
+          } }
+        );
+        await persistPaymentArtifactUpdate(booking._id, paymentId, {
+          supplierCreditNotePeppolDispatchStatus: "failed",
+          supplierCreditNotePeppolDispatchReason: reason,
+        });
+      }
     }
 
     return {
-      creditNoteNumber,
-      creditNoteUrl,
+      creditNoteNumber: creditNoteNumber!,
+      creditNoteUrl: creditNoteUrl!,
       creditNoteUblUrl,
       creditNoteGeneratedAt: generatedAt,
       relatedInvoiceNumber,
+      supplierCreditNoteNumber,
+      supplierCreditNoteUrl,
+      supplierCreditNoteUblUrl,
+      supplierCreditNoteGeneratedAt: generatedAt,
+      supplierCreditNoteRelatedInvoiceNumber: supplierRelatedInvoiceNumber,
+      creditNotePeppolDispatchStatus: update.creditNotePeppolDispatchStatus,
+      creditNotePeppolDispatchReason: update.creditNotePeppolDispatchReason,
+      creditNotePeppolDispatchReference: update.creditNotePeppolDispatchReference,
+      supplierCreditNotePeppolDispatchStatus: update.supplierCreditNotePeppolDispatchStatus,
+      supplierCreditNotePeppolDispatchReason: update.supplierCreditNotePeppolDispatchReason,
+      supplierCreditNotePeppolDispatchReference: update.supplierCreditNotePeppolDispatchReference,
     };
   } catch (error) {
     await clearCreditNoteGenerationClaim(bookingId);
     throw error;
   }
+}
+
+const applyManualParty = (booking: any, input: ManualInvoiceCorrectionInput): any => {
+  const customerOverride: ManualInvoicePartyOverride | undefined = input.customer;
+  const professionalOverride: ManualInvoicePartyOverride | undefined = input.professional;
+  const customer = customerOverride
+    ? {
+        ...(booking.customer || {}),
+        name: customerOverride.name ?? booking.customer?.name,
+        email: customerOverride.email ?? booking.customer?.email,
+        businessName: customerOverride.businessName ?? booking.customer?.businessName,
+        vatNumber: customerOverride.vatNumber ?? booking.customer?.vatNumber,
+        companyAddress: {
+          ...(booking.customer?.companyAddress || {}),
+          address: customerOverride.address ?? booking.customer?.companyAddress?.address,
+          postalCode: customerOverride.postalCode ?? booking.customer?.companyAddress?.postalCode,
+          city: customerOverride.city ?? booking.customer?.companyAddress?.city,
+          country: customerOverride.country ?? booking.customer?.companyAddress?.country,
+        },
+      }
+    : booking.customer;
+  const professional = professionalOverride
+    ? {
+        ...(booking.professional || {}),
+        name: professionalOverride.name ?? booking.professional?.name,
+        vatNumber: professionalOverride.vatNumber ?? booking.professional?.vatNumber,
+        businessInfo: {
+          ...(booking.professional?.businessInfo || {}),
+          companyName: professionalOverride.businessName ?? booking.professional?.businessInfo?.companyName,
+          address: professionalOverride.address ?? booking.professional?.businessInfo?.address,
+          postalCode: professionalOverride.postalCode ?? booking.professional?.businessInfo?.postalCode,
+          city: professionalOverride.city ?? booking.professional?.businessInfo?.city,
+          country: professionalOverride.country ?? booking.professional?.businessInfo?.country,
+        },
+      }
+    : booking.professional;
+  return {
+    ...(typeof booking.toObject === "function" ? booking.toObject() : booking),
+    customer,
+    professional,
+    payment: {
+      ...(booking.payment || {}),
+      ...input.payment,
+      vatBreakdown: input.lines.map((line: ManualInvoiceLine) => ({
+        description: line.description,
+        netAmount: line.amount,
+        vatRate: line.vatRate,
+        vatAmount: input.payment.reverseCharge ? 0 : Math.round(line.amount * line.vatRate) / 100,
+        vatLabel: line.vatLabel,
+      })),
+    },
+    selectedExtraOptions: [],
+    extraCosts: [],
+    __manualInvoiceLines: input.lines,
+  };
+};
+
+const notifyManualArtifactReady = async (
+  booking: any,
+  input: ManualInvoiceCorrectionInput,
+  number: string,
+  url: string,
+) => {
+  const bookingId = booking._id?.toString?.() || "";
+  const eventKey = input.side === "customer" ? "customer.invoice_ready" : "professional.invoice_ready";
+  const recipientId = input.side === "customer"
+    ? booking.customer?._id?.toString?.()
+    : booking.professional?._id?.toString?.();
+  if (!recipientId) return;
+  await notify({
+    userId: recipientId,
+    eventKey,
+    entityType: "booking",
+    entityId: bookingId,
+    context: { bookingId, invoiceNumber: number, invoiceUrl: url },
+  });
+};
+
+export async function createManualInvoiceArtifact(
+  bookingId: string,
+  paymentId: string,
+  input: ManualInvoiceCorrectionInput,
+): Promise<Record<string, unknown>> {
+  const booking = await loadBookingForInvoice(bookingId);
+  if (!booking?.payment) throw new Error("Booking payment was not found.");
+
+  const relatedInvoiceNumber = input.relatedInvoiceNumber || (
+    input.side === "customer" ? booking.payment.invoiceNumber : booking.payment.supplierInvoiceNumber
+  );
+  if (input.documentType === "credit_note" && !relatedInvoiceNumber) {
+    throw new Error("A related original invoice number is required for a credit note.");
+  }
+
+  const manualBooking = applyManualParty(booking, input);
+  const generatedAt = new Date();
+  const platform = await getPlatformParty();
+  const generated = await generateBookingInvoice(manualBooking as any, {
+    kind: input.side === "supplier" ? "self_bill" : "customer",
+    creditNote: input.documentType === "credit_note",
+    relatedInvoiceNumber,
+    manualOverride: input,
+  });
+  const keyBase = `invoices/${booking._id.toString()}/manual/${generated.invoiceNumber}`;
+  const artifactUrl = await uploadBufferToS3(
+    generated.pdfBuffer,
+    `${keyBase}.pdf`,
+    "application/pdf",
+    `inline; filename="${generated.invoiceNumber}.pdf"`,
+  );
+  const ublXml = buildUblInvoiceXml(manualBooking, generated.invoiceNumber, generatedAt, {
+    creditNote: input.documentType === "credit_note",
+    relatedInvoiceNumber,
+    selfBilling: input.side === "supplier",
+    platform,
+  });
+  const ublUrl = await uploadBufferToS3(
+    Buffer.from(ublXml, "utf8"),
+    `${keyBase}.xml`,
+    "application/xml",
+    `attachment; filename="${generated.invoiceNumber}.xml"`,
+  );
+
+  let peppolDispatchStatus = "skipped";
+  let peppolDispatchReason: string | undefined;
+  let peppolDispatchReference: string | undefined;
+  try {
+    const pricing = getPricingLinesForUbl(manualBooking, {
+      selfBilling: input.side === "supplier",
+      platform,
+    });
+    const result = await maybeDispatchPeppolInvoice({
+      booking: manualBooking,
+      side: input.side,
+      invoiceNumber: generated.invoiceNumber,
+      ublXml,
+      invoiceUblUrl: ublUrl,
+      documentType: input.documentType,
+      netAmount: pricing.totals.netAmount,
+      vatRate: pricing.totals.vatRate,
+      reverseCharge: pricing.totals.reverseCharge,
+      lineItems: getPeppolLineItems(pricing),
+    });
+    peppolDispatchStatus = result.status;
+    peppolDispatchReason = result.reason;
+    peppolDispatchReference = result.reference;
+  } catch (error) {
+    peppolDispatchStatus = "failed";
+    peppolDispatchReason = error instanceof Error ? error.message : String(error);
+  }
+
+  const isCustomer = input.side === "customer";
+  const isCredit = input.documentType === "credit_note";
+  const fields = isCredit
+    ? isCustomer
+      ? {
+          creditNoteNumber: generated.invoiceNumber,
+          creditNoteUrl: artifactUrl,
+          creditNoteUblUrl: ublUrl,
+          creditNoteGeneratedAt: generatedAt,
+          creditNoteRelatedInvoiceNumber: relatedInvoiceNumber,
+          creditNotePeppolDispatchStatus: peppolDispatchStatus,
+          creditNotePeppolDispatchReason: peppolDispatchReason,
+          creditNotePeppolDispatchReference: peppolDispatchReference,
+        }
+      : {
+          supplierCreditNoteNumber: generated.invoiceNumber,
+          supplierCreditNoteUrl: artifactUrl,
+          supplierCreditNoteUblUrl: ublUrl,
+          supplierCreditNoteGeneratedAt: generatedAt,
+          supplierCreditNoteRelatedInvoiceNumber: relatedInvoiceNumber,
+          supplierCreditNotePeppolDispatchStatus: peppolDispatchStatus,
+          supplierCreditNotePeppolDispatchReason: peppolDispatchReason,
+          supplierCreditNotePeppolDispatchReference: peppolDispatchReference,
+        }
+    : isCustomer
+      ? {
+          invoiceNumber: generated.invoiceNumber,
+          invoiceUrl: artifactUrl,
+          invoiceUblUrl: ublUrl,
+          invoiceGeneratedAt: generatedAt,
+          peppolDispatchStatus,
+          peppolDispatchReason,
+          peppolDispatchReference,
+        }
+      : {
+          supplierInvoiceNumber: generated.invoiceNumber,
+          supplierInvoiceUrl: artifactUrl,
+          supplierInvoiceUblUrl: ublUrl,
+          supplierInvoiceGeneratedAt: generatedAt,
+          supplierPeppolDispatchStatus: peppolDispatchStatus,
+          supplierPeppolDispatchReason: peppolDispatchReason,
+          supplierPeppolDispatchReference: peppolDispatchReference,
+        };
+
+  await Booking.updateOne(
+    { _id: booking._id },
+    { $set: Object.fromEntries(Object.entries(fields).map(([key, value]) => [`payment.${key}`, value])) },
+  );
+  await persistPaymentArtifactUpdate(booking._id, paymentId, fields);
+  await notifyManualArtifactReady(booking, input, generated.invoiceNumber, artifactUrl);
+  return {
+    side: input.side,
+    documentType: input.documentType,
+    invoiceNumber: generated.invoiceNumber,
+    invoiceUrl: artifactUrl,
+    invoiceUblUrl: ublUrl,
+    peppolDispatchStatus,
+    peppolDispatchReason,
+    peppolDispatchReference,
+  };
 }

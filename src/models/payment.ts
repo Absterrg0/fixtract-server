@@ -14,6 +14,8 @@ export type PaymentStatus =
   | "partially_refunded"
   | "disputed";
 
+export type TransferStatus = "pending" | "succeeded" | "failed";
+
 export interface IPaymentRefund {
   amount: number;
   reason?: string;
@@ -55,12 +57,21 @@ export interface IPayment extends Document {
   extraCostPaymentSucceeded?: boolean;
   extraCostPaidAt?: Date;
   extraCostStripePaymentIntentId?: string;
+  extraCostStripeChargeId?: string;
   extraCostTransferId?: string;
+  extraCostTransferStatus?: "pending" | "succeeded" | "failed";
+  extraCostTransferFailureReason?: string;
+  extraCostTransferAttemptedAt?: Date;
 
   stripePaymentIntentId?: string;
   stripeChargeId?: string;
   stripeTransferId?: string;
   stripeDestinationPayment?: string;
+  transferStatus?: TransferStatus;
+  transferIdempotencyKey?: string;
+  transferAttempt?: number;
+  transferFailureReason?: string;
+  transferAttemptedAt?: Date;
 
   refunds: IPaymentRefund[];
 
@@ -92,7 +103,17 @@ export interface IPayment extends Document {
   creditNoteGeneratedAt?: Date;
   creditNoteRelatedInvoiceNumber?: string;
   creditNotePeppolDispatchStatus?: string;
+  creditNotePeppolDispatchReason?: string;
   creditNotePeppolDispatchReference?: string;
+  creditNoteGenerationClaim?: string;
+  supplierCreditNoteNumber?: string;
+  supplierCreditNoteUrl?: string;
+  supplierCreditNoteUblUrl?: string;
+  supplierCreditNoteGeneratedAt?: Date;
+  supplierCreditNoteRelatedInvoiceNumber?: string;
+  supplierCreditNotePeppolDispatchStatus?: string;
+  supplierCreditNotePeppolDispatchReason?: string;
+  supplierCreditNotePeppolDispatchReference?: string;
 
   metadata?: Record<string, any>;
 
@@ -173,12 +194,21 @@ const PaymentSchema = new Schema<IPayment>(
     extraCostPaymentSucceeded: { type: Boolean },
     extraCostPaidAt: { type: Date },
     extraCostStripePaymentIntentId: { type: String },
+    extraCostStripeChargeId: { type: String },
     extraCostTransferId: { type: String },
+    extraCostTransferStatus: { type: String, enum: ["pending", "succeeded", "failed"] },
+    extraCostTransferFailureReason: { type: String, maxlength: 1000 },
+    extraCostTransferAttemptedAt: { type: Date },
 
     stripePaymentIntentId: { type: String },
     stripeChargeId: { type: String },
     stripeTransferId: { type: String },
     stripeDestinationPayment: { type: String },
+    transferStatus: { type: String, enum: ["pending", "succeeded", "failed"] },
+    transferIdempotencyKey: { type: String },
+    transferAttempt: { type: Number, min: 0, default: 0 },
+    transferFailureReason: { type: String, maxlength: 1000 },
+    transferAttemptedAt: { type: Date },
 
     refunds: { type: [PaymentRefundSchema], default: [] },
 
@@ -210,7 +240,17 @@ const PaymentSchema = new Schema<IPayment>(
     creditNoteGeneratedAt: { type: Date },
     creditNoteRelatedInvoiceNumber: { type: String },
     creditNotePeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    creditNotePeppolDispatchReason: { type: String },
     creditNotePeppolDispatchReference: { type: String },
+    creditNoteGenerationClaim: { type: String },
+    supplierCreditNoteNumber: { type: String },
+    supplierCreditNoteUrl: { type: String },
+    supplierCreditNoteUblUrl: { type: String },
+    supplierCreditNoteGeneratedAt: { type: Date },
+    supplierCreditNoteRelatedInvoiceNumber: { type: String },
+    supplierCreditNotePeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    supplierCreditNotePeppolDispatchReason: { type: String },
+    supplierCreditNotePeppolDispatchReference: { type: String },
 
     metadata: { type: Schema.Types.Mixed },
   },
@@ -229,6 +269,7 @@ PaymentSchema.index({ status: 1 });
 PaymentSchema.index({ customer: 1, status: 1 });
 PaymentSchema.index({ professional: 1, status: 1 });
 PaymentSchema.index({ bookingNumber: 1 });
+PaymentSchema.index({ stripePaymentIntentId: 1 }, { unique: true, sparse: true });
 
 const Payment = model<IPayment>("Payment", PaymentSchema);
 

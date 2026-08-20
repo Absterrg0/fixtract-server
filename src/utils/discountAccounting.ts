@@ -40,7 +40,10 @@ export function calculateDiscountedPayouts(
 
   return {
     customerPays: discount.finalAmount,
-    platformCommission: roundToTwo(platformCommissionOnBase - platformAbsorbed),
+    // Discounts can be larger than the nominal commission. Keep the stored
+    // platform fee non-negative; any subsidy is an explicit platform cost,
+    // never a negative commission that corrupts payout reporting.
+    platformCommission: roundToTwo(Math.max(0, platformCommissionOnBase - platformAbsorbed)),
     professionalPayout,
   };
 }

@@ -573,7 +573,14 @@ export const listProfessionalManagement = async (req: Request, res: Response) =>
 
     const professionalIds = professionals.map((item: any) => item._id);
     const earnings = await Payment.aggregate([
-      { $match: { professional: { $in: professionalIds }, status: "completed" } },
+      { $match: {
+        professional: { $in: professionalIds },
+        status: "completed",
+        $or: [
+          { transferStatus: "succeeded" },
+          { transferStatus: { $exists: false }, stripeTransferId: { $exists: true, $ne: null } },
+        ],
+      } },
       { $group: { _id: "$professional", moneyEarned: { $sum: { $ifNull: ["$professionalPayout", 0] } } } }
     ]);
     const earningsMap = new Map(earnings.map((item) => [String(item._id), item.moneyEarned || 0]));

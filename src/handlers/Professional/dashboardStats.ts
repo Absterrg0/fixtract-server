@@ -51,6 +51,18 @@ export const getProfessionalDashboardStats = async (req: Request, res: Response)
     const baseMatch: any = { professional: professionalId, ...dateFilter };
 
     const activeStatuses = ['booked', 'in_progress', 'professional_completed', 'completed'];
+    const settledPayoutMatch = {
+      $or: [
+        { 'payment.transferStatus': 'succeeded' },
+        { 'payment.transferStatus': { $exists: false }, 'payment.stripeTransferId': { $exists: true, $ne: null } },
+      ],
+    };
+    const settledPayoutExpression = {
+      $or: [
+        { $eq: ['$payment.transferStatus', 'succeeded'] },
+        { $ne: [{ $ifNull: ['$payment.stripeTransferId', null] }, null] },
+      ],
+    };
 
     const [
       totalBookings,
@@ -92,7 +104,8 @@ export const getProfessionalDashboardStats = async (req: Request, res: Response)
         {
           $match: {
             professional: professionalId,
-            'payment.status': { $in: ['authorized', 'completed'] },
+            'payment.status': 'completed',
+            ...settledPayoutMatch,
           },
         },
         {
@@ -129,7 +142,8 @@ export const getProfessionalDashboardStats = async (req: Request, res: Response)
         {
           $match: {
             professional: professionalId,
-            'payment.status': { $in: ['authorized', 'completed'] },
+            'payment.status': 'completed',
+            ...settledPayoutMatch,
           },
         },
         {
@@ -200,7 +214,7 @@ export const getProfessionalDashboardStats = async (req: Request, res: Response)
             revenue: {
               $sum: {
                 $cond: [
-                  { $in: ['$payment.status', ['authorized', 'completed']] },
+                  { $and: [{ $eq: ['$payment.status', 'completed'] }, settledPayoutExpression] },
                   { $ifNull: ['$payment.professionalPayout', 0] },
                   0,
                 ],
@@ -227,7 +241,7 @@ export const getProfessionalDashboardStats = async (req: Request, res: Response)
             revenue: {
               $sum: {
                 $cond: [
-                  { $in: ['$payment.status', ['authorized', 'completed']] },
+                  { $and: [{ $eq: ['$payment.status', 'completed'] }, settledPayoutExpression] },
                   { $ifNull: ['$payment.professionalPayout', 0] },
                   0,
                 ],

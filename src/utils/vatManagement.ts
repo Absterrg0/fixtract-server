@@ -116,10 +116,7 @@ export const parseVatCountryCode = (country?: string | null): string => {
   return "";
 };
 
-export const normalizeVatCountry = (country?: string | null): string => {
-  if (country == null || String(country).trim() === "") return "BE";
-  return parseVatCountryCode(country);
-};
+export const normalizeVatCountry = (country?: string | null): string => parseVatCountryCode(country);
 
 export const firstVatCountry = (...candidates: Array<string | null | undefined>): string => {
   for (const candidate of candidates) {
@@ -318,6 +315,10 @@ export const resolveSupplierB2BInvoiceDecision = (params: {
   const buyerVatValid = Boolean(
     params.buyerVatNumber && validateVATNumberFormat(params.buyerVatNumber),
   );
+  // The configured VAT-country exception table is authoritative for the
+  // platform buyer's place of supply, including cross-border supplier cases.
+  // Do this before the generic cross-border reverse-charge branch.
+  if (isB2BSameAsB2CCountry(buyerCountry)) return decision;
   if (supplierCountry && buyerCountry && supplierCountry !== buyerCountry && supplierVatValid && buyerVatValid) {
     return {
       ...decision,

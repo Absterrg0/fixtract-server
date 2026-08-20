@@ -851,6 +851,13 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
     }
 
+    if (!parseVatCountryCode(bookingData.location?.country)) {
+      return res.status(400).json({
+        success: false,
+        msg: "A valid service country is required for VAT determination",
+      });
+    }
+
     let booking: IBooking | null = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {

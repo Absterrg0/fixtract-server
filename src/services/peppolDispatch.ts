@@ -33,6 +33,14 @@ type PeppolDispatchPayload = {
   netAmount?: number;
   vatRate?: number;
   reverseCharge?: boolean;
+  /** The same accounting lines rendered in the FIX/SUP UBL/PDF. */
+  lineItems?: Array<{
+    description: string;
+    price: number;
+    vatRate?: number;
+    quantity?: number;
+    unitPrice?: number;
+  }>;
   ublXml: string;
   ublUrl: string;
 };
@@ -41,6 +49,8 @@ type OdooInvoiceLine = {
   description: string;
   price: number;
   vatRate?: number;
+  quantity?: number;
+  unitPrice?: number;
 };
 
 const MAX_DISPATCH_ATTEMPTS = 3;
@@ -156,6 +166,16 @@ const getOdooInvoiceLines = (booking: any, documentType: "invoice" | "credit_not
 };
 
 const getOdooInvoiceLinesForPayload = (booking: any, payload: PeppolDispatchPayload): OdooInvoiceLine[] => {
+  if (payload.lineItems?.length) {
+    const sign = payload.documentType === "credit_note" ? -1 : 1;
+    return payload.lineItems.map((line) => ({
+      description: line.description || "Service",
+      price: Number(line.price || 0) * sign,
+      vatRate: Number(line.vatRate ?? payload.vatRate ?? 0),
+      quantity: Number.isFinite(Number(line.quantity)) && Number(line.quantity) > 0 ? Number(line.quantity) : undefined,
+      unitPrice: Number.isFinite(Number(line.unitPrice)) ? Number(line.unitPrice) : undefined,
+    }));
+  }
   if (payload.side === "supplier" && typeof payload.netAmount === "number") {
     return [{
       description: booking.rfqData?.description || booking.quote?.description || "Service",
@@ -240,8 +260,11 @@ const ensureOdooPartner = async (
   if (partners[0]?.id) return partners[0].id;
 
   const countryCode = normalizeVatCountry(
-    payload.recipientCountry || businessInfo.country || customer.companyAddress?.country || customer.location?.country || "BE"
+    payload.recipientCountry || businessInfo.country || customer.companyAddress?.country || customer.location?.country
   );
+  if (!countryCode) {
+    throw new Error("Odoo partner country is required for Peppol dispatch");
+  }
   const countryId = countryCode ? await findOdooCountryId(config, countryCode) : undefined;
   const partnerVals: Record<string, unknown> = {
     name: payload.customerName || businessInfo.companyName || customer.businessName || customer.name || "Customer",
@@ -303,10 +326,12 @@ const buildOdooMoveVals = async (
   const currencyId = currency === "EUR" ? undefined : await findOdooCurrencyId(config, currency);
   const reverseCharge = payload.reverseCharge ?? Boolean(booking.payment?.reverseCharge);
   const invoiceLineIds = getOdooInvoiceLinesForPayload(booking, payload).map((line) => {
+    const quantity = line.quantity && line.quantity > 0 ? line.quantity : 1;
+    const priceUnit = line.unitPrice ?? (quantity !== 1 ? line.price / quantity : line.price);
     const lineVals: Record<string, unknown> = {
       name: line.description,
-      quantity: 1,
-      price_unit: line.price,
+      quantity,
+      price_unit: priceUnit,
       account_id: payload.side === "supplier" ? config.expenseAccountId : config.incomeAccountId,
     };
     const taxIds = getTaxIdsForLine(config, line, reverseCharge);
@@ -370,6 +395,30 @@ const ensureUblAttachmentOnOdooMove = async (
   });
 };
 
+const readOdooEdiDeliveryState = async (
+  config: OdooAccountingConfig,
+  moveId: number,
+): Promise<Array<{ state?: string; blocking_level?: string; error?: string; error_message?: string }> | undefined> => {
+  try {
+    const { value } = await odooCallWithRetries<Array<{ state?: string; blocking_level?: string; error?: string; error_message?: string }>>(
+      config,
+      "account.edi.document",
+      "search_read",
+      {
+        domain: [["move_id", "=", moveId]],
+        fields: ["state", "blocking_level", "error", "error_message"],
+        limit: 20,
+      },
+    );
+    return value;
+  } catch {
+    // Older Odoo installations may not expose the EDI document model to the
+    // API key. In that case the send request is still accepted, but delivery
+    // must remain queued rather than being reported as sent.
+    return undefined;
+  }
+};
+
 const dispatchToOdoo = async (
   booking: any,
   payload: PeppolDispatchPayload,
@@ -431,13 +480,34 @@ const dispatchToOdoo = async (
 
     try {
       await odooCallWithRetries(config, "account.move", "button_process_edi_web_services", { ids: [moveId] });
+      const ediDocuments = await readOdooEdiDeliveryState(config, moveId);
+      const failedDocument = ediDocuments?.find((document) =>
+        ["error", "cancelled", "canceled"].includes(String(document.state || "").toLowerCase()) ||
+        ["error"].includes(String(document.blocking_level || "").toLowerCase()) ||
+        Boolean(document.error || document.error_message),
+      );
+      if (failedDocument) {
+        return {
+          status: "failed",
+          provider: "odoo",
+          reference: `odoo-account.move-${moveId}`,
+          reason: failedDocument.error_message || failedDocument.error || "Odoo reported a Peppol EDI delivery error",
+          response: { moveId, companyId: config.companyId, ediDocuments },
+          attempts: 1,
+        };
+      }
+      const delivered = ediDocuments?.some((document) =>
+        ["sent", "done", "delivered"].includes(String(document.state || "").toLowerCase()),
+      );
       return {
-        status: "sent",
+        status: delivered ? "sent" : "queued",
         provider: "odoo",
         reference: `odoo-account.move-${moveId}`,
-        reason: "Invoice posted in Odoo and Peppol EDI send requested",
+        reason: delivered
+          ? "Odoo confirms the Peppol EDI document was sent"
+          : "Invoice posted in Odoo; Peppol send requested and delivery status is still pending",
         dispatchedAt: new Date(),
-        response: { moveId, companyId: config.companyId },
+        response: { moveId, companyId: config.companyId, ediDocuments },
         attempts: 1,
       };
     } catch {
@@ -473,6 +543,7 @@ export async function maybeDispatchPeppolInvoice(params: {
   netAmount?: number;
   vatRate?: number;
   reverseCharge?: boolean;
+  lineItems?: PeppolDispatchPayload["lineItems"];
 }): Promise<PeppolDispatchResult> {
   const side = params.side || "customer";
   if (!isBelgianB2BBooking(params.booking, side)) {
@@ -521,6 +592,7 @@ export async function maybeDispatchPeppolInvoice(params: {
     netAmount: params.netAmount,
     vatRate: params.vatRate,
     reverseCharge: params.reverseCharge,
+    lineItems: params.lineItems,
     ublXml: params.ublXml,
     ublUrl: params.invoiceUblUrl,
   };

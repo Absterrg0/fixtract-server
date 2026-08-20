@@ -1,6 +1,7 @@
 import Booking, { BookingStatus } from '../../models/booking';
 import { SYSTEM_USER_ID } from '../../constants/system';
 import { captureAndTransferPayment } from '../../handlers/Stripe/payment';
+import { getTransferStatus } from '../../utils/paymentSafety';
 import { stripe } from '../../services/stripe';
 import {
   generateIdempotencyKey,
@@ -84,6 +85,7 @@ export async function finalizeBookingCompletion(args: {
     {
       $set: {
         status: COMPLETED_BOOKING_STATUS,
+        actualStartDate: booking.actualStartDate || completionDate,
         actualEndDate: completionDate,
         ...(booking.extraCosts && booking.extraCosts.length > 0 ? { extraCostStatus: 'confirmed' } : {}),
       },
@@ -110,6 +112,28 @@ export async function finalizeBookingCompletion(args: {
     : '';
 
   if (!transferResult.success) {
+    const transferFailed = getTransferStatus({
+      transferStatus: refreshedBooking?.payment?.transferStatus,
+      stripeTransferId: refreshedBooking?.payment?.stripeTransferId,
+      metadata: undefined,
+    }) === 'failed';
+    if (transferFailed) {
+      await Booking.findOneAndUpdate(
+        { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },
+        {
+          $set: { status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
+          $push: {
+            statusHistory: {
+              status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
+              timestamp: new Date(),
+              updatedBy: actorId,
+              note: `Completion is awaiting professional payout recovery: ${transferResult.error?.message || 'transfer failed'}`,
+            },
+          },
+        },
+      );
+      return { ok: false, reason: 'payout_recovery_required', skipped: true };
+    }
     if (paymentStatus !== 'completed' && paymentStatus !== 'captured') {
       await Booking.findOneAndUpdate(
         { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },
