@@ -1,6 +1,7 @@
 import MarketingLead from '../../models/marketingLead';
 import MarketingSubscriber, { type MarketingLocale } from '../../models/marketingSubscriber';
 import MarketingSuppression from '../../models/marketingSuppression';
+import User from '../../models/user';
 import {
   MARKETING_AUDIENCE_TYPES,
   type MarketingAudienceType,
@@ -38,6 +39,7 @@ export type MarketingAudienceResolution = {
     invalidEmail: number;
     missingLocale: number;
     roleMismatch: number;
+    localeMismatch: number;
   };
   fallbackLocaleCount: number;
   overLimit: boolean;
@@ -99,7 +101,6 @@ function subscriberQuery(filters: ICampaignAudience, inactiveDays?: number): Rec
     { brevoUnsubscribedAt: null },
   ];
   if (normalized.countries.length) clauses.push({ region: { $in: normalized.countries } });
-  if (normalized.locales.length) clauses.push({ locale: { $in: normalized.locales } });
   if (normalized.serviceKeys.length && normalized.interestedServices.length) {
     clauses.push({ $or: [{ serviceKeys: { $in: normalized.serviceKeys } }, { interestedServices: { $in: normalized.interestedServices } }] });
   } else if (normalized.serviceKeys.length) {
@@ -125,9 +126,10 @@ function leadQuery(filters: ICampaignAudience): Record<string, unknown> {
   return { $and: clauses };
 }
 
-function firstNameForSubscriber(subscriber: any): string | undefined {
+function firstNameForSubscriber(subscriber: any, user?: any): string | undefined {
   if (typeof subscriber.firstName === 'string' && subscriber.firstName.trim()) return subscriber.firstName.trim();
   if (typeof subscriber.name === 'string' && subscriber.name.trim()) return subscriber.name.trim().split(/\s+/)[0];
+  if (typeof user?.name === 'string' && user.name.trim()) return user.name.trim().split(/\s+/)[0];
   return undefined;
 }
 
@@ -136,8 +138,8 @@ function firstNameForLead(lead: any): string | undefined {
   return undefined;
 }
 
-function resolvedLocale(raw: unknown, country: unknown, contentLocales: Set<MarketingLocale>): { locale?: MarketingLocale; fallback: boolean } {
-  const explicit = normalizeMarketingLocale(raw);
+function resolvedLocale(raw: unknown, country: unknown, contentLocales: Set<MarketingLocale>, userLocale?: unknown): { locale?: MarketingLocale; fallback: boolean } {
+  const explicit = normalizeMarketingLocale(userLocale) || normalizeMarketingLocale(raw);
   const countryDefault = defaultMarketingLocaleForCountry(country);
   const candidate = explicit || countryDefault;
   if (contentLocales.has(candidate)) return { locale: candidate, fallback: !explicit };
@@ -176,6 +178,12 @@ export async function resolveMarketingAudience(input: ResolveMarketingAudienceIn
     audienceType === 'subscribers' ? Promise.resolve([]) : MarketingLead.find(leadQuery(input.filters)).sort({ _id: 1 }).lean(),
   ]);
 
+  const userIds = subscribers.map((row: any) => row.userId).filter(Boolean);
+  const users = userIds.length > 0
+    ? await User.find({ _id: { $in: userIds } }).select('name marketingLocale').lean()
+    : [];
+  const usersById = new Map(users.map((user: any) => [String(user._id), user]));
+
   const seen = new Set<string>();
   const recipients: ResolvedMarketingRecipient[] = [];
   const sourceCounts = { subscribers: 0, leads: 0 };
@@ -183,6 +191,7 @@ export async function resolveMarketingAudience(input: ResolveMarketingAudienceIn
   let missingLocale = 0;
   let suppressedCount = 0;
   let roleMismatch = 0;
+  let localeMismatch = 0;
   let deduplicated = 0;
   let fallbackLocaleCount = 0;
 
@@ -200,15 +209,25 @@ export async function resolveMarketingAudience(input: ResolveMarketingAudienceIn
       deduplicated += 1;
       return;
     }
+    const user = source === 'subscriber' && row.userId ? usersById.get(String(row.userId)) : undefined;
     const role = source === 'lead' ? 'professional' : row.role;
     const requestedRoles = filters.roles.length ? filters.roles : ['customer', 'professional'];
     if (role && !requestedRoles.includes(role)) {
       roleMismatch += 1;
       return;
     }
-    const locale = resolvedLocale(row.locale, source === 'lead' ? row.country : row.region, contentLocales);
+    const locale = resolvedLocale(
+      row.locale,
+      source === 'lead' ? row.country : row.region,
+      contentLocales,
+      user?.marketingLocale,
+    );
     if (!locale.locale) {
       missingLocale += 1;
+      return;
+    }
+    if (filters.locales.length > 0 && !filters.locales.includes(locale.locale)) {
+      localeMismatch += 1;
       return;
     }
     seen.add(email);
@@ -216,7 +235,7 @@ export async function resolveMarketingAudience(input: ResolveMarketingAudienceIn
     sourceCounts[source === 'subscriber' ? 'subscribers' : 'leads'] += 1;
     recipients.push({
       email,
-      firstName: source === 'subscriber' ? firstNameForSubscriber(row) : firstNameForLead(row),
+      firstName: source === 'subscriber' ? firstNameForSubscriber(row, user) : firstNameForLead(row),
       locale: locale.locale,
       country: source === 'lead' ? row.country : row.region,
       serviceKeys: Array.isArray(row.serviceKeys) && row.serviceKeys.length ? row.serviceKeys : (row.interestedServices || []),
@@ -238,7 +257,7 @@ export async function resolveMarketingAudience(input: ResolveMarketingAudienceIn
     exactTotal: recipients.length,
     bySource: sourceCounts,
     deduplicated,
-    excluded: { suppressed: suppressedCount, invalidEmail, missingLocale, roleMismatch },
+    excluded: { suppressed: suppressedCount, invalidEmail, missingLocale, roleMismatch, localeMismatch },
     fallbackLocaleCount,
     overLimit,
     criteriaHash,

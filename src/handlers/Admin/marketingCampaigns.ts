@@ -8,14 +8,20 @@ import MarketingCampaign, {
   type MarketingLocale,
 } from '../../models/marketingCampaign';
 import MarketingSubscriber from '../../models/marketingSubscriber';
+import MarketingSuppression from '../../models/marketingSuppression';
 import { params } from '../../utils/requestParams';
 import { syncSubscribersFromUsers } from '../../utils/marketing/audience';
 import { refreshCampaignStats, sendMarketingCampaign } from '../../utils/marketing/sendCampaign';
-import { listActiveBrevoTemplates } from '../../utils/marketing/brevoMarketing';
+import { getBrevoMarketingTemplateHtml, listActiveBrevoTemplates } from '../../utils/marketing/brevoMarketing';
 import { sendBrevoTransactionalMarketingEmail } from '../../utils/marketing/brevoMarketing';
 import { isLeadOutreachEnabled, resolveMarketingAudience } from '../../utils/marketing/audienceResolver';
-import { assertInlineMarketingContent, renderMarketingEmail } from '../../utils/marketing/renderCampaign';
+import {
+  assertInlineMarketingContent,
+  renderMarketingEmail,
+  renderMarketingTemplateEmail,
+} from '../../utils/marketing/renderCampaign';
 import { isValidEmail, normalizeEmail } from '../../utils/marketing/normalizeEmail';
+import { signUnsubscribePayload } from '../../utils/marketing/unsubscribeToken';
 
 const MARKETING_AUDIENCE_TYPES = ['subscribers', 'leads', 'both'] as const;
 
@@ -496,12 +502,24 @@ export const sendMarketingCampaignTestEmail = async (req: Request, res: Response
         ? Number(rawContent.brevoTemplateId)
         : undefined,
     };
-    assertInlineMarketingContent(content);
-    const rendered = renderMarketingEmail({
-      content,
-      locale: locale as any,
-      firstName: typeof req.body?.firstName === 'string' ? req.body.firstName : undefined,
-    });
+    const firstName = typeof req.body?.firstName === 'string' ? req.body.firstName : undefined;
+    const rendered = content.brevoTemplateId
+      ? renderMarketingTemplateEmail({
+        content,
+        templateHtml: await getBrevoMarketingTemplateHtml(content.brevoTemplateId, locale as any),
+        locale: locale as any,
+        firstName,
+        unsubscribeToken: signUnsubscribePayload(to),
+      })
+      : (() => {
+        assertInlineMarketingContent(content);
+        return renderMarketingEmail({
+          content,
+          locale: locale as any,
+          firstName,
+          unsubscribeToken: signUnsubscribePayload(to),
+        });
+      })();
     await sendBrevoTransactionalMarketingEmail({
       to,
       subject: `[TEST] ${rendered.subject}`,
@@ -511,7 +529,7 @@ export const sendMarketingCampaignTestEmail = async (req: Request, res: Response
     return res.json({ success: true, data: { to, locale } });
   } catch (error: any) {
     const message = error instanceof Error ? error.message : 'Failed to send test email';
-    if (message.includes('require') || message.includes('missing') || message.includes('Test sends')) {
+    if (message.includes('require') || message.includes('missing') || message.includes('Test sends') || message.includes('template')) {
       return res.status(400).json({ success: false, msg: message });
     }
     console.error('sendMarketingCampaignTestEmail:', error);
@@ -595,10 +613,30 @@ export const listMarketingSubscribers = async (req: Request, res: Response) => {
       MarketingSubscriber.countDocuments(query),
     ]);
 
+    const normalizedEmails = rows
+      .map((row) => normalizeEmail(row.emailNormalized || row.email))
+      .filter(Boolean);
+    const suppressions = normalizedEmails.length > 0
+      ? await MarketingSuppression.find({ emailNormalized: { $in: normalizedEmails } })
+        .select('emailNormalized reason')
+        .lean()
+      : [];
+    const suppressionByEmail = new Map(
+      suppressions.map((suppression) => [normalizeEmail(suppression.emailNormalized), suppression]),
+    );
+    const subscribers = rows.map((row) => {
+      const suppression = suppressionByEmail.get(normalizeEmail(row.emailNormalized || row.email));
+      return {
+        ...row,
+        suppressed: Boolean(suppression || row.unsubscribedAt || row.brevoUnsubscribedAt),
+        suppressionReason: suppression?.reason || (row.brevoUnsubscribedAt ? 'provider' : undefined),
+      };
+    });
+
     return res.json({
       success: true,
       data: {
-        subscribers: rows,
+        subscribers,
         pagination: {
           page: pageNumber,
           limit: limitNumber,

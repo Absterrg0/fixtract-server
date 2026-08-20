@@ -18,7 +18,7 @@ describe('marketing lead workbook validation', () => {
       workbookBuffer([
         [' EMAIL ', 'Country', 'LANGUAGE', 'Service', 'First name', 'Last name'],
         ['Person@Example.com', 'be', 'nl', 'Plumbing', 'Ada', 'Lovelace'],
-        [' person@example.com ', 'BE', 'nl', 'Plumbing', 'Duplicate', 'Row'],
+        [' person@example.com ', 'BE', 'nl', 'Plumbing', 'Ada', 'Lovelace'],
       ]),
       { resolveService: (value) => (value.toLowerCase() === 'plumbing' ? 'plumbing' : undefined) },
     );
@@ -49,6 +49,24 @@ describe('marketing lead workbook validation', () => {
       expect.arrayContaining(['email', 'country', 'language', 'service']),
     );
     expect(result).not.toHaveProperty('buffer');
+  });
+
+  it('rejects conflicting duplicate emails instead of treating them as harmless duplicates', () => {
+    const result = validateLeadWorkbook(
+      workbookBuffer([
+        ['Email', 'Country', 'Language', 'Service', 'First name'],
+        ['person@example.com', 'BE', 'nl', 'Plumbing', 'Ada'],
+        ['PERSON@example.com', 'NL', 'nl', 'Plumbing', 'Grace'],
+      ]),
+      { resolveService: (value) => (value.toLowerCase() === 'plumbing' ? 'plumbing' : undefined) },
+    );
+
+    expect(result.validRows).toBe(1);
+    expect(result.duplicateRows).toBe(0);
+    expect(result.rejectedRows).toBe(1);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ row: 3, message: expect.stringContaining('Conflicting duplicate') }),
+    ]));
   });
 
   it('rejects a workbook over the row limit before parsing all rows', () => {

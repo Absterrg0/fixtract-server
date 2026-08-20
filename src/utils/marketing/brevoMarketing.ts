@@ -194,11 +194,19 @@ export async function assertBrevoMarketingTemplateContract(
   templateId: number,
   locale: 'en' | 'nl' | 'fr' | 'de',
 ): Promise<void> {
+  await getBrevoMarketingTemplateHtml(templateId, locale);
+}
+
+export async function getBrevoMarketingTemplateHtml(
+  templateId: number,
+  locale: 'en' | 'nl' | 'fr' | 'de',
+): Promise<string> {
   const api = createTransactionalEmailsApi();
   try {
     const response = await api.getSmtpTemplate(templateId);
     const htmlContent = response.body?.htmlContent || '';
     assertTemplateGreetingContract(htmlContent, locale);
+    return htmlContent;
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('Brevo template must begin')) throw error;
     console.error('[Brevo] template contract lookup failed', {
@@ -399,7 +407,12 @@ export async function createBrevoCampaign(
       .trim();
     if (utmCampaign) campaign.utmCampaign = utmCampaign;
   }
-  if (input.footer) campaign.footer = input.footer;
+  // Inline HTML is already rendered with the application footer. Passing a
+  // Brevo footer as well would append it a second time. Template-backed
+  // campaigns rely on Brevo to append the footer remotely.
+  if (input.footer && !input.htmlContent.includes('data-fixera-marketing-footer="true"')) {
+    campaign.footer = input.footer;
+  }
   if (input.templateId && Number.isFinite(input.templateId)) {
     campaign.templateId = input.templateId;
   } else {

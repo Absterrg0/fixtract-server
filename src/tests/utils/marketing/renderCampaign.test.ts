@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertTemplateGreetingContract } from '../../../utils/marketing/renderCampaign';
+import { assertTemplateGreetingContract, renderMarketingEmail, renderMarketingTemplateEmail } from '../../../utils/marketing/renderCampaign';
 
 describe('marketing template contract', () => {
   it('accepts a localized greeting with the Brevo first-name token', () => {
@@ -14,5 +14,31 @@ describe('marketing template contract', () => {
       '<p>Welcome</p><p>Hi {{ contact.FIRSTNAME }},</p>',
       'en',
     )).toThrow(/must begin/);
+  });
+
+  it('does not duplicate the application footer when inline content already contains it', () => {
+    const result = renderMarketingEmail({
+      locale: 'en',
+      firstName: 'Ada',
+      content: {
+        subject: 'Test',
+        htmlContent: '<p>Body</p><div data-fixera-marketing-footer="true">Existing footer</div>',
+      },
+    });
+
+    expect(result.htmlContent.match(/data-fixera-marketing-footer="true"/g)).toHaveLength(1);
+  });
+
+  it('renders a validated remote template for a test without leaving the Brevo token', () => {
+    const result = renderMarketingTemplateEmail({
+      locale: 'en',
+      firstName: '<Ada>',
+      templateHtml: '<p>Hi {{ contact.FIRSTNAME }},</p><p>Body</p>',
+      content: { subject: 'Template test', htmlContent: '' },
+    });
+
+    expect(result.htmlContent).toContain('Hi &lt;Ada&gt;,');
+    expect(result.htmlContent).not.toContain('contact.FIRSTNAME');
+    expect(result.htmlContent).toContain('data-fixera-marketing-footer="true"');
   });
 });

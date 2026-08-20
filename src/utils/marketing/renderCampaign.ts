@@ -31,6 +31,12 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#x27;');
 }
 
+function appendMarketingFooter(htmlContent: string, footer: string): string {
+  return htmlContent.includes('data-fixera-marketing-footer="true"')
+    ? htmlContent
+    : `${htmlContent}${footer}`;
+}
+
 export function resolveGreeting(firstName: unknown, locale: MarketingLocale): string {
   if (firstName === '{{ contact.FIRSTNAME }}') {
     const prefix = locale === 'nl' ? 'Hallo' : locale === 'fr' ? 'Bonjour' : 'Hi';
@@ -66,7 +72,33 @@ export function renderMarketingEmail(input: {
   return {
     subject: input.content.subject,
     previewText: input.content.previewText,
-    htmlContent: `${greeting}${body}${renderMarketingFooter(locale, input.unsubscribeToken)}`,
+    htmlContent: appendMarketingFooter(`${greeting}${body}`, renderMarketingFooter(locale, input.unsubscribeToken)),
+  };
+}
+
+/**
+ * Render a remote Brevo template for a transactional test without trusting
+ * user-supplied HTML. The template must already contain the localized
+ * greeting contract; only the first-name token and the application footer
+ * are rendered locally.
+ */
+export function renderMarketingTemplateEmail(input: {
+  content: CampaignRenderContent;
+  templateHtml: string;
+  locale: MarketingLocale;
+  firstName?: string;
+  unsubscribeToken?: string;
+}): { subject: string; previewText?: string; htmlContent: string } {
+  assertTemplateGreetingContract(input.templateHtml, input.locale);
+  const genericName: Record<MarketingLocale, string> = { en: 'there', nl: 'daar', fr: 'là', de: 'dort' };
+  const name = typeof input.firstName === 'string' && input.firstName.trim()
+    ? escapeHtml(input.firstName.trim().split(/\s+/)[0])
+    : genericName[input.locale];
+  const body = input.templateHtml.replace(/\{\{\s*contact\.FIRSTNAME\s*\}\}/gi, name);
+  return {
+    subject: input.content.subject,
+    previewText: input.content.previewText,
+    htmlContent: appendMarketingFooter(body, renderMarketingFooter(input.locale, input.unsubscribeToken)),
   };
 }
 

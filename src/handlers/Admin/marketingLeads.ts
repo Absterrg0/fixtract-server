@@ -54,12 +54,15 @@ function toServiceResolver(options: ServiceOption[]) {
   };
 }
 
-function serializeLead(lead: any) {
+function serializeLead(lead: any, indicators: { matchedSubscriber?: boolean; suppressed?: boolean; suppressionReason?: string } = {}) {
   return {
     ...lead,
     _id: String(lead._id),
     sourceImportId: lead.sourceImportId ? String(lead.sourceImportId) : undefined,
     matchedSubscriberId: lead.matchedSubscriberId ? String(lead.matchedSubscriberId) : undefined,
+    matchedSubscriber: Boolean(indicators.matchedSubscriber ?? lead.matchedSubscriberId),
+    suppressed: Boolean(indicators.suppressed ?? lead.unsubscribedAt),
+    suppressionReason: indicators.suppressionReason,
   };
 }
 
@@ -284,7 +287,44 @@ export const listMarketingLeads = async (req: Request, res: Response) => {
       MarketingLead.find(query).sort({ [sortField]: direction }).skip((page - 1) * limit).limit(limit).lean(),
       MarketingLead.countDocuments(query),
     ]);
-    return res.json({ success: true, data: { leads: leads.map(serializeLead), pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) } } });
+    const normalizedEmails = leads
+      .map((lead) => normalizeEmail(lead.emailNormalized || lead.email))
+      .filter(Boolean);
+    const [subscribers, suppressions] = normalizedEmails.length > 0
+      ? await Promise.all([
+        MarketingSubscriber.find({
+          $or: [
+            { emailNormalized: { $in: normalizedEmails } },
+            { email: { $in: normalizedEmails } },
+          ],
+        }).select('_id email emailNormalized').lean(),
+        MarketingSuppression.find({ emailNormalized: { $in: normalizedEmails } })
+          .select('emailNormalized reason')
+          .lean(),
+      ])
+      : [[], []];
+    const subscriberByEmail = new Map(
+      subscribers.map((subscriber) => [normalizeEmail(subscriber.emailNormalized || subscriber.email), subscriber]),
+    );
+    const suppressionByEmail = new Map(
+      suppressions.map((suppression) => [normalizeEmail(suppression.emailNormalized), suppression]),
+    );
+    return res.json({
+      success: true,
+      data: {
+        leads: leads.map((lead) => {
+          const email = normalizeEmail(lead.emailNormalized || lead.email);
+          const subscriber = subscriberByEmail.get(email);
+          const suppression = suppressionByEmail.get(email);
+          return serializeLead(lead, {
+            matchedSubscriber: Boolean(lead.matchedSubscriberId || subscriber),
+            suppressed: Boolean(lead.unsubscribedAt || suppression),
+            suppressionReason: suppression?.reason || (lead.unsubscribedAt ? 'unsubscribe' : undefined),
+          });
+        }),
+        pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+      },
+    });
   } catch (error) {
     console.error('listMarketingLeads:', error);
     return res.status(500).json({ success: false, msg: 'Failed to list leads' });

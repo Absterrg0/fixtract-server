@@ -99,6 +99,18 @@ function pushError(errors: LeadImportError[], error: LeadImportError): void {
   if (errors.length < 500) errors.push(error);
 }
 
+function normalizedOptionalName(value: unknown): string {
+  return String(value || '').trim().toLowerCase();
+}
+
+function sameNormalizedImportRow(left: LeadImportRow, right: LeadImportRow): boolean {
+  return normalizedOptionalName(left.firstName) === normalizedOptionalName(right.firstName)
+    && normalizedOptionalName(left.lastName) === normalizedOptionalName(right.lastName)
+    && left.country === right.country
+    && left.locale === right.locale
+    && JSON.stringify([...left.serviceKeys].sort()) === JSON.stringify([...right.serviceKeys].sort());
+}
+
 export function validateLeadWorkbook(
   buffer: Buffer,
   options: LeadImportOptions = {},
@@ -134,7 +146,7 @@ export function validateLeadWorkbook(
   }
 
   const rows: LeadImportRow[] = [];
-  const seenEmails = new Set<string>();
+  const firstRowByEmail = new Map<string, LeadImportRow>();
   let duplicateRows = 0;
   let rejectedRows = 0;
 
@@ -176,22 +188,29 @@ export function validateLeadWorkbook(
     const serviceKeys = serviceValues
       .map((value) => options.resolveService?.(value, country) || value)
       .filter(Boolean);
-    if (rowErrors.length === 0 && !seenEmails.has(emailNormalized)) {
-      seenEmails.add(emailNormalized);
-      rows.push({
-        rowNumber,
-        email,
-        emailNormalized,
-        firstName: valueAt(rawRow, 'firstName') || undefined,
-        lastName: valueAt(rawRow, 'lastName') || undefined,
-        country,
-        locale: locale as MarketingLocale,
-        serviceValues,
-        serviceKeys,
-      });
-    } else if (rowErrors.length === 0 && seenEmails.has(emailNormalized)) {
-      duplicateRows += 1;
-      pushError(errors, { row: rowNumber, field: 'email', message: 'Duplicate email in this workbook; first row will be kept' });
+    const candidateRow: LeadImportRow = {
+      rowNumber,
+      email,
+      emailNormalized,
+      firstName: valueAt(rawRow, 'firstName') || undefined,
+      lastName: valueAt(rawRow, 'lastName') || undefined,
+      country,
+      locale: locale as MarketingLocale,
+      serviceValues,
+      serviceKeys,
+    };
+    if (rowErrors.length === 0 && !firstRowByEmail.has(emailNormalized)) {
+      firstRowByEmail.set(emailNormalized, candidateRow);
+      rows.push(candidateRow);
+    } else if (rowErrors.length === 0 && firstRowByEmail.has(emailNormalized)) {
+      const firstRow = firstRowByEmail.get(emailNormalized)!;
+      if (sameNormalizedImportRow(firstRow, candidateRow)) {
+        duplicateRows += 1;
+        pushError(errors, { row: rowNumber, field: 'email', message: 'Duplicate email in this workbook; identical row skipped' });
+      } else {
+        rejectedRows += 1;
+        pushError(errors, { row: rowNumber, field: 'email', message: 'Conflicting duplicate email in this workbook; first row kept' });
+      }
     }
 
     if (rowErrors.length > 0) {

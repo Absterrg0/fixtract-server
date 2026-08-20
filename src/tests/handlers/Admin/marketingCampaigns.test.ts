@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Request, Response } from 'express';
 
-const { campaignCreate, campaignFindById, sendTestEmail } = vi.hoisted(() => ({
+const { campaignCreate, campaignFindById, sendTestEmail, getTemplateHtml } = vi.hoisted(() => ({
   campaignCreate: vi.fn(),
   campaignFindById: vi.fn(),
   sendTestEmail: vi.fn(),
+  getTemplateHtml: vi.fn(),
 }));
 
 vi.mock('../../../models/marketingCampaign', () => ({
@@ -33,6 +34,10 @@ vi.mock('../../../utils/marketing/sendCampaign', () => ({
 vi.mock('../../../utils/marketing/brevoMarketing', () => ({
   listActiveBrevoTemplates: vi.fn(),
   sendBrevoTransactionalMarketingEmail: sendTestEmail,
+  getBrevoMarketingTemplateHtml: getTemplateHtml,
+}));
+vi.mock('../../../utils/marketing/unsubscribeToken', () => ({
+  signUnsubscribePayload: vi.fn(() => 'signed-test-token'),
 }));
 
 import {
@@ -209,5 +214,31 @@ describe('marketing campaign admin handlers', () => {
       htmlContent: expect.stringContaining('Notification preferences'),
     }));
     expect(campaignCreate).not.toHaveBeenCalled();
+  });
+
+  it('validates and renders a remote Brevo template for a test send', async () => {
+    getTemplateHtml.mockResolvedValue('<p>Hi {{ contact.FIRSTNAME }},</p><p>Template body</p>');
+    const res = mockRes();
+
+    await sendMarketingCampaignTestEmail(
+      {
+        body: {
+          to: 'admin@example.com',
+          locale: 'en',
+          firstName: 'Ada',
+          campaign: {
+            content: { en: { subject: 'Template', htmlContent: '', brevoTemplateId: 42 } },
+          },
+        },
+      } as unknown as Request,
+      res,
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(getTemplateHtml).toHaveBeenCalledWith(42, 'en');
+    expect(sendTestEmail).toHaveBeenCalledWith(expect.objectContaining({
+      subject: '[TEST] Template',
+      htmlContent: expect.stringContaining('Hi Ada,'),
+    }));
   });
 });

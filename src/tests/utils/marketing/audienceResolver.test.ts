@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { subscriberFind, leadFind, suppressionFind } = vi.hoisted(() => ({
+const { subscriberFind, leadFind, suppressionFind, userFind } = vi.hoisted(() => ({
   subscriberFind: vi.fn(),
   leadFind: vi.fn(),
   suppressionFind: vi.fn(),
+  userFind: vi.fn(),
 }));
 
 function queryResult(rows: unknown[]) {
@@ -24,6 +25,9 @@ vi.mock('../../../models/marketingLead', () => ({
 vi.mock('../../../models/marketingSuppression', () => ({
   default: { find: suppressionFind },
 }));
+vi.mock('../../../models/user', () => ({
+  default: { find: userFind },
+}));
 vi.mock('../../../models/marketingCampaign', () => ({
   MARKETING_AUDIENCE_TYPES: ['subscribers', 'leads', 'both'],
 }));
@@ -37,6 +41,7 @@ describe('resolveMarketingAudience', () => {
     delete process.env.MARKETING_LEAD_OUTREACH_ENABLED;
     delete process.env.MARKETING_LEAD_LEGAL_APPROVED;
     suppressionFind.mockReturnValue(queryResult([{ emailNormalized: 'optedout@example.com' }]));
+    userFind.mockReturnValue(queryResult([]));
     subscriberFind.mockImplementation((query: Record<string, unknown>) => query.unsubscribedAt
       ? queryResult([{ emailNormalized: 'legacy-optout@example.com', email: 'legacy-optout@example.com' }])
       : queryResult([
@@ -109,5 +114,35 @@ describe('resolveMarketingAudience', () => {
       filters: { countries: [], interestedServices: [], serviceKeys: [], locales: ['en'], roles: ['professional'] },
       contentLocales: ['en'],
     })).rejects.toThrow('not enabled');
+  });
+
+  it('uses an explicit user language before the stored subscriber locale and reports mismatches', async () => {
+    subscriberFind.mockImplementation((query: Record<string, unknown>) => query.unsubscribedAt
+      ? queryResult([])
+      : queryResult([{
+          _id: 'subscriber-2',
+          userId: 'user-2',
+          email: 'language@example.com',
+          emailNormalized: 'language@example.com',
+          name: 'Language Example',
+          locale: 'nl',
+          region: 'BE',
+          role: 'customer',
+          consentVerifiedAt: new Date(),
+          unsubscribedAt: null,
+          brevoUnsubscribedAt: null,
+        }]));
+    userFind.mockReturnValue(queryResult([{ _id: 'user-2', name: 'User Name', marketingLocale: 'fr' }]));
+
+    const result = await resolveMarketingAudience({
+      campaignType: 'newsletter',
+      audienceType: 'subscribers',
+      filters: { countries: ['BE'], interestedServices: [], serviceKeys: [], locales: ['fr'], roles: ['customer'] },
+      contentLocales: ['fr'],
+      limitMode: 'preview',
+    });
+
+    expect(result.recipients[0]).toMatchObject({ locale: 'fr', firstName: 'Language' });
+    expect(result.excluded.localeMismatch).toBe(0);
   });
 });

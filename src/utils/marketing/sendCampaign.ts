@@ -260,7 +260,7 @@ export async function sendMarketingCampaign(
       const content = contentForLocale(campaign, locale);
       if (!content) continue;
 
-      if (content.brevoTemplateId && !isMarketingDryRun()) {
+      if (content.brevoTemplateId) {
         await assertBrevoMarketingTemplateContract(content.brevoTemplateId, locale);
       }
 
@@ -358,7 +358,7 @@ export async function sendMarketingCampaign(
           // schedule it again (or leave it unsent when that timestamp is already in the past).
           scheduledAt: null,
           utmCampaign: campaign.utmCampaign || `Fixtract ${campaign.type} ${campaign._id}`,
-          footer: renderMarketingFooter(locale),
+          footer: content.brevoTemplateId ? renderMarketingFooter(locale) : undefined,
         });
         brevoCampaignId = created.campaignId;
         recordDelivery({
