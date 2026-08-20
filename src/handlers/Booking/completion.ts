@@ -35,6 +35,7 @@ import { sendDisputeRaisedAdminEmail } from '../../utils/emailService';
 import { notify } from '../../utils/notifications/notify';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
+import { calculateExtraCostBreakdown } from '../../utils/extraCostAccounting';
 
 const ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
@@ -79,17 +80,38 @@ const computeCustomerLoyaltyDiscount = async (customer: any, commissionInclusive
   }
 };
 
-const computeExtraCostCustomerCharge = async (customer: any, extraCostTotal: number) => {
+const computeExtraCostCustomerCharge = async (
+  customer: any,
+  extraCostTotal: number,
+  vatRate = 0,
+  reverseCharge = false,
+) => {
   const commissionPercent = await getPlatformCommissionPercent();
   const subtotalInclCommission = roundToTwo(extraCostTotal * (1 + commissionPercent / 100));
   const loyalty = await computeCustomerLoyaltyDiscount(customer, subtotalInclCommission);
   const platformMargin = roundToTwo(subtotalInclCommission - extraCostTotal);
   const cappedLoyalty = Math.max(0, Math.min(loyalty.amount, platformMargin));
+  const breakdown = calculateExtraCostBreakdown({
+    extraCostNetAmount: extraCostTotal,
+    commissionPercent,
+    customerDiscount: cappedLoyalty,
+  });
   (loyalty as any).cappedAmount = cappedLoyalty;
-  (loyalty as any).amount = cappedLoyalty;
-  const customerChargeAmount = Math.max(0, roundToTwo(subtotalInclCommission - cappedLoyalty));
-  const platformCommissionAmount = roundToTwo(subtotalInclCommission - extraCostTotal - cappedLoyalty);
-  return { commissionPercent, subtotalInclCommission, loyalty, cappedLoyalty, customerChargeAmount, platformCommissionAmount };
+  (loyalty as any).amount = breakdown.customerDiscount;
+  const customerNetChargeAmount = breakdown.customerChargeAmount;
+  const vatAmount = reverseCharge ? 0 : roundToTwo(customerNetChargeAmount * Math.max(0, vatRate) / 100);
+  const customerChargeAmount = roundToTwo(customerNetChargeAmount + vatAmount);
+  return {
+    commissionPercent,
+    subtotalInclCommission,
+    loyalty,
+    cappedLoyalty: breakdown.customerDiscount,
+    customerNetChargeAmount,
+    vatAmount,
+    customerChargeAmount,
+    platformCommissionAmount: breakdown.platformCommissionAmount,
+    platformFeeAmount: roundToTwo(breakdown.platformCommissionAmount + vatAmount),
+  };
 };
 
 export const professionalCompleteBooking = async (req: Request, res: Response) => {
@@ -356,7 +378,12 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
       const professionalUser = await User.findById(authUser._id).select('email name username businessInfo').lean();
       if (customerUser?._id) {
         const emailExtraCostTotal = extraCostTotal > 0
-          ? (await computeExtraCostCustomerCharge(customerUser, extraCostTotal)).customerChargeAmount
+          ? (await computeExtraCostCustomerCharge(
+              customerUser,
+              extraCostTotal,
+              updatedBooking.payment?.vatRate,
+              updatedBooking.payment?.reverseCharge,
+            )).customerChargeAmount
           : extraCostTotal;
         await notify({
           userId: customerUser._id.toString(),
@@ -469,9 +496,14 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     }
 
     const currency = (booking.payment?.currency || 'EUR').toLowerCase();
-    const { subtotalInclCommission, loyalty, customerChargeAmount, platformCommissionAmount } =
-      await computeExtraCostCustomerCharge(booking.customer as any, extraCostTotal);
-    const applicationFeeAmount = convertToStripeAmount(Math.max(0, platformCommissionAmount), currency);
+    const { subtotalInclCommission, loyalty, cappedLoyalty, customerNetChargeAmount, customerChargeAmount, vatAmount, platformFeeAmount, platformCommissionAmount } =
+      await computeExtraCostCustomerCharge(
+        booking.customer as any,
+        extraCostTotal,
+        booking.payment?.vatRate,
+        booking.payment?.reverseCharge,
+      );
+    const applicationFeeAmount = convertToStripeAmount(Math.max(0, platformFeeAmount), currency);
 
     const paymentIntent = await stripe.paymentIntents.create({
       amount: convertToStripeAmount(customerChargeAmount, currency),
@@ -504,6 +536,43 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     booking.set('payment.extraCostStripePaymentIntentId', paymentIntent.id);
     booking.set('payment.extraCostClientSecret', paymentIntent.client_secret);
     booking.set('payment.extraCostAmount', customerChargeAmount);
+    booking.set('payment.extraCostCustomerNetAmount', customerNetChargeAmount);
+    booking.set('payment.extraCostVatAmount', vatAmount);
+    booking.set('payment.extraCostPlatformFee', platformFeeAmount);
+    booking.set('payment.extraCostNetAmount', extraCostTotal);
+    booking.set('payment.extraCostCustomerDiscount', cappedLoyalty);
+    booking.set('payment.extraCostPlatformCommission', platformCommissionAmount);
+    booking.set('payment.extraCostProfessionalPayout', extraCostTotal);
+    booking.set('payment.extraCostStatus', 'pending');
+    booking.set('payment.extraCostPaymentSucceeded', false);
+    await Payment.findOneAndUpdate(
+      { booking: booking._id },
+      {
+        $set: {
+          extraCostAmount: customerChargeAmount,
+          extraCostCustomerNetAmount: customerNetChargeAmount,
+          extraCostVatAmount: vatAmount,
+          extraCostPlatformFee: platformFeeAmount,
+          extraCostNetAmount: extraCostTotal,
+          extraCostCustomerDiscount: cappedLoyalty,
+          extraCostPlatformCommission: platformCommissionAmount,
+          extraCostProfessionalPayout: extraCostTotal,
+          extraCostStatus: 'pending',
+          extraCostPaymentSucceeded: false,
+          extraCostStripePaymentIntentId: paymentIntent.id,
+        },
+        $setOnInsert: {
+          booking: booking._id,
+          bookingNumber: booking.bookingNumber,
+          customer: (booking.customer as any)._id,
+          professional: professional._id,
+          currency: currency.toUpperCase(),
+          amount: booking.payment?.amount || 0,
+          status: booking.payment?.status || 'pending',
+        },
+      },
+      { upsert: true },
+    );
     await booking.save();
 
     return res.json({

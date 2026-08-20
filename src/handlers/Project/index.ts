@@ -26,6 +26,7 @@ import { resolveAvailability } from "../../utils/availabilityHelpers";
 import { normalizePreparationDuration } from "../../utils/projectDurations";
 import { computeProjectDiff, determineReapprovalType } from "../../utils/projectDiff";
 import { toSlug } from "../../utils/slug";
+import { withArticle47ProfessionalQuestion } from "../../utils/vatManagement";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
 let cachedWindowFieldsSupport: boolean | null = null;
@@ -619,7 +620,7 @@ export const getPublishedProject = async (req: Request, res: Response) => {
     const serviceConfigurationId = project.serviceConfigurationId;
     const vatConfig = serviceConfigurationId
       ? await ServiceConfiguration.findById(serviceConfigurationId)
-          .select("vatManagement.enabled vatManagement.rateRuleGroup vatManagement.reducedVatQuestions")
+          .select("vatManagement.enabled vatManagement.rateRuleGroup vatManagement.reducedVatQuestions vatManagement.professionalVatQuestions vatManagement.article47Classification vatManagement.exemptFromBelgianReverseCharge")
           .lean()
       : null;
     const serialized = serializePublicProject(project);
@@ -632,6 +633,9 @@ export const getPublishedProject = async (req: Request, res: Response) => {
               enabled: true,
               rateRuleGroup: vatConfig.vatManagement.rateRuleGroup,
               reducedVatQuestions: vatConfig.vatManagement.reducedVatQuestions,
+              professionalVatQuestions: withArticle47ProfessionalQuestion(vatConfig.vatManagement),
+              article47Classification: vatConfig.vatManagement.article47Classification,
+              exemptFromBelgianReverseCharge: vatConfig.vatManagement.exemptFromBelgianReverseCharge,
             }
           : undefined,
         professionalStats,

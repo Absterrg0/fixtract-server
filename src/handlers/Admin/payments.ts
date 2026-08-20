@@ -78,7 +78,14 @@ export const getPayments = async (req: Request, res: Response) => {
           $group: {
             _id: '$status',
             count: { $sum: 1 },
-            totalVolume: { $sum: '$totalWithVat' }
+            totalVolume: {
+              $sum: {
+                $add: [
+                  { $ifNull: ['$totalWithVat', 0] },
+                  { $ifNull: ['$extraCostAmount', 0] },
+                ],
+              },
+            }
           }
         }
       ])

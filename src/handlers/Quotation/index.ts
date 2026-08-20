@@ -41,6 +41,12 @@ const getVatAnswersFromBooking = (booking: any): Record<string, unknown> => {
   return {};
 };
 
+const getProfessionalAnswersFromProject = (project: any): Record<string, unknown> =>
+  (project?.vatProfessionalAnswers || []).reduce((acc: Record<string, unknown>, entry: { fieldName?: string; value?: unknown }) => {
+    if (entry?.fieldName) acc[entry.fieldName] = entry.value;
+    return acc;
+  }, {});
+
 const getAllowedVatOptionsForBooking = async (booking: any) => {
   const customer = booking.customer as any;
   const project = booking.project as any;
@@ -48,6 +54,7 @@ const getAllowedVatOptionsForBooking = async (booking: any) => {
     ? project.services[0]
     : null;
   const country = booking.vatDecision?.country
+    || customer?.companyAddress?.country
     || customer?.location?.country
     || project?.distance?.countryCode
     || 'BE';
@@ -58,17 +65,24 @@ const getAllowedVatOptionsForBooking = async (booking: any) => {
     service: projectService?.service || project?.service,
     areaOfWork: projectService?.areaOfWork || project?.areaOfWork,
     country,
+    bookingCountry: booking.vatDecision?.country || customer?.location?.country,
+    businessCountry: customer?.companyAddress?.country,
     customerType: customer?.customerType || 'individual',
     vatNumber: customer?.vatNumber,
     isVatVerified: customer?.isVatVerified,
     answers: getVatAnswersFromBooking(booking),
+    professionalAnswers: getProfessionalAnswersFromProject(project),
+    propertyNature: booking.vatDecision?.propertyNature,
   });
 };
 
-const validatePricingLinesAgainstAllowedVat = async (booking: any, lines: Array<{ vatRate: number }>) => {
+const validatePricingLinesAgainstAllowedVat = async (booking: any, lines: Array<{ vatRate: number; vatLabel?: string }>) => {
   const options = await getAllowedVatOptionsForBooking(booking);
   const allowedRates = new Set(options.map(option => Number(option.rate)));
-  const invalidLine = lines.find(line => !allowedRates.has(Number(line.vatRate)));
+  const invalidLine = lines.find(line => {
+    const rate = Number(line.vatRate);
+    return line.vatLabel !== 'Custom VAT rate' && !allowedRates.has(rate);
+  });
   if (invalidLine) {
     return {
       valid: false,
@@ -122,9 +136,9 @@ export const getQuotationVatRateOptions = async (req: Request, res: Response) =>
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'customerType location vatNumber isVatVerified businessName')
+      .populate('customer', 'customerType location vatNumber isVatVerified businessName companyAddress')
       .populate('professional', '_id')
-      .populate('project', 'serviceConfigurationId category service areaOfWork distance');
+      .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
@@ -364,9 +378,9 @@ export const respondToRFQ = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName')
+      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress')
       .populate('professional', 'name username email businessInfo')
-      .populate('project', 'serviceConfigurationId category service areaOfWork distance');
+      .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
@@ -546,9 +560,9 @@ export const submitQuotation = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName')
+      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress')
       .populate('professional', 'name username email businessInfo')
-      .populate('project', 'serviceConfigurationId category service areaOfWork distance');
+      .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
@@ -722,9 +736,9 @@ export const editQuotation = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName')
+      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress')
       .populate('professional', 'name username email businessInfo')
-      .populate('project', 'serviceConfigurationId category service areaOfWork distance');
+      .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
@@ -1062,8 +1076,11 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
       category: linkedProjectService?.category || linkedProject?.category,
       service: linkedProjectService?.service || linkedProject?.service,
       areaOfWork: linkedProjectService?.areaOfWork || linkedProject?.areaOfWork,
-      country: customer.location?.country,
+      country: customer.location?.country || linkedProject?.distance?.countryCode,
+      bookingCountry: linkedProject?.distance?.countryCode || customer.location?.country,
+      businessCountry: customer.companyAddress?.country,
       answers: {},
+      professionalAnswers: getProfessionalAnswersFromProject(linkedProject),
       customerType: customer.customerType || 'individual',
       vatNumber: customer.vatNumber,
       isVatVerified: customer.isVatVerified,

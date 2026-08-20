@@ -43,6 +43,19 @@ export interface IPayment extends Document {
   vatBreakdown?: VatBreakdownLine[];
   platformCommission?: number;
   professionalPayout?: number;
+  extraCostAmount?: number;
+  extraCostCustomerNetAmount?: number;
+  extraCostVatAmount?: number;
+  extraCostPlatformFee?: number;
+  extraCostNetAmount?: number;
+  extraCostCustomerDiscount?: number;
+  extraCostPlatformCommission?: number;
+  extraCostProfessionalPayout?: number;
+  extraCostStatus?: "pending" | "succeeded" | "failed" | "refunded";
+  extraCostPaymentSucceeded?: boolean;
+  extraCostPaidAt?: Date;
+  extraCostStripePaymentIntentId?: string;
+  extraCostTransferId?: string;
 
   stripePaymentIntentId?: string;
   stripeChargeId?: string;
@@ -64,6 +77,13 @@ export interface IPayment extends Document {
   peppolDispatchStatus?: string;
   peppolDispatchReference?: string;
   peppolDispatchedAt?: Date;
+  supplierPeppolDispatchStatus?: string;
+  supplierPeppolDispatchReference?: string;
+  supplierPeppolDispatchedAt?: Date;
+  supplierInvoiceNumber?: string;
+  supplierInvoiceUrl?: string;
+  supplierInvoiceUblUrl?: string;
+  supplierInvoiceGeneratedAt?: Date;
   creditNoteNumber?: string;
   creditNoteUrl?: string;
   creditNoteUblUrl?: string;
@@ -139,6 +159,19 @@ const PaymentSchema = new Schema<IPayment>(
     }],
     platformCommission: { type: Number },
     professionalPayout: { type: Number },
+    extraCostAmount: { type: Number },
+    extraCostCustomerNetAmount: { type: Number },
+    extraCostVatAmount: { type: Number },
+    extraCostPlatformFee: { type: Number },
+    extraCostNetAmount: { type: Number },
+    extraCostCustomerDiscount: { type: Number },
+    extraCostPlatformCommission: { type: Number },
+    extraCostProfessionalPayout: { type: Number },
+    extraCostStatus: { type: String, enum: ["pending", "succeeded", "failed", "refunded"] },
+    extraCostPaymentSucceeded: { type: Boolean },
+    extraCostPaidAt: { type: Date },
+    extraCostStripePaymentIntentId: { type: String },
+    extraCostTransferId: { type: String },
 
     stripePaymentIntentId: { type: String },
     stripeChargeId: { type: String },
@@ -160,6 +193,13 @@ const PaymentSchema = new Schema<IPayment>(
     peppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
     peppolDispatchReference: { type: String },
     peppolDispatchedAt: { type: Date },
+    supplierPeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    supplierPeppolDispatchReference: { type: String },
+    supplierPeppolDispatchedAt: { type: Date },
+    supplierInvoiceNumber: { type: String },
+    supplierInvoiceUrl: { type: String },
+    supplierInvoiceUblUrl: { type: String },
+    supplierInvoiceGeneratedAt: { type: Date },
     creditNoteNumber: { type: String },
     creditNoteUrl: { type: String },
     creditNoteUblUrl: { type: String },

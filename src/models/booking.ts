@@ -208,6 +208,8 @@ export interface IBooking extends Document {
     appliedRate: number;
     reducedRate?: number;
     reverseCharge?: boolean;
+    vatLabel?: string;
+    propertyNature?: 'movable' | 'immovable';
     explanation?: string;
     matchedRuleText?: string;
     ruleGroup?: string;
@@ -280,6 +282,17 @@ export interface IBooking extends Document {
     extraCostStripePaymentIntentId?: string;
     extraCostClientSecret?: string;
     extraCostAmount?: number;
+    extraCostCustomerNetAmount?: number;
+    extraCostVatAmount?: number;
+    extraCostPlatformFee?: number;
+    extraCostNetAmount?: number;
+    extraCostCustomerDiscount?: number;
+    extraCostPlatformCommission?: number;
+    extraCostProfessionalPayout?: number;
+    extraCostStatus?: 'pending' | 'succeeded' | 'failed' | 'refunded';
+    extraCostPaymentSucceeded?: boolean;
+    extraCostPaidAt?: Date;
+    extraCostTransferId?: string;
 
     invoiceNumber?: string;
     invoiceUrl?: string;
@@ -288,6 +301,13 @@ export interface IBooking extends Document {
     peppolDispatchStatus?: string;
     peppolDispatchReference?: string;
     peppolDispatchedAt?: Date;
+    supplierPeppolDispatchStatus?: string;
+    supplierPeppolDispatchReference?: string;
+    supplierPeppolDispatchedAt?: Date;
+    supplierInvoiceNumber?: string;
+    supplierInvoiceUrl?: string;
+    supplierInvoiceUblUrl?: string;
+    supplierInvoiceGeneratedAt?: Date;
     creditNoteNumber?: string;
     creditNoteUrl?: string;
     creditNoteUblUrl?: string;
@@ -770,6 +790,8 @@ const BookingSchema = new Schema({
     appliedRate: { type: Number, required: true, min: 0, max: 100 },
     reducedRate: { type: Number, min: 0, max: 100 },
     reverseCharge: { type: Boolean },
+    vatLabel: { type: String },
+    propertyNature: { type: String, enum: ['movable', 'immovable'] },
     explanation: { type: String, maxlength: 1000 },
     matchedRuleText: { type: String, maxlength: 1000 },
     ruleGroup: { type: String },
@@ -887,6 +909,17 @@ const BookingSchema = new Schema({
     extraCostStripePaymentIntentId: { type: String },
     extraCostClientSecret: { type: String },
     extraCostAmount: { type: Number },
+    extraCostCustomerNetAmount: { type: Number },
+    extraCostVatAmount: { type: Number },
+    extraCostPlatformFee: { type: Number },
+    extraCostNetAmount: { type: Number },
+    extraCostCustomerDiscount: { type: Number },
+    extraCostPlatformCommission: { type: Number },
+    extraCostProfessionalPayout: { type: Number },
+    extraCostStatus: { type: String, enum: ['pending', 'succeeded', 'failed', 'refunded'] },
+    extraCostPaymentSucceeded: { type: Boolean },
+    extraCostPaidAt: { type: Date },
+    extraCostTransferId: { type: String },
 
     // Invoice
     invoiceNumber: { type: String },
@@ -896,6 +929,13 @@ const BookingSchema = new Schema({
     peppolDispatchStatus: { type: String },
     peppolDispatchReference: { type: String },
     peppolDispatchedAt: { type: Date },
+    supplierPeppolDispatchStatus: { type: String },
+    supplierPeppolDispatchReference: { type: String },
+    supplierPeppolDispatchedAt: { type: Date },
+    supplierInvoiceNumber: { type: String },
+    supplierInvoiceUrl: { type: String },
+    supplierInvoiceUblUrl: { type: String },
+    supplierInvoiceGeneratedAt: { type: Date },
     creditNoteNumber: { type: String },
     creditNoteUrl: { type: String },
     creditNoteUblUrl: { type: String },

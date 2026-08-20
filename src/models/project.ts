@@ -192,6 +192,7 @@ export interface IProject extends Document {
   service: string; // Kept for backwards compatibility (primary service)
   areaOfWork?: string;
   serviceConfigurationId?: string; // Reference to the ServiceConfiguration
+  vatProfessionalAnswers?: { fieldName: string; value: any }[];
   categories?: string[]; // Multiple categories
   services?: IServiceSelection[]; // 3-10 services with category and area
   certifications: ICertification[];
@@ -545,6 +546,10 @@ const ProjectSchema = new Schema<IProject>(
     service: { type: String, required: true },
     areaOfWork: { type: String },
     serviceConfigurationId: { type: String },
+    vatProfessionalAnswers: [{
+      fieldName: { type: String, required: true },
+      value: { type: Schema.Types.Mixed },
+    }],
     categories: [{ type: String }],
     services: {
       type: [ServiceSelectionSchema],

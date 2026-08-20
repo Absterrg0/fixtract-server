@@ -17,7 +17,6 @@ import { convertFromStripeAmount } from '../../utils/payment';
 import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
 import { deductPoints } from '../../utils/pointsSystem';
 import { getProfessionalDisplayName } from '../../utils/displayName';
-import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
 import { notify } from '../../utils/notifications/notify';
 
 const reserveWebhookEvent = async (event: Stripe.Event): Promise<{ shouldProcess: boolean }> => {
@@ -212,6 +211,10 @@ export const handleWebhook = async (req: Request, res: Response) => {
  * Handle payment_intent.succeeded event
  */
 async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent) {
+  if (paymentIntent.metadata.type === 'extra_cost') {
+    await handleExtraCostPaymentSucceeded(paymentIntent);
+    return;
+  }
   const bookingId = paymentIntent.metadata.bookingId;
   if (!bookingId) return;
 
@@ -261,14 +264,6 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
       }
     );
 
-    void ensureBookingInvoiceArtifacts(booking._id.toString()).catch((invoiceError: any) => {
-      console.error(
-        `[WEBHOOK] Payment authorized for booking ${bookingId}, but invoice generation failed:`,
-        invoiceError?.message || invoiceError
-      );
-    });
-
-    // Deduct points now that payment is confirmed
     const pointsRedeemed = (booking.payment as any)?.discount?.pointsRedeemed;
     if (pointsRedeemed > 0 && booking.customer) {
       try {
@@ -400,6 +395,58 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
   }
 }
 
+async function handleExtraCostPaymentSucceeded(paymentIntent: Stripe.PaymentIntent) {
+  const bookingId = paymentIntent.metadata.bookingId;
+  if (!bookingId) return;
+  const now = new Date();
+  const booking = await Booking.findOneAndUpdate(
+    {
+      _id: bookingId,
+      'payment.extraCostStripePaymentIntentId': paymentIntent.id,
+      'payment.extraCostStatus': { $in: ['pending', 'succeeded'] },
+    },
+    {
+      $set: {
+        'payment.extraCostStatus': 'succeeded',
+        'payment.extraCostPaymentSucceeded': true,
+        'payment.extraCostPaidAt': now,
+      },
+    },
+    { new: true },
+  );
+  if (!booking) return;
+
+  await Payment.findOneAndUpdate(
+    { booking: booking._id, extraCostStripePaymentIntentId: paymentIntent.id },
+    {
+      $set: {
+        extraCostStatus: 'succeeded',
+        extraCostPaymentSucceeded: true,
+        extraCostPaidAt: now,
+      },
+    },
+  );
+
+  if (booking.customer) {
+    try {
+      await notify({
+        userId: String(booking.customer),
+        eventKey: 'customer.payment_confirmed',
+        entityType: 'booking',
+        entityId: String(booking._id),
+        idempotencyKey: `stripe:${paymentIntent.id}:extra_cost_payment_confirmed`,
+        context: {
+          bookingId: String(booking._id),
+          amount: booking.payment?.extraCostAmount || convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency),
+          currency: (paymentIntent.currency || 'EUR').toUpperCase(),
+        },
+      });
+    } catch (error: any) {
+      console.error(`Failed to notify extra-cost payment for booking ${bookingId}:`, error?.message || error);
+    }
+  }
+}
+
 /**
  * Handle payment_intent.payment_failed event
  */
@@ -407,6 +454,10 @@ async function handlePaymentIntentFailed(
   paymentIntent: Stripe.PaymentIntent,
   stripeEventId: string,
 ) {
+  if (paymentIntent.metadata.type === 'extra_cost') {
+    await handleExtraCostPaymentFailed(paymentIntent);
+    return;
+  }
   const bookingId = paymentIntent.metadata.bookingId;
   if (!bookingId) return;
 
@@ -490,10 +541,37 @@ async function handlePaymentIntentFailed(
   console.log(`Payment failed via webhook for booking ${bookingId}`);
 }
 
+async function handleExtraCostPaymentFailed(paymentIntent: Stripe.PaymentIntent) {
+  const bookingId = paymentIntent.metadata.bookingId;
+  if (!bookingId) return;
+  const now = new Date();
+  await Booking.updateOne(
+    {
+      _id: bookingId,
+      'payment.extraCostStripePaymentIntentId': paymentIntent.id,
+      'payment.extraCostStatus': { $in: ['pending', 'failed'] },
+    },
+    {
+      $set: {
+        'payment.extraCostStatus': 'failed',
+        'payment.extraCostPaymentSucceeded': false,
+      },
+    },
+  );
+  await Payment.updateOne(
+    { booking: bookingId, extraCostStripePaymentIntentId: paymentIntent.id },
+    { $set: { extraCostStatus: 'failed', extraCostPaymentSucceeded: false, updatedAt: now } },
+  );
+}
+
 /**
  * Handle payment_intent.canceled event
  */
 async function handlePaymentIntentCanceled(paymentIntent: Stripe.PaymentIntent) {
+  if (paymentIntent.metadata.type === 'extra_cost') {
+    await handleExtraCostPaymentFailed(paymentIntent);
+    return;
+  }
   const bookingId = paymentIntent.metadata.bookingId;
   if (!bookingId) return;
 

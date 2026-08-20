@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   applyB2BInvoiceRule,
-  B2B_VAT_EXEMPTION_NOTE,
+  ARTICLE_47_FIELD_NAME,
+  countryFromAddressText,
   evaluateVatRule,
+  firstVatCountry,
   getStandardVatRate,
   isB2BSameAsB2CCountry,
   normalizeVatCountry,
+  parseVatCountryCode,
   requiresVatRfqReview,
+  resolvePlaceOfSupplyCountry,
+  resolvePropertyNature,
   type VatDecision,
 } from "../../utils/vatManagement";
 import type { IVatLogicRule } from "../../models/serviceConfiguration";
@@ -30,6 +35,7 @@ describe("normalizeVatCountry", () => {
   it("maps country names and aliases", () => {
     expect(normalizeVatCountry("Belgium")).toBe("BE");
     expect(normalizeVatCountry("The Netherlands")).toBe("NL");
+    expect(normalizeVatCountry("Nederland")).toBe("NL");
     expect(normalizeVatCountry("holland")).toBe("NL");
     expect(normalizeVatCountry("United Kingdom")).toBe("GB");
     expect(normalizeVatCountry("Czech Republic")).toBe("CZ");
@@ -37,6 +43,19 @@ describe("normalizeVatCountry", () => {
 
   it("returns empty string for unknown countries", () => {
     expect(normalizeVatCountry("Atlantis")).toBe("");
+  });
+});
+
+describe("parseVatCountryCode / firstVatCountry", () => {
+  it("does not treat an empty profile country as Belgium", () => {
+    expect(parseVatCountryCode("")).toBe("");
+    expect(parseVatCountryCode(undefined)).toBe("");
+    expect(firstVatCountry("", undefined, "Nederland")).toBe("NL");
+    expect(firstVatCountry("", "BE")).toBe("BE");
+  });
+
+  it("reads a country name from a formatted service address", () => {
+    expect(countryFromAddressText("Keizersgracht 1, Amsterdam, Nederland")).toBe("NL");
   });
 });
 
@@ -56,10 +75,11 @@ describe("getStandardVatRate", () => {
 });
 
 describe("isB2BSameAsB2CCountry", () => {
-  it("matches the five exception countries", () => {
-    for (const country of ["BE", "CH", "LI", "NO", "GR"]) {
+  it("matches the four non-Belgian exception countries", () => {
+    for (const country of ["CH", "LI", "NO", "GR"]) {
       expect(isB2BSameAsB2CCountry(country)).toBe(true);
     }
+    expect(isB2BSameAsB2CCountry("BE")).toBe(false);
   });
 
   it("does not match other EU countries", () => {
@@ -179,20 +199,49 @@ describe("applyB2BInvoiceRule", () => {
     expect(applyB2BInvoiceRule(decision, "individual", "NL123456789B01", true)).toEqual(decision);
   });
 
-  it("applies 0% reverse charge for verified EU B2B outside exception countries", () => {
+  it("applies Reverse Charge for verified EU B2B outside exception countries", () => {
     const result = applyB2BInvoiceRule(makeDecision(), "business", "NL123456789B01", true);
     expect(result.appliedRate).toBe(0);
     expect(result.reverseCharge).toBe(true);
-    expect(result.explanation).toBe(B2B_VAT_EXEMPTION_NOTE);
+    expect(result.vatLabel).toBe("Reverse Charge");
   });
 
-  it("does not exempt B2B in the five exception countries", () => {
-    for (const country of ["BE", "CH", "LI", "NO", "GR"]) {
-      const decision = makeDecision({ country });
+  it("keeps local B2C rates for CH, LI, NO, and GR B2B", () => {
+    for (const country of ["CH", "LI", "NO", "GR"]) {
+      const decision = makeDecision({ country, appliedRate: country === "GR" ? 24 : 8.1 });
       const result = applyB2BInvoiceRule(decision, "business", "BE0123456789", true);
       expect(result.reverseCharge).toBe(false);
       expect(result.appliedRate).toBe(decision.appliedRate);
     }
+  });
+
+  it("keeps Belgian B2B movable work on the B2C rate", () => {
+    const decision = makeDecision({ country: "BE", appliedRate: 21, standardRate: 21 });
+    const result = applyB2BInvoiceRule(decision, "business", "BE0123456789", true, {
+      propertyNature: "movable",
+    });
+    expect(result.reverseCharge).toBe(false);
+    expect(result.appliedRate).toBe(21);
+  });
+
+  it("applies Reverse Charge for Belgian B2B immovable work", () => {
+    const decision = makeDecision({ country: "BE", appliedRate: 6, standardRate: 21 });
+    const result = applyB2BInvoiceRule(decision, "business", "BE0123456789", true, {
+      propertyNature: "immovable",
+    });
+    expect(result.reverseCharge).toBe(true);
+    expect(result.appliedRate).toBe(0);
+    expect(result.vatLabel).toBe("Reverse Charge");
+  });
+
+  it("keeps Belgian B2C rates when immovable work is exempt from Belgian reverse charge", () => {
+    const decision = makeDecision({ country: "BE", appliedRate: 6, standardRate: 21 });
+    const result = applyB2BInvoiceRule(decision, "business", "BE0123456789", true, {
+      propertyNature: "immovable",
+      exemptFromBelgianReverseCharge: true,
+    });
+    expect(result.reverseCharge).toBe(false);
+    expect(result.appliedRate).toBe(6);
   });
 
   it("requires a verified VAT number for the exemption", () => {
@@ -217,5 +266,62 @@ describe("requiresVatRfqReview", () => {
     expect(requiresVatRfqReview({ action: "standard_rate", reverseCharge: false })).toBe(false);
     expect(requiresVatRfqReview({ action: "reduced_rate", reverseCharge: false })).toBe(false);
     expect(requiresVatRfqReview(null)).toBe(false);
+  });
+});
+
+describe("resolvePropertyNature", () => {
+  it("uses the service classification when it is not project-dependent", () => {
+    expect(resolvePropertyNature({ classification: "movable" })).toBe("movable");
+    expect(resolvePropertyNature({ classification: "immovable" })).toBe("immovable");
+  });
+
+  it("uses the professional Article 47 answer when the service is project-dependent", () => {
+    expect(
+      resolvePropertyNature({
+        classification: "project_dependent",
+        professionalAnswers: { [ARTICLE_47_FIELD_NAME]: true },
+      })
+    ).toBe("immovable");
+    expect(
+      resolvePropertyNature({
+        classification: "project_dependent",
+        professionalAnswers: { [ARTICLE_47_FIELD_NAME]: false },
+      })
+    ).toBe("movable");
+  });
+});
+
+describe("resolvePlaceOfSupplyCountry", () => {
+  it("uses the booking address for B2C", () => {
+    expect(
+      resolvePlaceOfSupplyCountry({
+        customerType: "individual",
+        propertyNature: "movable",
+        bookingCountry: "NL",
+        businessCountry: "BE",
+      })
+    ).toBe("NL");
+  });
+
+  it("uses the booking address for B2B immovable work", () => {
+    expect(
+      resolvePlaceOfSupplyCountry({
+        customerType: "business",
+        propertyNature: "immovable",
+        bookingCountry: "NL",
+        businessCountry: "BE",
+      })
+    ).toBe("NL");
+  });
+
+  it("uses the customer business address for B2B movable work", () => {
+    expect(
+      resolvePlaceOfSupplyCountry({
+        customerType: "business",
+        propertyNature: "movable",
+        bookingCountry: "NL",
+        businessCountry: "DE",
+      })
+    ).toBe("DE");
   });
 });

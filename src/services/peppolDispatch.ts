@@ -22,12 +22,17 @@ export type PeppolDispatchResult = {
 };
 
 type PeppolDispatchPayload = {
+  side: "customer" | "supplier";
   documentType: "invoice" | "credit_note";
   invoiceNumber: string;
   peppolParticipantId?: string;
   supplierParticipantId?: string;
   customerVatNumber?: string;
   customerName?: string;
+  recipientCountry?: string;
+  netAmount?: number;
+  vatRate?: number;
+  reverseCharge?: boolean;
   ublXml: string;
   ublUrl: string;
 };
@@ -43,11 +48,14 @@ const RETRY_BASE_DELAY_MS = 500;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const isBelgianB2BBooking = (booking: any): boolean => {
-  const customer = booking.customer || {};
-  if (customer.customerType !== "business") return false;
+const isBelgianB2BBooking = (booking: any, side: "customer" | "supplier"): boolean => {
+  const party = side === "supplier" ? booking.professional || {} : booking.customer || {};
+  if (side === "supplier" && !party.businessInfo?.vatNumber && !party.vatNumber) return false;
+  if (side === "customer" && party.customerType !== "business") return false;
   const country = normalizeVatCountry(
-    customer.companyAddress?.country || customer.location?.country || booking.vatDecision?.country
+    side === "supplier"
+      ? party.businessInfo?.country || party.location?.country
+      : booking.vatDecision?.country || party.companyAddress?.country || party.location?.country
   );
   return country === "BE";
 };
@@ -147,6 +155,17 @@ const getOdooInvoiceLines = (booking: any, documentType: "invoice" | "credit_not
   }];
 };
 
+const getOdooInvoiceLinesForPayload = (booking: any, payload: PeppolDispatchPayload): OdooInvoiceLine[] => {
+  if (payload.side === "supplier" && typeof payload.netAmount === "number") {
+    return [{
+      description: booking.rfqData?.description || booking.quote?.description || "Service",
+      price: payload.netAmount * (payload.documentType === "credit_note" ? -1 : 1),
+      vatRate: payload.vatRate ?? 0,
+    }];
+  }
+  return getOdooInvoiceLines(booking, payload.documentType);
+};
+
 const getTaxIdsForLine = (
   config: OdooAccountingConfig,
   line: OdooInvoiceLine,
@@ -183,7 +202,9 @@ const findExistingOdooMove = async (
     "search_read",
     {
       domain: [
-        ["move_type", "=", payload.documentType === "credit_note" ? "out_refund" : "out_invoice"],
+        ["move_type", "=", payload.side === "supplier"
+          ? (payload.documentType === "credit_note" ? "in_refund" : "in_invoice")
+          : (payload.documentType === "credit_note" ? "out_refund" : "out_invoice")],
         "|",
         ["ref", "=", payload.invoiceNumber],
         ["payment_reference", "=", payload.invoiceNumber],
@@ -200,8 +221,9 @@ const ensureOdooPartner = async (
   booking: any,
   payload: PeppolDispatchPayload
 ): Promise<number> => {
-  const customer = booking.customer || {};
-  const vat = normalizeOdooVat(payload.customerVatNumber || customer.vatNumber);
+  const customer = payload.side === "supplier" ? booking.professional || {} : booking.customer || {};
+  const businessInfo = customer.businessInfo || {};
+  const vat = normalizeOdooVat(payload.customerVatNumber || businessInfo.vatNumber || customer.vatNumber);
   const email = customer.email;
   const domain = vat
     ? [["vat", "=", vat]]
@@ -217,16 +239,18 @@ const ensureOdooPartner = async (
   );
   if (partners[0]?.id) return partners[0].id;
 
-  const countryCode = normalizeVatCountry(customer.companyAddress?.country || customer.location?.country || "BE");
+  const countryCode = normalizeVatCountry(
+    payload.recipientCountry || businessInfo.country || customer.companyAddress?.country || customer.location?.country || "BE"
+  );
   const countryId = countryCode ? await findOdooCountryId(config, countryCode) : undefined;
   const partnerVals: Record<string, unknown> = {
-    name: payload.customerName || customer.businessName || customer.name || "Customer",
+    name: payload.customerName || businessInfo.companyName || customer.businessName || customer.name || "Customer",
     email,
     vat,
-    is_company: customer.customerType === "business",
-    street: customer.companyAddress?.address || customer.location?.address,
-    city: customer.companyAddress?.city || customer.location?.city,
-    zip: customer.companyAddress?.postalCode || customer.location?.postalCode,
+    is_company: payload.side === "supplier" || customer.customerType === "business",
+    street: businessInfo.address || customer.companyAddress?.address || customer.location?.address,
+    city: businessInfo.city || customer.companyAddress?.city || customer.location?.city,
+    zip: businessInfo.postalCode || customer.companyAddress?.postalCode || customer.location?.postalCode,
   };
   if (countryId) {
     partnerVals.country_id = countryId;
@@ -277,13 +301,13 @@ const buildOdooMoveVals = async (
 ) => {
   const currency = booking.payment?.currency || "EUR";
   const currencyId = currency === "EUR" ? undefined : await findOdooCurrencyId(config, currency);
-  const reverseCharge = Boolean(booking.payment?.reverseCharge);
-  const invoiceLineIds = getOdooInvoiceLines(booking, payload.documentType).map((line) => {
+  const reverseCharge = payload.reverseCharge ?? Boolean(booking.payment?.reverseCharge);
+  const invoiceLineIds = getOdooInvoiceLinesForPayload(booking, payload).map((line) => {
     const lineVals: Record<string, unknown> = {
       name: line.description,
       quantity: 1,
       price_unit: line.price,
-      account_id: config.incomeAccountId,
+      account_id: payload.side === "supplier" ? config.expenseAccountId : config.incomeAccountId,
     };
     const taxIds = getTaxIdsForLine(config, line, reverseCharge);
     if (taxIds.length > 0) {
@@ -293,7 +317,9 @@ const buildOdooMoveVals = async (
   });
 
   return {
-    move_type: payload.documentType === "credit_note" ? "out_refund" : "out_invoice",
+    move_type: payload.side === "supplier"
+      ? (payload.documentType === "credit_note" ? "in_refund" : "in_invoice")
+      : (payload.documentType === "credit_note" ? "out_refund" : "out_invoice"),
     partner_id: partnerId,
     invoice_date: new Date().toISOString().slice(0, 10),
     ref: payload.invoiceNumber,
@@ -363,7 +389,7 @@ const dispatchToOdoo = async (
   }
 
   const reverseCharge = Boolean(booking.payment?.reverseCharge);
-  const lines = getOdooInvoiceLines(booking, payload.documentType);
+  const lines = getOdooInvoiceLinesForPayload(booking, payload);
   const lineWithoutTax = findMissingTaxMapping(config, lines, reverseCharge);
   if (lineWithoutTax) {
     return {
@@ -387,19 +413,44 @@ const dispatchToOdoo = async (
     })();
     await ensureUblAttachmentOnOdooMove(config, moveId, payload);
 
-    if (config.autoPost && existingMove?.state !== "posted") {
-      await odooCallWithRetries(config, "account.move", "action_post", { ids: [moveId] });
+    if (existingMove?.state !== "posted") {
+      try {
+        await odooCallWithRetries(config, "account.move", "action_post", { ids: [moveId] });
+      } catch (postError: any) {
+        return {
+          status: "queued",
+          provider: "odoo",
+          reference: `odoo-account.move-${moveId}`,
+          reason: postError?.message || "Invoice created in Odoo but could not be posted for Peppol send",
+          dispatchedAt: new Date(),
+          response: { moveId, companyId: config.companyId },
+          attempts: 1,
+        };
+      }
     }
 
-    return {
-      status: "queued",
-      provider: "odoo",
-      reference: `odoo-account.move-${moveId}`,
-      reason: "Invoice created in Odoo; send via Odoo Peppol workflow",
-      dispatchedAt: new Date(),
-      response: { moveId, companyId: config.companyId },
-      attempts: 1,
-    };
+    try {
+      await odooCallWithRetries(config, "account.move", "button_process_edi_web_services", { ids: [moveId] });
+      return {
+        status: "sent",
+        provider: "odoo",
+        reference: `odoo-account.move-${moveId}`,
+        reason: "Invoice posted in Odoo and Peppol EDI send requested",
+        dispatchedAt: new Date(),
+        response: { moveId, companyId: config.companyId },
+        attempts: 1,
+      };
+    } catch {
+      return {
+        status: "queued",
+        provider: "odoo",
+        reference: `odoo-account.move-${moveId}`,
+        reason: "Invoice posted in Odoo; Peppol send pending in Odoo",
+        dispatchedAt: new Date(),
+        response: { moveId, companyId: config.companyId },
+        attempts: 1,
+      };
+    }
   } catch (error: any) {
     return {
       status: "failed",
@@ -414,19 +465,26 @@ const dispatchToOdoo = async (
 
 export async function maybeDispatchPeppolInvoice(params: {
   booking: any;
+  side?: "customer" | "supplier";
   invoiceNumber: string;
   ublXml: string;
   invoiceUblUrl: string;
   documentType?: "invoice" | "credit_note";
+  netAmount?: number;
+  vatRate?: number;
+  reverseCharge?: boolean;
 }): Promise<PeppolDispatchResult> {
-  if (!isBelgianB2BBooking(params.booking)) {
-    return { status: "skipped", reason: "Peppol dispatch is limited to Belgian B2B customers" };
+  const side = params.side || "customer";
+  if (!isBelgianB2BBooking(params.booking, side)) {
+    return { status: "skipped", reason: side === "supplier"
+      ? "Supplier Peppol dispatch is limited to Belgian B2B professionals"
+      : "Peppol dispatch is limited to Belgian B2B customers" };
   }
 
   const settings = await PlatformSettings.getCurrentConfig();
   const eInvoicing = settings.eInvoicing || {};
 
-  if (!eInvoicing.peppolEnabled) {
+  if (!eInvoicing.peppolEnabled && eInvoicing.provider !== "odoo") {
     return { status: "skipped", reason: "Peppol e-invoicing is disabled in platform settings" };
   }
 
@@ -446,12 +504,23 @@ export async function maybeDispatchPeppolInvoice(params: {
   }
 
   const payload: PeppolDispatchPayload = {
+    side,
     documentType: params.documentType || "invoice",
     invoiceNumber: params.invoiceNumber,
     peppolParticipantId: eInvoicing.peppolParticipantId,
     supplierParticipantId: eInvoicing.peppolParticipantId,
-    customerVatNumber: params.booking.customer?.vatNumber,
-    customerName: params.booking.customer?.businessName || params.booking.customer?.name,
+    customerVatNumber: side === "supplier"
+      ? params.booking.professional?.businessInfo?.vatNumber || params.booking.professional?.vatNumber
+      : params.booking.customer?.vatNumber,
+    customerName: side === "supplier"
+      ? params.booking.professional?.businessInfo?.companyName || params.booking.professional?.businessInfo?.name || params.booking.professional?.name
+      : params.booking.customer?.businessName || params.booking.customer?.name,
+    recipientCountry: side === "supplier"
+      ? params.booking.professional?.businessInfo?.country || params.booking.professional?.location?.country
+      : params.booking.customer?.companyAddress?.country || params.booking.customer?.location?.country,
+    netAmount: params.netAmount,
+    vatRate: params.vatRate,
+    reverseCharge: params.reverseCharge,
     ublXml: params.ublXml,
     ublUrl: params.invoiceUblUrl,
   };

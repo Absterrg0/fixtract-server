@@ -49,6 +49,7 @@ export interface IVatQuestion {
     unit?: string;
     options?: string[];
     isRequired: boolean;
+    audience?: 'customer' | 'professional';
 }
 
 export interface IVatLogicCondition {
@@ -72,7 +73,10 @@ export interface IVatLogicRule {
 export interface IVatManagement {
     enabled: boolean;
     rateRuleGroup?: string;
+    article47Classification?: 'movable' | 'immovable' | 'project_dependent';
+    exemptFromBelgianReverseCharge?: boolean;
     reducedVatQuestions: IVatQuestion[];
+    professionalVatQuestions?: IVatQuestion[];
     logicRules: IVatLogicRule[];
 }
 
@@ -187,7 +191,8 @@ const VatQuestionSchema = new Schema<IVatQuestion>({
     },
     unit: { type: String, trim: true },
     options: [{ type: String }],
-    isRequired: { type: Boolean, default: true }
+    isRequired: { type: Boolean, default: true },
+    audience: { type: String, enum: ['customer', 'professional'] }
 }, { _id: false });
 
 const VatLogicConditionSchema = new Schema<IVatLogicCondition>({
@@ -222,7 +227,14 @@ VatLogicRuleSchema.pre('validate', function(next) {
 const VatManagementSchema = new Schema<IVatManagement>({
     enabled: { type: Boolean, default: false },
     rateRuleGroup: { type: String, trim: true },
+    article47Classification: {
+        type: String,
+        enum: ['movable', 'immovable', 'project_dependent'],
+        default: 'immovable',
+    },
+    exemptFromBelgianReverseCharge: { type: Boolean, default: false },
     reducedVatQuestions: { type: [VatQuestionSchema], default: [] },
+    professionalVatQuestions: { type: [VatQuestionSchema], default: [] },
     logicRules: { type: [VatLogicRuleSchema], default: [] }
 }, { _id: false });
 
@@ -246,7 +258,7 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
     professionalInputFields: [DynamicFieldSchema],
     extraOptions: [ExtraOptionSchema],
     conditionsAndWarnings: [ConditionWarningSchema],
-    vatManagement: { type: VatManagementSchema, default: () => ({ enabled: false, reducedVatQuestions: [], logicRules: [] }) },
+    vatManagement: { type: VatManagementSchema, default: () => ({ enabled: false, reducedVatQuestions: [], professionalVatQuestions: [], logicRules: [] }) },
 
     // Metadata
     isActive: { type: Boolean, default: true },

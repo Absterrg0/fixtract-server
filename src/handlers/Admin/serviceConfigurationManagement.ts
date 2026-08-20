@@ -3,6 +3,7 @@ import ServiceConfiguration from '../../models/serviceConfiguration';
 import CmsContent from '../../models/cmsContent';
 import { IUser } from '../../models/user';
 import { toSlug } from '../../utils/slug';
+import { withArticle47ProfessionalQuestion } from '../../utils/vatManagement';
 
 function respondWithSchemaError(res: Response, error: any, fallbackMessage: string) {
     if (error?.name === 'ValidationError' && error.errors) {
@@ -129,9 +130,10 @@ export const getServiceConfigurationById = async (req: Request, res: Response) =
 const validateVatManagement = (vatManagement: any): string | null => {
     if (!vatManagement || !vatManagement.enabled) return null;
 
-    const questions = Array.isArray(vatManagement.reducedVatQuestions)
-        ? vatManagement.reducedVatQuestions
-        : [];
+    const questions = [
+      ...(Array.isArray(vatManagement.reducedVatQuestions) ? vatManagement.reducedVatQuestions : []),
+      ...(Array.isArray(vatManagement.professionalVatQuestions) ? vatManagement.professionalVatQuestions : []),
+    ];
     const fieldNames = new Set<string>();
     for (const question of questions) {
         const fieldName = String(question?.fieldName || '').trim();
@@ -191,6 +193,9 @@ const mergeVatManagement = (existingVatManagement: any, patch: any) => {
         reducedVatQuestions: Array.isArray(patch.reducedVatQuestions)
             ? patch.reducedVatQuestions
             : existing.reducedVatQuestions || [],
+        professionalVatQuestions: Array.isArray(patch.professionalVatQuestions)
+            ? patch.professionalVatQuestions
+            : existing.professionalVatQuestions || [],
         logicRules: Array.isArray(patch.logicRules)
             ? patch.logicRules
             : existing.logicRules || [],
@@ -208,6 +213,11 @@ export const createServiceConfiguration = async (req: Request, res: Response) =>
         const vatError = validateVatManagement(configurationData?.vatManagement);
         if (vatError) {
             return res.status(400).json({ success: false, message: vatError });
+        }
+
+        if (configurationData?.vatManagement) {
+            configurationData.vatManagement.professionalVatQuestions =
+                withArticle47ProfessionalQuestion(configurationData.vatManagement);
         }
 
         // Check if configuration already exists
@@ -259,6 +269,8 @@ export const updateServiceConfiguration = async (req: Request, res: Response) =>
 
         if (updateData?.vatManagement !== undefined) {
             updateData.vatManagement = mergeVatManagement(existingConfiguration.vatManagement, updateData.vatManagement);
+            updateData.vatManagement.professionalVatQuestions =
+                withArticle47ProfessionalQuestion(updateData.vatManagement);
             const vatError = validateVatManagement(updateData.vatManagement);
             if (vatError) {
                 return res.status(400).json({ success: false, message: vatError });

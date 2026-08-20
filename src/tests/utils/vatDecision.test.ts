@@ -114,6 +114,25 @@ describe("resolveVatDecisionFromConfig", () => {
     });
     expect(decision.reverseCharge).toBe(true);
     expect(decision.appliedRate).toBe(0);
+    expect(decision.vatLabel).toBe("Reverse Charge");
+  });
+
+  it("applies Reverse Charge for Belgian B2B immovable work", async () => {
+    mockConfig({
+      category: "Cleaning",
+      vatManagement: { enabled: false, article47Classification: "immovable" },
+    });
+    const decision = await resolveVatDecisionFromConfig({
+      category: "Cleaning",
+      country: "BE",
+      customerType: "business",
+      vatNumber: "BE0123456789",
+      isVatVerified: true,
+      propertyNature: "immovable",
+    });
+    expect(decision.reverseCharge).toBe(true);
+    expect(decision.appliedRate).toBe(0);
+    expect(decision.vatLabel).toBe("Reverse Charge");
   });
 
   it("keeps local VAT for Belgian B2B (same-as-B2C exception)", async () => {
@@ -166,6 +185,7 @@ describe("getVatRateOptionsFromConfig", () => {
     expect(options).toHaveLength(1);
     expect(options[0].rate).toBe(0);
     expect(options[0].reverseCharge).toBe(true);
+    expect(options[0].label).toBe("Reverse Charge");
     expect(options[0].source).toBe("b2b_exempt");
   });
 

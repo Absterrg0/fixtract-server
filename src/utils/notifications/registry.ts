@@ -700,6 +700,20 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
     }),
     'booking',
   ),
+  'customer.invoice_ready': def(
+    'customer.invoice_ready',
+    'booking_updates',
+    'email_always',
+    'customer',
+    (ctx) => ({
+      title: ctx.invoiceNumber ? `Invoice ${String(ctx.invoiceNumber)} is ready` : 'Your invoice is ready',
+      body: ctx.invoiceUrl
+        ? `Your invoice is ready. Download it here: ${ctx.invoiceUrl}`
+        : 'Your invoice is ready on the booking page.',
+      clickUrl: String(ctx.invoiceUrl || frontend(`/bookings/${ctx.bookingId || ''}`)),
+    }),
+    'booking',
+  ),
   'customer.review_reminder': def(
     'customer.review_reminder',
     'booking_updates',
@@ -976,6 +990,20 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
           String(ctx.customerName || 'Customer'),
           String(ctx.bookingId || ''),
         ),
+    }),
+    'booking',
+  ),
+  'professional.invoice_ready': def(
+    'professional.invoice_ready',
+    'booking_updates',
+    'email_always',
+    'professional',
+    (ctx) => ({
+      title: ctx.invoiceNumber ? `Self-bill ${String(ctx.invoiceNumber)} is ready` : 'Your self-bill invoice is ready',
+      body: ctx.invoiceUrl
+        ? `The supplier self-bill is ready. Download it here: ${ctx.invoiceUrl}`
+        : 'The supplier self-bill is ready on the booking page.',
+      clickUrl: String(ctx.invoiceUrl || frontend(`/bookings/${ctx.bookingId || ''}`)),
     }),
     'booking',
   ),

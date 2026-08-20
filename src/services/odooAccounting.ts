@@ -8,6 +8,7 @@ export type OdooAccountingConfig = {
   apiKey: string;
   companyId: number;
   incomeAccountId: number;
+  expenseAccountId: number;
   salesJournalId?: number;
   defaultTaxId: number;
   reverseChargeTaxId?: number;
@@ -230,6 +231,29 @@ const discoverIncomeAccount = async (
   return pickIncomeAccount(mergedAccounts);
 };
 
+const discoverExpenseAccount = async (
+  credentials: OdooCredentials,
+  companyId: number,
+): Promise<number> => {
+  const accounts = await odooJson2CallWithRetries<Array<{ id: number; code?: string | false; name?: string }>>(
+    credentials,
+    "account.account",
+    "search_read",
+    {
+      domain: [["account_type", "=", "expense"]],
+      fields: ["id", "code", "name"],
+      limit: 50,
+    },
+    companyId,
+  );
+  const preferred = accounts.find((account) => /service|subcontract|supplier/i.test(String(account.name || "")))
+    || accounts[0];
+  if (!preferred?.id) {
+    throw new Error("No Odoo expense account found for supplier invoices");
+  }
+  return preferred.id;
+};
+
 const discoverSaleTaxes = async (
   credentials: OdooCredentials,
   companyId: number
@@ -308,6 +332,7 @@ export const discoverOdooAccountingConfig = async (): Promise<OdooAccountingConf
   }
 
   const { accountId: incomeAccountId, companyId } = await discoverIncomeAccount(credentials);
+  const expenseAccountId = await discoverExpenseAccount(credentials, companyId);
   const { taxIdsByRate, defaultTaxId, reverseChargeTaxId } = await discoverSaleTaxes(credentials, companyId);
   const salesJournalId = await discoverSalesJournal(credentials, companyId);
 
@@ -316,6 +341,7 @@ export const discoverOdooAccountingConfig = async (): Promise<OdooAccountingConf
     apiKey: credentials.apiKey,
     companyId,
     incomeAccountId,
+    expenseAccountId,
     salesJournalId,
     defaultTaxId,
     reverseChargeTaxId,

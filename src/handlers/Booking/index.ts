@@ -16,7 +16,7 @@ import CancellationRequest, { ACTIVE_CANCELLATION_STATUSES, CANCELLATION_REASON_
 import { addBusinessDays, REFUND_RESPONSE_BUSINESS_DAYS } from "../../utils/businessDays";
 import { notify } from "../../utils/notifications/notify";
 import { IUser } from "../../models/user";
-import { applyB2BInvoiceRule, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
+import { applyB2BInvoiceRule, firstVatCountry, parseVatCountryCode, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
 import ServiceConfiguration from "../../models/serviceConfiguration";
 
 /** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
@@ -31,22 +31,23 @@ const applyProceedAtStandardVatIfRequested = (
   const standardRate = Number.isFinite(vatDecision.standardRate)
     ? vatDecision.standardRate
     : vatDecision.appliedRate ?? 21;
-  const overrideFields = {
-    action: "standard_rate" as const,
+  return applyB2BInvoiceRule({
+    ...vatDecision,
+    action: "standard_rate",
     appliedRate: standardRate,
     reverseCharge: false,
     explanation: `Customer chose to proceed at the standard VAT rate (${standardRate}%).`,
     matchedRuleText: undefined,
-  };
-  const afterB2B = applyB2BInvoiceRule(
-    { ...vatDecision, ...overrideFields },
-    customer?.customerType,
-    customer?.vatNumber,
-    customer?.isVatVerified
-  );
-  // Customer's explicit standard-rate choice overrides B2B reverse-charge.
-  return { ...afterB2B, ...overrideFields };
+  }, customer?.customerType, customer?.vatNumber, customer?.isVatVerified, {
+    propertyNature: vatDecision.propertyNature,
+  });
 };
+
+const professionalAnswersFromProject = (project: { vatProfessionalAnswers?: Array<{ fieldName?: string; value?: unknown }> } | null | undefined) =>
+  (project?.vatProfessionalAnswers || []).reduce((acc: Record<string, unknown>, answer) => {
+    if (answer?.fieldName) acc[String(answer.fieldName)] = answer.value;
+    return acc;
+  }, {});
 
 const presignMaybeS3Url = async (url?: string | null) => {
   if (!url) return url;
@@ -299,6 +300,8 @@ const presignBookingFiles = async (bookingDoc: any) => {
       ...booking.payment,
       invoiceUrl: await presignMaybeS3Url(booking.payment.invoiceUrl),
       invoiceUblUrl: await presignMaybeS3Url(booking.payment.invoiceUblUrl),
+      supplierInvoiceUrl: await presignMaybeS3Url(booking.payment.supplierInvoiceUrl),
+      supplierInvoiceUblUrl: await presignMaybeS3Url(booking.payment.supplierInvoiceUblUrl),
       creditNoteUrl: await presignMaybeS3Url(booking.payment.creditNoteUrl),
       creditNoteUblUrl: await presignMaybeS3Url(booking.payment.creditNoteUblUrl),
     };
@@ -327,6 +330,8 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       serviceConfigurationId,
       vatAnswers,
       proceedAtStandardVat,
+      serviceCountry,
+      serviceLocation,
     } = req.body;
     const paymentAtCheckoutRequested =
       paymentAtCheckout === true ||
@@ -417,19 +422,43 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       configIdForVat
     );
 
+    const requestedServiceCountry =
+      parseVatCountryCode(serviceCountry) ||
+      parseVatCountryCode(serviceLocation?.country);
+    const serviceCoords = Array.isArray(serviceLocation?.coordinates)
+      ? serviceLocation.coordinates.map(Number)
+      : [];
+    const hasServiceCoords =
+      serviceCoords.length === 2 &&
+      Number.isFinite(serviceCoords[0]) &&
+      Number.isFinite(serviceCoords[1]) &&
+      serviceCoords[0] >= -180 &&
+      serviceCoords[0] <= 180 &&
+      serviceCoords[1] >= -90 &&
+      serviceCoords[1] <= 90;
+
+    const applyBookingLocation = (fallbackCountry?: string) => {
+      const country = firstVatCountry(
+        requestedServiceCountry,
+        customer.location?.country,
+        fallbackCountry
+      );
+      return {
+        type: "Point" as const,
+        coordinates: hasServiceCoords ? serviceCoords : (customer.location?.coordinates || [0, 0]),
+        address: serviceLocation?.address || customer.location?.address,
+        city: serviceLocation?.city || customer.location?.city,
+        country,
+        postalCode: serviceLocation?.postalCode || customer.location?.postalCode,
+      };
+    };
+
     // Create booking payload (base fields)
     const bookingData: any = {
       customer: userId,
       bookingType,
       status: 'rfq',
-      location: {
-        type: 'Point',
-        coordinates: customer.location.coordinates,
-        address: customer.location.address,
-        city: customer.location.city,
-        country: customer.location.country,
-        postalCode: customer.location.postalCode
-      },
+      location: applyBookingLocation(),
       rfqData: {
         serviceType: rfqData.serviceType,
         description: rfqData.description,
@@ -468,7 +497,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       // country-based standard rates and B2B reverse-charge rules still apply.
       const vatDecision = await resolveVatDecisionFromConfig({
         serviceConfigurationId,
-        country: customer.location?.country,
+        country: bookingData.location.country,
+        bookingCountry: bookingData.location.country,
+        businessCountry: customer.companyAddress?.country,
         answers: normalizedVatAnswers,
         customerType: customer.customerType || "individual",
         vatNumber: customer.vatNumber,
@@ -532,13 +563,17 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           msg: "serviceConfigurationId does not match the selected project",
         });
       }
+      bookingData.location = applyBookingLocation(project.distance?.countryCode);
       const vatDecision = await resolveVatDecisionFromConfig({
         serviceConfigurationId: selectedServiceConfigId,
         category: projectService?.category || project.category,
         service: projectService?.service || project.service,
         areaOfWork: projectService?.areaOfWork || project.areaOfWork,
-        country: customer.location?.country || project.distance?.countryCode,
+        country: bookingData.location.country,
+        bookingCountry: bookingData.location.country,
+        businessCountry: customer.companyAddress?.country,
         answers: normalizedVatAnswers,
+        professionalAnswers: professionalAnswersFromProject(project),
         customerType: customer.customerType || "individual",
         vatNumber: customer.vatNumber,
         isVatVerified: customer.isVatVerified,
@@ -792,7 +827,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         }
 
         bookingData.quote = {
-          amount: checkoutSnapshot.totalAmount,
+          amount: checkoutSnapshot.baseSubtotal,
           currency: checkoutSnapshot.currency,
           description: `Auto-generated checkout quote for ${project.title}`,
           breakdown: [
@@ -1768,10 +1803,10 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
 export const previewVatDecision = async (req: Request, res: Response) => {
   try {
     const userId = req.user?._id;
-    const { projectId, serviceConfigurationId, vatAnswers } = req.body;
+    const { projectId, serviceConfigurationId, vatAnswers, serviceCountry } = req.body;
 
     const customer = await User.findById(userId).select(
-      "role customerType vatNumber isVatVerified location"
+      "role customerType vatNumber isVatVerified location companyAddress"
     );
     if (!customer || customer.role !== "customer") {
       return res.status(403).json({ success: false, msg: "Only customers can preview VAT" });
@@ -1787,7 +1822,7 @@ export const previewVatDecision = async (req: Request, res: Response) => {
     let project: any = null;
     if (projectId && mongoose.Types.ObjectId.isValid(projectId)) {
       project = await Project.findById(projectId).select(
-        "services category service areaOfWork serviceConfigurationId distance"
+        "services category service areaOfWork serviceConfigurationId distance vatProfessionalAnswers"
       );
     }
     const projectService = Array.isArray(project?.services) && project.services.length > 0
@@ -1799,8 +1834,19 @@ export const previewVatDecision = async (req: Request, res: Response) => {
       category: projectService?.category || project?.category,
       service: projectService?.service || project?.service,
       areaOfWork: projectService?.areaOfWork || project?.areaOfWork,
-      country: customer.location?.country || project?.distance?.countryCode,
+      country: firstVatCountry(
+        serviceCountry,
+        customer.location?.country,
+        project?.distance?.countryCode
+      ),
+      bookingCountry: firstVatCountry(
+        serviceCountry,
+        customer.location?.country,
+        project?.distance?.countryCode
+      ),
+      businessCountry: customer.companyAddress?.country,
       answers: normalizedVatAnswers,
+      professionalAnswers: professionalAnswersFromProject(project),
       customerType: customer.customerType || "individual",
       vatNumber: customer.vatNumber,
       isVatVerified: customer.isVatVerified,
@@ -1863,7 +1909,9 @@ export const proceedAtStandardVatRate = async (req: Request, res: Response, next
       reverseCharge: false,
       explanation: `Customer chose to proceed at the standard VAT rate (${standardRate}%).`,
       matchedRuleText: undefined,
-    }, customer?.customerType, customer?.vatNumber, customer?.isVatVerified);
+    }, customer?.customerType, customer?.vatNumber, customer?.isVatVerified, {
+      propertyNature: booking.vatDecision.propertyNature,
+    });
 
     const project = booking.project as any;
     const subprojectIndex = booking.selectedSubprojectIndex;

@@ -21,6 +21,7 @@ import {
   buildTransferMetadata,
   determineBookingCurrency,
   computeGrossBookingAmount,
+  quoteAmountIncludesSelectedExtras,
 } from '../../utils/payment';
 import { calculateVAT } from '../../utils/vat';
 import { calculateVatFromPricingLines } from '../../utils/vatLineCalculation';
@@ -30,7 +31,6 @@ import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discoun
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
 import { auditLog } from '../../utils/auditLogger';
-import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
 
 const extractParticipantIds = (booking: any, professionalOverride?: any) => {
   const customerId = (booking.customer as any)?._id || booking.customer;
@@ -63,14 +63,34 @@ const ALLOWED_PAYMENT_OVERRIDE_KEYS = new Set([
   'invoiceUrl',
   'invoiceUblUrl',
   'invoiceGeneratedAt',
+  'supplierInvoiceNumber',
+  'supplierInvoiceUrl',
+  'supplierInvoiceUblUrl',
+  'supplierInvoiceGeneratedAt',
   'peppolDispatchStatus',
   'peppolDispatchReference',
   'peppolDispatchedAt',
+  'supplierPeppolDispatchStatus',
+  'supplierPeppolDispatchReference',
+  'supplierPeppolDispatchedAt',
   'metadata',
   'notes',
   'refundReason',
   'refundSource',
   'refundNotes',
+  'extraCostAmount',
+  'extraCostCustomerNetAmount',
+  'extraCostVatAmount',
+  'extraCostPlatformFee',
+  'extraCostNetAmount',
+  'extraCostCustomerDiscount',
+  'extraCostPlatformCommission',
+  'extraCostProfessionalPayout',
+  'extraCostStatus',
+  'extraCostPaymentSucceeded',
+  'extraCostPaidAt',
+  'extraCostStripePaymentIntentId',
+  'extraCostTransferId',
 ]);
 
 const filterPaymentOverrides = (overrides: Record<string, any>) =>
@@ -109,9 +129,29 @@ const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {
     invoiceUrl: paymentSummary.invoiceUrl,
     invoiceUblUrl: paymentSummary.invoiceUblUrl,
     invoiceGeneratedAt: paymentSummary.invoiceGeneratedAt,
+    supplierInvoiceNumber: paymentSummary.supplierInvoiceNumber,
+    supplierInvoiceUrl: paymentSummary.supplierInvoiceUrl,
+    supplierInvoiceUblUrl: paymentSummary.supplierInvoiceUblUrl,
+    supplierInvoiceGeneratedAt: paymentSummary.supplierInvoiceGeneratedAt,
     peppolDispatchStatus: paymentSummary.peppolDispatchStatus,
     peppolDispatchReference: paymentSummary.peppolDispatchReference,
     peppolDispatchedAt: paymentSummary.peppolDispatchedAt,
+    supplierPeppolDispatchStatus: paymentSummary.supplierPeppolDispatchStatus,
+    supplierPeppolDispatchReference: paymentSummary.supplierPeppolDispatchReference,
+    supplierPeppolDispatchedAt: paymentSummary.supplierPeppolDispatchedAt,
+    extraCostAmount: paymentSummary.extraCostAmount,
+    extraCostCustomerNetAmount: paymentSummary.extraCostCustomerNetAmount,
+    extraCostVatAmount: paymentSummary.extraCostVatAmount,
+    extraCostPlatformFee: paymentSummary.extraCostPlatformFee,
+    extraCostNetAmount: paymentSummary.extraCostNetAmount,
+    extraCostCustomerDiscount: paymentSummary.extraCostCustomerDiscount,
+    extraCostPlatformCommission: paymentSummary.extraCostPlatformCommission,
+    extraCostProfessionalPayout: paymentSummary.extraCostProfessionalPayout,
+    extraCostStatus: paymentSummary.extraCostStatus,
+    extraCostPaymentSucceeded: paymentSummary.extraCostPaymentSucceeded,
+    extraCostPaidAt: paymentSummary.extraCostPaidAt,
+    extraCostStripePaymentIntentId: paymentSummary.extraCostStripePaymentIntentId,
+    extraCostTransferId: paymentSummary.extraCostTransferId,
     ...filterPaymentOverrides(overrides),
   };
 };
@@ -329,9 +369,10 @@ export const createPaymentIntent = async (
         };
       }
     }
+    const extrasAlreadyInQuote = quoteAmountIncludesSelectedExtras(booking);
     const commissionedExtraOptionsTotal = +(selectedExtraOptionsTotal * (1 + commissionPercent / 100)).toFixed(2);
     let milestoneExtraOptionsCharge = 0;
-    if (selectedExtraOptionsTotal > 0) {
+    if (selectedExtraOptionsTotal > 0 && !extrasAlreadyInQuote) {
       if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
         const minOrder = Math.min(...booking.milestonePayments.map((m: any) => m.order ?? 0));
         if (milestoneOrder === minOrder) {
@@ -726,13 +767,6 @@ export const confirmPayment = async (req: Request, res: Response) => {
           capturedAt: booking.payment!.capturedAt || new Date(),
         })
       );
-
-      void ensureBookingInvoiceArtifacts(booking._id.toString()).catch((invoiceError: unknown) => {
-        console.error(
-          `[PAYMENT CONFIRM] Payment authorized for booking ${booking._id}, but invoice generation failed:`,
-          invoiceError instanceof Error ? invoiceError.message : invoiceError
-        );
-      });
 
       console.log(`✅ Payment authorized for booking ${booking._id}`);
 

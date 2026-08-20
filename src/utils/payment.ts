@@ -27,19 +27,68 @@ export function convertToStripeAmount(amount: number, currency: string = "EUR"):
   return Math.round(amount * 100);
 }
 
+type GrossBookingAmountInput = {
+  quote?: { amount?: number };
+  selectedExtraOptions?: Array<{ bookedPrice?: number } | number>;
+  checkoutSnapshot?: {
+    baseSubtotal?: number;
+    extraOptionsTotal?: number;
+    totalAmount?: number;
+  };
+};
+
+const moneyClose = (a: number, b: number): boolean => Math.abs(a - b) < 0.02;
+
+const sumSelectedExtraOptionPrices = (
+  selectedExtraOptions?: Array<{ bookedPrice?: number } | number>
+): number => {
+  if (!Array.isArray(selectedExtraOptions)) return 0;
+  let total = 0;
+  for (const entry of selectedExtraOptions) {
+    if (typeof entry === "number") {
+      total += entry;
+      continue;
+    }
+    if (typeof entry?.bookedPrice === "number") {
+      total += entry.bookedPrice;
+    }
+  }
+  return total;
+};
+
+/** Pay-at-checkout used to store package+extras in quote.amount and then add extras again. */
+export function quoteAmountIncludesSelectedExtras(booking: GrossBookingAmountInput): boolean {
+  const extrasTotal = sumSelectedExtraOptionPrices(booking.selectedExtraOptions);
+  if (extrasTotal <= 0) return false;
+  const quoteAmount = Number(booking.quote?.amount || 0);
+  const snapshot = booking.checkoutSnapshot;
+  if (
+    snapshot &&
+    Number(snapshot.extraOptionsTotal) > 0 &&
+    Number.isFinite(Number(snapshot.totalAmount)) &&
+    moneyClose(quoteAmount, Number(snapshot.totalAmount))
+  ) {
+    return true;
+  }
+  const baseSubtotal = Number(snapshot?.baseSubtotal);
+  if (Number.isFinite(baseSubtotal) && moneyClose(quoteAmount, baseSubtotal)) {
+    return false;
+  }
+  return moneyClose(quoteAmount, baseSubtotal + extrasTotal);
+}
+
 export function computeGrossBookingAmount(
-  booking: { quote?: { amount?: number }; selectedExtraOptions?: Array<{ bookedPrice?: number } | number> },
+  booking: GrossBookingAmountInput,
   commissionPercent: number
 ): number {
-  const optionsTotal = Array.isArray(booking?.selectedExtraOptions)
-    ? booking.selectedExtraOptions.reduce((sum: number, entry) => {
-        const bookedPrice = (entry as { bookedPrice?: number })?.bookedPrice;
-        return typeof bookedPrice === 'number' ? sum + bookedPrice : sum;
-      }, 0)
-    : 0;
-  const commissionedOptions = +(optionsTotal * (1 + commissionPercent / 100)).toFixed(2);
+  const optionsTotal = sumSelectedExtraOptionPrices(booking.selectedExtraOptions);
   const quoteAmount = booking?.quote?.amount || 0;
-  return +(quoteAmount * (1 + commissionPercent / 100) + commissionedOptions).toFixed(2);
+  const commissionedQuote = +(quoteAmount * (1 + commissionPercent / 100)).toFixed(2);
+  if (quoteAmountIncludesSelectedExtras(booking) || optionsTotal <= 0) {
+    return commissionedQuote;
+  }
+  const commissionedOptions = +(optionsTotal * (1 + commissionPercent / 100)).toFixed(2);
+  return +(commissionedQuote + commissionedOptions).toFixed(2);
 }
 
 /**
