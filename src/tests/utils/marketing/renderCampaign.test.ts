@@ -41,4 +41,14 @@ describe('marketing template contract', () => {
     expect(result.htmlContent).not.toContain('contact.FIRSTNAME');
     expect(result.htmlContent).toContain('data-fixera-marketing-footer="true"');
   });
+
+  it('localizes the provider first-name greeting for German inline campaigns', () => {
+    const result = renderMarketingEmail({
+      locale: 'de',
+      firstName: '{{ contact.FIRSTNAME }}',
+      content: { subject: 'Test', htmlContent: '<p>Body</p>' },
+    });
+
+    expect(result.htmlContent).toContain('Hallo {{ contact.FIRSTNAME }},');
+  });
 });

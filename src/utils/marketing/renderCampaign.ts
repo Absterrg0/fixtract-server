@@ -32,14 +32,14 @@ function escapeHtml(value: string): string {
 }
 
 function appendMarketingFooter(htmlContent: string, footer: string): string {
-  return htmlContent.includes('data-fixera-marketing-footer="true"')
+  return /data-fixera-marketing-footer\s*=\s*["']true["']/i.test(htmlContent)
     ? htmlContent
     : `${htmlContent}${footer}`;
 }
 
 export function resolveGreeting(firstName: unknown, locale: MarketingLocale): string {
   if (firstName === '{{ contact.FIRSTNAME }}') {
-    const prefix = locale === 'nl' ? 'Hallo' : locale === 'fr' ? 'Bonjour' : 'Hi';
+    const prefix = locale === 'nl' || locale === 'de' ? 'Hallo' : locale === 'fr' ? 'Bonjour' : 'Hi';
     return `${prefix} {{ contact.FIRSTNAME }},`;
   }
   const name = typeof firstName === 'string' ? firstName.trim().split(/\s+/)[0] : '';

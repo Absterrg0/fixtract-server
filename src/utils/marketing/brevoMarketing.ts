@@ -410,7 +410,7 @@ export async function createBrevoCampaign(
   // Inline HTML is already rendered with the application footer. Passing a
   // Brevo footer as well would append it a second time. Template-backed
   // campaigns rely on Brevo to append the footer remotely.
-  if (input.footer && !input.htmlContent.includes('data-fixera-marketing-footer="true"')) {
+  if (input.footer && !/data-fixera-marketing-footer\s*=\s*["']true["']/i.test(input.htmlContent)) {
     campaign.footer = input.footer;
   }
   if (input.templateId && Number.isFinite(input.templateId)) {
