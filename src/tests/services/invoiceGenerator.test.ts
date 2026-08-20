@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { inflateSync } from "node:zlib";
-import { generateInvoicePDF } from "../../services/invoiceGenerator";
+import { applyManualInvoicePartyOverrides, generateInvoicePDF } from "../../services/invoiceGenerator";
 
 const extractPdfStreamText = (pdf: Buffer): string => {
   const marker = Buffer.from("stream");
@@ -58,5 +58,48 @@ describe("invoice PDF artifacts", () => {
     const encodedText = concatenatePdfHexText(renderedText);
     expect(encodedText).toContain(Buffer.from("Reverse Charge").toString("latin1"));
     expect(encodedText).toContain(Buffer.from("Page 1 of 1").toString("latin1"));
+  });
+
+  it("renders the self-billing party label", async () => {
+    const pdf = await generateInvoicePDF({
+      invoiceNumber: "SUP-2026-000001",
+      invoiceDate: new Date("2026-08-20T00:00:00.000Z"),
+      bookingNumber: "BK-2",
+      customer: { name: "Fixtract", email: "accounts@example.com", country: "BE" },
+      professional: { name: "Supplier", country: "BE" },
+      payment: { netAmount: 100, vatAmount: 0, vatRate: 0, totalWithVat: 100, currency: "EUR" },
+      serviceDescription: "Supplier service",
+      selfBilling: true,
+    });
+
+    const encodedText = concatenatePdfHexText(extractPdfStreamText(pdf));
+    expect(encodedText).toContain(Buffer.from("SUPPLIER").toString("latin1"));
+  });
+
+  it("applies manual party overrides to hydrated bookings without losing fields", () => {
+    const booking = {
+      toObject: () => ({
+        customer: { name: "Original customer", email: "customer@example.com", location: { country: "BE" } },
+        professional: { name: "Original supplier", businessInfo: { country: "BE" } },
+        location: { country: "BE" },
+        payment: { netAmount: 100 },
+      }),
+    } as any;
+    const result = applyManualInvoicePartyOverrides(booking, {
+      lines: [],
+      payment: { netAmount: 100, vatAmount: 0, vatRate: 0, totalWithVat: 100, currency: "EUR" },
+      customer: { name: "Corrected customer", country: "NL" },
+    });
+
+    expect(result.location).toEqual({ country: "BE" });
+    expect(result.customer).toMatchObject({
+      name: "Corrected customer",
+      email: "customer@example.com",
+      companyAddress: { country: "NL" },
+    });
+    expect(result.professional).toMatchObject({
+      name: "Original supplier",
+      businessInfo: { country: "BE" },
+    });
   });
 });

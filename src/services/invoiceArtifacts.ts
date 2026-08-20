@@ -603,14 +603,14 @@ const buildUblPartiesAndTotals = (
   const customerParty = {
     name: customer.businessName || customer.name || "Customer",
     vatNumber: customer.vatNumber || "",
+    country: booking.vatDecision?.country || customer.companyAddress?.country || customer.location?.country,
     peppolParticipantId: toBelgianPeppolParticipantId(
       customer.vatNumber,
-      customer.companyAddress?.country || customer.location?.country,
+      booking.vatDecision?.country || customer.companyAddress?.country || customer.location?.country,
     ),
     street: customer.companyAddress?.address || customer.location?.address,
     city: customer.companyAddress?.city || customer.location?.city,
     postalCode: customer.companyAddress?.postalCode || customer.location?.postalCode,
-    country: customer.companyAddress?.country || customer.location?.country,
   };
   const platformParty = {
     name: platform.name || "Fixtract",
