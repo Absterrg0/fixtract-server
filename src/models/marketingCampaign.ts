@@ -43,6 +43,10 @@ export interface ICampaignLocaleDelivery {
   brevoCampaignId?: number;
   brevoStatus?: 'created' | 'sent';
   recipientCount: number;
+  subscriberCount?: number;
+  leadCount?: number;
+  deduplicatedRecipientCount?: number;
+  criteriaHash?: string;
   stats?: {
     sent: number;
     delivered: number;
@@ -81,6 +85,9 @@ export interface IMarketingCampaign extends Document {
   nextRetryAt?: Date | null;
   lastError?: string;
   utmCampaign?: string;
+  lastPreviewCount?: number;
+  lastPreviewAt?: Date | null;
+  lastPreviewCriteriaHash?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -117,6 +124,10 @@ const deliverySchema = new Schema<ICampaignLocaleDelivery>(
     brevoCampaignId: { type: Number },
     brevoStatus: { type: String, enum: ['created', 'sent'] },
     recipientCount: { type: Number, default: 0 },
+    subscriberCount: { type: Number, default: 0 },
+    leadCount: { type: Number, default: 0 },
+    deduplicatedRecipientCount: { type: Number, default: 0 },
+    criteriaHash: { type: String, trim: true },
     stats: {
       sent: { type: Number, default: 0 },
       delivered: { type: Number, default: 0 },
@@ -176,6 +187,9 @@ const marketingCampaignSchema = new Schema<IMarketingCampaign>(
     nextRetryAt: { type: Date, default: null, index: true },
     lastError: { type: String },
     utmCampaign: { type: String, trim: true },
+    lastPreviewCount: { type: Number, min: 0 },
+    lastPreviewAt: { type: Date, default: null },
+    lastPreviewCriteriaHash: { type: String, trim: true },
   },
   { timestamps: true },
 );

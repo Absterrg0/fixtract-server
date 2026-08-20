@@ -19,6 +19,7 @@ import {
   TransactionalEmailsApiApiKeys,
   SendSmtpEmail,
 } from '@getbrevo/brevo';
+import { assertTemplateGreetingContract } from './renderCampaign';
 
 const FOLDER_NAME = 'Fixtract Campaigns';
 const CONTACT_ATTRIBUTES = ['FIRSTNAME', 'REGION', 'LOCALE', 'UNSUB_TOKEN'] as const;
@@ -187,6 +188,25 @@ export async function listActiveBrevoTemplates(): Promise<
   }
 
   return templates;
+}
+
+export async function assertBrevoMarketingTemplateContract(
+  templateId: number,
+  locale: 'en' | 'nl' | 'fr' | 'de',
+): Promise<void> {
+  const api = createTransactionalEmailsApi();
+  try {
+    const response = await api.getSmtpTemplate(templateId);
+    const htmlContent = response.body?.htmlContent || '';
+    assertTemplateGreetingContract(htmlContent, locale);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Brevo template must begin')) throw error;
+    console.error('[Brevo] template contract lookup failed', {
+      templateId,
+      ...sanitizedBrevoError(error),
+    });
+    throw new Error(`Brevo template ${templateId} could not be validated`);
+  }
 }
 
 /** Resolve or create the Fixtract marketing folder in Brevo. */

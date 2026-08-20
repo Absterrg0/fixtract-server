@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import User from '../../models/user';
 import MarketingSubscriber from '../../models/marketingSubscriber';
+import MarketingSuppression from '../../models/marketingSuppression';
 import { syncPendingBrevoResubscribes } from '../../utils/marketing/audience';
 import { generateUnsubscribeToken } from '../../utils/marketing/unsubscribeToken';
 import {
@@ -208,6 +209,22 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
       return;
     }
 
+    // Language-only updates are intentionally supported by the same preference
+    // endpoint used for channel toggles.
+    if (marketingLocale !== undefined && type === undefined && channel === undefined && enabled === undefined) {
+      const updatedUser = await User.findByIdAndUpdate(
+        userId,
+        { $set: { marketingLocale: marketingLocale.trim().toLowerCase(), marketingLocaleSource: 'explicit' } },
+        { new: true },
+      ).select('_id');
+      if (!updatedUser) {
+        res.status(404).json({ success: false, msg: 'User not found' });
+        return;
+      }
+      res.status(200).json({ success: true, msg: 'Marketing language updated' });
+      return;
+    }
+
     if (!type || !(VALID_TYPES as readonly string[]).includes(type)) {
       res.status(400).json({ success: false, msg: `type must be one of: ${VALID_TYPES.join(', ')}` });
       return;
@@ -250,6 +267,7 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
       const normalizedEmail = updatedUser.email.toLowerCase().trim();
       const consentUpdatedAt = new Date();
       if (enabled) {
+        await MarketingSuppression.deleteOne({ emailNormalized: normalizedEmail, reason: 'unsubscribe' });
         await MarketingSubscriber.updateOne(
           { email: normalizedEmail },
           {

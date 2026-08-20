@@ -42,7 +42,6 @@ const marketingSubscriberSchema = new Schema<IMarketingSubscriber>(
       type: String,
       lowercase: true,
       trim: true,
-      index: true,
       default: function (this: IMarketingSubscriber) {
         return this.email?.trim().toLowerCase();
       },
@@ -129,6 +128,7 @@ marketingSubscriberSchema.index({ unsubscribedAt: 1, role: 1, subscribedAt: 1 })
 marketingSubscriberSchema.index({ unsubscribedAt: 1, lastCampaignSentAt: 1, subscribedAt: 1 });
 marketingSubscriberSchema.index({ unsubscribedAt: 1, lastEngagedAt: 1, subscribedAt: 1 });
 marketingSubscriberSchema.index({ subscribedAt: -1 });
+marketingSubscriberSchema.index({ emailNormalized: 1 }, { unique: true, sparse: true });
 
 const MarketingSubscriber = mongoose.model<IMarketingSubscriber>(
   'MarketingSubscriber',

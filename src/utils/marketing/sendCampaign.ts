@@ -4,6 +4,7 @@ import MarketingCampaign, {
   MARKETING_LOCALES,
 } from '../../models/marketingCampaign';
 import MarketingSubscriber from '../../models/marketingSubscriber';
+import MarketingLead from '../../models/marketingLead';
 import { randomUUID } from 'node:crypto';
 import { resolveMarketingAudience } from './audienceResolver';
 import { renderMarketingEmail, renderMarketingFooter } from './renderCampaign';
@@ -15,6 +16,7 @@ import {
   isMarketingDryRun,
   sendBrevoCampaignNow,
   syncContactsToList,
+  assertBrevoMarketingTemplateContract,
 } from './brevoMarketing';
 import { signUnsubscribePayload } from './unsubscribeToken';
 
@@ -168,6 +170,12 @@ export async function sendMarketingCampaign(
   }
 
   let members;
+  let audienceAudit = {
+    subscriberCount: 0,
+    leadCount: 0,
+    deduplicatedRecipientCount: 0,
+    criteriaHash: '',
+  };
   try {
     const resolved = await resolveMarketingAudience({
       campaignType: campaign.type,
@@ -178,6 +186,12 @@ export async function sendMarketingCampaign(
       limitMode: 'delivery',
     });
     if (resolved.overLimit) throw new Error(`Audience has ${resolved.exactTotal} recipients, exceeding the configured delivery limit of 5000`);
+    audienceAudit = {
+      subscriberCount: resolved.bySource.subscribers,
+      leadCount: resolved.bySource.leads,
+      deduplicatedRecipientCount: resolved.deduplicated,
+      criteriaHash: resolved.criteriaHash,
+    };
     members = resolved.recipients.map((recipient) => ({
       email: recipient.email,
       name: recipient.firstName,
@@ -185,6 +199,7 @@ export async function sendMarketingCampaign(
       region: recipient.country,
       subscriberId: recipient.subscriberId,
       userId: recipient.userId,
+      leadId: recipient.leadId,
     }));
   } catch (err: any) {
     const error = err?.message || String(err) || 'Failed to resolve campaign audience';
@@ -206,8 +221,12 @@ export async function sendMarketingCampaign(
     locale: delivery.locale,
     brevoListId: delivery.brevoListId,
       brevoCampaignId: delivery.brevoCampaignId,
-      brevoStatus: delivery.brevoStatus,
+    brevoStatus: delivery.brevoStatus,
     recipientCount: delivery.recipientCount,
+    subscriberCount: delivery.subscriberCount,
+    leadCount: delivery.leadCount,
+    deduplicatedRecipientCount: delivery.deduplicatedRecipientCount,
+    criteriaHash: delivery.criteriaHash,
     stats: delivery.stats,
     error: delivery.error,
   }));
@@ -241,6 +260,10 @@ export async function sendMarketingCampaign(
       const content = contentForLocale(campaign, locale);
       if (!content) continue;
 
+      if (content.brevoTemplateId && !isMarketingDryRun()) {
+        await assertBrevoMarketingTemplateContract(content.brevoTemplateId, locale);
+      }
+
       const localeMembers = members.filter((m) => m.locale === locale);
       // Fallback: if no one has this locale, only send en to unmatched when locale===en
       const recipients =
@@ -252,6 +275,7 @@ export async function sendMarketingCampaign(
         recordDelivery({
           locale,
           recipientCount: 0,
+          ...audienceAudit,
           error: 'No recipients for locale',
         });
         if (!(await checkpoint())) {
@@ -264,6 +288,7 @@ export async function sendMarketingCampaign(
         recordDelivery({
           locale,
           recipientCount: recipients.length,
+          ...audienceAudit,
           stats: {
             sent: recipients.length,
             delivered: 0,
@@ -289,6 +314,7 @@ export async function sendMarketingCampaign(
         brevoCampaignId: previous?.brevoCampaignId,
         brevoStatus: previous?.brevoStatus,
         recipientCount: recipients.length,
+        ...audienceAudit,
       });
       if (!(await checkpoint())) {
         return { ok: false, error: 'Campaign send claim was lost before contact import' };
@@ -341,6 +367,7 @@ export async function sendMarketingCampaign(
           brevoCampaignId,
           brevoStatus: 'created',
           recipientCount: recipients.length,
+          ...audienceAudit,
         });
         if (!(await checkpoint())) {
           return { ok: false, error: 'Campaign send claim was lost after Brevo draft creation' };
@@ -355,6 +382,7 @@ export async function sendMarketingCampaign(
         brevoCampaignId,
         brevoStatus: 'sent',
         recipientCount: recipients.length,
+        ...audienceAudit,
       });
       if (!(await checkpoint())) {
         return { ok: false, error: 'Campaign send claim was lost after delivery' };
@@ -364,6 +392,13 @@ export async function sendMarketingCampaign(
       if (ids.length > 0) {
         await MarketingSubscriber.updateMany(
           { _id: { $in: ids } },
+          { $set: { lastCampaignSentAt: new Date() } },
+        );
+      }
+      const leadIds = recipients.map((r) => r.leadId).filter(Boolean);
+      if (leadIds.length > 0) {
+        await MarketingLead.updateMany(
+          { _id: { $in: leadIds } },
           { $set: { lastCampaignSentAt: new Date() } },
         );
       }

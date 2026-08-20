@@ -70,6 +70,34 @@ export function renderMarketingEmail(input: {
   };
 }
 
+/**
+ * Brevo templates are rendered remotely, so the application cannot prepend the
+ * personalized greeting itself. Require the template to put the greeting and
+ * FIRSTNAME contact attribute at the beginning of its visible content.
+ */
+export function assertTemplateGreetingContract(htmlContent: string, locale: MarketingLocale): void {
+  const visible = htmlContent
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 240);
+  const greetingByLocale: Record<MarketingLocale, RegExp> = {
+    en: /^(?:hi|hello)(?:\s|,|!|<)/i,
+    nl: /^hallo(?:\s|,|!|<)/i,
+    fr: /^bonjour(?:\s|,|!|<)/i,
+    de: /^hallo(?:\s|,|!|<)/i,
+  };
+  if (!greetingByLocale[locale].test(visible) || !/\{\{\s*contact\.FIRSTNAME\s*\}\}/i.test(htmlContent)) {
+    throw new Error(
+      `Brevo template must begin with a localized ${locale} greeting using {{ contact.FIRSTNAME }}`,
+    );
+  }
+}
+
 export function assertInlineMarketingContent(content: CampaignRenderContent): void {
   if (content.brevoTemplateId && (!content.htmlContent || content.htmlContent.trim().length <= 10)) {
     throw new Error('Test sends require inline HTML content so the greeting and footer can be verified');

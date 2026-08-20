@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import User from '../../models/user';
 import MarketingSubscriber from '../../models/marketingSubscriber';
+import MarketingLead from '../../models/marketingLead';
+import MarketingSuppression from '../../models/marketingSuppression';
 import {
   generateUnsubscribeToken,
   verifyUnsubscribePayload,
@@ -58,6 +60,12 @@ async function resolveUnsubscribeEmail(req: Request): Promise<
 
 async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
   const normalized = normalizeEmail(email);
+  const now = new Date();
+  await MarketingSuppression.findOneAndUpdate(
+    { emailNormalized: normalized },
+    { $set: { emailNormalized: normalized, reason: 'unsubscribe', source: 'user' } },
+    { upsert: true, setDefaultsOnInsert: true },
+  );
   await User.updateMany(
     { email: normalized },
     {
@@ -66,7 +74,6 @@ async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
     },
   );
 
-  const now = new Date();
   let already = false;
   const existing = await MarketingSubscriber.findOne({ email: normalized })
     .select('+unsubscribeToken unsubscribedAt')
@@ -109,6 +116,11 @@ async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
       }
     }
   }
+
+  await MarketingLead.updateMany(
+    { emailNormalized: normalized, status: 'active' },
+    { $set: { unsubscribedAt: now } },
+  );
 
   return { already };
 }
