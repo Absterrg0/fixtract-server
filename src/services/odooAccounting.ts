@@ -271,7 +271,6 @@ const discoverSaleTaxes = async (
   );
 
   const tax21 = pickSaleTax(taxes, 21, ["21% S", "21%"]);
-  const tax6 = pickSaleTax(taxes, 6, ["6% S", "6%"]);
   if (!tax21) {
     throw new Error("Could not find a 21% Odoo sales tax (expected Belgian tax such as 21% S)");
   }
@@ -292,11 +291,18 @@ const discoverSaleTaxes = async (
   );
   const reverseChargeTaxId = reverseTaxes.find((tax) => /ic|intra|reverse|co-contractor/i.test(String(tax.name || "")))?.id;
 
+  const taxIdsByRate = taxes.reduce<Record<string, number>>((mapping, tax) => {
+    const rate = Number(tax.amount);
+    if (tax.id && Number.isFinite(rate) && rate > 0 && mapping[String(rate)] == null) {
+      mapping[String(rate)] = tax.id;
+    }
+    return mapping;
+  }, {});
+
   return {
-    taxIdsByRate: {
-      ...(tax21 ? { "21": tax21 } : {}),
-      ...(tax6 ? { "6": tax6 } : {}),
-    },
+    // Keep every configured Odoo sales tax, not only the Belgian 21% and 6%
+    // defaults. This lets Peppol dispatch handle Dutch and other EU rates.
+    taxIdsByRate,
     defaultTaxId: tax21,
     reverseChargeTaxId,
   };

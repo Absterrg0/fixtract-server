@@ -11,6 +11,7 @@ export interface VatDecision {
   reducedRate?: number;
   reverseCharge: boolean;
   vatLabel?: string;
+  exemptFromBelgianReverseCharge?: boolean;
   explanation: string;
   matchedRuleText?: string;
   ruleGroup?: string;
@@ -125,7 +126,7 @@ export const firstVatCountry = (...candidates: Array<string | null | undefined>)
     const parsed = parseVatCountryCode(candidate);
     if (parsed) return parsed;
   }
-  return "BE";
+  return "";
 };
 
 export const countryFromAddressComponents = (
@@ -157,6 +158,20 @@ export const getStandardVatRate = (country?: string | null): number => {
   const normalized = normalizeVatCountry(country);
   if (!normalized) return 0;
   return STANDARD_RATES[normalized] ?? 0;
+};
+
+/** Parse rates entered with either a decimal point or a decimal comma. */
+export const parseFlexibleNumber = (value: unknown): number => {
+  if (typeof value === "number") return Number.isFinite(value) ? value : Number.NaN;
+  const raw = String(value ?? "").trim().replace(/\s/g, "");
+  if (!raw) return Number.NaN;
+  const normalized = raw.includes(",")
+    ? raw.includes(".") && raw.lastIndexOf(",") > raw.lastIndexOf(".")
+      ? raw.replace(/\./g, "").replace(",", ".")
+      : raw.replace(/,/g, ".")
+    : raw;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
 };
 
 export const isB2BSameAsB2CCountry = (country?: string | null): boolean =>
@@ -201,7 +216,7 @@ const coerceComparable = (value: unknown): string | number | boolean => {
   const raw = String(value ?? "").trim();
   if (/^(true|yes|y)$/i.test(raw)) return true;
   if (/^(false|no|n)$/i.test(raw)) return false;
-  const parsed = Number(raw);
+  const parsed = parseFlexibleNumber(raw);
   return Number.isFinite(parsed) && raw !== "" ? parsed : raw.toLowerCase();
 };
 
@@ -253,7 +268,8 @@ export const applyB2BInvoiceRule = (
   if (customerType !== "business") return decision;
   if (!hasVerifiedVatNumber(vatNumber, isVatVerified)) return decision;
 
-  const country = normalizeVatCountry(decision.country);
+  const country = parseVatCountryCode(decision.country);
+  if (!country) return decision;
   if (isB2BSameAsB2CCountry(country)) return decision;
 
   const propertyNature = context?.propertyNature || "movable";
@@ -270,6 +286,58 @@ export const applyB2BInvoiceRule = (
     explanation: REVERSE_CHARGE_LABEL,
     propertyNature,
   };
+};
+
+/** Resolve VAT on the supplier's invoice to the platform buyer. */
+export const resolveSupplierB2BInvoiceDecision = (params: {
+  supplierCountry?: string | null;
+  buyerCountry?: string | null;
+  supplierVatNumber?: string | null;
+  buyerVatNumber?: string | null;
+  propertyNature?: PropertyNature;
+  exemptFromBelgianReverseCharge?: boolean;
+}): VatDecision => {
+  const supplierCountry = parseVatCountryCode(params.supplierCountry);
+  const buyerCountry = parseVatCountryCode(params.buyerCountry) || supplierCountry;
+  const propertyNature = params.propertyNature || "movable";
+  const standardRate = buyerCountry ? getStandardVatRate(buyerCountry) : 0;
+  const decision: VatDecision = {
+    action: "standard_rate",
+    country: buyerCountry,
+    standardRate,
+    appliedRate: standardRate,
+    reverseCharge: false,
+    propertyNature,
+    exemptFromBelgianReverseCharge: params.exemptFromBelgianReverseCharge,
+    explanation: `Standard VAT rate ${standardRate}% applied to the supplier invoice.`,
+  };
+
+  const supplierVatValid = Boolean(
+    params.supplierVatNumber && validateVATNumberFormat(params.supplierVatNumber),
+  );
+  const buyerVatValid = Boolean(
+    params.buyerVatNumber && validateVATNumberFormat(params.buyerVatNumber),
+  );
+  if (supplierCountry && buyerCountry && supplierCountry !== buyerCountry && supplierVatValid && buyerVatValid) {
+    return {
+      ...decision,
+      appliedRate: 0,
+      reverseCharge: true,
+      vatLabel: REVERSE_CHARGE_LABEL,
+      explanation: REVERSE_CHARGE_LABEL,
+    };
+  }
+
+  return applyB2BInvoiceRule(
+    decision,
+    "business",
+    params.buyerVatNumber,
+    buyerVatValid,
+    {
+      propertyNature,
+      exemptFromBelgianReverseCharge: params.exemptFromBelgianReverseCharge,
+    },
+  );
 };
 
 const pushUniqueRate = (options: VatRateOption[], option: VatRateOption) => {
@@ -295,7 +363,7 @@ export const getVatRateOptionsFromConfig = async (params: {
   exemptFromBelgianReverseCharge?: boolean;
 }): Promise<VatRateOption[]> => {
   const decision = await resolveVatDecisionFromConfig(params);
-  const country = decision.country || normalizeVatCountry(params.country);
+  const country = decision.country || parseVatCountryCode(params.country);
 
   if (decision.reverseCharge && decision.appliedRate === 0) {
     return [{
@@ -368,14 +436,16 @@ export const resolveVatDecisionFromConfig = async (params: {
     params.exemptFromBelgianReverseCharge ?? Boolean(vat?.exemptFromBelgianReverseCharge);
   const b2bContext: B2BInvoiceContext = { propertyNature, exemptFromBelgianReverseCharge };
 
-  const country = params.bookingCountry || params.businessCountry
+  const hasPlaceOfSupplyContext = [params.bookingCountry, params.businessCountry]
+    .some((value) => value != null && String(value).trim() !== "");
+  const country = hasPlaceOfSupplyContext
     ? resolvePlaceOfSupplyCountry({
         customerType: params.customerType,
         propertyNature,
         bookingCountry: params.bookingCountry || params.country,
         businessCountry: params.businessCountry,
       })
-    : normalizeVatCountry(params.country);
+    : parseVatCountryCode(params.country);
 
   const fallbackRate = getStandardVatRate(country);
   if (!country) {
@@ -386,6 +456,7 @@ export const resolveVatDecisionFromConfig = async (params: {
       appliedRate: 0,
       reverseCharge: false,
       propertyNature,
+      exemptFromBelgianReverseCharge,
       explanation: "Customer country could not be matched to a VAT jurisdiction. VAT review is required before checkout.",
     };
   }
@@ -396,6 +467,7 @@ export const resolveVatDecisionFromConfig = async (params: {
     appliedRate: fallbackRate,
     reverseCharge: false,
     propertyNature,
+    exemptFromBelgianReverseCharge,
     explanation: `Standard VAT rate ${fallbackRate}% applied.`,
   };
 
@@ -435,6 +507,7 @@ export const resolveVatDecisionFromConfig = async (params: {
       appliedRate: rule.action === "rfq" ? standardRate : reducedRate,
       reverseCharge: false,
       propertyNature,
+      exemptFromBelgianReverseCharge,
       explanation: rule.customText || (rule.action === "rfq"
         ? "Reduced VAT claim requires RFQ review."
         : `Reduced VAT rate ${reducedRate}% applied.`),

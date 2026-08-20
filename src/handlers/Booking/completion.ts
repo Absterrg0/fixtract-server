@@ -285,13 +285,20 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
               error: { code: 'VALIDATION_ERROR', message: 'Other extra cost requires name and amount' }
             });
           }
+          const otherAmount = Number(cost.amount);
+          if (!Number.isFinite(otherAmount) || otherAmount < 0) {
+            return res.status(400).json({
+              success: false,
+              error: { code: 'VALIDATION_ERROR', message: 'Other extra cost amount must be a non-negative number' }
+            });
+          }
           validatedExtraCosts.push({
             type: 'other',
             name: cost.name,
             justification: cost.justification,
-            amount: cost.amount,
+            amount: otherAmount,
           });
-          extraCostTotal += cost.amount;
+          extraCostTotal += otherAmount;
         } else {
           return res.status(400).json({
             success: false,

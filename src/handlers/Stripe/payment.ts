@@ -134,9 +134,11 @@ const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {
     supplierInvoiceUblUrl: paymentSummary.supplierInvoiceUblUrl,
     supplierInvoiceGeneratedAt: paymentSummary.supplierInvoiceGeneratedAt,
     peppolDispatchStatus: paymentSummary.peppolDispatchStatus,
+    peppolDispatchReason: paymentSummary.peppolDispatchReason,
     peppolDispatchReference: paymentSummary.peppolDispatchReference,
     peppolDispatchedAt: paymentSummary.peppolDispatchedAt,
     supplierPeppolDispatchStatus: paymentSummary.supplierPeppolDispatchStatus,
+    supplierPeppolDispatchReason: paymentSummary.supplierPeppolDispatchReason,
     supplierPeppolDispatchReference: paymentSummary.supplierPeppolDispatchReference,
     supplierPeppolDispatchedAt: paymentSummary.supplierPeppolDispatchedAt,
     extraCostAmount: paymentSummary.extraCostAmount,
@@ -487,7 +489,13 @@ export const createPaymentIntent = async (
     // Calculate VAT on the discounted amount. Prefer the booking's service-level VAT
     // decision when the booking wizard already evaluated a configured rule.
     const configuredVatDecision = (booking as any).vatDecision;
-    const quotePricingVatCalculation = getQuotePricingVatCalculation(booking, discountedQuoteAmount);
+    // A professional may enter a provisional/custom rate while preparing a
+    // quotation. Once the booking wizard has resolved reverse charge, that
+    // customer-side decision is authoritative and must not be overridden by
+    // quotation line metadata.
+    const quotePricingVatCalculation = configuredVatDecision?.reverseCharge
+      ? null
+      : getQuotePricingVatCalculation(booking, discountedQuoteAmount);
     const vatCalculation = quotePricingVatCalculation
       ? quotePricingVatCalculation
       : configuredVatDecision && !requiresVatRfqReview(configuredVatDecision)

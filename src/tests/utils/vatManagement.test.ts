@@ -8,10 +8,12 @@ import {
   getStandardVatRate,
   isB2BSameAsB2CCountry,
   normalizeVatCountry,
+  parseFlexibleNumber,
   parseVatCountryCode,
   requiresVatRfqReview,
   resolvePlaceOfSupplyCountry,
   resolvePropertyNature,
+  resolveSupplierB2BInvoiceDecision,
   type VatDecision,
 } from "../../utils/vatManagement";
 import type { IVatLogicRule } from "../../models/serviceConfiguration";
@@ -52,6 +54,7 @@ describe("parseVatCountryCode / firstVatCountry", () => {
     expect(parseVatCountryCode(undefined)).toBe("");
     expect(firstVatCountry("", undefined, "Nederland")).toBe("NL");
     expect(firstVatCountry("", "BE")).toBe("BE");
+    expect(firstVatCountry("Atlantis", undefined)).toBe("");
   });
 
   it("reads a country name from a formatted service address", () => {
@@ -71,6 +74,14 @@ describe("getStandardVatRate", () => {
   it("returns 0 for non-VAT countries and unknowns", () => {
     expect(getStandardVatRate("US")).toBe(0);
     expect(getStandardVatRate("Atlantis")).toBe(0);
+  });
+});
+
+describe("parseFlexibleNumber", () => {
+  it("accepts comma decimals and grouped European numbers", () => {
+    expect(parseFlexibleNumber("8,1")).toBe(8.1);
+    expect(parseFlexibleNumber("25,5")).toBe(25.5);
+    expect(parseFlexibleNumber("1.234,56")).toBe(1234.56);
   });
 });
 
@@ -253,6 +264,58 @@ describe("applyB2BInvoiceRule", () => {
   });
 });
 
+describe("resolveSupplierB2BInvoiceDecision", () => {
+  it("applies Belgian reverse charge for an immovable professional invoice", () => {
+    const result = resolveSupplierB2BInvoiceDecision({
+      supplierCountry: "BE",
+      buyerCountry: "BE",
+      supplierVatNumber: "BE0123456789",
+      buyerVatNumber: "BE1002103337",
+      propertyNature: "immovable",
+    });
+    expect(result.appliedRate).toBe(0);
+    expect(result.reverseCharge).toBe(true);
+  });
+
+  it("honors the Belgian immovable-work exemption on self-billing", () => {
+    const result = resolveSupplierB2BInvoiceDecision({
+      supplierCountry: "BE",
+      buyerCountry: "BE",
+      supplierVatNumber: "BE0123456789",
+      buyerVatNumber: "BE1002103337",
+      propertyNature: "immovable",
+      exemptFromBelgianReverseCharge: true,
+    });
+    expect(result.appliedRate).toBe(21);
+    expect(result.reverseCharge).toBe(false);
+  });
+
+  it("does not infer Belgian VAT when both supplier and buyer countries are unknown", () => {
+    const result = resolveSupplierB2BInvoiceDecision({
+      supplierCountry: "Atlantis",
+      buyerCountry: "Unknown",
+      supplierVatNumber: "XX12345678",
+      buyerVatNumber: "YY12345678",
+    });
+    expect(result.country).toBe("");
+    expect(result.standardRate).toBe(0);
+    expect(result.appliedRate).toBe(0);
+  });
+
+  it("applies cross-border reverse charge when both parties have valid VAT numbers", () => {
+    const result = resolveSupplierB2BInvoiceDecision({
+      supplierCountry: "NL",
+      buyerCountry: "BE",
+      supplierVatNumber: "NL123456789B01",
+      buyerVatNumber: "BE1002103337",
+      propertyNature: "movable",
+    });
+    expect(result.country).toBe("BE");
+    expect(result.appliedRate).toBe(0);
+    expect(result.reverseCharge).toBe(true);
+  });
+});
+
 describe("requiresVatRfqReview", () => {
   it("requires review for rfq decisions without reverse charge", () => {
     expect(requiresVatRfqReview({ action: "rfq", reverseCharge: false })).toBe(true);
@@ -323,5 +386,16 @@ describe("resolvePlaceOfSupplyCountry", () => {
         businessCountry: "DE",
       })
     ).toBe("DE");
+  });
+
+  it("does not silently turn an unknown place of supply into Belgium", () => {
+    expect(
+      resolvePlaceOfSupplyCountry({
+        customerType: "business",
+        propertyNature: "movable",
+        bookingCountry: "Atlantis",
+        businessCountry: "Unknown",
+      })
+    ).toBe("");
   });
 });

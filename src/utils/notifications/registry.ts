@@ -166,6 +166,8 @@ const def = (
             typeof ctx.bookingId === 'string' && ctx.bookingId
               ? ctx.bookingId
               : undefined,
+          attachmentUrl: typeof ctx.invoiceUrl === 'string' ? ctx.invoiceUrl : undefined,
+          attachmentName: ctx.invoiceNumber ? `${String(ctx.invoiceNumber)}.pdf` : 'invoice.pdf',
         }),
     };
   };

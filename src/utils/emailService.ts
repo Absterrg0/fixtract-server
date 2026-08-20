@@ -7,6 +7,8 @@ interface SendEmailMeta {
   template?: string;
   relatedBooking?: string | mongoose.Types.ObjectId;
   relatedUser?: string | mongoose.Types.ObjectId;
+  attachmentUrl?: string;
+  attachmentName?: string;
 }
 
 // Initialize Brevo API with proper configuration
@@ -1442,6 +1444,12 @@ const sendEmail = async (
       name: 'Fixtract Team',
       email: process.env.FROM_EMAIL || 'noreply@fixtract.com',
     };
+    if (meta.attachmentUrl) {
+      sendSmtpEmail.attachment = [{
+        url: meta.attachmentUrl,
+        name: meta.attachmentName || 'invoice.pdf',
+      }];
+    }
     await emailAPI.sendTransacEmail(sendSmtpEmail);
     logDevEmail('SENT', to, subject, template, htmlContent);
     logEmail({
@@ -1525,6 +1533,8 @@ export const sendNotificationEmail = async (params: {
   subject?: string;
   template: string;
   relatedBooking?: string;
+  attachmentUrl?: string;
+  attachmentName?: string;
 }): Promise<boolean> => {
   const {
     to,
@@ -1536,6 +1546,8 @@ export const sendNotificationEmail = async (params: {
     subject = `${title} - Fixtract`,
     template,
     relatedBooking,
+    attachmentUrl,
+    attachmentName,
   } = params;
 
   const content = `
@@ -1553,6 +1565,8 @@ export const sendNotificationEmail = async (params: {
   return sendEmail(to, subject, content, {
     template,
     relatedBooking,
+    attachmentUrl,
+    attachmentName,
   });
 };
 

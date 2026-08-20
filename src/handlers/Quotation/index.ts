@@ -15,7 +15,7 @@ import Project from '../../models/project';
 import { addWorkingDays } from '../../utils/workingDays';
 import { getNextSequence } from '../../utils/counterSequence';
 import { createPaymentIntent } from '../Stripe/payment';
-import { getVatRateOptionsFromConfig, resolveVatDecisionFromConfig } from '../../utils/vatManagement';
+import { getVatRateOptionsFromConfig, parseFlexibleNumber, resolveVatDecisionFromConfig } from '../../utils/vatManagement';
 import { notify } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
@@ -54,10 +54,11 @@ const getAllowedVatOptionsForBooking = async (booking: any) => {
     ? project.services[0]
     : null;
   const country = booking.vatDecision?.country
+    || booking.location?.country
     || customer?.companyAddress?.country
     || customer?.location?.country
     || project?.distance?.countryCode
-    || 'BE';
+    || '';
 
   return getVatRateOptionsFromConfig({
     serviceConfigurationId: project?.serviceConfigurationId?.toString(),
@@ -65,7 +66,7 @@ const getAllowedVatOptionsForBooking = async (booking: any) => {
     service: projectService?.service || project?.service,
     areaOfWork: projectService?.areaOfWork || project?.areaOfWork,
     country,
-    bookingCountry: booking.vatDecision?.country || customer?.location?.country,
+    bookingCountry: booking.location?.country || customer?.location?.country,
     businessCountry: customer?.companyAddress?.country,
     customerType: customer?.customerType || 'individual',
     vatNumber: customer?.vatNumber,
@@ -152,9 +153,10 @@ export const getQuotationVatRateOptions = async (req: Request, res: Response) =>
     const customer = booking.customer as any;
     const project = booking.project as any;
     const country = booking.vatDecision?.country
+      || booking.location?.country
       || customer?.location?.country
       || project?.distance?.countryCode
-      || 'BE';
+      || '';
 
     const options = await getAllowedVatOptionsForBooking(booking);
 
@@ -181,8 +183,8 @@ const normalizePricingLines = (
   if (Array.isArray(pricingLines) && pricingLines.length > 0) {
     const lines = pricingLines.map((line: any) => ({
       description: String(line?.description || '').trim(),
-      price: Number(line?.price),
-      vatRate: Number(line?.vatRate),
+      price: parseFlexibleNumber(line?.price),
+      vatRate: parseFlexibleNumber(line?.vatRate),
       vatCountry: line?.vatCountry ? String(line.vatCountry).trim().toUpperCase() : fallbackCountry,
       vatLabel: line?.vatLabel ? String(line.vatLabel).trim() : undefined,
     }));

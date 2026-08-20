@@ -209,6 +209,7 @@ export interface IBooking extends Document {
     reducedRate?: number;
     reverseCharge?: boolean;
     vatLabel?: string;
+    exemptFromBelgianReverseCharge?: boolean;
     propertyNature?: 'movable' | 'immovable';
     explanation?: string;
     matchedRuleText?: string;
@@ -299,9 +300,11 @@ export interface IBooking extends Document {
     invoiceUblUrl?: string;
     invoiceGeneratedAt?: Date;
     peppolDispatchStatus?: string;
+    peppolDispatchReason?: string;
     peppolDispatchReference?: string;
     peppolDispatchedAt?: Date;
     supplierPeppolDispatchStatus?: string;
+    supplierPeppolDispatchReason?: string;
     supplierPeppolDispatchReference?: string;
     supplierPeppolDispatchedAt?: Date;
     supplierInvoiceNumber?: string;
@@ -785,12 +788,13 @@ const BookingSchema = new Schema({
   },
   vatDecision: {
     action: { type: String, enum: ['standard_rate', 'reduced_rate', 'rfq'], required: true },
-    country: { type: String, required: true },
+    country: { type: String },
     standardRate: { type: Number, required: true, min: 0, max: 100 },
     appliedRate: { type: Number, required: true, min: 0, max: 100 },
     reducedRate: { type: Number, min: 0, max: 100 },
     reverseCharge: { type: Boolean },
     vatLabel: { type: String },
+    exemptFromBelgianReverseCharge: { type: Boolean },
     propertyNature: { type: String, enum: ['movable', 'immovable'] },
     explanation: { type: String, maxlength: 1000 },
     matchedRuleText: { type: String, maxlength: 1000 },
@@ -927,9 +931,11 @@ const BookingSchema = new Schema({
     invoiceUblUrl: { type: String },
     invoiceGeneratedAt: { type: Date },
     peppolDispatchStatus: { type: String },
+    peppolDispatchReason: { type: String },
     peppolDispatchReference: { type: String },
     peppolDispatchedAt: { type: Date },
     supplierPeppolDispatchStatus: { type: String },
+    supplierPeppolDispatchReason: { type: String },
     supplierPeppolDispatchReference: { type: String },
     supplierPeppolDispatchedAt: { type: Date },
     supplierInvoiceNumber: { type: String },

@@ -75,9 +75,11 @@ export interface IPayment extends Document {
   invoiceUblUrl?: string;
   invoiceGeneratedAt?: Date;
   peppolDispatchStatus?: string;
+  peppolDispatchReason?: string;
   peppolDispatchReference?: string;
   peppolDispatchedAt?: Date;
   supplierPeppolDispatchStatus?: string;
+  supplierPeppolDispatchReason?: string;
   supplierPeppolDispatchReference?: string;
   supplierPeppolDispatchedAt?: Date;
   supplierInvoiceNumber?: string;
@@ -191,9 +193,11 @@ const PaymentSchema = new Schema<IPayment>(
     invoiceUblUrl: { type: String },
     invoiceGeneratedAt: { type: Date },
     peppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    peppolDispatchReason: { type: String },
     peppolDispatchReference: { type: String },
     peppolDispatchedAt: { type: Date },
     supplierPeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    supplierPeppolDispatchReason: { type: String },
     supplierPeppolDispatchReference: { type: String },
     supplierPeppolDispatchedAt: { type: Date },
     supplierInvoiceNumber: { type: String },

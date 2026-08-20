@@ -9,9 +9,8 @@ import PlatformSettings from "../models/platformSettings";
 import { getVATExplanation, isEUCountry } from "../utils/vat";
 import { formatCurrency } from "../utils/payment";
 import {
-  applyB2BInvoiceRule,
-  getStandardVatRate,
-  normalizeVatCountry,
+  parseVatCountryCode,
+  resolveSupplierB2BInvoiceDecision,
 } from "../utils/vatManagement";
 import {
   calculateInvoiceSideTotals,
@@ -97,6 +96,7 @@ interface InvoiceBooking {
     scope?: string;
     description?: string;
     pricingLines?: { description: string; price: number; vatRate?: number; vatLabel?: string }[];
+    materials?: Array<{ name: string; quantity?: string | number; unit?: string; description?: string }>;
     totalAmount?: number;
   }>;
   currentQuoteVersion?: number;
@@ -193,6 +193,7 @@ interface InvoiceBooking {
   vatDecision?: {
     country?: string;
     propertyNature?: "movable" | "immovable";
+    exemptFromBelgianReverseCharge?: boolean;
     answers?: Array<{ fieldName: string; value: unknown }>;
     explanation?: string;
   };
@@ -607,25 +608,16 @@ export async function generateBookingInvoice(
     country: settings.companyAddress?.country,
   };
 
-  const supplierVatCountry = normalizeVatCountry(issuer.country);
-  const supplierVatDecision = applyB2BInvoiceRule(
-    {
-      action: "standard_rate",
-      country: supplierVatCountry,
-      standardRate: getStandardVatRate(supplierVatCountry),
-      appliedRate: getStandardVatRate(supplierVatCountry),
-      reverseCharge: false,
-      explanation: "Supplier invoice VAT context",
-      propertyNature: booking.vatDecision?.propertyNature || "movable",
-    },
-    "business",
-    issuer.vatNumber,
-    Boolean(issuer.vatNumber),
-    {
-      propertyNature: booking.vatDecision?.propertyNature || "movable",
-      exemptFromBelgianReverseCharge: false,
-    }
-  );
+  const supplierCountry = parseVatCountryCode(professional.businessInfo?.country);
+  const supplierVatCountry = parseVatCountryCode(issuer.country);
+  const supplierVatDecision = resolveSupplierB2BInvoiceDecision({
+    supplierCountry,
+    buyerCountry: supplierVatCountry,
+    supplierVatNumber: professional.vatNumber,
+    buyerVatNumber: issuer.vatNumber,
+    propertyNature: booking.vatDecision?.propertyNature || "movable",
+    exemptFromBelgianReverseCharge: booking.vatDecision?.exemptFromBelgianReverseCharge,
+  });
   const supplierReverseCharge = Boolean(supplierVatDecision.reverseCharge);
   const supplierVatRate = supplierReverseCharge ? 0 : supplierVatDecision.appliedRate;
   const supplierServiceNet = calculateSupplierInvoiceNet({
@@ -753,8 +745,12 @@ export async function generateBookingInvoice(
         booking.rfqData?.serviceType ? `Service: ${booking.rfqData.serviceType}` : undefined,
         currentQuote?.scope ? `Scope: ${currentQuote.scope}` : undefined,
         currentQuote?.description || booking.quote?.description || booking.rfqData?.description || "Property service",
-        selectedSubproject?.materialsIncluded && selectedSubproject.materials?.length
-          ? `Included materials:\n${selectedSubproject.materials.map((material) =>
+        (selectedSubproject?.materialsIncluded && selectedSubproject.materials?.length
+          ? selectedSubproject.materials
+          : currentQuote?.materials || []).length
+          ? `Included materials:\n${(selectedSubproject?.materialsIncluded && selectedSubproject.materials?.length
+            ? selectedSubproject.materials
+            : currentQuote?.materials || []).map((material) =>
               `- ${material.name}${material.quantity != null ? ` (${material.quantity}${material.unit ? ` ${material.unit}` : ""})` : ""}${material.description ? `: ${material.description}` : ""}`
             ).join("\n")}`
           : undefined,
@@ -765,9 +761,52 @@ export async function generateBookingInvoice(
 
     lineItems: selfBilling
       ? supplierLines
-      : usingDiscountedVatBreakdown
-        ? [...quoteLines, ...extraCostLines]
-        : [...quoteLines, ...optionLines, ...extraCostLines],
+      : (() => {
+          const customerServiceNet = Number(booking.payment.netAmount ?? 0) * sign;
+          const quoteSourceTotal = quoteLines.reduce((sum, line) => sum + Math.abs(Number(line.amount) || 0), 0);
+          const sourceIsCustomerNet = Math.abs(quoteSourceTotal - Math.abs(customerServiceNet)) < 0.02;
+          const customerScale = sourceIsCustomerNet || supplierServiceNet <= 0
+            ? 1
+            : Math.abs(customerServiceNet) / Math.max(0.01, supplierServiceNet);
+          const scaledQuoteLines = quoteLines.map((line) => ({
+            ...line,
+            amount: line.amount * customerScale,
+            unitPrice: line.unitPrice != null ? line.unitPrice * customerScale : undefined,
+          }));
+          // A VAT breakdown already represents the full customer-facing
+          // service net. In that case its pricing lines include the selected
+          // options and must not be appended a second time.
+          const scaledOptionLines = sourceIsCustomerNet
+            ? []
+            : optionLines.map((line) => ({
+                ...line,
+                amount: line.amount * customerScale,
+              }));
+          const serviceLines = scaledQuoteLines.length > 0
+            ? scaledQuoteLines
+            : [{
+                description: serviceLabel,
+                amount: Math.max(
+                  0,
+                  Math.abs(customerServiceNet) - scaledOptionLines.reduce((sum, line) => sum + Math.abs(line.amount), 0),
+                ) * (sign < 0 ? -1 : 1),
+                vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
+                quantity: hasUnits ? unitQuantity : undefined,
+                unitPrice: hasUnitPrice ? unitPrice * customerScale : undefined,
+                unit: hasUnits ? "units" : undefined,
+              }];
+          const serviceLinesWithOptions = [...serviceLines, ...scaledOptionLines];
+          const serviceLineTotal = serviceLinesWithOptions.reduce((sum, line) => sum + Number(line.amount || 0), 0);
+          const adjustment = Math.round((customerServiceNet - serviceLineTotal) * 100) / 100;
+          if (Math.abs(adjustment) >= 0.01) {
+            serviceLinesWithOptions.push({
+              description: adjustment > 0 ? "Platform commission" : "Payment discount adjustment",
+              amount: adjustment,
+              vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
+            });
+          }
+          return [...serviceLinesWithOptions, ...extraCostLines];
+        })(),
     discounts,
     actualStartDate: booking.actualStartDate || booking.scheduledStartDate,
     actualEndDate: booking.actualEndDate || booking.scheduledExecutionEndDate,

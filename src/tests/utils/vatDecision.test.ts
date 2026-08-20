@@ -117,6 +117,23 @@ describe("resolveVatDecisionFromConfig", () => {
     expect(decision.vatLabel).toBe("Reverse Charge");
   });
 
+  it("uses the Dutch business country for a movable Dutch B2B customer", async () => {
+    mockConfig(null);
+    const decision = await resolveVatDecisionFromConfig({
+      country: "Belgium",
+      bookingCountry: "Belgium",
+      businessCountry: "Nederland",
+      propertyNature: "movable",
+      customerType: "business",
+      vatNumber: "NL123456789B01",
+      isVatVerified: true,
+    });
+
+    expect(decision.country).toBe("NL");
+    expect(decision.appliedRate).toBe(0);
+    expect(decision.reverseCharge).toBe(true);
+  });
+
   it("applies Reverse Charge for Belgian B2B immovable work", async () => {
     mockConfig({
       category: "Cleaning",
@@ -153,6 +170,17 @@ describe("resolveVatDecisionFromConfig", () => {
       country: "Atlantis",
       customerType: "individual",
     });
+    expect(decision.action).toBe("rfq");
+    expect(decision.appliedRate).toBe(0);
+  });
+
+  it("requires VAT review when place-of-supply context is present but unknown", async () => {
+    const decision = await resolveVatDecisionFromConfig({
+      bookingCountry: "Atlantis",
+      businessCountry: "Unknown",
+      customerType: "business",
+    });
+    expect(decision.country).toBe("");
     expect(decision.action).toBe("rfq");
     expect(decision.appliedRate).toBe(0);
   });

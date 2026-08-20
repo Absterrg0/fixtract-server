@@ -1,6 +1,6 @@
 import { Buffer } from "buffer";
 import PlatformSettings from "../models/platformSettings";
-import { normalizeVatCountry } from "../utils/vatManagement";
+import { parseVatCountryCode, normalizeVatCountry } from "../utils/vatManagement";
 import {
   discoverOdooAccountingConfig,
   odooJson2Call,
@@ -52,7 +52,7 @@ const isBelgianB2BBooking = (booking: any, side: "customer" | "supplier"): boole
   const party = side === "supplier" ? booking.professional || {} : booking.customer || {};
   if (side === "supplier" && !party.businessInfo?.vatNumber && !party.vatNumber) return false;
   if (side === "customer" && party.customerType !== "business") return false;
-  const country = normalizeVatCountry(
+  const country = parseVatCountryCode(
     side === "supplier"
       ? party.businessInfo?.country || party.location?.country
       : booking.vatDecision?.country || party.companyAddress?.country || party.location?.country
@@ -388,7 +388,7 @@ const dispatchToOdoo = async (
     };
   }
 
-  const reverseCharge = Boolean(booking.payment?.reverseCharge);
+  const reverseCharge = Boolean(payload.reverseCharge ?? booking.payment?.reverseCharge);
   const lines = getOdooInvoiceLinesForPayload(booking, payload);
   const lineWithoutTax = findMissingTaxMapping(config, lines, reverseCharge);
   if (lineWithoutTax) {
