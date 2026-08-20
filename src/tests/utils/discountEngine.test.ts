@@ -66,6 +66,10 @@ describe("payment safety invariants", () => {
     expect(canRetryTransfer(payment)).toBe(true);
   });
 
+  it("does not treat a failed legacy transfer as settled just because an id exists", () => {
+    expect(getTransferStatus({ stripeTransferId: "tr_123", metadata: { transferFailed: true } })).toBe("failed");
+  });
+
   it("blocks payouts above the reconciled customer amount", () => {
     expect(() => requireProfessionalPayout({ professionalPayout: 101, netAmount: 100 })).toThrow(
       /exceeds the reconciled customer net amount/,

@@ -122,6 +122,7 @@ export async function finalizeBookingCompletion(args: {
         { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },
         {
           $set: { status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
+          $unset: { actualEndDate: 1 },
           $push: {
             statusHistory: {
               status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
@@ -286,6 +287,7 @@ export async function runCompletionAutoAccept(): Promise<{
   const cutoff = new Date(Date.now() - 10 * DAY_MS);
   const result = { autoAccepted: 0, skipped: 0, errors: [] as string[] };
 
+  const MAX_TRANSFER_RECOVERY_ATTEMPTS = 3;
   const candidates = await Booking.find({
     status: 'professional_completed',
     professionalCompletedAt: { $lte: cutoff },
@@ -297,6 +299,11 @@ export async function runCompletionAutoAccept(): Promise<{
 
   for (const booking of candidates) {
     try {
+      const transferAttempt = Number(booking.payment?.transferAttempt || 0);
+      if (transferAttempt >= MAX_TRANSFER_RECOVERY_ATTEMPTS) {
+        result.errors.push(`${booking._id}: payout recovery exhausted after ${transferAttempt} attempts`);
+        continue;
+      }
       const unpaidMilestoneCount = getUnpaidMilestoneCount(booking.milestonePayments);
       const extraCostTotal = Number(booking.extraCostTotal || 0);
       let extraCostPaymentSucceeded = extraCostTotal <= 0;
@@ -336,7 +343,11 @@ export async function runCompletionAutoAccept(): Promise<{
       if (finalize.ok) {
         result.autoAccepted++;
       } else if (finalize.skipped) {
-        result.skipped++;
+        if (finalize.reason === 'payout_recovery_required') {
+          result.errors.push(`${booking._id}: ${finalize.reason}`);
+        } else {
+          result.skipped++;
+        }
       } else {
         result.errors.push(`${booking._id}: ${finalize.reason}`);
       }

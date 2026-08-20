@@ -54,7 +54,11 @@ const reserveWebhookEvent = async (event: Stripe.Event): Promise<{ shouldProcess
         {
           eventId: event.id,
           status: 'processing',
-          lastAttemptAt: { $lt: new Date(now.getTime() - WEBHOOK_PROCESSING_LEASE_MS) },
+          $or: [
+            { lastAttemptAt: { $exists: false } },
+            { lastAttemptAt: null },
+            { lastAttemptAt: { $lt: new Date(now.getTime() - WEBHOOK_PROCESSING_LEASE_MS) } },
+          ],
         },
         {
           $set: { lastAttemptAt: now, lastError: undefined },
@@ -158,7 +162,11 @@ export const handleWebhook = async (req: Request, res: Response) => {
 
   // Handle the event
   try {
-    switch (event.type) {
+    // Stripe's current Node typings do not include the Connect transfer.failed
+    // event, but Stripe can still deliver it for older Connect integrations.
+    // Switch on the runtime event name so it is handled rather than silently
+    // acknowledged as an unknown event.
+    switch (event.type as string) {
       case 'payment_intent.succeeded':
         await handlePaymentIntentSucceeded(event.data.object as Stripe.PaymentIntent);
         break;
@@ -196,6 +204,10 @@ export const handleWebhook = async (req: Request, res: Response) => {
 
       case 'transfer.reversed':
         await handleTransferReversed(event.data.object as Stripe.Transfer);
+        break;
+
+      case 'transfer.failed':
+        await handleTransferReversed(event.data.object as Stripe.Transfer, 'failed');
         break;
 
       case 'account.updated':
@@ -441,7 +453,7 @@ async function handleExtraCostPaymentSucceeded(paymentIntent: Stripe.PaymentInte
           'payment.extraCostTransferStatus': 'succeeded',
           'payment.extraCostTransferAttemptedAt': now,
         }
-      : { 'payment.extraCostTransferStatus': 'pending' }),
+      : {}),
   };
   const booking = await Booking.findOneAndUpdate(
     {
@@ -475,7 +487,7 @@ async function handleExtraCostPaymentSucceeded(paymentIntent: Stripe.PaymentInte
               extraCostTransferStatus: 'succeeded',
               extraCostTransferAttemptedAt: now,
             }
-          : { extraCostTransferStatus: 'pending' }),
+          : {}),
       },
     },
   );
@@ -612,7 +624,11 @@ async function handleExtraCostPaymentFailed(paymentIntent: Stripe.PaymentIntent)
     },
   );
   await Payment.updateOne(
-    { booking: bookingId, extraCostStripePaymentIntentId: paymentIntent.id },
+    {
+      booking: bookingId,
+      extraCostStripePaymentIntentId: paymentIntent.id,
+      extraCostStatus: { $in: ['pending', 'failed'] },
+    },
     { $set: { extraCostStatus: 'failed', extraCostPaymentSucceeded: false, updatedAt: now } },
   );
 }
@@ -896,7 +912,8 @@ async function handleTransferCreated(transfer: Stripe.Transfer) {
   if (!booking || !booking.payment) return;
 
   const isExtraCostTransfer = Boolean(
-    booking.payment.extraCostStripeChargeId && sourceTransaction === booking.payment.extraCostStripeChargeId,
+    booking.payment.extraCostTransferId === transfer.id ||
+    (booking.payment.extraCostStripeChargeId && sourceTransaction === booking.payment.extraCostStripeChargeId),
   );
   if (isExtraCostTransfer) {
     booking.payment.extraCostTransferId = transfer.id;
@@ -909,9 +926,8 @@ async function handleTransferCreated(transfer: Stripe.Transfer) {
       { $set: {
         extraCostTransferId: transfer.id,
         extraCostTransferStatus: 'succeeded',
-        extraCostTransferFailureReason: undefined,
         extraCostTransferAttemptedAt: new Date(),
-      } },
+      }, $unset: { extraCostTransferFailureReason: 1 } },
     );
     console.log(`Extra-cost transfer created via webhook for booking ${booking._id}: ${transfer.id}`);
     return;
@@ -930,8 +946,8 @@ async function handleTransferCreated(transfer: Stripe.Transfer) {
         stripeTransferId: transfer.id,
         transferredAt: new Date(),
         transferStatus: 'succeeded',
-        transferFailureReason: undefined,
       },
+      $unset: { transferFailureReason: 1 },
     },
   );
 
@@ -941,7 +957,7 @@ async function handleTransferCreated(transfer: Stripe.Transfer) {
 /**
  * Handle transfer.reversed event
  */
-async function handleTransferReversed(transfer: Stripe.Transfer) {
+async function handleTransferReversed(transfer: Stripe.Transfer, failureKind: 'reversed' | 'failed' = 'reversed') {
   const bookingId = transfer.metadata.bookingId;
   const sourceTransaction = typeof transfer.source_transaction === 'string' ? transfer.source_transaction : undefined;
   const booking = bookingId
@@ -956,18 +972,19 @@ async function handleTransferReversed(transfer: Stripe.Transfer) {
   if (!booking || !booking.payment) return;
 
   const isExtraCostTransfer = Boolean(
-    booking.payment.extraCostStripeChargeId && sourceTransaction === booking.payment.extraCostStripeChargeId,
+    booking.payment.extraCostTransferId === transfer.id ||
+    (booking.payment.extraCostStripeChargeId && sourceTransaction === booking.payment.extraCostStripeChargeId),
   );
   if (isExtraCostTransfer) {
     booking.payment.extraCostTransferStatus = 'failed';
-    booking.payment.extraCostTransferFailureReason = `Stripe extra-cost transfer ${transfer.id} was reversed`;
+    booking.payment.extraCostTransferFailureReason = `Stripe extra-cost transfer ${transfer.id} ${failureKind}`;
     booking.payment.extraCostTransferAttemptedAt = new Date();
     await booking.save();
     await Payment.findOneAndUpdate(
       { booking: booking._id },
       { $set: {
         extraCostTransferStatus: 'failed',
-        extraCostTransferFailureReason: `Stripe extra-cost transfer ${transfer.id} was reversed`,
+        extraCostTransferFailureReason: `Stripe extra-cost transfer ${transfer.id} ${failureKind}`,
         extraCostTransferAttemptedAt: new Date(),
       } },
     );
@@ -977,7 +994,7 @@ async function handleTransferReversed(transfer: Stripe.Transfer) {
 
   const retryAttempt = (booking.payment.transferAttempt || 0) + 1;
   booking.payment.transferStatus = 'failed';
-  booking.payment.transferFailureReason = `Stripe transfer ${transfer.id} was reversed`;
+  booking.payment.transferFailureReason = `Stripe transfer ${transfer.id} ${failureKind}`;
   booking.payment.transferAttemptedAt = new Date();
   booking.payment.transferAttempt = retryAttempt;
   booking.payment.transferIdempotencyKey = undefined;
@@ -987,7 +1004,7 @@ async function handleTransferReversed(transfer: Stripe.Transfer) {
     {
       $set: {
         transferStatus: 'failed',
-        transferFailureReason: `Stripe transfer ${transfer.id} was reversed`,
+        transferFailureReason: `Stripe transfer ${transfer.id} ${failureKind}`,
         transferAttemptedAt: new Date(),
         transferAttempt: retryAttempt,
       },

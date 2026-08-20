@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import Booking, { BookingStatus, ExtraCostType } from '../../models/booking';
 import User from '../../models/user';
 import PlatformSettings from '../../models/platformSettings';
@@ -555,36 +556,52 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     booking.set('payment.extraCostStatus', 'pending');
     booking.set('payment.extraCostPaymentSucceeded', false);
     booking.set('payment.extraCostTransferStatus', 'pending');
-    await Payment.findOneAndUpdate(
-      { booking: booking._id },
-      {
-        $set: {
-          extraCostAmount: customerChargeAmount,
-          extraCostCustomerNetAmount: customerNetChargeAmount,
-          extraCostVatAmount: vatAmount,
-          extraCostPlatformFee: platformFeeAmount,
-          extraCostNetAmount: extraCostTotal,
-          extraCostCustomerDiscount: cappedLoyalty,
-          extraCostPlatformCommission: platformCommissionAmount,
-          extraCostProfessionalPayout: extraCostTotal,
-          extraCostStatus: 'pending',
-          extraCostPaymentSucceeded: false,
-          extraCostStripePaymentIntentId: paymentIntent.id,
-          extraCostTransferStatus: 'pending',
-        },
-        $setOnInsert: {
-          booking: booking._id,
-          bookingNumber: booking.bookingNumber,
-          customer: (booking.customer as any)._id,
-          professional: professional._id,
-          currency: currency.toUpperCase(),
-          amount: booking.payment?.amount || 0,
-          status: booking.payment?.status || 'pending',
-        },
-      },
-      { upsert: true },
-    );
-    await booking.save();
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await Payment.findOneAndUpdate(
+          { booking: booking._id },
+          {
+            $set: {
+              extraCostAmount: customerChargeAmount,
+              extraCostCustomerNetAmount: customerNetChargeAmount,
+              extraCostVatAmount: vatAmount,
+              extraCostPlatformFee: platformFeeAmount,
+              extraCostNetAmount: extraCostTotal,
+              extraCostCustomerDiscount: cappedLoyalty,
+              extraCostPlatformCommission: platformCommissionAmount,
+              extraCostProfessionalPayout: extraCostTotal,
+              extraCostStatus: 'pending',
+              extraCostPaymentSucceeded: false,
+              extraCostStripePaymentIntentId: paymentIntent.id,
+              extraCostTransferStatus: 'pending',
+            },
+            $setOnInsert: {
+              booking: booking._id,
+              bookingNumber: booking.bookingNumber,
+              customer: (booking.customer as any)._id,
+              professional: professional._id,
+              currency: currency.toUpperCase(),
+              amount: booking.payment?.amount || 0,
+              status: booking.payment?.status || 'pending',
+            },
+          },
+          { upsert: true, session },
+        );
+        await booking.save({ session });
+      });
+    } catch (writeError) {
+      // The PaymentIntent was created before the database transaction. Cancel it
+      // so a failed persistence attempt cannot leave a chargeable orphan.
+      try {
+        await stripe.paymentIntents.cancel(paymentIntent.id);
+      } catch (cancelError) {
+        console.error(`Failed to cancel orphaned extra-cost PaymentIntent ${paymentIntent.id}:`, cancelError);
+      }
+      throw writeError;
+    } finally {
+      await session.endSession();
+    }
 
     return res.json({
       success: true,
@@ -730,6 +747,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
           { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },
           {
             $set: { status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
+            $unset: { actualEndDate: 1 },
             $push: {
               statusHistory: {
                 status: PROFESSIONAL_COMPLETION_PENDING_STATUS,

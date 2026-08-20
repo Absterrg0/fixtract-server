@@ -15,7 +15,7 @@ import Project from '../../models/project';
 import { addWorkingDays } from '../../utils/workingDays';
 import { getNextSequence } from '../../utils/counterSequence';
 import { createPaymentIntent } from '../Stripe/payment';
-import { getVatRateOptionsFromConfig, parseFlexibleNumber, resolveVatDecisionFromConfig } from '../../utils/vatManagement';
+import { getVatRateOptionsFromConfig, parseFlexibleNumber, parseVatCountryCode, resolveVatDecisionFromConfig } from '../../utils/vatManagement';
 import { notify } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
@@ -80,10 +80,13 @@ const getAllowedVatOptionsForBooking = async (booking: any) => {
 const validatePricingLinesAgainstAllowedVat = async (booking: any, lines: Array<{ vatRate: number; vatLabel?: string }>) => {
   const options = await getAllowedVatOptionsForBooking(booking);
   const allowedRates = new Set(options.map(option => Number(option.rate)));
+  const bookingCountry = booking.vatDecision?.country || booking.location?.country;
+  // Custom rates are a server-authorized part of RFQ quotation workflow when
+  // the country is unresolved. A client label must never grant that authority.
+  const customVatRateAuthorized = booking.vatDecision?.action === 'rfq' || !parseVatCountryCode(bookingCountry);
   const invalidLine = lines.find(line => {
     const rate = Number(line.vatRate);
-    const isCustomVat = String(line.vatLabel || '').trim().toLowerCase().startsWith('custom vat rate');
-    return !isCustomVat && !allowedRates.has(rate);
+    return !allowedRates.has(rate) && !customVatRateAuthorized;
   });
   if (invalidLine) {
     return {
@@ -153,13 +156,14 @@ export const getQuotationVatRateOptions = async (req: Request, res: Response) =>
 
     const customer = booking.customer as any;
     const project = booking.project as any;
-    const country = booking.vatDecision?.country
+    const fallbackCountry = booking.vatDecision?.country
       || booking.location?.country
       || customer?.location?.country
       || project?.distance?.countryCode
       || '';
 
     const options = await getAllowedVatOptionsForBooking(booking);
+    const country = options.find((option) => option.country)?.country || options[0]?.country || fallbackCountry;
 
     return res.json({
       success: true,

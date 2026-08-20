@@ -230,7 +230,6 @@ const VatManagementSchema = new Schema<IVatManagement>({
     article47Classification: {
         type: String,
         enum: ['movable', 'immovable', 'project_dependent'],
-        default: 'immovable',
     },
     exemptFromBelgianReverseCharge: { type: Boolean, default: false },
     reducedVatQuestions: { type: [VatQuestionSchema], default: [] },

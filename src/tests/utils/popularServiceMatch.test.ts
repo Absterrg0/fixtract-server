@@ -36,7 +36,7 @@ describe("popularServiceMatch", () => {
     expect(match).toEqual({
       $or: [
         { service: { $regex: "^interior-design$", $options: "i" } },
-        { service: { $regex: "^interior[\\s\\-_&]*design$", $options: "i" } },
+        { service: { $regex: "^interior[\\s\\-_&]+design$", $options: "i" } },
       ],
     });
   });

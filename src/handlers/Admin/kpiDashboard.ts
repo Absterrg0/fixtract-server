@@ -12,6 +12,7 @@ import { STRIPE_CONFIG } from '../../services/stripe';
 import { generateKpiPdf } from '../../utils/kpiReport';
 import { sendKpiReportEmail } from '../../utils/emailService';
 import { uploadBufferToS3 } from '../../utils/s3Upload';
+import { buildSettledTransferExpression } from '../../utils/paymentSafety';
 
 const REPORTING_CURRENCY = STRIPE_CONFIG.defaultCurrency || 'EUR';
 
@@ -113,12 +114,7 @@ const round1 = (n: number | null | undefined) => (n == null || !Number.isFinite(
 const money2 = (n: number | null | undefined) => Math.round(((n as number) || 0) * 100) / 100;
 
 const PAID_STATUSES = ['booked', 'in_progress', 'professional_completed', 'completed'];
-const settledPayoutExpr = {
-  $or: [
-    { $eq: ['$transferStatus', 'succeeded'] },
-    { $ne: [{ $ifNull: ['$stripeTransferId', null] }, null] },
-  ],
-};
+const settledPayoutExpr = buildSettledTransferExpression();
 
 const quotedExpr = { $or: [{ $ifNull: ['$quote.submittedAt', false] }, { $gt: [{ $size: { $ifNull: ['$quoteVersions', []] } }, 0] }] };
 const firstQuoteAtExpr = { $ifNull: [{ $arrayElemAt: ['$quoteVersions.createdAt', 0] }, '$quote.submittedAt'] };
@@ -139,6 +135,7 @@ const bookingMetricsProjection = (currencyField: string) => ({
   paymentStatus: '$payment.status',
   transferStatus: '$payment.transferStatus',
   stripeTransferId: '$payment.stripeTransferId',
+  metadata: '$payment.metadata',
   refundAmount: {
     $ifNull: [
       '$payment.refundAmount',

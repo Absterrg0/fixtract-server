@@ -41,7 +41,8 @@ type GrossBookingAmountInput = {
   };
 };
 
-const moneyClose = (a: number, b: number): boolean => Math.abs(a - b) < 0.02;
+const sameMoney = (a: number, b: number): boolean =>
+  Number.isFinite(a) && Number.isFinite(b) && Math.round(a * 100) === Math.round(b * 100);
 
 const sumSelectedExtraOptionPrices = (
   selectedExtraOptions?: Array<{ bookedPrice?: number } | number>
@@ -67,22 +68,25 @@ export function quoteAmountIncludesSelectedExtras(booking: GrossBookingAmountInp
   const quoteAmount = Number(booking.quote?.amount || 0);
   const snapshot = booking.checkoutSnapshot;
   const computedTotalLine = booking.quote?.breakdown?.find((line) => line.item === 'checkout_snapshot:computed_total');
-  if (computedTotalLine && moneyClose(quoteAmount, Number(computedTotalLine.totalPrice))) {
+  if (computedTotalLine && sameMoney(quoteAmount, Number(computedTotalLine.totalPrice))) {
     return true;
   }
   if (
     snapshot &&
     Number(snapshot.extraOptionsTotal) > 0 &&
     Number.isFinite(Number(snapshot.totalAmount)) &&
-    moneyClose(quoteAmount, Number(snapshot.totalAmount))
+    sameMoney(quoteAmount, Number(snapshot.totalAmount))
   ) {
     return true;
   }
   const baseSubtotal = Number(snapshot?.baseSubtotal);
-  if (Number.isFinite(baseSubtotal) && moneyClose(quoteAmount, baseSubtotal)) {
+  if (Number.isFinite(baseSubtotal) && sameMoney(quoteAmount, baseSubtotal + extrasTotal)) {
+    return true;
+  }
+  if (Number.isFinite(baseSubtotal) && sameMoney(quoteAmount, baseSubtotal)) {
     return false;
   }
-  return moneyClose(quoteAmount, baseSubtotal + extrasTotal);
+  return sameMoney(quoteAmount, baseSubtotal + extrasTotal);
 }
 
 export function computeGrossBookingAmount(

@@ -9,8 +9,12 @@ import {
   type ManualInvoiceCorrectionInput,
 } from '../../services/invoiceArtifacts';
 import { presignS3Url } from '../../utils/s3Upload';
-import { canRetryTransfer, getTransferStatus } from '../../utils/paymentSafety';
+import { buildOversightTransferStatusExpression, canRetryTransfer, getTransferStatus } from '../../utils/paymentSafety';
 import { auditLog } from '../../utils/auditLogger';
+
+class ManualInvoiceValidationError extends Error {
+  readonly code = 'MANUAL_INVOICE_VALIDATION_ERROR';
+}
 
 const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -114,29 +118,7 @@ export const getPayments = async (req: Request, res: Response) => {
               $cond: [
                 { $ne: ['$status', 'completed'] },
                 '$status',
-                {
-                  $cond: [
-                    {
-                      $or: [
-                        { $eq: ['$transferStatus', 'succeeded'] },
-                        { $ne: [{ $ifNull: ['$stripeTransferId', null] }, null] },
-                      ],
-                    },
-                    'completed',
-                    {
-                      $cond: [
-                        {
-                          $or: [
-                            { $eq: ['$transferStatus', 'failed'] },
-                            { $eq: ['$metadata.transferFailed', true] },
-                          ],
-                        },
-                        'transfer_failed',
-                        'transfer_pending',
-                      ],
-                    },
-                  ],
-                },
+                buildOversightTransferStatusExpression(),
               ],
             },
           },
@@ -404,11 +386,11 @@ export const createManualPaymentArtifact = async (req: Request, res: Response) =
       const quantity = rawLine?.quantity === undefined || rawLine?.quantity === '' ? undefined : parseManualNumber(rawLine.quantity);
       const unitPrice = rawLine?.unitPrice === undefined || rawLine?.unitPrice === '' ? undefined : parseManualNumber(rawLine.unitPrice);
       const description = String(rawLine?.description || '').trim();
-      if (!description || description.length > 500) throw new Error(`Line ${index + 1} needs a description of at most 500 characters.`);
-      if (!Number.isFinite(amount) || amount < 0) throw new Error(`Line ${index + 1} has an invalid amount.`);
-      if (!Number.isFinite(vatRate) || vatRate < 0 || vatRate > 100) throw new Error(`Line ${index + 1} has an invalid VAT rate.`);
-      if (quantity !== undefined && (!Number.isFinite(quantity) || quantity <= 0)) throw new Error(`Line ${index + 1} has an invalid quantity.`);
-      if (unitPrice !== undefined && (!Number.isFinite(unitPrice) || unitPrice < 0)) throw new Error(`Line ${index + 1} has an invalid unit price.`);
+      if (!description || description.length > 500) throw new ManualInvoiceValidationError(`Line ${index + 1} needs a description of at most 500 characters.`);
+      if (!Number.isFinite(amount) || amount < 0) throw new ManualInvoiceValidationError(`Line ${index + 1} has an invalid amount.`);
+      if (!Number.isFinite(vatRate) || vatRate < 0 || vatRate > 100) throw new ManualInvoiceValidationError(`Line ${index + 1} has an invalid VAT rate.`);
+      if (quantity !== undefined && (!Number.isFinite(quantity) || quantity <= 0)) throw new ManualInvoiceValidationError(`Line ${index + 1} has an invalid quantity.`);
+      if (unitPrice !== undefined && (!Number.isFinite(unitPrice) || unitPrice < 0)) throw new ManualInvoiceValidationError(`Line ${index + 1} has an invalid unit price.`);
       return {
         description,
         amount: roundManualNumber(amount),
@@ -479,6 +461,9 @@ export const createManualPaymentArtifact = async (req: Request, res: Response) =
     return res.status(201).json({ success: true, msg: 'Manual invoice artifact created', data: signedResult });
   } catch (error: any) {
     console.error('[ADMIN][PAYMENTS] Failed to create manual invoice artifact', error);
-    return res.status(400).json({ success: false, msg: error?.message || 'Failed to create manual invoice artifact' });
+    if (error instanceof ManualInvoiceValidationError) {
+      return res.status(400).json({ success: false, msg: error.message });
+    }
+    return res.status(500).json({ success: false, msg: 'Failed to create manual invoice artifact' });
   }
 };

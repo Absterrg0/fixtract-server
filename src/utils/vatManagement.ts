@@ -101,7 +101,10 @@ export const ARTICLE_47_QUESTION =
   "Will the work be carried out on a fixed part of the property or on something that will become permanently fixed to the property? (Article 47)";
 
 export const B2B_SAME_AS_B2C_COUNTRIES = new Set(["CH", "LI", "NO", "GR"]);
-export const B2B_VAT_EXEMPTION_NOTE = "Reverse Charge";
+const KNOWN_COUNTRY_CODES = new Set([
+  ...Object.keys(STANDARD_RATES),
+  ...Object.values(COUNTRY_ALIASES),
+]);
 
 /** ISO-2 when recognized; empty string when missing or unknown. Does not default to BE. */
 export const parseVatCountryCode = (country?: string | null): string => {
@@ -109,7 +112,7 @@ export const parseVatCountryCode = (country?: string | null): string => {
   const raw = String(country).trim();
   const upper = raw.toUpperCase();
   if (upper === "EL") return "GR";
-  if (/^[A-Z]{2}$/.test(upper)) return upper;
+  if (/^[A-Z]{2}$/.test(upper)) return KNOWN_COUNTRY_CODES.has(upper) ? upper : "";
   if (COUNTRY_ALIASES[upper]) return COUNTRY_ALIASES[upper];
   const normalizedName = upper.replace(/[.,']/g, "").replace(/\s+/g, " ");
   if (COUNTRY_ALIASES[normalizedName]) return COUNTRY_ALIASES[normalizedName];
@@ -162,6 +165,9 @@ export const parseFlexibleNumber = (value: unknown): number => {
   if (typeof value === "number") return Number.isFinite(value) ? value : Number.NaN;
   const raw = String(value ?? "").trim().replace(/\s/g, "");
   if (!raw) return Number.NaN;
+  if (raw.includes(",") && !raw.includes(".") && /^\d+,\d{3}$/.test(raw)) {
+    return Number.NaN;
+  }
   const normalized = raw.includes(",")
     ? raw.includes(".") && raw.lastIndexOf(",") > raw.lastIndexOf(".")
       ? raw.replace(/\./g, "").replace(",", ".")
@@ -487,9 +493,17 @@ export const resolveVatDecisionFromConfig = async (params: {
     return applyB2B(fallback);
   }
 
+  if (!vat.article47Classification) {
+    return {
+      ...fallback,
+      action: "rfq",
+      explanation: "VAT management is enabled but its Article 47 classification has not been reviewed by an administrator.",
+    };
+  }
+
   const combinedAnswers = {
-    ...(params.professionalAnswers || {}),
     ...(params.answers || {}),
+    ...(params.professionalAnswers || {}),
   };
 
   const rules = [...(vat.logicRules || [])]

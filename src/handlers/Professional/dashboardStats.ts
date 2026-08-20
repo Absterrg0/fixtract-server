@@ -5,6 +5,7 @@ import Favorite from '../../models/favorite';
 import WarrantyClaim from '../../models/warrantyClaim';
 import ProfileView from '../../models/profileView';
 import { escapeCsv } from '../../utils/csv';
+import { buildSettledTransferExpression } from '../../utils/paymentSafety';
 
 type RangeKey = 'month' | '3months' | '12months' | 'all';
 
@@ -57,12 +58,7 @@ export const getProfessionalDashboardStats = async (req: Request, res: Response)
         { 'payment.transferStatus': { $exists: false }, 'payment.stripeTransferId': { $exists: true, $ne: null } },
       ],
     };
-    const settledPayoutExpression = {
-      $or: [
-        { $eq: ['$payment.transferStatus', 'succeeded'] },
-        { $ne: [{ $ifNull: ['$payment.stripeTransferId', null] }, null] },
-      ],
-    };
+    const settledPayoutExpression = buildSettledTransferExpression('payment');
 
     const [
       totalBookings,

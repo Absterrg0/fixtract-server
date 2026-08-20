@@ -16,7 +16,7 @@ export function popularServiceMatch(serviceFilter: string): Record<string, unkno
   const tokens = toSlug(trimmed).split("-").filter(Boolean).map(escapeRegex);
   if (tokens.length === 0) return exact;
 
-  const slugPattern = `^${tokens.join("[\\s\\-_&]*")}$`;
+  const slugPattern = `^${tokens.join("[\\s\\-_&]+")}$`;
   if (slugPattern === `^${escaped}$`) return exact;
 
   return {

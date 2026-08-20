@@ -17,6 +17,7 @@ const belgianRenovationConfig = {
   service: "Solar panel installation",
   vatManagement: {
     enabled: true,
+    article47Classification: "immovable",
     rateRuleGroup: "building_work",
     reducedVatQuestions: [],
     logicRules: [
@@ -101,6 +102,20 @@ describe("resolveVatDecisionFromConfig", () => {
     });
     expect(decision.action).toBe("standard_rate");
     expect(decision.appliedRate).toBe(21);
+  });
+
+  it("requires admin review instead of guessing Article 47 for legacy VAT configs", async () => {
+    mockConfig({
+      category: "Solar",
+      vatManagement: { enabled: true, reducedVatQuestions: [], logicRules: [] },
+    });
+    const decision = await resolveVatDecisionFromConfig({
+      serviceConfigurationId: "652f1f77bcf86cd799439011",
+      country: "BE",
+      customerType: "individual",
+    });
+    expect(decision.action).toBe("rfq");
+    expect(decision.explanation).toContain("Article 47 classification");
   });
 
   it("overrides with reverse charge for verified EU B2B outside exception countries", async () => {

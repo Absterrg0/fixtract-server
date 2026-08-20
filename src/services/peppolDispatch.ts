@@ -1,4 +1,5 @@
 import { Buffer } from "buffer";
+import { PEPPOL_DISPATCH_STATUSES, type PeppolDispatchStatus } from "../constants/peppol";
 import PlatformSettings from "../models/platformSettings";
 import { parseVatCountryCode, normalizeVatCountry } from "../utils/vatManagement";
 import {
@@ -7,7 +8,8 @@ import {
   type OdooAccountingConfig,
 } from "./odooAccounting";
 
-export type PeppolDispatchStatus = "skipped" | "queued" | "sent" | "failed";
+export { PEPPOL_DISPATCH_STATUSES } from "../constants/peppol";
+export type { PeppolDispatchStatus } from "../constants/peppol";
 
 export type PeppolProvider = "manual" | "odoo";
 
@@ -62,6 +64,7 @@ const isBelgianB2BBooking = (booking: any, side: "customer" | "supplier"): boole
   const party = side === "supplier" ? booking.professional || {} : booking.customer || {};
   if (side === "supplier" && !party.businessInfo?.vatNumber && !party.vatNumber) return false;
   if (side === "customer" && party.customerType !== "business") return false;
+  if (side === "customer" && !party.vatNumber) return false;
   const country = parseVatCountryCode(
     side === "supplier"
       ? party.businessInfo?.country || party.location?.country
@@ -555,7 +558,7 @@ export async function maybeDispatchPeppolInvoice(params: {
   const settings = await PlatformSettings.getCurrentConfig();
   const eInvoicing = settings.eInvoicing || {};
 
-  if (!eInvoicing.peppolEnabled && eInvoicing.provider !== "odoo") {
+  if (!eInvoicing.peppolEnabled) {
     return { status: "skipped", reason: "Peppol e-invoicing is disabled in platform settings" };
   }
 

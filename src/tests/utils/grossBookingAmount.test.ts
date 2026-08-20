@@ -70,4 +70,21 @@ describe("computeGrossBookingAmount", () => {
       )
     ).toBe(492.82);
   });
+
+  it("does not lose a one-cent extra option to a tolerance check", () => {
+    expect(
+      computeGrossBookingAmount(
+        {
+          quote: { amount: 100.01 },
+          selectedExtraOptions: [{ bookedPrice: 0.01 }],
+          checkoutSnapshot: {
+            baseSubtotal: 100,
+            extraOptionsTotal: 0.01,
+            totalAmount: 100.01,
+          },
+        },
+        0,
+      ),
+    ).toBe(100.01);
+  });
 });

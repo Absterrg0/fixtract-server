@@ -40,6 +40,7 @@ const applyProceedAtStandardVatIfRequested = (
     matchedRuleText: undefined,
   }, customer?.customerType, customer?.vatNumber, customer?.isVatVerified, {
     propertyNature: vatDecision.propertyNature,
+    exemptFromBelgianReverseCharge: vatDecision.exemptFromBelgianReverseCharge,
   });
 };
 
@@ -126,6 +127,34 @@ const resolveNormalizedVatAnswers = async (
     if (fieldName) acc[String(fieldName)] = answer.answer;
     return acc;
   }, {});
+};
+
+const validateServiceCountryCoverage = async (params: {
+  country?: string | null;
+  serviceConfigurationId?: string | null;
+  projectCountry?: string | null;
+}): Promise<string | null> => {
+  const country = parseVatCountryCode(params.country);
+  if (!country) return "A valid service country is required for VAT determination";
+
+  const projectCountry = parseVatCountryCode(params.projectCountry);
+  if (projectCountry && projectCountry !== country) {
+    return "The service country does not match the project's configured service area";
+  }
+
+  if (params.serviceConfigurationId && mongoose.Types.ObjectId.isValid(params.serviceConfigurationId)) {
+    const configuration = await ServiceConfiguration.findById(params.serviceConfigurationId)
+      .select("activeCountries")
+      .lean();
+    const activeCountries = (configuration?.activeCountries || [])
+      .map((candidate: string) => parseVatCountryCode(candidate))
+      .filter(Boolean);
+    if (activeCountries.length > 0 && !activeCountries.includes(country)) {
+      return "The service is not available in the selected service country";
+    }
+  }
+
+  return null;
 };
 
 const roundMoney = (value: number): number =>
@@ -304,6 +333,8 @@ const presignBookingFiles = async (bookingDoc: any) => {
       supplierInvoiceUblUrl: await presignMaybeS3Url(booking.payment.supplierInvoiceUblUrl),
       creditNoteUrl: await presignMaybeS3Url(booking.payment.creditNoteUrl),
       creditNoteUblUrl: await presignMaybeS3Url(booking.payment.creditNoteUblUrl),
+      supplierCreditNoteUrl: await presignMaybeS3Url(booking.payment.supplierCreditNoteUrl),
+      supplierCreditNoteUblUrl: await presignMaybeS3Url(booking.payment.supplierCreditNoteUblUrl),
     };
   }
 
@@ -422,9 +453,16 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       configIdForVat
     );
 
-    const requestedServiceCountry =
-      parseVatCountryCode(serviceCountry) ||
-      parseVatCountryCode(serviceLocation?.country);
+    const suppliedServiceCountries = [serviceCountry, serviceLocation?.country]
+      .filter((value) => value != null && String(value).trim() !== '')
+      .map((value) => parseVatCountryCode(String(value)));
+    if (suppliedServiceCountries.some((country) => !country)) {
+      return res.status(400).json({ success: false, msg: "A valid ISO service country is required" });
+    }
+    if (new Set(suppliedServiceCountries).size > 1) {
+      return res.status(400).json({ success: false, msg: "The service country fields must agree" });
+    }
+    const requestedServiceCountry = suppliedServiceCountries[0];
     const serviceCoords = Array.isArray(serviceLocation?.coordinates)
       ? serviceLocation.coordinates.map(Number)
       : [];
@@ -437,8 +475,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       serviceCoords[1] >= -90 &&
       serviceCoords[1] <= 90;
 
-    const applyBookingLocation = (fallbackCountry?: string) => {
+    const applyBookingLocation = (fallbackCountry?: string, authoritativeCountry?: string) => {
       const country = firstVatCountry(
+        authoritativeCountry,
         requestedServiceCountry,
         customer.location?.country,
         fallbackCountry
@@ -452,6 +491,20 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         postalCode: serviceLocation?.postalCode || customer.location?.postalCode,
       };
     };
+
+    const hasServiceAddressFields = Boolean(
+      serviceLocation &&
+      ['address', 'city', 'country', 'postalCode'].some((field) => {
+        const value = (serviceLocation as any)[field];
+        return value != null && String(value).trim() !== '';
+      }),
+    );
+    if (hasServiceAddressFields && !hasServiceCoords) {
+      return res.status(400).json({
+        success: false,
+        msg: "A service address must include valid coordinates; please select the address from the map suggestions",
+      });
+    }
 
     // Create booking payload (base fields)
     const bookingData: any = {
@@ -492,6 +545,12 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
 
       bookingData.professional = professionalId;
+
+      const coverageError = await validateServiceCountryCoverage({
+        country: bookingData.location.country,
+        serviceConfigurationId,
+      });
+      if (coverageError) return res.status(400).json({ success: false, msg: coverageError });
 
       // Professional bookings have no project-level service configuration, but
       // country-based standard rates and B2B reverse-charge rules still apply.
@@ -563,7 +622,20 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           msg: "serviceConfigurationId does not match the selected project",
         });
       }
-      bookingData.location = applyBookingLocation(project.distance?.countryCode);
+      const projectCountry = firstVatCountry(project.distance?.countryCode);
+      if (projectCountry && requestedServiceCountry && projectCountry !== requestedServiceCountry) {
+        return res.status(400).json({
+          success: false,
+          msg: "The service country does not match the project's configured service area",
+        });
+      }
+      bookingData.location = applyBookingLocation(projectCountry, projectCountry);
+      const coverageError = await validateServiceCountryCoverage({
+        country: bookingData.location.country,
+        serviceConfigurationId: selectedServiceConfigId,
+        projectCountry,
+      });
+      if (coverageError) return res.status(400).json({ success: false, msg: coverageError });
       const vatDecision = await resolveVatDecisionFromConfig({
         serviceConfigurationId: selectedServiceConfigId,
         category: projectService?.category || project.category,
@@ -1835,22 +1907,29 @@ export const previewVatDecision = async (req: Request, res: Response) => {
     const projectService = Array.isArray(project?.services) && project.services.length > 0
       ? project.services[0]
       : null;
+    const parsedRequestedCountry = serviceCountry ? parseVatCountryCode(serviceCountry) : "";
+    if (serviceCountry && !parsedRequestedCountry) {
+      return res.status(400).json({ success: false, msg: "A valid ISO service country is required" });
+    }
+    const previewCountry = firstVatCountry(
+      project?.distance?.countryCode,
+      parsedRequestedCountry,
+      customer.location?.country,
+    );
+    const coverageError = await validateServiceCountryCoverage({
+      country: previewCountry,
+      serviceConfigurationId: serviceConfigurationId || project?.serviceConfigurationId,
+      projectCountry: project?.distance?.countryCode,
+    });
+    if (coverageError) return res.status(400).json({ success: false, msg: coverageError });
 
     const decision = await resolveVatDecisionFromConfig({
       serviceConfigurationId: serviceConfigurationId || project?.serviceConfigurationId,
       category: projectService?.category || project?.category,
       service: projectService?.service || project?.service,
       areaOfWork: projectService?.areaOfWork || project?.areaOfWork,
-      country: firstVatCountry(
-        serviceCountry,
-        customer.location?.country,
-        project?.distance?.countryCode
-      ),
-      bookingCountry: firstVatCountry(
-        serviceCountry,
-        customer.location?.country,
-        project?.distance?.countryCode
-      ),
+      country: previewCountry,
+      bookingCountry: previewCountry,
       businessCountry: customer.companyAddress?.country,
       answers: normalizedVatAnswers,
       professionalAnswers: professionalAnswersFromProject(project),
@@ -1904,6 +1983,13 @@ export const proceedAtStandardVatRate = async (req: Request, res: Response, next
       });
     }
 
+    if (!booking.vatDecision.country) {
+      return res.status(409).json({
+        success: false,
+        msg: "VAT country is missing; refresh the booking VAT decision before continuing.",
+      });
+    }
+
     const standardRate = Number.isFinite(booking.vatDecision.standardRate)
       ? booking.vatDecision.standardRate!
       : booking.vatDecision.appliedRate ?? 21;
@@ -1911,6 +1997,7 @@ export const proceedAtStandardVatRate = async (req: Request, res: Response, next
     const customer = booking.customer as any;
     booking.vatDecision = applyB2BInvoiceRule({
       ...booking.vatDecision,
+      country: booking.vatDecision.country,
       action: "standard_rate",
       appliedRate: standardRate,
       reverseCharge: false,
@@ -1918,6 +2005,7 @@ export const proceedAtStandardVatRate = async (req: Request, res: Response, next
       matchedRuleText: undefined,
     }, customer?.customerType, customer?.vatNumber, customer?.isVatVerified, {
       propertyNature: booking.vatDecision.propertyNature,
+      exemptFromBelgianReverseCharge: booking.vatDecision.exemptFromBelgianReverseCharge,
     });
 
     const project = booking.project as any;

@@ -77,11 +77,14 @@ const ALLOWED_PAYMENT_OVERRIDE_KEYS = new Set([
   'supplierInvoiceUblUrl',
   'supplierInvoiceGeneratedAt',
   'peppolDispatchStatus',
+  'peppolDispatchReason',
   'peppolDispatchReference',
   'peppolDispatchedAt',
   'supplierPeppolDispatchStatus',
+  'supplierPeppolDispatchReason',
   'supplierPeppolDispatchReference',
   'supplierPeppolDispatchedAt',
+  'milestoneIndex',
   'metadata',
   'notes',
   'refundReason',
@@ -1091,7 +1094,7 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
     booking.payment.status = 'completed';
     booking.payment.stripeTransferId = transfer.id;
     booking.payment.stripeDestinationPayment = transfer.destination_payment as string;
-    booking.payment.transferCurrency = transferCurrency;
+    booking.payment.transferCurrency = transferCurrency.toUpperCase();
     booking.payment.transferAmount = transferAmount;
     booking.payment.transferStatus = 'succeeded';
     booking.payment.transferFailureReason = undefined;

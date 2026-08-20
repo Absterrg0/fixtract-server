@@ -189,9 +189,10 @@ const pickSaleTax = (
   preferredNames: string[]
 ): number | undefined => {
   const normalizedPreferred = preferredNames.map((name) => name.toLowerCase());
-  const exact = taxes.find((tax) => normalizedPreferred.includes(String(tax.name || "").toLowerCase()));
+  const stableTaxes = [...taxes].sort((left, right) => left.id - right.id);
+  const exact = stableTaxes.find((tax) => normalizedPreferred.includes(String(tax.name || "").toLowerCase()));
   if (exact?.id) return exact.id;
-  const byAmount = taxes.find((tax) => Number(tax.amount) === amount);
+  const byAmount = stableTaxes.find((tax) => Number(tax.amount) === amount);
   return byAmount?.id;
 };
 
@@ -265,6 +266,7 @@ const discoverSaleTaxes = async (
     {
       domain: [["type_tax_use", "=", "sale"]],
       fields: ["id", "name", "amount"],
+      order: "id asc",
       limit: 100,
     },
     companyId
@@ -285,13 +287,16 @@ const discoverSaleTaxes = async (
         ["amount", "=", 0],
       ],
       fields: ["id", "name", "amount"],
+      order: "id asc",
       limit: 20,
     },
     companyId
   );
-  const reverseChargeTaxId = reverseTaxes.find((tax) => /ic|intra|reverse|co-contractor/i.test(String(tax.name || "")))?.id;
+  const reverseChargeTaxId = [...reverseTaxes]
+    .sort((left, right) => left.id - right.id)
+    .find((tax) => /ic|intra|reverse|co-contractor/i.test(String(tax.name || "")))?.id;
 
-  const taxIdsByRate = taxes.reduce<Record<string, number>>((mapping, tax) => {
+  const taxIdsByRate = [...taxes].sort((left, right) => left.id - right.id).reduce<Record<string, number>>((mapping, tax) => {
     const rate = Number(tax.amount);
     if (tax.id && Number.isFinite(rate) && rate > 0 && mapping[String(rate)] == null) {
       mapping[String(rate)] = tax.id;

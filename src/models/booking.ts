@@ -2,6 +2,8 @@ import mongoose, { Schema, model, Document, Types } from "mongoose";
 import { getNextSequence } from "../utils/counterSequence";
 import { STRIPE_CONFIG } from "../services/stripe";
 import { VatBreakdownLine } from "../Types/stripe";
+import { PEPPOL_DISPATCH_STATUSES, type PeppolDispatchStatus } from "../constants/peppol";
+import type { InvoiceArtifactHistoryEntry } from "../Types/invoice";
 
 const SUPPORTED_CURRENCIES = STRIPE_CONFIG.supportedCurrencies.length
   ? STRIPE_CONFIG.supportedCurrencies
@@ -203,7 +205,7 @@ export interface IBooking extends Document {
   };
   vatDecision?: {
     action: 'standard_rate' | 'reduced_rate' | 'rfq';
-    country: string;
+    country?: string;
     standardRate: number;
     appliedRate: number;
     reducedRate?: number;
@@ -308,11 +310,11 @@ export interface IBooking extends Document {
     invoiceUrl?: string;
     invoiceUblUrl?: string;
     invoiceGeneratedAt?: Date;
-    peppolDispatchStatus?: string;
+    peppolDispatchStatus?: PeppolDispatchStatus;
     peppolDispatchReason?: string;
     peppolDispatchReference?: string;
     peppolDispatchedAt?: Date;
-    supplierPeppolDispatchStatus?: string;
+    supplierPeppolDispatchStatus?: PeppolDispatchStatus;
     supplierPeppolDispatchReason?: string;
     supplierPeppolDispatchReference?: string;
     supplierPeppolDispatchedAt?: Date;
@@ -325,7 +327,7 @@ export interface IBooking extends Document {
     creditNoteUblUrl?: string;
     creditNoteGeneratedAt?: Date;
     creditNoteRelatedInvoiceNumber?: string;
-    creditNotePeppolDispatchStatus?: string;
+    creditNotePeppolDispatchStatus?: PeppolDispatchStatus;
     creditNotePeppolDispatchReason?: string;
     creditNotePeppolDispatchReference?: string;
     creditNoteGenerationClaim?: string;
@@ -334,9 +336,10 @@ export interface IBooking extends Document {
     supplierCreditNoteUblUrl?: string;
     supplierCreditNoteGeneratedAt?: Date;
     supplierCreditNoteRelatedInvoiceNumber?: string;
-    supplierCreditNotePeppolDispatchStatus?: string;
+    supplierCreditNotePeppolDispatchStatus?: PeppolDispatchStatus;
     supplierCreditNotePeppolDispatchReason?: string;
     supplierCreditNotePeppolDispatchReference?: string;
+    invoiceArtifactHistory?: InvoiceArtifactHistoryEntry[];
 
     // Auto-discount breakdown
     discount?: {
@@ -523,6 +526,20 @@ export interface IBooking extends Document {
 }
 
 const TIME_24H_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+const InvoiceArtifactHistorySchema = new Schema<InvoiceArtifactHistoryEntry>(
+  {
+    side: { type: String, enum: ["customer", "supplier"], required: true },
+    documentType: { type: String, enum: ["invoice", "credit_note"], required: true },
+    invoiceNumber: { type: String, required: true },
+    invoiceUrl: { type: String },
+    invoiceUblUrl: { type: String },
+    generatedAt: { type: Date },
+    relatedInvoiceNumber: { type: String },
+    replacedAt: { type: Date, required: true },
+  },
+  { _id: false },
+);
 
 const BookingSchema = new Schema({
   // Core references
@@ -958,11 +975,11 @@ const BookingSchema = new Schema({
     invoiceUrl: { type: String },
     invoiceUblUrl: { type: String },
     invoiceGeneratedAt: { type: Date },
-    peppolDispatchStatus: { type: String },
+    peppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
     peppolDispatchReason: { type: String },
     peppolDispatchReference: { type: String },
     peppolDispatchedAt: { type: Date },
-    supplierPeppolDispatchStatus: { type: String },
+    supplierPeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
     supplierPeppolDispatchReason: { type: String },
     supplierPeppolDispatchReference: { type: String },
     supplierPeppolDispatchedAt: { type: Date },
@@ -975,7 +992,7 @@ const BookingSchema = new Schema({
     creditNoteUblUrl: { type: String },
     creditNoteGeneratedAt: { type: Date },
     creditNoteRelatedInvoiceNumber: { type: String },
-    creditNotePeppolDispatchStatus: { type: String },
+    creditNotePeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
     creditNotePeppolDispatchReason: { type: String },
     creditNotePeppolDispatchReference: { type: String },
     creditNoteGenerationClaim: { type: String },
@@ -984,9 +1001,10 @@ const BookingSchema = new Schema({
     supplierCreditNoteUblUrl: { type: String },
     supplierCreditNoteGeneratedAt: { type: Date },
     supplierCreditNoteRelatedInvoiceNumber: { type: String },
-    supplierCreditNotePeppolDispatchStatus: { type: String },
+    supplierCreditNotePeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
     supplierCreditNotePeppolDispatchReason: { type: String },
     supplierCreditNotePeppolDispatchReference: { type: String },
+    invoiceArtifactHistory: { type: [InvoiceArtifactHistorySchema], default: [] },
 
     // Auto-discount breakdown
     discount: {

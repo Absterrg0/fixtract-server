@@ -4,7 +4,7 @@ import Payment from "../models/payment";
 import PlatformSettings from "../models/platformSettings";
 import { uploadBufferToS3 } from "../utils/s3Upload";
 import {
-  B2B_VAT_EXEMPTION_NOTE,
+  REVERSE_CHARGE_LABEL,
   normalizeVatCountry,
   resolveSupplierB2BInvoiceDecision,
 } from "../utils/vatManagement";
@@ -15,12 +15,13 @@ import {
 } from "../utils/invoiceAccounting";
 import {
   generateBookingInvoice,
+  applyManualInvoicePartyOverrides,
   type ManualInvoiceLine,
   type ManualInvoiceOverride,
-  type ManualInvoicePartyOverride,
 } from "./invoiceGenerator";
 import { maybeDispatchPeppolInvoice } from "./peppolDispatch";
 import { notify } from "../utils/notifications/notify";
+import type { InvoiceArtifactHistoryEntry } from "../Types/invoice";
 
 export const SELF_BILLING_NOTE = "Prepared and sent on behalf of the supplier.";
 const SELF_BILLING_CUSTOMIZATION_ID =
@@ -249,13 +250,16 @@ const clearLegacyInvoiceFields = async (bookingId: string) => {
 const persistPaymentArtifactUpdate = async (
   bookingId: mongoose.Types.ObjectId | string,
   paymentId: string | undefined,
-  update: Record<string, unknown>
+  update: Record<string, unknown>,
+  historyEntry?: InvoiceArtifactHistoryEntry,
 ) => {
+  const updateDocument: Record<string, unknown> = { $set: update };
+  if (historyEntry) updateDocument.$push = { invoiceArtifactHistory: historyEntry };
   if (paymentId && mongoose.Types.ObjectId.isValid(paymentId)) {
-    await Payment.findByIdAndUpdate(paymentId, { $set: update });
+    await Payment.findByIdAndUpdate(paymentId, updateDocument);
     return;
   }
-  await Payment.findOneAndUpdate({ booking: bookingId }, { $set: update });
+  await Payment.findOneAndUpdate({ booking: bookingId }, updateDocument);
 };
 
 const toMoney = (value: unknown): string => {
@@ -301,6 +305,18 @@ type UblLine = InvoiceAccountingLine & { price: number; vatAmount: number };
 
 const moneyNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
 
+const getCustomerExtraCostNet = (booking: any, fallback: number): number => {
+  if (booking.payment?.extraCostCustomerNetAmount != null) {
+    return moneyNumber(booking.payment.extraCostCustomerNetAmount);
+  }
+  if (booking.payment?.extraCostAmount != null) {
+    const gross = moneyNumber(booking.payment.extraCostAmount);
+    const vat = booking.payment?.reverseCharge ? 0 : moneyNumber(booking.payment?.extraCostVatAmount);
+    return Math.max(0, Math.round((gross - vat) * 100) / 100);
+  }
+  return fallback;
+};
+
 const getExtraCostLinesForUbl = (
   booking: any,
   vatRate: number,
@@ -309,7 +325,7 @@ const getExtraCostLinesForUbl = (
 ): UblLine[] => {
   const rawTotal = (booking.extraCosts || []).reduce((sum: number, cost: any) => sum + moneyNumber(cost.amount), 0);
   const targetTotal = customerSide
-    ? moneyNumber(booking.payment?.extraCostCustomerNetAmount ?? booking.payment?.extraCostAmount ?? rawTotal)
+    ? getCustomerExtraCostNet(booking, rawTotal)
     : rawTotal;
   const scale = rawTotal > 0 ? targetTotal / rawTotal : 1;
   return (booking.extraCosts || []).map((cost: any) => {
@@ -558,7 +574,7 @@ const buildUblPartiesAndTotals = (
   const taxCategoryId = reverseCharge ? "AE" : "S";
   const taxCategoryExtras = reverseCharge
     ? `<cbc:TaxExemptionReasonCode>VATEX-EU-IC</cbc:TaxExemptionReasonCode>
-        <cbc:TaxExemptionReason>${escapeXml(B2B_VAT_EXEMPTION_NOTE)}</cbc:TaxExemptionReason>`
+        <cbc:TaxExemptionReason>${escapeXml(REVERSE_CHARGE_LABEL)}</cbc:TaxExemptionReason>`
     : "";
   const taxSubtotals = pricingLines.map((line: any) => `
     <cac:TaxSubtotal>
@@ -674,7 +690,7 @@ const buildUblCreditNoteXml = (
   <cbc:IssueDate>${issuedAt.toISOString().slice(0, 10)}</cbc:IssueDate>
   <cbc:CreditNoteTypeCode>381</cbc:CreditNoteTypeCode>
   ${selfBilling ? `<cbc:Note>${escapeXml(SELF_BILLING_NOTE)}</cbc:Note>` : ""}
-  ${reverseCharge ? `<cbc:Note>${escapeXml(B2B_VAT_EXEMPTION_NOTE)}</cbc:Note>` : ""}
+  ${reverseCharge ? `<cbc:Note>${escapeXml(REVERSE_CHARGE_LABEL)}</cbc:Note>` : ""}
   <cbc:DocumentCurrencyCode>${escapeXml(currency)}</cbc:DocumentCurrencyCode>
   <cbc:BuyerReference>${escapeXml(booking.bookingNumber || booking._id?.toString?.())}</cbc:BuyerReference>
   ${options?.relatedInvoiceNumber ? `<cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>${escapeXml(options.relatedInvoiceNumber)}</cbc:ID></cac:InvoiceDocumentReference></cac:BillingReference>` : ""}
@@ -743,7 +759,7 @@ const buildUblInvoiceXml = (
   <cbc:IssueDate>${issuedAt.toISOString().slice(0, 10)}</cbc:IssueDate>
   <cbc:InvoiceTypeCode>${invoiceTypeCode}</cbc:InvoiceTypeCode>
   ${selfBilling ? `<cbc:Note>${escapeXml(SELF_BILLING_NOTE)}</cbc:Note>` : ""}
-  ${reverseCharge ? `<cbc:Note>${escapeXml(B2B_VAT_EXEMPTION_NOTE)}</cbc:Note>` : ""}
+  ${reverseCharge ? `<cbc:Note>${escapeXml(REVERSE_CHARGE_LABEL)}</cbc:Note>` : ""}
   <cbc:DocumentCurrencyCode>${escapeXml(currency)}</cbc:DocumentCurrencyCode>
   <cbc:BuyerReference>${escapeXml(booking.bookingNumber || booking._id?.toString?.())}</cbc:BuyerReference>
   ${options?.relatedInvoiceNumber ? `<cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>${escapeXml(options.relatedInvoiceNumber)}</cbc:ID></cac:InvoiceDocumentReference></cac:BillingReference>` : ""}
@@ -1359,12 +1375,24 @@ export async function ensureCreditInvoiceArtifacts(
       supplierCreditNoteUblUrl,
       supplierCreditNoteGeneratedAt: generatedAt,
       supplierCreditNoteRelatedInvoiceNumber: supplierRelatedInvoiceNumber,
-      creditNotePeppolDispatchStatus: "skipped" as string | undefined,
-      creditNotePeppolDispatchReason: undefined as string | undefined,
-      creditNotePeppolDispatchReference: undefined as string | undefined,
-      supplierCreditNotePeppolDispatchStatus: "skipped" as string | undefined,
-      supplierCreditNotePeppolDispatchReason: undefined as string | undefined,
-      supplierCreditNotePeppolDispatchReference: undefined as string | undefined,
+      creditNotePeppolDispatchStatus: existingCustomerCredit
+        ? (booking.payment.creditNotePeppolDispatchStatus || "skipped")
+        : "skipped",
+      creditNotePeppolDispatchReason: existingCustomerCredit
+        ? booking.payment.creditNotePeppolDispatchReason
+        : undefined,
+      creditNotePeppolDispatchReference: existingCustomerCredit
+        ? booking.payment.creditNotePeppolDispatchReference
+        : undefined,
+      supplierCreditNotePeppolDispatchStatus: existingSupplierCredit
+        ? (booking.payment.supplierCreditNotePeppolDispatchStatus || "skipped")
+        : "skipped",
+      supplierCreditNotePeppolDispatchReason: existingSupplierCredit
+        ? booking.payment.supplierCreditNotePeppolDispatchReason
+        : undefined,
+      supplierCreditNotePeppolDispatchReference: existingSupplierCredit
+        ? booking.payment.supplierCreditNotePeppolDispatchReference
+        : undefined,
     };
 
     await Booking.updateOne(
@@ -1515,45 +1543,11 @@ export async function ensureCreditInvoiceArtifacts(
 }
 
 const applyManualParty = (booking: any, input: ManualInvoiceCorrectionInput): any => {
-  const customerOverride: ManualInvoicePartyOverride | undefined = input.customer;
-  const professionalOverride: ManualInvoicePartyOverride | undefined = input.professional;
-  const customer = customerOverride
-    ? {
-        ...(booking.customer || {}),
-        name: customerOverride.name ?? booking.customer?.name,
-        email: customerOverride.email ?? booking.customer?.email,
-        businessName: customerOverride.businessName ?? booking.customer?.businessName,
-        vatNumber: customerOverride.vatNumber ?? booking.customer?.vatNumber,
-        companyAddress: {
-          ...(booking.customer?.companyAddress || {}),
-          address: customerOverride.address ?? booking.customer?.companyAddress?.address,
-          postalCode: customerOverride.postalCode ?? booking.customer?.companyAddress?.postalCode,
-          city: customerOverride.city ?? booking.customer?.companyAddress?.city,
-          country: customerOverride.country ?? booking.customer?.companyAddress?.country,
-        },
-      }
-    : booking.customer;
-  const professional = professionalOverride
-    ? {
-        ...(booking.professional || {}),
-        name: professionalOverride.name ?? booking.professional?.name,
-        vatNumber: professionalOverride.vatNumber ?? booking.professional?.vatNumber,
-        businessInfo: {
-          ...(booking.professional?.businessInfo || {}),
-          companyName: professionalOverride.businessName ?? booking.professional?.businessInfo?.companyName,
-          address: professionalOverride.address ?? booking.professional?.businessInfo?.address,
-          postalCode: professionalOverride.postalCode ?? booking.professional?.businessInfo?.postalCode,
-          city: professionalOverride.city ?? booking.professional?.businessInfo?.city,
-          country: professionalOverride.country ?? booking.professional?.businessInfo?.country,
-        },
-      }
-    : booking.professional;
+  const partyBooking = applyManualInvoicePartyOverrides(booking, input);
   return {
-    ...(typeof booking.toObject === "function" ? booking.toObject() : booking),
-    customer,
-    professional,
+    ...(typeof partyBooking.toObject === "function" ? partyBooking.toObject() : partyBooking),
     payment: {
-      ...(booking.payment || {}),
+      ...(partyBooking.payment || {}),
       ...input.payment,
       vatBreakdown: input.lines.map((line: ManualInvoiceLine) => ({
         description: line.description,
@@ -1664,6 +1658,47 @@ export async function createManualInvoiceArtifact(
 
   const isCustomer = input.side === "customer";
   const isCredit = input.documentType === "credit_note";
+  const previousArtifact = isCredit
+    ? isCustomer
+      ? {
+          invoiceNumber: booking.payment.creditNoteNumber,
+          invoiceUrl: booking.payment.creditNoteUrl,
+          invoiceUblUrl: booking.payment.creditNoteUblUrl,
+          generatedAt: booking.payment.creditNoteGeneratedAt,
+          relatedInvoiceNumber: booking.payment.creditNoteRelatedInvoiceNumber,
+        }
+      : {
+          invoiceNumber: booking.payment.supplierCreditNoteNumber,
+          invoiceUrl: booking.payment.supplierCreditNoteUrl,
+          invoiceUblUrl: booking.payment.supplierCreditNoteUblUrl,
+          generatedAt: booking.payment.supplierCreditNoteGeneratedAt,
+          relatedInvoiceNumber: booking.payment.supplierCreditNoteRelatedInvoiceNumber,
+        }
+    : isCustomer
+      ? {
+          invoiceNumber: booking.payment.invoiceNumber,
+          invoiceUrl: booking.payment.invoiceUrl,
+          invoiceUblUrl: booking.payment.invoiceUblUrl,
+          generatedAt: booking.payment.invoiceGeneratedAt,
+        }
+      : {
+          invoiceNumber: booking.payment.supplierInvoiceNumber,
+          invoiceUrl: booking.payment.supplierInvoiceUrl,
+          invoiceUblUrl: booking.payment.supplierInvoiceUblUrl,
+          generatedAt: booking.payment.supplierInvoiceGeneratedAt,
+        };
+  const historyEntry: InvoiceArtifactHistoryEntry | undefined = previousArtifact.invoiceNumber
+    ? {
+        side: input.side,
+        documentType: input.documentType,
+        invoiceNumber: previousArtifact.invoiceNumber,
+        invoiceUrl: previousArtifact.invoiceUrl,
+        invoiceUblUrl: previousArtifact.invoiceUblUrl,
+        generatedAt: previousArtifact.generatedAt,
+        relatedInvoiceNumber: previousArtifact.relatedInvoiceNumber,
+        replacedAt: generatedAt,
+      }
+    : undefined;
   const fields = isCredit
     ? isCustomer
       ? {
@@ -1706,11 +1741,12 @@ export async function createManualInvoiceArtifact(
           supplierPeppolDispatchReference: peppolDispatchReference,
         };
 
-  await Booking.updateOne(
-    { _id: booking._id },
-    { $set: Object.fromEntries(Object.entries(fields).map(([key, value]) => [`payment.${key}`, value])) },
-  );
-  await persistPaymentArtifactUpdate(booking._id, paymentId, fields);
+  const bookingUpdate: Record<string, unknown> = {
+    $set: Object.fromEntries(Object.entries(fields).map(([key, value]) => [`payment.${key}`, value])),
+  };
+  if (historyEntry) bookingUpdate.$push = { "payment.invoiceArtifactHistory": historyEntry };
+  await Booking.updateOne({ _id: booking._id }, bookingUpdate);
+  await persistPaymentArtifactUpdate(booking._id, paymentId, fields, historyEntry);
   await notifyManualArtifactReady(booking, input, generated.invoiceNumber, artifactUrl);
   return {
     side: input.side,

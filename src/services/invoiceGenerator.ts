@@ -123,7 +123,7 @@ export type ManualInvoiceOverride = {
   professional?: ManualInvoicePartyOverride;
 };
 
-interface InvoiceBooking {
+export interface InvoiceBooking {
   _id: { toString(): string } | string;
   bookingNumber?: string;
   location?: {
@@ -240,7 +240,52 @@ interface InvoiceBooking {
     answers?: Array<{ fieldName: string; value: unknown }>;
     explanation?: string;
   };
+  __manualInvoiceLines?: ManualInvoiceLine[];
 }
+
+/** Apply party corrections to a plain booking object without spreading a hydrated Mongoose document. */
+export const applyManualInvoicePartyOverrides = <T extends InvoiceBooking>(
+  booking: T,
+  override: ManualInvoiceOverride,
+): T => {
+  const baseBooking = typeof (booking as any).toObject === "function" ? (booking as any).toObject() : booking;
+  const customerOverride = override.customer;
+  const professionalOverride = override.professional;
+  return {
+    ...(baseBooking as any),
+    customer: customerOverride
+      ? {
+          ...(baseBooking.customer || {}),
+          name: customerOverride.name ?? baseBooking.customer?.name,
+          email: customerOverride.email ?? baseBooking.customer?.email,
+          businessName: customerOverride.businessName ?? baseBooking.customer?.businessName,
+          vatNumber: customerOverride.vatNumber ?? baseBooking.customer?.vatNumber,
+          companyAddress: {
+            ...(baseBooking.customer?.companyAddress || {}),
+            address: customerOverride.address ?? baseBooking.customer?.companyAddress?.address,
+            postalCode: customerOverride.postalCode ?? baseBooking.customer?.companyAddress?.postalCode,
+            city: customerOverride.city ?? baseBooking.customer?.companyAddress?.city,
+            country: customerOverride.country ?? baseBooking.customer?.companyAddress?.country,
+          },
+        }
+      : baseBooking.customer,
+    professional: professionalOverride
+      ? {
+          ...(baseBooking.professional || {}),
+          name: professionalOverride.name ?? baseBooking.professional?.name,
+          vatNumber: professionalOverride.vatNumber ?? baseBooking.professional?.vatNumber,
+          businessInfo: {
+            ...(baseBooking.professional?.businessInfo || {}),
+            companyName: professionalOverride.businessName ?? baseBooking.professional?.businessInfo?.companyName,
+            address: professionalOverride.address ?? baseBooking.professional?.businessInfo?.address,
+            postalCode: professionalOverride.postalCode ?? baseBooking.professional?.businessInfo?.postalCode,
+            city: professionalOverride.city ?? baseBooking.professional?.businessInfo?.city,
+            country: professionalOverride.country ?? baseBooking.professional?.businessInfo?.country,
+          },
+        }
+      : baseBooking.professional,
+  } as T;
+};
 
 /**
  * Generate invoice number
@@ -537,41 +582,9 @@ export async function generateBookingInvoice(
 ): Promise<{ invoiceNumber: string; pdfBuffer: Buffer }> {
   const manualOverride = options?.manualOverride;
   if (manualOverride) {
-    const customerOverride = manualOverride.customer;
-    const professionalOverride = manualOverride.professional;
+    booking = applyManualInvoicePartyOverrides(booking, manualOverride);
     booking = {
       ...(booking as any),
-      customer: customerOverride
-        ? {
-            ...(booking.customer as any),
-            name: customerOverride.name ?? booking.customer.name,
-            email: customerOverride.email ?? booking.customer.email,
-            businessName: customerOverride.businessName ?? booking.customer.businessName,
-            vatNumber: customerOverride.vatNumber ?? booking.customer.vatNumber,
-            companyAddress: {
-              ...((booking.customer as any).companyAddress || {}),
-              address: customerOverride.address ?? (booking.customer as any).companyAddress?.address,
-              postalCode: customerOverride.postalCode ?? (booking.customer as any).companyAddress?.postalCode,
-              city: customerOverride.city ?? (booking.customer as any).companyAddress?.city,
-              country: customerOverride.country ?? (booking.customer as any).companyAddress?.country,
-            },
-          }
-        : booking.customer,
-      professional: professionalOverride
-        ? {
-            ...(booking.professional as any),
-            name: professionalOverride.name ?? booking.professional.name,
-            vatNumber: professionalOverride.vatNumber ?? booking.professional.vatNumber,
-            businessInfo: {
-              ...((booking.professional as any).businessInfo || {}),
-              companyName: professionalOverride.businessName ?? (booking.professional as any).businessInfo?.companyName,
-              address: professionalOverride.address ?? (booking.professional as any).businessInfo?.address,
-              postalCode: professionalOverride.postalCode ?? (booking.professional as any).businessInfo?.postalCode,
-              city: professionalOverride.city ?? (booking.professional as any).businessInfo?.city,
-              country: professionalOverride.country ?? (booking.professional as any).businessInfo?.country,
-            },
-          }
-        : booking.professional,
       payment: {
         ...(booking.payment as any),
         ...manualOverride.payment,
@@ -589,10 +602,6 @@ export async function generateBookingInvoice(
     } as InvoiceBooking;
   }
   const kind = options?.kind || "customer";
-  const invoiceNumber = options?.creditNote
-    ? await generateCreditNoteNumber(kind === "self_bill" ? "SUP" : "FIX")
-    : await generateInvoiceNumber(kind === "self_bill" ? "SUP" : "FIX");
-  const invoiceDate = new Date();
   const sign = options?.creditNote ? -1 : 1;
 
   const customer = booking.customer;
@@ -612,6 +621,13 @@ export async function generateBookingInvoice(
   if (!issuerCountry) {
     throw new Error("Cannot generate invoice: platform VAT country is missing or invalid.");
   }
+  // Validate all accounting parties before reserving a sequence number. A
+  // malformed booking must not create a permanent sequence gap or orphaned
+  // invoice artifact in object storage.
+  const invoiceNumber = options?.creditNote
+    ? await generateCreditNoteNumber(kind === "self_bill" ? "SUP" : "FIX")
+    : await generateInvoiceNumber(kind === "self_bill" ? "SUP" : "FIX");
+  const invoiceDate = new Date();
   const currentQuote = booking.quoteVersions?.find((quote) => quote.version === booking.currentQuoteVersion)
     || booking.quoteVersions?.[booking.quoteVersions.length - 1];
   const checkoutQuantity = booking.checkoutSnapshot?.pricingType === "unit"
@@ -685,7 +701,11 @@ export async function generateBookingInvoice(
   const customerExtraCostNet = booking.payment.extraCostCustomerNetAmount != null
     ? Number(booking.payment.extraCostCustomerNetAmount)
     : booking.payment.extraCostAmount != null
-      ? Number(booking.payment.extraCostAmount)
+      ? Math.max(
+          0,
+          Number(booking.payment.extraCostAmount) -
+            (booking.payment.reverseCharge ? 0 : Number(booking.payment.extraCostVatAmount || 0)),
+        )
       : rawExtraCostTotal;
   const extraCostScale = rawExtraCostTotal > 0 ? customerExtraCostNet / rawExtraCostTotal : 1;
   const extraCostLines = manualLines?.length ? [] : (booking.extraCosts || []).map((cost) => {

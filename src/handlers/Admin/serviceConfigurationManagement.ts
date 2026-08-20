@@ -130,6 +130,10 @@ export const getServiceConfigurationById = async (req: Request, res: Response) =
 const validateVatManagement = (vatManagement: any): string | null => {
     if (!vatManagement || !vatManagement.enabled) return null;
 
+    if (!['movable', 'immovable', 'project_dependent'].includes(vatManagement.article47Classification)) {
+        return 'VAT management requires an explicit Article 47 classification before it can be enabled.';
+    }
+
     const questions = [
       ...(Array.isArray(vatManagement.reducedVatQuestions) ? vatManagement.reducedVatQuestions : []),
       ...(Array.isArray(vatManagement.professionalVatQuestions) ? vatManagement.professionalVatQuestions : []),
@@ -138,7 +142,7 @@ const validateVatManagement = (vatManagement: any): string | null => {
     for (const question of questions) {
         const fieldName = String(question?.fieldName || '').trim();
         if (!fieldName || !String(question?.question || '').trim()) {
-            return 'Every reduced VAT question needs both a question text and a field name.';
+            return 'Every VAT question needs both a question text and a field name.';
         }
         if (fieldNames.has(fieldName)) {
             return `Duplicate VAT question field name "${fieldName}".`;
@@ -168,7 +172,7 @@ const validateVatManagement = (vatManagement: any): string | null => {
         for (const condition of Array.isArray(rule?.conditions) ? rule.conditions : []) {
             const conditionField = String(condition?.fieldName || '').trim();
             if (!conditionField || !fieldNames.has(conditionField)) {
-                return `VAT rule condition references unknown field "${conditionField || '(empty)'}". Define it as a reduced VAT question first.`;
+                return `VAT rule condition references unknown field "${conditionField || '(empty)'}". Define it as a customer or professional VAT question first.`;
             }
         }
     }

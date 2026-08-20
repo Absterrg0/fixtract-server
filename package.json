@@ -28,6 +28,7 @@
     "migrate:fix-invoice-sequence-indexes": "npx tsx src/scripts/fix/fixInvoiceSequenceIndexes.ts",
     "fix:conversation-indexes": "npx tsx src/scripts/fix/fixConversationIndexes.ts",
     "fix:invoice-sequence-indexes": "npx tsx src/scripts/fix/fixInvoiceSequenceIndexes.ts",
+    "fix:payment-indexes": "npx tsx src/scripts/fix/fixPaymentIndexes.ts",
     "fix:merge-solar": "npx tsx src/scripts/fix/mergeDuplicateSolarServices.ts",
     "fix:solar-service-names": "npx tsx src/scripts/fix/fixSolarServiceNames.ts",
     "fix:stuck-milestone-quotes": "npx tsx src/scripts/fix/migrateStuckMilestoneQuotes.ts",

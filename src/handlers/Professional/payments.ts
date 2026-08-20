@@ -45,7 +45,7 @@ export const getPaymentStats = async (req: Request, res: Response) => {
           $or: [
             { status: 'authorized' },
             { status: 'completed', $or: [
-              { transferStatus: 'failed' },
+              { transferStatus: { $in: ['pending', 'failed'] } },
               { transferStatus: { $exists: false }, stripeTransferId: { $exists: null } },
             ] },
           ],

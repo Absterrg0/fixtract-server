@@ -4,14 +4,10 @@ import User from '../models/user';
 import WarrantyClaim from '../models/warrantyClaim';
 import ServiceView from '../models/serviceView';
 import { STRIPE_CONFIG } from '../services/stripe';
+import { buildSettledTransferExpression } from './paymentSafety';
 
 const REPORTING_CURRENCY = STRIPE_CONFIG.defaultCurrency || 'EUR';
-const settledPayoutExpr = {
-  $or: [
-    { $eq: ['$payment.transferStatus', 'succeeded'] },
-    { $ne: [{ $ifNull: ['$payment.stripeTransferId', null] }, null] },
-  ],
-};
+const settledPayoutExpr = buildSettledTransferExpression('payment');
 
 interface KpiRange { from: Date; to: Date; }
 

@@ -55,6 +55,7 @@ describe("parseVatCountryCode / firstVatCountry", () => {
     expect(firstVatCountry("", undefined, "Nederland")).toBe("NL");
     expect(firstVatCountry("", "BE")).toBe("BE");
     expect(firstVatCountry("Atlantis", undefined)).toBe("");
+    expect(parseVatCountryCode("XX")).toBe("");
   });
 
   it("reads a country name from a formatted service address", () => {
@@ -82,6 +83,7 @@ describe("parseFlexibleNumber", () => {
     expect(parseFlexibleNumber("8,1")).toBe(8.1);
     expect(parseFlexibleNumber("25,5")).toBe(25.5);
     expect(parseFlexibleNumber("1.234,56")).toBe(1234.56);
+    expect(parseFlexibleNumber("1,234")).toBeNaN();
   });
 });
 

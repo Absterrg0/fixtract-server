@@ -40,9 +40,14 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
 
         // Build pricingModels for backward compatibility with Step1 dropdown
         // Prefer structured pricingOptions; fall back to parsing legacy pricingModel string
-        const configObj = configuration.toObject();
-        if (configObj.vatManagement) {
-            configObj.vatManagement.professionalVatQuestions = withArticle47ProfessionalQuestion(configObj.vatManagement);
+        const configObj: any = configuration.toObject();
+            if (configObj.vatManagement) {
+            const vatManagement = configObj.vatManagement;
+            configObj.vatManagement = {
+                enabled: vatManagement.enabled,
+                article47Classification: vatManagement.article47Classification,
+                professionalVatQuestions: withArticle47ProfessionalQuestion(vatManagement),
+            };
         }
         let pricingModels: string[] = [];
         if (configObj.pricingOptions && configObj.pricingOptions.length > 0) {

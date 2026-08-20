@@ -1,12 +1,13 @@
-type DiscountComponent = { amount?: number; discountAmount?: number };
+type AmountDiscountComponent = { amount?: number; discountAmount?: never };
+type PointsDiscountComponent = { amount?: never; discountAmount?: number };
 
 export type DiscountPayoutInput = {
   originalAmount: number;
   finalAmount: number;
-  loyaltyDiscount: DiscountComponent;
-  repeatBuyerDiscount: DiscountComponent;
-  pointsDiscount: DiscountComponent;
-  codeDiscount?: DiscountComponent;
+  loyaltyDiscount: AmountDiscountComponent;
+  repeatBuyerDiscount: AmountDiscountComponent;
+  pointsDiscount: PointsDiscountComponent;
+  codeDiscount?: AmountDiscountComponent;
 };
 
 const roundToTwo = (value: number): number => Math.round(value * 100) / 100;

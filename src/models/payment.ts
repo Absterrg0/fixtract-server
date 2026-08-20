@@ -1,9 +1,11 @@
 import { Schema, model, Document, Types } from "mongoose";
 import { STRIPE_CONFIG } from "../services/stripe";
 import { VatBreakdownLine } from "../Types/stripe";
-import { PeppolDispatchStatus } from "../services/peppolDispatch";
+import { PEPPOL_DISPATCH_STATUSES, type PeppolDispatchStatus } from "../constants/peppol";
+import type { TransferStatus } from "../utils/paymentSafety";
+import type { InvoiceArtifactHistoryEntry } from "../Types/invoice";
 
-const PEPPOL_DISPATCH_STATUSES: PeppolDispatchStatus[] = ["skipped", "queued", "sent", "failed"];
+type PaymentPeppolStatus = PeppolDispatchStatus;
 
 export type PaymentStatus =
   | "pending"
@@ -14,7 +16,7 @@ export type PaymentStatus =
   | "partially_refunded"
   | "disputed";
 
-export type TransferStatus = "pending" | "succeeded" | "failed";
+export type { TransferStatus } from "../utils/paymentSafety";
 
 export interface IPaymentRefund {
   amount: number;
@@ -85,11 +87,11 @@ export interface IPayment extends Document {
   invoiceUrl?: string;
   invoiceUblUrl?: string;
   invoiceGeneratedAt?: Date;
-  peppolDispatchStatus?: string;
+  peppolDispatchStatus?: PaymentPeppolStatus;
   peppolDispatchReason?: string;
   peppolDispatchReference?: string;
   peppolDispatchedAt?: Date;
-  supplierPeppolDispatchStatus?: string;
+  supplierPeppolDispatchStatus?: PaymentPeppolStatus;
   supplierPeppolDispatchReason?: string;
   supplierPeppolDispatchReference?: string;
   supplierPeppolDispatchedAt?: Date;
@@ -102,7 +104,7 @@ export interface IPayment extends Document {
   creditNoteUblUrl?: string;
   creditNoteGeneratedAt?: Date;
   creditNoteRelatedInvoiceNumber?: string;
-  creditNotePeppolDispatchStatus?: string;
+  creditNotePeppolDispatchStatus?: PaymentPeppolStatus;
   creditNotePeppolDispatchReason?: string;
   creditNotePeppolDispatchReference?: string;
   creditNoteGenerationClaim?: string;
@@ -111,9 +113,11 @@ export interface IPayment extends Document {
   supplierCreditNoteUblUrl?: string;
   supplierCreditNoteGeneratedAt?: Date;
   supplierCreditNoteRelatedInvoiceNumber?: string;
-  supplierCreditNotePeppolDispatchStatus?: string;
+  supplierCreditNotePeppolDispatchStatus?: PaymentPeppolStatus;
   supplierCreditNotePeppolDispatchReason?: string;
   supplierCreditNotePeppolDispatchReference?: string;
+
+  invoiceArtifactHistory?: InvoiceArtifactHistoryEntry[];
 
   metadata?: Record<string, any>;
 
@@ -136,6 +140,20 @@ const PaymentRefundSchema = new Schema<IPaymentRefund>(
     notes: { type: String, maxlength: 1000 },
   },
   { _id: false }
+);
+
+const InvoiceArtifactHistorySchema = new Schema<InvoiceArtifactHistoryEntry>(
+  {
+    side: { type: String, enum: ["customer", "supplier"], required: true },
+    documentType: { type: String, enum: ["invoice", "credit_note"], required: true },
+    invoiceNumber: { type: String, required: true },
+    invoiceUrl: { type: String },
+    invoiceUblUrl: { type: String },
+    generatedAt: { type: Date },
+    relatedInvoiceNumber: { type: String },
+    replacedAt: { type: Date, required: true },
+  },
+  { _id: false },
 );
 
 const SUPPORTED_CURRENCIES = STRIPE_CONFIG.supportedCurrencies.length
@@ -251,6 +269,7 @@ const PaymentSchema = new Schema<IPayment>(
     supplierCreditNotePeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
     supplierCreditNotePeppolDispatchReason: { type: String },
     supplierCreditNotePeppolDispatchReference: { type: String },
+    invoiceArtifactHistory: { type: [InvoiceArtifactHistorySchema], default: [] },
 
     metadata: { type: Schema.Types.Mixed },
   },
