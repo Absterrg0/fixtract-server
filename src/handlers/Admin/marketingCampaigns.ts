@@ -8,9 +8,15 @@ import MarketingCampaign, {
 } from '../../models/marketingCampaign';
 import MarketingSubscriber from '../../models/marketingSubscriber';
 import { params } from '../../utils/requestParams';
-import { countCampaignAudience, syncSubscribersFromUsers } from '../../utils/marketing/audience';
+import { syncSubscribersFromUsers } from '../../utils/marketing/audience';
 import { refreshCampaignStats, sendMarketingCampaign } from '../../utils/marketing/sendCampaign';
 import { listActiveBrevoTemplates } from '../../utils/marketing/brevoMarketing';
+import { sendBrevoTransactionalMarketingEmail } from '../../utils/marketing/brevoMarketing';
+import { resolveMarketingAudience } from '../../utils/marketing/audienceResolver';
+import { assertInlineMarketingContent, renderMarketingEmail } from '../../utils/marketing/renderCampaign';
+import { isValidEmail, normalizeEmail } from '../../utils/marketing/normalizeEmail';
+
+const MARKETING_AUDIENCE_TYPES = ['subscribers', 'leads', 'both'] as const;
 
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
@@ -25,6 +31,7 @@ function configuredInactiveDays(): number {
 function parseAudience(body: any, existing?: {
   countries?: string[];
   interestedServices?: string[];
+  serviceKeys?: string[];
   locales?: string[];
   roles?: Array<'customer' | 'professional'>;
 }) {
@@ -43,7 +50,7 @@ function parseAudience(body: any, existing?: {
         !(MARKETING_LOCALES as readonly string[]).includes(locale.trim().toLowerCase()),
     )
   ) {
-    throw new MarketingInputError('locales may only contain en, nl, or fr');
+    throw new MarketingInputError('locales contain an unsupported marketing language');
   }
   if (
     Array.isArray(source.roles) &&
@@ -70,6 +77,11 @@ function parseAudience(body: any, existing?: {
     : existing?.interestedServices
       ? [...existing.interestedServices]
       : [];
+  const serviceKeys = Array.isArray(source.serviceKeys)
+    ? source.serviceKeys.map((s: any) => String(s).trim()).filter(Boolean)
+    : existing?.serviceKeys
+      ? [...existing.serviceKeys]
+      : [];
   const locales = Array.isArray(source.locales)
     ? source.locales
         .map((l: any) => String(l).trim().toLowerCase())
@@ -82,7 +94,7 @@ function parseAudience(body: any, existing?: {
     : existing?.roles?.length
       ? [...existing.roles]
       : ['customer', 'professional'];
-  return { countries, interestedServices, locales, roles };
+  return { countries, interestedServices, serviceKeys, locales, roles };
 }
 
 function parseContent(body: any): Record<string, { subject: string; htmlContent: string; previewText?: string; brevoTemplateId?: number }> {
@@ -205,12 +217,19 @@ export const createMarketingCampaign = async (req: Request, res: Response) => {
     if (!(MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(type)) {
       return res.status(400).json({ success: false, msg: 'Invalid campaign type' });
     }
+    const audienceType = req.body?.audienceType || 'subscribers';
+    if (!(MARKETING_AUDIENCE_TYPES as readonly string[]).includes(audienceType)) {
+      return res.status(400).json({ success: false, msg: 'Invalid audienceType' });
+    }
+    if (audienceType !== 'subscribers') {
+      return res.status(400).json({ success: false, msg: 'Lead audiences are not enabled yet' });
+    }
 
     const content = parseContent(req.body);
     if (Object.keys(content).length === 0) {
       return res.status(400).json({
         success: false,
-        msg: 'Provide content for at least one locale (en/nl/fr) with subject + htmlContent or brevoTemplateId',
+        msg: 'Provide content for at least one supported locale with subject + htmlContent or brevoTemplateId',
       });
     }
 
@@ -228,6 +247,7 @@ export const createMarketingCampaign = async (req: Request, res: Response) => {
     const campaign = await MarketingCampaign.create({
       name: name.trim(),
       type: type as MarketingCampaignType,
+      audienceType,
       status: scheduled && scheduled.getTime() > Date.now() ? 'scheduled' : 'draft',
       content,
       audience,
@@ -279,6 +299,7 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
       req.body?.audience ||
       req.body?.countries ||
       req.body?.interestedServices ||
+      req.body?.serviceKeys ||
       req.body?.locales ||
       req.body?.roles
     ) {
@@ -291,6 +312,12 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
         return res.status(400).json({ success: false, msg: 'Content update cleared all locales' });
       }
       campaign.content = content as any;
+    }
+    if (req.body?.audienceType !== undefined) {
+      if (req.body.audienceType !== 'subscribers') {
+        return res.status(400).json({ success: false, msg: 'Lead audiences are not enabled yet' });
+      }
+      campaign.audienceType = req.body.audienceType;
     }
     if (scheduledAt !== undefined) {
       if (scheduledAt === null || scheduledAt === '') {
@@ -376,14 +403,70 @@ export const previewMarketingAudience = async (req: Request, res: Response) => {
       Number.isFinite(rawInactive) && rawInactive > 0
         ? Math.max(1, Math.floor(rawInactive))
         : undefined;
-    const { count, truncated } = await countCampaignAudience(audience, { inactiveDays });
-    return res.json({ success: true, data: { count, truncated, audience } });
+    const resolution = await resolveMarketingAudience({
+      campaignType: req.body?.type === 'invitation' ? 'invitation' : 'newsletter',
+      audienceType: req.body?.audienceType || 'subscribers',
+      filters: audience,
+      contentLocales: Object.keys(req.body?.content || {}),
+      inactiveDays,
+      limitMode: 'preview',
+    });
+    return res.json({
+      success: true,
+      data: { ...resolution, count: resolution.exactTotal, truncated: resolution.overLimit, audience },
+    });
   } catch (error: any) {
     if (error instanceof MarketingInputError) {
       return res.status(400).json({ success: false, msg: error.message });
     }
     console.error('previewMarketingAudience:', error);
     return res.status(500).json({ success: false, msg: 'Failed to preview audience' });
+  }
+};
+
+/** Send the current editor payload without creating or mutating a campaign. */
+export const sendMarketingCampaignTestEmail = async (req: Request, res: Response) => {
+  try {
+    const to = normalizeEmail(req.body?.to);
+    if (!isValidEmail(to)) {
+      return res.status(400).json({ success: false, msg: 'A valid test recipient email is required' });
+    }
+    const locale = typeof req.body?.locale === 'string' ? req.body.locale.trim().toLowerCase() : 'en';
+    if (!(MARKETING_LOCALES as readonly string[]).includes(locale)) {
+      return res.status(400).json({ success: false, msg: 'Unsupported test email locale' });
+    }
+    const rawContent = req.body?.campaign?.content?.[locale];
+    if (!rawContent || typeof rawContent !== 'object') {
+      return res.status(400).json({ success: false, msg: `Campaign content is missing for ${locale}` });
+    }
+    const content = {
+      subject: typeof rawContent.subject === 'string' ? rawContent.subject.trim() : '',
+      htmlContent: typeof rawContent.htmlContent === 'string' ? rawContent.htmlContent : '',
+      previewText: typeof rawContent.previewText === 'string' ? rawContent.previewText.trim() : undefined,
+      brevoTemplateId: Number.isInteger(Number(rawContent.brevoTemplateId)) && Number(rawContent.brevoTemplateId) > 0
+        ? Number(rawContent.brevoTemplateId)
+        : undefined,
+    };
+    assertInlineMarketingContent(content);
+    const rendered = renderMarketingEmail({
+      content,
+      locale: locale as any,
+      firstName: typeof req.body?.firstName === 'string' ? req.body.firstName : undefined,
+    });
+    await sendBrevoTransactionalMarketingEmail({
+      to,
+      subject: `[TEST] ${rendered.subject}`,
+      htmlContent: rendered.htmlContent,
+      previewText: rendered.previewText,
+    });
+    return res.json({ success: true, data: { to, locale } });
+  } catch (error: any) {
+    const message = error instanceof Error ? error.message : 'Failed to send test email';
+    if (message.includes('require') || message.includes('missing') || message.includes('Test sends')) {
+      return res.status(400).json({ success: false, msg: message });
+    }
+    console.error('sendMarketingCampaignTestEmail:', error);
+    return res.status(502).json({ success: false, msg: 'Failed to send test email' });
   }
 };
 

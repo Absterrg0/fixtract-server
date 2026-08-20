@@ -11,6 +11,8 @@ import {
   restoreBrevoMarketingContact,
   suppressBrevoMarketingContact,
 } from './brevoMarketing';
+import { normalizeEmail } from './normalizeEmail';
+import { normalizeMarketingLocale } from './marketingCatalog';
 
 export type AudienceMember = {
   email: string;
@@ -69,7 +71,7 @@ export async function syncSubscribersFromUsers(): Promise<{
       lastUserId ? { ...baseQuery, _id: { $gt: lastUserId } } : baseQuery,
     )
       .select(
-        'email name role location companyAddress businessInfo notificationPreferences serviceCategories preferredLocale locale language updatedAt marketingConsentAt',
+        'email name role location companyAddress businessInfo notificationPreferences serviceCategories preferredLocale locale language marketingLocale updatedAt marketingConsentAt',
       )
       .sort({ _id: 1 })
       .limit(SYNC_BATCH_SIZE)
@@ -124,7 +126,7 @@ export async function syncSubscribersFromUsers(): Promise<{
     const operations: Parameters<typeof MarketingSubscriber.bulkWrite>[0] = [];
 
     for (const user of users) {
-      const email = String(user.email).toLowerCase().trim();
+      const email = normalizeEmail(user.email);
       if (!email) continue;
 
       const promotionsEmail = (user as any).notificationPreferences?.promotions?.email;
@@ -136,7 +138,8 @@ export async function syncSubscribersFromUsers(): Promise<{
         Array.isArray((user as any).serviceCategories) ? (user as any).serviceCategories : [];
       const interestedServices = Array.from(new Set([...fromBookings, ...fromPro].map(String)));
       // Seed locale from preference fields when present (schema may not declare them yet)
-      const locale = normalizeLocale(
+      const explicitLocale = normalizeMarketingLocale((user as any).marketingLocale);
+      const locale = explicitLocale || normalizeLocale(
         (user as any).preferredLocale ?? (user as any).locale ?? (user as any).language,
       );
       const existingByCurrentEmail = existingByEmail.get(email);
@@ -165,11 +168,14 @@ export async function syncSubscribersFromUsers(): Promise<{
         userId: user._id,
         role: user.role,
         interestedServices,
+        serviceKeys: interestedServices,
         locale,
+        localeSource: explicitLocale ? 'explicit' : 'fallback',
         lastEngagedAt,
         consentVerifiedAt: user.marketingConsentAt,
       };
       if (typeof user.name === 'string' && user.name.trim()) metadata.name = user.name.trim();
+      if (typeof user.name === 'string' && user.name.trim()) metadata.firstName = user.name.trim().split(/\s+/)[0];
       if (region) metadata.region = region;
       const unset: Record<string, 1> = {};
       if (!metadata.name) unset.name = 1;

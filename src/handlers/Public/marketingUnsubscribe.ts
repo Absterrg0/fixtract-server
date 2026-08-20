@@ -6,6 +6,7 @@ import {
   verifyUnsubscribePayload,
 } from '../../utils/marketing/unsubscribeToken';
 import { syncPendingBrevoUnsubscribes } from '../../utils/marketing/audience';
+import { normalizeEmail } from '../../utils/marketing/normalizeEmail';
 
 function isDuplicateKeyError(error: unknown): boolean {
   return Boolean(
@@ -56,7 +57,7 @@ async function resolveUnsubscribeEmail(req: Request): Promise<
 }
 
 async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
-  const normalized = email.toLowerCase().trim();
+  const normalized = normalizeEmail(email);
   await User.updateMany(
     { email: normalized },
     {
@@ -83,6 +84,7 @@ async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
     try {
       await MarketingSubscriber.create({
         email: normalized,
+        emailNormalized: normalized,
         unsubscribedAt: now,
         interestedServices: [],
         locale: 'en',

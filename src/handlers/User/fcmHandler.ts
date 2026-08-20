@@ -7,6 +7,7 @@ import {
   getOriginFromRequest,
   isAllowedOrigin,
 } from '../../utils/fcmTokenUtils';
+import { MARKETING_LOCALES, isMarketingLocale } from '../../utils/marketing/marketingCatalog';
 
 // ------------------------------------------------------------------
 // Register / Unregister FCM tokens
@@ -156,7 +157,7 @@ export const getNotificationPreferences = async (req: Request, res: Response): P
     }
 
     const user = await User.findById(userId).select(
-      'notificationPreferences marketingConsentAt',
+      'notificationPreferences marketingConsentAt marketingLocale marketingLocaleSource',
     );
     if (!user) {
       res.status(404).json({ success: false, msg: 'User not found' });
@@ -174,7 +175,7 @@ export const getNotificationPreferences = async (req: Request, res: Response): P
 
     res.status(200).json({
       success: true,
-      data: preferences,
+      data: { ...preferences, marketingLocale: user.marketingLocale, marketingLocaleSource: user.marketingLocaleSource },
     });
   } catch (err) {
     console.error('getNotificationPreferences error:', err);
@@ -195,11 +196,17 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
       return;
     }
 
-    const { type, channel, enabled } = req.body as {
+    const { type, channel, enabled, marketingLocale } = req.body as {
       type?: string;
       channel?: 'push' | 'email';
       enabled?: boolean;
+      marketingLocale?: string;
     };
+
+    if (marketingLocale !== undefined && !isMarketingLocale(marketingLocale)) {
+      res.status(400).json({ success: false, msg: `marketingLocale must be one of: ${MARKETING_LOCALES.join(', ')}` });
+      return;
+    }
 
     if (!type || !(VALID_TYPES as readonly string[]).includes(type)) {
       res.status(400).json({ success: false, msg: `type must be one of: ${VALID_TYPES.join(', ')}` });
@@ -220,6 +227,10 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
     const userUpdate: Record<string, Record<string, unknown>> = {
       $set: { [updatePath]: enabled },
     };
+    if (marketingLocale !== undefined) {
+      userUpdate.$set.marketingLocale = marketingLocale.trim().toLowerCase();
+      userUpdate.$set.marketingLocaleSource = 'explicit';
+    }
     if (type === 'promotions' && channel === 'email') {
       if (enabled) {
         userUpdate.$set.marketingConsentAt = new Date();
@@ -250,7 +261,9 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
             },
             $setOnInsert: {
               email: normalizedEmail,
+              emailNormalized: normalizedEmail,
               interestedServices: [],
+              serviceKeys: [],
               locale: 'en',
               unsubscribeToken: generateUnsubscribeToken(),
               source: 'user_sync',

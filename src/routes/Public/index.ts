@@ -26,6 +26,7 @@ import {
 import { getPublicSiteSettings } from "../../handlers/Public/siteSettings";
 import { listPublicSiteAnnouncements } from "../../handlers/Public/siteAnnouncements";
 import { unsubscribeMarketing } from "../../handlers/Public/marketingUnsubscribe";
+import { getMarketingLanguages } from "../../handlers/Public/marketingLanguages";
 import { recordProfessionalView } from "../../handlers/Public/profileView";
 import { recordServiceView } from "../../handlers/Public/serviceView";
 import {
@@ -123,6 +124,7 @@ publicRouter
   .route("/marketing/unsubscribe")
   .get(schedulingRateLimiter, unsubscribeMarketing)
   .post(schedulingRateLimiter, unsubscribeMarketing);
+publicRouter.route("/marketing/languages").get(schedulingRateLimiter, getMarketingLanguages);
 
 // Cron entrypoints (secured via CRON_SECRET bearer token)
 publicRouter.route("/cron/notification-reminders").get(runNotificationRemindersCron);

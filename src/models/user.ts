@@ -183,6 +183,8 @@ export interface IUser extends Document {
         system?: { push?: boolean; email?: boolean };
     };
     marketingConsentAt?: Date;
+    marketingLocale?: string;
+    marketingLocaleSource?: 'explicit' | 'country_default' | 'fallback';
     // Stripe Connect fields (for professionals)
     stripe?: {
         accountId?: string;
@@ -674,6 +676,12 @@ const UserSchema = new Schema({
         }
     },
     marketingConsentAt: { type: Date, default: null },
+    marketingLocale: { type: String, lowercase: true, trim: true, maxlength: 10 },
+    marketingLocaleSource: {
+        type: String,
+        enum: ['explicit', 'country_default', 'fallback'],
+        default: 'fallback',
+    },
     // Customer-specific fields
     businessName: {
         type: String,

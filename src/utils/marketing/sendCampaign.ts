@@ -5,8 +5,8 @@ import MarketingCampaign, {
 } from '../../models/marketingCampaign';
 import MarketingSubscriber from '../../models/marketingSubscriber';
 import { randomUUID } from 'node:crypto';
-import { getFrontendUrl } from '../frontendUrl';
-import { resolveCampaignAudience } from './audience';
+import { resolveMarketingAudience } from './audienceResolver';
+import { renderMarketingEmail, renderMarketingFooter } from './renderCampaign';
 import {
   createBrevoCampaign,
   createCampaignList,
@@ -31,20 +31,6 @@ function localesToSend(campaign: IMarketingCampaign): MarketingLocale[] {
   });
   if (requested.length === 0) return available;
   return available.filter((l) => requested.includes(l));
-}
-
-function campaignFooterHtml(): string {
-  const base = getFrontendUrl();
-  const prefsUrl = `${base}/profile?tab=notifications`;
-  const unsubUrl = `${base}/unsubscribe?token={{ contact.UNSUB_TOKEN }}`;
-  return `<div style="margin-top:32px;padding-top:16px;border-top:1px solid #e5e7eb;font-size:12px;color:#6b7280;text-align:center;">
-  <p style="margin:0 0 8px 0;">You received this because you opted in to Fixtract promotions.</p>
-  <p style="margin:0;">
-    <a href="${unsubUrl}" style="color:#6b7280;text-decoration:underline;">Unsubscribe</a>
-    &nbsp;·&nbsp;
-    <a href="${prefsUrl}" style="color:#6b7280;text-decoration:underline;">Notification preferences</a>
-  </p>
-</div>`;
 }
 
 function defaultReengagementInactiveDays(): number {
@@ -183,10 +169,23 @@ export async function sendMarketingCampaign(
 
   let members;
   try {
-    members = await resolveCampaignAudience(campaign.audience, {
+    const resolved = await resolveMarketingAudience({
+      campaignType: campaign.type,
+      audienceType: campaign.audienceType || 'subscribers',
+      filters: campaign.audience,
+      contentLocales: locales,
       inactiveDays: resolveReengagementInactiveDays(campaign),
-      rejectTruncated: true,
+      limitMode: 'delivery',
     });
+    if (resolved.overLimit) throw new Error(`Audience has ${resolved.exactTotal} recipients, exceeding the configured delivery limit of 5000`);
+    members = resolved.recipients.map((recipient) => ({
+      email: recipient.email,
+      name: recipient.firstName,
+      locale: recipient.locale,
+      region: recipient.country,
+      subscriberId: recipient.subscriberId,
+      userId: recipient.userId,
+    }));
   } catch (err: any) {
     const error = err?.message || String(err) || 'Failed to resolve campaign audience';
     return failOwnedCampaign(campaignId, claimId, error, undefined, sendAttempt);
@@ -315,11 +314,17 @@ export async function sendMarketingCampaign(
 
       let brevoCampaignId = previous?.brevoCampaignId;
       if (!brevoCampaignId) {
+        const rendered = renderMarketingEmail({
+          content,
+          locale,
+          firstName: '{{ contact.FIRSTNAME }}',
+        });
+        const inlineHtml = content.brevoTemplateId ? content.htmlContent : rendered.htmlContent;
         const created = await createBrevoCampaign({
           name: `${campaign.name} [${locale}]`,
-          subject: content.subject,
-          htmlContent: content.htmlContent,
-          previewText: content.previewText,
+          subject: rendered.subject,
+          htmlContent: inlineHtml,
+          previewText: rendered.previewText,
           listId,
           templateId: content.brevoTemplateId,
           // The application claims this campaign only after its persisted scheduledAt is due.
@@ -327,7 +332,7 @@ export async function sendMarketingCampaign(
           // schedule it again (or leave it unsent when that timestamp is already in the past).
           scheduledAt: null,
           utmCampaign: campaign.utmCampaign || `Fixtract ${campaign.type} ${campaign._id}`,
-          footer: campaignFooterHtml(),
+          footer: renderMarketingFooter(locale),
         });
         brevoCampaignId = created.campaignId;
         recordDelivery({

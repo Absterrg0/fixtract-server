@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Request, Response } from 'express';
 
-const { campaignCreate, campaignFindById } = vi.hoisted(() => ({
+const { campaignCreate, campaignFindById, sendTestEmail } = vi.hoisted(() => ({
   campaignCreate: vi.fn(),
   campaignFindById: vi.fn(),
+  sendTestEmail: vi.fn(),
 }));
 
 vi.mock('../../../models/marketingCampaign', () => ({
@@ -31,11 +32,13 @@ vi.mock('../../../utils/marketing/sendCampaign', () => ({
 
 vi.mock('../../../utils/marketing/brevoMarketing', () => ({
   listActiveBrevoTemplates: vi.fn(),
+  sendBrevoTransactionalMarketingEmail: sendTestEmail,
 }));
 
 import {
   createMarketingCampaign,
   updateMarketingCampaign,
+  sendMarketingCampaignTestEmail,
 } from '../../../handlers/Admin/marketingCampaigns';
 
 function mockRes() {
@@ -181,5 +184,30 @@ describe('marketing campaign admin handlers', () => {
     expect(campaign.nextRetryAt).toBeNull();
     expect(campaign.status).toBe('draft');
     expect(campaign.save).toHaveBeenCalled();
+  });
+
+  it('sends an unsaved draft through the renderer without touching campaign state', async () => {
+    const res = mockRes();
+
+    await sendMarketingCampaignTestEmail(
+      {
+        body: {
+          to: ' Admin@Example.COM ',
+          locale: 'en',
+          campaign: {
+            content: { en: { subject: 'Draft', htmlContent: '<p>Body content</p>' } },
+          },
+        },
+      } as unknown as Request,
+      res,
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(sendTestEmail).toHaveBeenCalledWith(expect.objectContaining({
+      to: 'admin@example.com',
+      subject: '[TEST] Draft',
+      htmlContent: expect.stringContaining('Notification preferences'),
+    }));
+    expect(campaignCreate).not.toHaveBeenCalled();
   });
 });

@@ -17,6 +17,7 @@ import {
   UpdateContact,
   TransactionalEmailsApi,
   TransactionalEmailsApiApiKeys,
+  SendSmtpEmail,
 } from '@getbrevo/brevo';
 
 const FOLDER_NAME = 'Fixtract Campaigns';
@@ -84,6 +85,33 @@ export function isBrevoMarketingConfigured(): boolean {
 
 export function isMarketingDryRun(): boolean {
   return process.env.EMAIL_DEV_NO_SEND === 'true' || process.env.MARKETING_CAMPAIGN_DRY_RUN === 'true';
+}
+
+export async function sendBrevoTransactionalMarketingEmail(input: {
+  to: string;
+  subject: string;
+  htmlContent: string;
+  previewText?: string;
+}): Promise<void> {
+  if (isMarketingDryRun()) return;
+  const api = createTransactionalEmailsApi();
+  const message = new SendSmtpEmail();
+  message.to = [{ email: input.to }];
+  message.subject = input.subject;
+  message.htmlContent = input.htmlContent;
+  if (input.previewText) message.textContent = input.previewText;
+  const fromEmail = process.env.FROM_EMAIL?.trim();
+  if (!fromEmail) throw new Error('FROM_EMAIL is required to send a test email');
+  message.sender = {
+    email: fromEmail,
+    name: process.env.BREVO_SENDER_NAME?.trim() || 'Fixtract',
+  };
+  try {
+    await api.sendTransacEmail(message);
+  } catch (error) {
+    console.error('[Brevo] test transactional email failed', sanitizedBrevoError(error));
+    throw new Error('Brevo test email failed');
+  }
 }
 
 async function setBrevoContactBlacklist(

@@ -1,8 +1,11 @@
 import mongoose, { Document, Schema } from 'mongoose';
-import { MARKETING_LOCALES, type MarketingLocale } from './marketingSubscriber';
+import { MARKETING_LOCALES, type MarketingLocale } from '../utils/marketing/marketingCatalog';
+export { MARKETING_LOCALES } from '../utils/marketing/marketingCatalog';
 
-export const MARKETING_CAMPAIGN_TYPES = ['newsletter', 'promotion', 'reengagement'] as const;
+export const MARKETING_CAMPAIGN_TYPES = ['newsletter', 'promotion', 'reengagement', 'invitation'] as const;
 export type MarketingCampaignType = (typeof MARKETING_CAMPAIGN_TYPES)[number];
+export const MARKETING_AUDIENCE_TYPES = ['subscribers', 'leads', 'both'] as const;
+export type MarketingAudienceType = (typeof MARKETING_AUDIENCE_TYPES)[number];
 
 export const MARKETING_CAMPAIGN_STATUSES = [
   'draft',
@@ -26,6 +29,8 @@ export interface ICampaignAudience {
   countries: string[];
   /** Service interest strings; empty = all services */
   interestedServices: string[];
+  /** Canonical service identifiers; legacy interestedServices remains readable. */
+  serviceKeys: string[];
   /** Locales to send; empty = all locales that have content */
   locales: MarketingLocale[];
   /** Include customers / professionals; defaults both true via empty = both */
@@ -54,8 +59,9 @@ export interface IMarketingCampaign extends Document {
   name: string;
   type: MarketingCampaignType;
   status: MarketingCampaignStatus;
+  audienceType: MarketingAudienceType;
   /** Content keyed by locale */
-  content: Partial<Record<MarketingLocale, ICampaignLocaleContent>>;
+  content: Partial<Record<string, ICampaignLocaleContent>>;
   audience: ICampaignAudience;
   /** For reengagement auto-sends: inactive for this many days */
   inactiveDays?: number;
@@ -93,6 +99,7 @@ const audienceSchema = new Schema<ICampaignAudience>(
   {
     countries: { type: [String], default: [] },
     interestedServices: { type: [String], default: [] },
+    serviceKeys: { type: [String], default: [] },
     locales: { type: [String], enum: MARKETING_LOCALES, default: [] },
     roles: {
       type: [String],
@@ -139,14 +146,15 @@ const marketingCampaignSchema = new Schema<IMarketingCampaign>(
       default: 'draft',
       index: true,
     },
-    content: {
-      type: {
-        en: { type: localeContentSchema, required: false },
-        nl: { type: localeContentSchema, required: false },
-        fr: { type: localeContentSchema, required: false },
-      },
-      default: {},
+    audienceType: {
+      type: String,
+      enum: MARKETING_AUDIENCE_TYPES,
+      default: 'subscribers',
+      index: true,
     },
+    // Mixed keeps old en/nl/fr documents readable while allowing the catalog
+    // to grow without another schema deployment.
+    content: { type: Schema.Types.Mixed, default: {} },
     audience: {
       type: audienceSchema,
       default: () => ({
@@ -180,5 +188,4 @@ const MarketingCampaign = mongoose.model<IMarketingCampaign>(
 );
 
 export default MarketingCampaign;
-export { MARKETING_LOCALES };
 export type { MarketingLocale };

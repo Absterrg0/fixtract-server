@@ -132,6 +132,7 @@ import {
   syncMarketingSubscribers,
   listMarketingSubscribers,
   listMarketingTemplates,
+  sendMarketingCampaignTestEmail,
 } from "../../handlers/Admin/marketingCampaigns";
 import { uploadProfileImage as cmsImageMulter, upload as adminFileUpload } from "../../utils/s3Upload";
 import { getAdminSiteSettings, updateAdminSiteSettings } from "../../handlers/Admin/siteSettings";
@@ -312,6 +313,7 @@ adminRouter.route('/site-announcements/:id').get(getSiteAnnouncement).patch(upda
 // Marketing email campaigns (Brevo)
 adminRouter.route('/marketing-campaigns').get(listMarketingCampaigns).post(createMarketingCampaign);
 adminRouter.route('/marketing-campaigns/preview-audience').post(previewMarketingAudience);
+adminRouter.route('/marketing-campaigns/test-send').post(sendMarketingCampaignTestEmail);
 adminRouter.route('/marketing-campaigns/templates').get(listMarketingTemplates);
 adminRouter.route('/marketing-campaigns/:id/send').post(sendMarketingCampaignNow);
 adminRouter.route('/marketing-campaigns/:id/stats').post(refreshMarketingCampaignStats);
