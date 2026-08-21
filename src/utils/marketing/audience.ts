@@ -115,9 +115,15 @@ export async function syncSubscribersFromUsers(): Promise<{
       .map((user) => String(user.email || '').toLowerCase().trim())
       .filter(Boolean);
     const existingSubscribers = await MarketingSubscriber.find({
-      $or: [{ email: { $in: emails } }, { userId: { $in: userIds } }],
+      $or: [
+        { email: { $in: emails } },
+        { emailNormalized: { $in: emails } },
+        { userId: { $in: userIds } },
+      ],
     }).lean();
-    const existingByEmail = new Map(existingSubscribers.map((sub) => [sub.email, sub]));
+    const existingByEmail = new Map(
+      existingSubscribers.map((sub) => [normalizeEmail(sub.emailNormalized || sub.email), sub]),
+    );
     const existingByUserId = new Map(
       existingSubscribers
         .filter((sub) => sub.userId)
@@ -239,7 +245,12 @@ export async function syncPendingBrevoUnsubscribes(limit = 100, email?: string):
     unsubscribedAt: { $ne: null },
     brevoUnsubscribedAt: null,
     ...(email
-      ? { email: email.toLowerCase().trim() }
+          ? {
+              $or: [
+                { email: email.toLowerCase().trim() },
+                { emailNormalized: normalizeEmail(email) },
+              ],
+            }
       : {
           $or: [
             { brevoUnsubscribeError: { $exists: false } },
@@ -290,8 +301,13 @@ export async function syncPendingBrevoResubscribes(limit = 100, email?: string):
     unsubscribedAt: null,
     consentVerifiedAt: { $type: 'date' },
     brevoUnsubscribedAt: { $ne: null },
-    ...(email
-      ? { email: email.toLowerCase().trim() }
+      ...(email
+      ? {
+          $or: [
+            { email: email.toLowerCase().trim() },
+            { emailNormalized: normalizeEmail(email) },
+          ],
+        }
       : {
           $or: [
             { brevoResubscribeError: { $exists: false } },
