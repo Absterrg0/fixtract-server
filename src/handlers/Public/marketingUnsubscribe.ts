@@ -75,7 +75,9 @@ async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
   );
 
   let already = false;
-  const existing = await MarketingSubscriber.findOne({ email: normalized })
+  const existing = await MarketingSubscriber.findOne({
+    $or: [{ email: normalized }, { emailNormalized: normalized }],
+  })
     .select('+unsubscribeToken unsubscribedAt')
     .lean();
   if (existing) {
@@ -103,14 +105,17 @@ async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
       if (!isDuplicateKeyError(error)) throw error;
       // A simultaneous create won the unique-email race — preserve its opt-out stamp.
       const raced = await MarketingSubscriber.findOneAndUpdate(
-        { email: normalized, unsubscribedAt: null },
+        {
+          $or: [{ email: normalized }, { emailNormalized: normalized }],
+          unsubscribedAt: null,
+        },
         { $set: { unsubscribedAt: now }, $unset: { consentVerifiedAt: 1 } },
         { new: false },
       );
       already = true;
       if (!raced) {
         await MarketingSubscriber.updateOne(
-          { email: normalized },
+          { $or: [{ email: normalized }, { emailNormalized: normalized }] },
           { $unset: { consentVerifiedAt: 1 } },
         );
       }

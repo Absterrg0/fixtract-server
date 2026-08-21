@@ -269,10 +269,17 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
       if (enabled) {
         await MarketingSuppression.deleteOne({ emailNormalized: normalizedEmail, reason: 'unsubscribe' });
         await MarketingSubscriber.updateOne(
-          { email: normalizedEmail },
+          {
+            $or: [
+              { userId: updatedUser._id },
+              { email: normalizedEmail },
+              { emailNormalized: normalizedEmail },
+            ],
+          },
           {
             $set: {
               userId: updatedUser._id,
+              emailNormalized: normalizedEmail,
               unsubscribedAt: null,
               subscribedAt: consentUpdatedAt,
               consentVerifiedAt: consentUpdatedAt,
@@ -295,7 +302,13 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
         await syncPendingBrevoResubscribes(1, normalizedEmail);
       } else {
         await MarketingSubscriber.updateMany(
-          { $or: [{ userId: updatedUser._id }, { email: normalizedEmail }] },
+          {
+            $or: [
+              { userId: updatedUser._id },
+              { email: normalizedEmail },
+              { emailNormalized: normalizedEmail },
+            ],
+          },
           {
             $set: { unsubscribedAt: consentUpdatedAt },
             $unset: { consentVerifiedAt: 1 },
