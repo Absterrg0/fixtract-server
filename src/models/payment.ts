@@ -7,6 +7,14 @@ import type { InvoiceArtifactHistoryEntry } from "../Types/invoice";
 
 type PaymentPeppolStatus = PeppolDispatchStatus;
 
+export interface ManualArtifactClaim {
+  key: string;
+  side: "customer" | "supplier";
+  documentType: "invoice" | "credit_note";
+  invoiceNumber?: string;
+  createdAt: Date;
+}
+
 export type PaymentStatus =
   | "pending"
   | "authorized"
@@ -119,6 +127,8 @@ export interface IPayment extends Document {
 
   invoiceArtifactHistory?: InvoiceArtifactHistoryEntry[];
 
+  manualArtifactClaims?: ManualArtifactClaim[];
+
   metadata?: Record<string, any>;
 
   createdAt: Date;
@@ -152,6 +162,17 @@ const InvoiceArtifactHistorySchema = new Schema<InvoiceArtifactHistoryEntry>(
     generatedAt: { type: Date },
     relatedInvoiceNumber: { type: String },
     replacedAt: { type: Date, required: true },
+  },
+  { _id: false },
+);
+
+const ManualArtifactClaimSchema = new Schema<ManualArtifactClaim>(
+  {
+    key: { type: String, required: true },
+    side: { type: String, enum: ["customer", "supplier"], required: true },
+    documentType: { type: String, enum: ["invoice", "credit_note"], required: true },
+    invoiceNumber: { type: String },
+    createdAt: { type: Date, required: true },
   },
   { _id: false },
 );
@@ -270,6 +291,7 @@ const PaymentSchema = new Schema<IPayment>(
     supplierCreditNotePeppolDispatchReason: { type: String },
     supplierCreditNotePeppolDispatchReference: { type: String },
     invoiceArtifactHistory: { type: [InvoiceArtifactHistorySchema], default: [] },
+    manualArtifactClaims: { type: [ManualArtifactClaimSchema], default: [] },
 
     metadata: { type: Schema.Types.Mixed },
   },

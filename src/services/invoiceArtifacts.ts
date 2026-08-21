@@ -11,6 +11,7 @@ import {
 import {
   calculateInvoiceSideTotals,
   calculateSupplierInvoiceNet,
+  getCustomerExtraCostNet,
   type InvoiceAccountingLine,
 } from "../utils/invoiceAccounting";
 import {
@@ -82,16 +83,23 @@ const escapeXml = (value: unknown): string =>
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
 
-const hasInvoiceArtifacts = (payment: any) =>
+const hasCustomerInvoiceArtifacts = (payment: any) =>
   Boolean(
     payment?.invoiceNumber &&
     payment?.invoiceUrl &&
     !String(payment.invoiceNumber).startsWith("GENERATING-") &&
-    String(payment.invoiceNumber).startsWith("FIX-") &&
+    String(payment.invoiceNumber).startsWith("FIX-")
+  );
+
+const hasSupplierInvoiceArtifacts = (payment: any) =>
+  Boolean(
     payment?.supplierInvoiceNumber &&
     payment?.supplierInvoiceUrl &&
     String(payment.supplierInvoiceNumber).startsWith("SUP-")
   );
+
+const hasInvoiceArtifacts = (payment: any) =>
+  Boolean(hasCustomerInvoiceArtifacts(payment) && hasSupplierInvoiceArtifacts(payment));
 
 const hasCreditNoteArtifacts = (payment: any) =>
   Boolean(
@@ -259,7 +267,10 @@ const persistPaymentArtifactUpdate = async (
     await Payment.findByIdAndUpdate(paymentId, updateDocument);
     return;
   }
-  await Payment.findOneAndUpdate({ booking: bookingId }, updateDocument);
+  // Without a payment id, target the booking's base payment only. A booking can
+  // have multiple milestone Payment documents and invoice artifacts are
+  // booking-level, so an unconstrained booking match could update the wrong one.
+  await Payment.findOneAndUpdate({ booking: bookingId, milestoneIndex: null }, updateDocument);
 };
 
 const toMoney = (value: unknown): string => {
@@ -305,18 +316,6 @@ type UblLine = InvoiceAccountingLine & { price: number; vatAmount: number };
 
 const moneyNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
 
-const getCustomerExtraCostNet = (booking: any, fallback: number): number => {
-  if (booking.payment?.extraCostCustomerNetAmount != null) {
-    return moneyNumber(booking.payment.extraCostCustomerNetAmount);
-  }
-  if (booking.payment?.extraCostAmount != null) {
-    const gross = moneyNumber(booking.payment.extraCostAmount);
-    const vat = booking.payment?.reverseCharge ? 0 : moneyNumber(booking.payment?.extraCostVatAmount);
-    return Math.max(0, Math.round((gross - vat) * 100) / 100);
-  }
-  return fallback;
-};
-
 const getExtraCostLinesForUbl = (
   booking: any,
   vatRate: number,
@@ -325,7 +324,7 @@ const getExtraCostLinesForUbl = (
 ): UblLine[] => {
   const rawTotal = (booking.extraCosts || []).reduce((sum: number, cost: any) => sum + moneyNumber(cost.amount), 0);
   const targetTotal = customerSide
-    ? getCustomerExtraCostNet(booking, rawTotal)
+    ? getCustomerExtraCostNet(booking.payment, rawTotal)
     : rawTotal;
   const scale = rawTotal > 0 ? targetTotal / rawTotal : 1;
   return (booking.extraCosts || []).map((cost: any) => {
@@ -501,7 +500,7 @@ const getPricingLinesForUbl = (
     });
     const lines = [serviceLine, ...optionLines, ...getExtraCostLinesForUbl(booking, vatRate, reverseCharge, false)];
     const totals = calculateInvoiceSideTotals({ lines, reverseCharge, vatRate, vatLabel: supplierVat?.vatLabel });
-    return { lines: lines.map((line) => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * vatRate) / 100 })), totals };
+    return { lines: lines.map((line) => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * (line.vatRate ?? vatRate)) / 100 })), totals };
   }
 
   const baseNet = baseLines.reduce((sum, line) => sum + line.amount, 0);
@@ -517,7 +516,7 @@ const getPricingLinesForUbl = (
   }
   const lines = [...baseLines, ...getExtraCostLinesForUbl(booking, vatRate, reverseCharge, true)];
   const totals = calculateInvoiceSideTotals({ lines, reverseCharge, vatRate, vatLabel: booking.payment?.vatLabel });
-  return { lines: lines.map((line) => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * (line.vatRate || vatRate) * 100) / 10000 })), totals };
+  return { lines: lines.map((line) => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * (line.vatRate ?? vatRate)) / 100 })), totals };
 };
 
 const getPeppolLineItems = (pricing: { lines: UblLine[] }) => pricing.lines.map((line) => ({
@@ -540,10 +539,10 @@ const ublPartyXml = (
         postalCode: party.postalCode,
         country: party.country,
       })}
-      <cac:PartyTaxScheme>
-        <cbc:CompanyID>${escapeXml(party.vatNumber || "")}</cbc:CompanyID>
+      ${party.vatNumber ? `<cac:PartyTaxScheme>
+        <cbc:CompanyID>${escapeXml(party.vatNumber)}</cbc:CompanyID>
         <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
-      </cac:PartyTaxScheme>
+      </cac:PartyTaxScheme>` : ""}
       <cac:PartyLegalEntity>
         <cbc:RegistrationName>${escapeXml(party.name)}</cbc:RegistrationName>
       </cac:PartyLegalEntity>
@@ -834,7 +833,7 @@ const retryPeppolForExistingArtifacts = async (
   existing: any,
 ): Promise<InvoiceArtifactResult> => {
   const booking = await loadBookingForInvoice(bookingId);
-  if (!booking?.payment) return toInvoiceArtifactResult(existing.payment);
+  if (!booking?.payment?.status) return toInvoiceArtifactResult(existing.payment);
   const update: InvoiceArtifactResult = toInvoiceArtifactResult(existing.payment);
   let platform: UblPlatformParty | undefined;
   try {
@@ -860,10 +859,15 @@ const retryPeppolForExistingArtifacts = async (
 
   if (existing.payment.peppolDispatchStatus !== "sent") {
     try {
-      const customerUblXml = buildUblInvoiceXml(booking, existing.payment.invoiceNumber, new Date(), {
-        selfBilling: false,
-        platform,
-      });
+      const customerUblXml = buildUblInvoiceXml(
+        booking,
+        existing.payment.invoiceNumber,
+        existing.payment.invoiceGeneratedAt || new Date(),
+        {
+          selfBilling: false,
+          platform,
+        },
+      );
       const customerPricing = getPricingLinesForUbl(booking, { selfBilling: false, platform });
       const result = await maybeDispatchPeppolInvoice({
         booking,
@@ -872,8 +876,8 @@ const retryPeppolForExistingArtifacts = async (
         ublXml: customerUblXml,
         invoiceUblUrl: existing.payment.invoiceUblUrl,
         netAmount: customerPricing.totals.netAmount,
-        vatRate: booking.payment?.vatRate,
-        reverseCharge: booking.payment?.reverseCharge,
+        vatRate: customerPricing.totals.vatRate,
+        reverseCharge: customerPricing.totals.reverseCharge,
         lineItems: getPeppolLineItems(customerPricing),
       });
       Object.assign(update, {
@@ -891,10 +895,15 @@ const retryPeppolForExistingArtifacts = async (
 
   if (existing.payment.supplierPeppolDispatchStatus !== "sent") {
     try {
-      const supplierUblXml = buildUblInvoiceXml(booking, existing.payment.supplierInvoiceNumber, new Date(), {
-        selfBilling: true,
-        platform,
-      });
+      const supplierUblXml = buildUblInvoiceXml(
+        booking,
+        existing.payment.supplierInvoiceNumber,
+        existing.payment.supplierInvoiceGeneratedAt || new Date(),
+        {
+          selfBilling: true,
+          platform,
+        },
+      );
       const supplierPricing = getPricingLinesForUbl(booking, { selfBilling: true, platform });
       const result = await maybeDispatchPeppolInvoice({
         booking,
@@ -942,15 +951,136 @@ const retryPeppolForExistingArtifacts = async (
   return update;
 };
 
+/**
+ * Legacy bookings can already carry an issued customer (FIX-) invoice without a
+ * supplier self-bill invoice. Generate only the missing supplier side and leave
+ * every customer-facing field untouched.
+ */
+const generateMissingSupplierInvoiceArtifacts = async (
+  bookingId: string,
+  paymentId: string | undefined,
+  existing: any,
+): Promise<InvoiceArtifactResult> => {
+  const booking = await loadBookingForInvoice(bookingId);
+  if (!booking?.payment?.status) return toInvoiceArtifactResult(existing.payment);
+
+  const platform = await getPlatformParty();
+  const generatedAt = new Date();
+  const supplierInvoice = await generateBookingInvoice(booking as any, { kind: "self_bill" });
+  const supplierKey = `invoices/${booking._id.toString()}/${supplierInvoice.invoiceNumber}`;
+  const supplierInvoiceUrl = await uploadBufferToS3(
+    supplierInvoice.pdfBuffer,
+    `${supplierKey}.pdf`,
+    "application/pdf",
+    `inline; filename="${supplierInvoice.invoiceNumber}.pdf"`
+  );
+  const supplierUblXml = buildUblInvoiceXml(booking, supplierInvoice.invoiceNumber, generatedAt, {
+    selfBilling: true,
+    platform,
+  });
+  const supplierInvoiceUblUrl = await uploadBufferToS3(
+    Buffer.from(supplierUblXml, "utf8"),
+    `${supplierKey}.xml`,
+    "application/xml",
+    `attachment; filename="${supplierInvoice.invoiceNumber}.xml"`
+  );
+
+  const update: InvoiceArtifactResult = toInvoiceArtifactResult(existing.payment);
+  update.supplierInvoiceNumber = supplierInvoice.invoiceNumber;
+  update.supplierInvoiceUrl = supplierInvoiceUrl;
+  update.supplierInvoiceUblUrl = supplierInvoiceUblUrl;
+  update.supplierInvoiceGeneratedAt = generatedAt;
+  update.supplierPeppolDispatchStatus = "skipped";
+
+  await Booking.updateOne(
+    { _id: booking._id },
+    {
+      $set: {
+        "payment.supplierInvoiceNumber": update.supplierInvoiceNumber,
+        "payment.supplierInvoiceUrl": update.supplierInvoiceUrl,
+        "payment.supplierInvoiceUblUrl": update.supplierInvoiceUblUrl,
+        "payment.supplierInvoiceGeneratedAt": update.supplierInvoiceGeneratedAt,
+        "payment.supplierPeppolDispatchStatus": update.supplierPeppolDispatchStatus,
+      },
+    }
+  );
+  await persistPaymentArtifactUpdate(booking._id, paymentId, {
+    supplierInvoiceNumber: update.supplierInvoiceNumber,
+    supplierInvoiceUrl: update.supplierInvoiceUrl,
+    supplierInvoiceUblUrl: update.supplierInvoiceUblUrl,
+    supplierInvoiceGeneratedAt: update.supplierInvoiceGeneratedAt,
+    supplierPeppolDispatchStatus: update.supplierPeppolDispatchStatus,
+  });
+
+  try {
+    const supplierPricing = getPricingLinesForUbl(booking, { selfBilling: true, platform });
+    const supplierPeppolResult = await maybeDispatchPeppolInvoice({
+      booking,
+      side: "supplier",
+      invoiceNumber: supplierInvoice.invoiceNumber,
+      ublXml: supplierUblXml,
+      invoiceUblUrl: supplierInvoiceUblUrl,
+      netAmount: supplierPricing.totals.netAmount,
+      vatRate: supplierPricing.totals.vatRate,
+      reverseCharge: supplierPricing.totals.reverseCharge,
+      lineItems: getPeppolLineItems(supplierPricing),
+    });
+    update.supplierPeppolDispatchStatus = supplierPeppolResult.status;
+    update.supplierPeppolDispatchReference = supplierPeppolResult.reference;
+    await Booking.updateOne(
+      { _id: booking._id },
+      {
+        $set: {
+          "payment.supplierPeppolDispatchStatus": supplierPeppolResult.status,
+          "payment.supplierPeppolDispatchReason": supplierPeppolResult.reason,
+          "payment.supplierPeppolDispatchReference": supplierPeppolResult.reference,
+          "payment.supplierPeppolDispatchedAt": supplierPeppolResult.dispatchedAt,
+        },
+      },
+    );
+    await persistPaymentArtifactUpdate(booking._id, paymentId, {
+      supplierPeppolDispatchStatus: supplierPeppolResult.status,
+      supplierPeppolDispatchReason: supplierPeppolResult.reason,
+      supplierPeppolDispatchReference: supplierPeppolResult.reference,
+      supplierPeppolDispatchedAt: supplierPeppolResult.dispatchedAt,
+    });
+  } catch (supplierPeppolError) {
+    console.error(
+      `[INVOICE] Supplier Peppol dispatch failed for booking ${bookingId}:`,
+      supplierPeppolError instanceof Error ? supplierPeppolError.message : supplierPeppolError,
+    );
+    update.supplierPeppolDispatchStatus = "failed";
+    await Booking.updateOne(
+      { _id: booking._id },
+      { $set: {
+        "payment.supplierPeppolDispatchStatus": "failed",
+        "payment.supplierPeppolDispatchReason": supplierPeppolError instanceof Error ? supplierPeppolError.message : String(supplierPeppolError),
+      } },
+    );
+    await persistPaymentArtifactUpdate(booking._id, paymentId, {
+      supplierPeppolDispatchStatus: "failed",
+      supplierPeppolDispatchReason: supplierPeppolError instanceof Error ? supplierPeppolError.message : String(supplierPeppolError),
+    });
+  }
+
+  return update;
+};
+
 export async function ensureBookingInvoiceArtifacts(
   bookingId: string,
   paymentId?: string
 ): Promise<InvoiceArtifactResult | null> {
   await clearStaleGenerationClaimsIfNeeded(bookingId);
   const existing = await Booking.findById(bookingId);
-  if (!existing?.payment) return null;
-  if (hasInvoiceArtifacts(existing.payment)) {
-    return retryPeppolForExistingArtifacts(bookingId, paymentId, existing);
+  if (!existing?.payment?.status) return null;
+  if (hasCustomerInvoiceArtifacts(existing.payment)) {
+    // A customer invoice that was already issued must never be cleared or
+    // renumbered. When the supplier side is missing (e.g. bookings invoiced
+    // before self-billing existed), generate only the missing supplier side.
+    if (hasSupplierInvoiceArtifacts(existing.payment)) {
+      return retryPeppolForExistingArtifacts(bookingId, paymentId, existing);
+    }
+    return generateMissingSupplierInvoiceArtifacts(bookingId, paymentId, existing);
   }
 
   const invoiceNumber = existing.payment.invoiceNumber;
@@ -972,7 +1102,7 @@ export async function ensureBookingInvoiceArtifacts(
 
   try {
     const booking = await loadBookingForInvoice(bookingId);
-    if (!booking?.payment) {
+    if (!booking?.payment?.status) {
       await clearInvoiceGenerationClaim(bookingId);
       return null;
     }
@@ -1050,16 +1180,17 @@ export async function ensureBookingInvoiceArtifacts(
     await persistPaymentArtifactUpdate(booking._id, paymentId, update);
 
     try {
+      const customerPricing = getPricingLinesForUbl(booking, { selfBilling: false, platform });
       const peppolResult = await maybeDispatchPeppolInvoice({
         booking,
         side: "customer",
         invoiceNumber: customerInvoice.invoiceNumber,
         ublXml: customerUblXml,
         invoiceUblUrl,
-        netAmount: getPricingLinesForUbl(booking, { selfBilling: false, platform }).totals.netAmount,
-        vatRate: booking.payment?.vatRate,
-        reverseCharge: booking.payment?.reverseCharge,
-        lineItems: getPeppolLineItems(getPricingLinesForUbl(booking, { selfBilling: false, platform })),
+        netAmount: customerPricing.totals.netAmount,
+        vatRate: customerPricing.totals.vatRate,
+        reverseCharge: customerPricing.totals.reverseCharge,
+        lineItems: getPeppolLineItems(customerPricing),
       });
       update.peppolDispatchStatus = peppolResult.status;
       update.peppolDispatchReference = peppolResult.reference;
@@ -1165,7 +1296,7 @@ const retryPeppolForExistingCreditArtifacts = async (
 ): Promise<CreditArtifactResult> => {
   const booking = await loadBookingForInvoice(bookingId);
   const update = toCreditArtifactResult(existing.payment);
-  if (!booking?.payment) return update;
+  if (!booking?.payment?.status) return update;
 
   let platform: UblPlatformParty | undefined;
   try {
@@ -1185,12 +1316,17 @@ const retryPeppolForExistingCreditArtifacts = async (
   if (platform && update.creditNotePeppolDispatchStatus !== "sent") {
     try {
       if (!existing.payment.creditNoteUblUrl) throw new Error("Customer credit note UBL artifact is missing.");
-      const customerUblXml = buildUblInvoiceXml(booking, existing.payment.creditNoteNumber, new Date(), {
-        creditNote: true,
-        relatedInvoiceNumber: existing.payment.creditNoteRelatedInvoiceNumber || existing.payment.invoiceNumber,
-        selfBilling: false,
-        platform,
-      });
+      const customerUblXml = buildUblInvoiceXml(
+        booking,
+        existing.payment.creditNoteNumber,
+        existing.payment.creditNoteGeneratedAt || new Date(),
+        {
+          creditNote: true,
+          relatedInvoiceNumber: existing.payment.creditNoteRelatedInvoiceNumber || existing.payment.invoiceNumber,
+          selfBilling: false,
+          platform,
+        },
+      );
       const customerPricing = getPricingLinesForUbl(booking, { selfBilling: false, platform });
       const result = await maybeDispatchPeppolInvoice({
         booking,
@@ -1200,8 +1336,8 @@ const retryPeppolForExistingCreditArtifacts = async (
         invoiceUblUrl: existing.payment.creditNoteUblUrl,
         documentType: "credit_note",
         netAmount: customerPricing.totals.netAmount,
-        vatRate: booking.payment?.vatRate,
-        reverseCharge: booking.payment?.reverseCharge,
+        vatRate: customerPricing.totals.vatRate,
+        reverseCharge: customerPricing.totals.reverseCharge,
         lineItems: getPeppolLineItems(customerPricing),
       });
       update.creditNotePeppolDispatchStatus = result.status;
@@ -1216,12 +1352,17 @@ const retryPeppolForExistingCreditArtifacts = async (
   if (platform && update.supplierCreditNotePeppolDispatchStatus !== "sent") {
     try {
       if (!existing.payment.supplierCreditNoteUblUrl) throw new Error("Supplier credit note UBL artifact is missing.");
-      const supplierUblXml = buildUblInvoiceXml(booking, existing.payment.supplierCreditNoteNumber, new Date(), {
-        creditNote: true,
-        relatedInvoiceNumber: existing.payment.supplierCreditNoteRelatedInvoiceNumber || existing.payment.supplierInvoiceNumber,
-        selfBilling: true,
-        platform,
-      });
+      const supplierUblXml = buildUblInvoiceXml(
+        booking,
+        existing.payment.supplierCreditNoteNumber,
+        existing.payment.supplierCreditNoteGeneratedAt || new Date(),
+        {
+          creditNote: true,
+          relatedInvoiceNumber: existing.payment.supplierCreditNoteRelatedInvoiceNumber || existing.payment.supplierInvoiceNumber,
+          selfBilling: true,
+          platform,
+        },
+      );
       const supplierPricing = getPricingLinesForUbl(booking, { selfBilling: true, platform });
       const result = await maybeDispatchPeppolInvoice({
         booking,
@@ -1427,8 +1568,8 @@ export async function ensureCreditInvoiceArtifacts(
           invoiceUblUrl: creditNoteUblUrl!,
           documentType: "credit_note",
           netAmount: customerPricing.totals.netAmount,
-          vatRate: booking.payment?.vatRate,
-          reverseCharge: booking.payment?.reverseCharge,
+          vatRate: customerPricing.totals.vatRate,
+          reverseCharge: customerPricing.totals.reverseCharge,
           lineItems: getPeppolLineItems(customerPricing),
         });
         update.creditNotePeppolDispatchStatus = peppolResult.status;
@@ -1518,6 +1659,10 @@ export async function ensureCreditInvoiceArtifacts(
       }
     }
 
+    // Release the generation claim as soon as the artifacts are persisted so a
+    // manual correction can immediately trigger a regeneration if needed.
+    await clearCreditNoteGenerationClaim(bookingId);
+
     return {
       creditNoteNumber: creditNoteNumber!,
       creditNoteUrl: creditNoteUrl!,
@@ -1590,7 +1735,7 @@ export async function createManualInvoiceArtifact(
   input: ManualInvoiceCorrectionInput,
 ): Promise<Record<string, unknown>> {
   const booking = await loadBookingForInvoice(bookingId);
-  if (!booking?.payment) throw new Error("Booking payment was not found.");
+  if (!booking?.payment?.status) throw new Error("Booking payment was not found.");
 
   const relatedInvoiceNumber = input.relatedInvoiceNumber || (
     input.side === "customer" ? booking.payment.invoiceNumber : booking.payment.supplierInvoiceNumber
@@ -1747,7 +1892,16 @@ export async function createManualInvoiceArtifact(
   if (historyEntry) bookingUpdate.$push = { "payment.invoiceArtifactHistory": historyEntry };
   await Booking.updateOne({ _id: booking._id }, bookingUpdate);
   await persistPaymentArtifactUpdate(booking._id, paymentId, fields, historyEntry);
-  await notifyManualArtifactReady(booking, input, generated.invoiceNumber, artifactUrl);
+  try {
+    await notifyManualArtifactReady(booking, input, generated.invoiceNumber, artifactUrl);
+  } catch (notifyError) {
+    // The artifact and history entry are already persisted; a notification
+    // failure must not make the admin endpoint report the operation as failed.
+    console.error(
+      `[INVOICE] Manual artifact notification failed for booking ${booking._id}:`,
+      notifyError instanceof Error ? notifyError.message : notifyError,
+    );
+  }
   return {
     side: input.side,
     documentType: input.documentType,

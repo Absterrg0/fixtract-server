@@ -8,6 +8,7 @@ import Payment from "../../models/payment";
 import Booking from "../../models/booking";
 import Project from "../../models/project";
 import { calculateLoyaltyStatus } from "../../utils/loyaltySystem";
+import { buildSettledTransferExpression } from "../../utils/paymentSafety";
 import { addPoints, deductPoints } from "../../utils/pointsSystem";
 import { updateProfessionalLevel } from "../../utils/professionalLevelSystem";
 import mongoose from 'mongoose';
@@ -576,10 +577,7 @@ export const listProfessionalManagement = async (req: Request, res: Response) =>
       { $match: {
         professional: { $in: professionalIds },
         status: "completed",
-        $or: [
-          { transferStatus: "succeeded" },
-          { transferStatus: { $exists: false }, stripeTransferId: { $exists: true, $ne: null } },
-        ],
+        $expr: buildSettledTransferExpression(),
       } },
       { $group: { _id: "$professional", moneyEarned: { $sum: { $ifNull: ["$professionalPayout", 0] } } } }
     ]);

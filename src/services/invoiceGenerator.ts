@@ -15,6 +15,7 @@ import {
 import {
   calculateInvoiceSideTotals,
   calculateSupplierInvoiceNet,
+  getCustomerExtraCostNet,
 } from "../utils/invoiceAccounting";
 
 interface InvoiceData {
@@ -689,15 +690,7 @@ export async function generateBookingInvoice(
   });
 
   const rawExtraCostTotal = (booking.extraCosts || []).reduce((sum, cost) => sum + (Number(cost.amount) || 0), 0);
-  const customerExtraCostNet = booking.payment.extraCostCustomerNetAmount != null
-    ? Number(booking.payment.extraCostCustomerNetAmount)
-    : booking.payment.extraCostAmount != null
-      ? Math.max(
-          0,
-          Number(booking.payment.extraCostAmount) -
-            (booking.payment.reverseCharge ? 0 : Number(booking.payment.extraCostVatAmount || 0)),
-        )
-      : rawExtraCostTotal;
+  const customerExtraCostNet = getCustomerExtraCostNet(booking.payment, rawExtraCostTotal);
   const extraCostScale = rawExtraCostTotal > 0 ? customerExtraCostNet / rawExtraCostTotal : 1;
   const extraCostLines = manualLines?.length ? [] : (booking.extraCosts || []).map((cost) => {
     const unitDetail =

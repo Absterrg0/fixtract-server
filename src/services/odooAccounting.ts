@@ -232,6 +232,36 @@ const discoverIncomeAccount = async (
   return pickIncomeAccount(mergedAccounts);
 };
 
+/**
+ * Deterministically rank expense accounts the way pickIncomeAccount does.
+ * Broad accounts such as "Services and other goods" must not win over the
+ * specific subcontracting account, and ties break on the stable Odoo id so
+ * discovery-cache refreshes always post to the same P&L account.
+ */
+const pickExpenseAccount = (
+  accounts: Array<{ id: number; code?: string | false; name?: string }>
+): number => {
+  const ranked = [...accounts].sort((left, right) => {
+    const score = (account: typeof left): number => {
+      const code = String(account.code || "");
+      const name = String(account.name || "").toLowerCase();
+      if (name.includes("subcontract")) return 0;
+      if (code.startsWith("604")) return 1;
+      if (name.includes("third part") || name.includes("façon") || name.includes("facon")) return 2;
+      if (name.includes("service") && !name.includes("goods")) return 3;
+      if (code.startsWith("6")) return 5;
+      return 10;
+    };
+    const byScore = score(left) - score(right);
+    return byScore !== 0 ? byScore : left.id - right.id;
+  });
+  const selected = ranked[0];
+  if (!selected?.id) {
+    throw new Error("No Odoo expense account found for supplier invoices");
+  }
+  return selected.id;
+};
+
 const discoverExpenseAccount = async (
   credentials: OdooCredentials,
   companyId: number,
@@ -243,16 +273,12 @@ const discoverExpenseAccount = async (
     {
       domain: [["account_type", "=", "expense"]],
       fields: ["id", "code", "name"],
+      order: "id asc",
       limit: 50,
     },
     companyId,
   );
-  const preferred = accounts.find((account) => /service|subcontract|supplier/i.test(String(account.name || "")))
-    || accounts[0];
-  if (!preferred?.id) {
-    throw new Error("No Odoo expense account found for supplier invoices");
-  }
-  return preferred.id;
+  return pickExpenseAccount(accounts);
 };
 
 const discoverSaleTaxes = async (

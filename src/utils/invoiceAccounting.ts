@@ -38,6 +38,36 @@ export type SupplierInvoiceBasisInput = {
 
 const money = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
+/**
+ * Single source of truth for the customer-facing extra-cost net amount, shared
+ * by the PDF and UBL builders so the two cannot drift:
+ * 1. prefer the persisted customer net amount,
+ * 2. else gross extra cost minus its VAT (VAT is zero under reverse charge),
+ * 3. else the raw sum of the booking's extra costs.
+ */
+export const getCustomerExtraCostNet = (
+  payment: {
+    extraCostCustomerNetAmount?: unknown;
+    extraCostAmount?: unknown;
+    extraCostVatAmount?: unknown;
+    reverseCharge?: boolean;
+  },
+  fallback: number,
+): number => {
+  if (payment?.extraCostCustomerNetAmount != null) {
+    const net = Number(payment.extraCostCustomerNetAmount);
+    if (Number.isFinite(net)) return money(net);
+  }
+  if (payment?.extraCostAmount != null) {
+    const gross = Number(payment.extraCostAmount);
+    if (Number.isFinite(gross)) {
+      const vat = payment.reverseCharge ? 0 : Number(payment.extraCostVatAmount) || 0;
+      return money(Math.max(0, gross - vat));
+    }
+  }
+  return fallback;
+};
+
 const sumOptions = (options?: SupplierInvoiceBasisInput["selectedExtraOptions"]): number =>
   (options || []).reduce<number>((sum, option) => {
     if (typeof option === "number") return sum + option;

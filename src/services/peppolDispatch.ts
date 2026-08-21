@@ -143,37 +143,38 @@ const getCurrentQuote = (booking: any) => {
   return versions.find((quote: any) => quote.version === booking.currentQuoteVersion) || versions[versions.length - 1];
 };
 
+// Odoo applies the refund sign from move_type (in_refund/out_refund), so
+// price values stay positive here. The negative sign for credit notes is only
+// applied in the UBL output, never in the Odoo move lines.
 const getOdooInvoiceLines = (booking: any, documentType: "invoice" | "credit_note"): OdooInvoiceLine[] => {
-  const sign = documentType === "credit_note" ? -1 : 1;
   const currentQuote = getCurrentQuote(booking);
   if (Array.isArray(booking.payment?.vatBreakdown) && booking.payment.vatBreakdown.length > 0) {
     return booking.payment.vatBreakdown.map((line: any) => ({
       description: line.description || "Service",
-      price: Number(line.netAmount || 0) * sign,
+      price: Math.abs(Number(line.netAmount || 0)),
       vatRate: Number(line.vatRate ?? booking.payment?.vatRate ?? 0),
     }));
   }
   if (Array.isArray(currentQuote?.pricingLines) && currentQuote.pricingLines.length > 0) {
     return currentQuote.pricingLines.map((line: any) => ({
       description: line.description || "Service",
-      price: Number(line.price || 0) * sign,
+      price: Math.abs(Number(line.price || 0)),
       vatRate: Number(line.vatRate ?? booking.payment?.vatRate ?? 0),
     }));
   }
 
   return [{
     description: booking.quote?.description || booking.rfqData?.description || "Service",
-    price: Number(booking.payment?.netAmount ?? booking.payment?.amount ?? 0) * sign,
+    price: Math.abs(Number(booking.payment?.netAmount ?? booking.payment?.amount ?? 0)),
     vatRate: Number(booking.payment?.vatRate ?? 0),
   }];
 };
 
 const getOdooInvoiceLinesForPayload = (booking: any, payload: PeppolDispatchPayload): OdooInvoiceLine[] => {
   if (payload.lineItems?.length) {
-    const sign = payload.documentType === "credit_note" ? -1 : 1;
     return payload.lineItems.map((line) => ({
       description: line.description || "Service",
-      price: Number(line.price || 0) * sign,
+      price: Math.abs(Number(line.price || 0)),
       vatRate: Number(line.vatRate ?? payload.vatRate ?? 0),
       quantity: Number.isFinite(Number(line.quantity)) && Number(line.quantity) > 0 ? Number(line.quantity) : undefined,
       unitPrice: Number.isFinite(Number(line.unitPrice)) ? Number(line.unitPrice) : undefined,
@@ -182,7 +183,7 @@ const getOdooInvoiceLinesForPayload = (booking: any, payload: PeppolDispatchPayl
   if (payload.side === "supplier" && typeof payload.netAmount === "number") {
     return [{
       description: booking.rfqData?.description || booking.quote?.description || "Service",
-      price: payload.netAmount * (payload.documentType === "credit_note" ? -1 : 1),
+      price: Math.abs(payload.netAmount),
       vatRate: payload.vatRate ?? 0,
     }];
   }
@@ -591,7 +592,11 @@ export async function maybeDispatchPeppolInvoice(params: {
       : params.booking.customer?.businessName || params.booking.customer?.name,
     recipientCountry: side === "supplier"
       ? params.booking.professional?.businessInfo?.country || params.booking.professional?.location?.country
-      : params.booking.customer?.companyAddress?.country || params.booking.customer?.location?.country,
+      : params.booking.customer?.companyAddress?.country
+        || params.booking.customer?.location?.country
+        // Keep this in sync with isBelgianB2BBooking, which also accepts the
+        // VAT decision country as the customer's country.
+        || params.booking.vatDecision?.country,
     netAmount: params.netAmount,
     vatRate: params.vatRate,
     reverseCharge: params.reverseCharge,

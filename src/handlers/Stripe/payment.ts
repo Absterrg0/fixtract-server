@@ -117,6 +117,21 @@ const filterPaymentOverrides = (overrides: Record<string, any>) =>
     return acc;
   }, {} as Record<string, any>);
 
+/**
+ * A transfer error is ambiguous when we cannot know whether Stripe created the
+ * transfer: network-level failures (no HTTP status) and HTTP 5xx responses.
+ */
+const isAmbiguousTransferError = (error: any): boolean => {
+  if (!error) return true;
+  const status = typeof error.statusCode === 'number'
+    ? error.statusCode
+    : typeof error.response?.status === 'number'
+      ? error.response.status
+      : undefined;
+  if (typeof status !== 'number') return true;
+  return status >= 500;
+};
+
 const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {}, professionalOverride?: any) => {
   const { customerId, professionalId } = extractParticipantIds(booking, professionalOverride);
   const paymentSummary = booking.payment || {};
@@ -976,7 +991,7 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
         if (typeof balanceTransaction?.amount !== 'number' || balanceTransaction.amount <= 0) {
           throw new Error('Stripe balance transaction amount is unavailable');
         }
-        const bookingTotal = Number(booking.payment.totalWithVat ?? booking.payment.amount);
+        const bookingTotal = Number(booking.payment.totalWithVat);
         if (!Number.isFinite(bookingTotal) || bookingTotal <= 0) {
           throw new Error('Reconciled booking total is missing or invalid');
         }
@@ -1045,13 +1060,20 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
       // Capture succeeded but transfer failed — record the state for manual recovery
       console.error(`Transfer FAILED after capture for booking ${booking._id}:`, transferError.message);
 
-      // A corrected retry must use a fresh idempotency key. Keep the failed
-      // attempt number so concurrent retries remain deterministic per attempt.
-      const failedTransferAttempt = (booking.payment.transferAttempt || 0) + 1;
+      // A network error or HTTP 5xx can happen after Stripe actually created the
+      // transfer. For those ambiguous outcomes keep the same attempt number and
+      // idempotency key so a retry replays the original request instead of
+      // creating a duplicate transfer. Only definitive rejections rotate the key.
+      const ambiguousTransferFailure = isAmbiguousTransferError(transferError);
+      const failedTransferAttempt = ambiguousTransferFailure
+        ? (booking.payment.transferAttempt || 0)
+        : (booking.payment.transferAttempt || 0) + 1;
       booking.payment.status = 'completed'; // Money is captured; transfer remains recoverable.
       booking.payment.transferStatus = 'failed';
       booking.payment.transferAttempt = failedTransferAttempt;
-      booking.payment.transferIdempotencyKey = undefined;
+      if (!ambiguousTransferFailure) {
+        booking.payment.transferIdempotencyKey = undefined;
+      }
       booking.payment.transferFailureReason = transferError.message;
       booking.payment.transferAttemptedAt = new Date();
       booking.payment.refundNotes = `Transfer failed after capture: ${transferError.message}. Funds held in platform account.`;
@@ -1063,7 +1085,9 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
           status: 'completed',
           transferStatus: 'failed',
           transferAttempt: failedTransferAttempt,
-          transferIdempotencyKey: undefined,
+          transferIdempotencyKey: ambiguousTransferFailure
+            ? booking.payment.transferIdempotencyKey
+            : undefined,
           transferFailureReason: transferError.message,
           transferAttemptedAt: booking.payment.transferAttemptedAt,
           capturedAt: booking.payment.capturedAt,

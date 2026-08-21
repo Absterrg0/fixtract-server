@@ -61,7 +61,8 @@ const reserveWebhookEvent = async (event: Stripe.Event): Promise<{ shouldProcess
           ],
         },
         {
-          $set: { lastAttemptAt: now, lastError: undefined },
+          $set: { lastAttemptAt: now },
+          $unset: { lastError: 1 },
           $inc: { attempts: 1 },
         },
       );
@@ -73,7 +74,8 @@ const reserveWebhookEvent = async (event: Stripe.Event): Promise<{ shouldProcess
       const claimResult = await StripeEvent.updateOne(
         { eventId: event.id, status: 'failed' },
         {
-          $set: { status: 'processing', lastAttemptAt: now, lastError: undefined },
+          $set: { status: 'processing', lastAttemptAt: now },
+          $unset: { lastError: 1 },
           $inc: { attempts: 1 },
         }
       );
@@ -992,9 +994,22 @@ async function handleTransferReversed(transfer: Stripe.Transfer, failureKind: 'r
     return;
   }
 
+  // Stripe re-delivers webhooks and expired leases can re-run an event, so only
+  // apply the failure transition once per transfer. Incrementing transferAttempt
+  // again would rotate the retry idempotency key for the same logical payout.
+  const failureReason = `Stripe transfer ${transfer.id} ${failureKind}`;
+  const alreadyFailedForThisTransfer =
+    booking.payment.transferStatus === 'failed' &&
+    typeof booking.payment.transferFailureReason === 'string' &&
+    booking.payment.transferFailureReason.includes(transfer.id);
+  if (alreadyFailedForThisTransfer) {
+    console.log(`Transfer ${failureKind} webhook for booking ${booking._id} was already recorded; skipping duplicate state change (${transfer.id})`);
+    return;
+  }
+
   const retryAttempt = (booking.payment.transferAttempt || 0) + 1;
   booking.payment.transferStatus = 'failed';
-  booking.payment.transferFailureReason = `Stripe transfer ${transfer.id} ${failureKind}`;
+  booking.payment.transferFailureReason = failureReason;
   booking.payment.transferAttemptedAt = new Date();
   booking.payment.transferAttempt = retryAttempt;
   booking.payment.transferIdempotencyKey = undefined;
@@ -1004,7 +1019,7 @@ async function handleTransferReversed(transfer: Stripe.Transfer, failureKind: 'r
     {
       $set: {
         transferStatus: 'failed',
-        transferFailureReason: `Stripe transfer ${transfer.id} ${failureKind}`,
+        transferFailureReason: failureReason,
         transferAttemptedAt: new Date(),
         transferAttempt: retryAttempt,
       },

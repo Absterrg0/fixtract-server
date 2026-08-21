@@ -28,6 +28,10 @@ export default async function fixPaymentIndexes() {
   await mongoose.connect(mongoUri);
   try {
     const duplicateMilestones = await Payment.aggregate<DuplicateGroup>([
+      // Base payments (missing or null milestoneIndex) are reconciled by the
+      // duplicateBasePayments check below; including them here would count a
+      // duplicate base payment in both groups.
+      { $match: { $and: [{ milestoneIndex: { $exists: true } }, { milestoneIndex: { $ne: null } }] } },
       { $group: {
         _id: { booking: "$booking", milestoneIndex: "$milestoneIndex" },
         ids: { $push: "$_id" },

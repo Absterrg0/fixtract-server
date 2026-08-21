@@ -287,13 +287,8 @@ export const getKpiSummary = async (req: Request, res: Response) => {
     const completedRevenueMatch: Record<string, unknown> = {
       status: 'completed',
       ...bookingCountryMatch,
+      $expr: settledPayoutExpr,
       $and: [
-        {
-          $or: [
-            { 'payment.transferStatus': 'succeeded' },
-            { 'payment.transferStatus': { $exists: false }, 'payment.stripeTransferId': { $exists: true, $ne: null } },
-          ],
-        },
         {
           $or: [
             { 'payment.capturedAt': { $gte: from, $lte: to } },

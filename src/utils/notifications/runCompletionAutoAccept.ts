@@ -1,4 +1,5 @@
 import Booking, { BookingStatus } from '../../models/booking';
+import Payment from '../../models/payment';
 import { SYSTEM_USER_ID } from '../../constants/system';
 import { captureAndTransferPayment } from '../../handlers/Stripe/payment';
 import { getTransferStatus } from '../../utils/paymentSafety';
@@ -112,10 +113,15 @@ export async function finalizeBookingCompletion(args: {
     : '';
 
   if (!transferResult.success) {
+    // transferFailed can be persisted only on the Payment document metadata, so
+    // read the failure state from the payment record instead of the booking.
+    const paymentRecord = await Payment.findOne({ booking: completedBooking._id })
+      .select('transferStatus stripeTransferId metadata')
+      .lean();
     const transferFailed = getTransferStatus({
-      transferStatus: refreshedBooking?.payment?.transferStatus,
-      stripeTransferId: refreshedBooking?.payment?.stripeTransferId,
-      metadata: undefined,
+      transferStatus: paymentRecord?.transferStatus,
+      stripeTransferId: paymentRecord?.stripeTransferId,
+      metadata: paymentRecord?.metadata as { transferFailed?: boolean } | undefined,
     }) === 'failed';
     if (transferFailed) {
       await Booking.findOneAndUpdate(

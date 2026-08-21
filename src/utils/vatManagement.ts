@@ -494,11 +494,11 @@ export const resolveVatDecisionFromConfig = async (params: {
   }
 
   if (!vat.article47Classification) {
-    return {
+    return applyB2B({
       ...fallback,
       action: "rfq",
       explanation: "VAT management is enabled but its Article 47 classification has not been reviewed by an administrator.",
-    };
+    });
   }
 
   const combinedAnswers = {

@@ -9,6 +9,7 @@ import {
   type ManualInvoiceCorrectionInput,
 } from '../../services/invoiceArtifacts';
 import { presignS3Url } from '../../utils/s3Upload';
+import { parseFlexibleNumber } from '../../utils/vatManagement';
 import { buildOversightTransferStatusExpression, canRetryTransfer, getTransferStatus } from '../../utils/paymentSafety';
 import { auditLog } from '../../utils/auditLogger';
 
@@ -335,11 +336,10 @@ export const generatePaymentCreditNote = async (req: Request, res: Response) =>
   });
 
 const parseManualNumber = (value: unknown): number => {
-  if (typeof value === 'string') {
-    const normalized = value.replace(/\s/g, '').replace(',', '.');
-    return Number(normalized);
-  }
-  return Number(value);
+  // parseFlexibleNumber rejects ambiguous grouped input such as "1,500"
+  // instead of guessing whether the comma is a decimal or thousands separator.
+  const parsed = parseFlexibleNumber(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
 };
 
 const roundManualNumber = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
@@ -443,25 +443,72 @@ export const createManualPaymentArtifact = async (req: Request, res: Response) =
       customer: readManualParty(body.customer),
       professional: readManualParty(body.professional),
     };
-    const result = await createManualInvoiceArtifact(payment.booking.toString(), paymentId, input);
-    await auditLog({
-      req,
-      action: 'admin.manual_invoice_artifact_created',
-      targetType: 'Payment',
-      targetId: paymentId,
-      details: {
-        side,
-        documentType,
-        invoiceNumber: result.invoiceNumber,
-        netAmount,
-        vatAmount,
-        totalWithVat,
-        currency,
-        lineCount: lines.length,
-      },
-    });
-    const signedResult = await withPresignedInvoiceUrls(result as Record<string, any>);
-    return res.status(201).json({ success: true, msg: 'Manual invoice artifact created', data: signedResult });
+
+    // Idempotency protection: a client retry must not allocate a second
+    // invoice number and a second set of PDF/UBL artifacts. The claim is
+    // reserved atomically before generation and released if generation fails.
+    const idempotencyKey = body.idempotencyKey ? String(body.idempotencyKey).trim().slice(0, 128) : '';
+    if (idempotencyKey) {
+      const claimResult = await Payment.findOneAndUpdate(
+        { _id: paymentId, 'manualArtifactClaims.key': { $ne: idempotencyKey } },
+        {
+          $push: {
+            manualArtifactClaims: { key: idempotencyKey, side, documentType, createdAt: new Date() },
+          },
+        },
+        { new: true }
+      ).lean();
+      if (!claimResult) {
+        const existingPayment = await Payment.findById(paymentId).lean();
+        const priorClaim = existingPayment?.manualArtifactClaims?.find((claim: any) => claim.key === idempotencyKey);
+        return res.status(409).json({
+          success: false,
+          msg: 'A manual artifact with this idempotency key was already created for this payment.',
+          data: priorClaim?.invoiceNumber ? { invoiceNumber: priorClaim.invoiceNumber } : undefined,
+        });
+      }
+    }
+
+    try {
+      const result = await createManualInvoiceArtifact(payment.booking.toString(), paymentId, input);
+      if (idempotencyKey) {
+        await Payment.updateOne(
+          { _id: paymentId, 'manualArtifactClaims.key': idempotencyKey },
+          { $set: { 'manualArtifactClaims.$.invoiceNumber': result.invoiceNumber } }
+        );
+      }
+      await auditLog({
+        req,
+        action: 'admin.manual_invoice_artifact_created',
+        targetType: 'Payment',
+        targetId: paymentId,
+        details: {
+          side,
+          documentType,
+          invoiceNumber: result.invoiceNumber,
+          netAmount,
+          vatAmount,
+          totalWithVat,
+          currency,
+          lineCount: lines.length,
+        },
+      });
+      const signedResult = await withPresignedInvoiceUrls(result as Record<string, any>);
+      return res.status(201).json({ success: true, msg: 'Manual invoice artifact created', data: signedResult });
+    } catch (error: any) {
+      // Release the idempotency claim so a corrected retry can proceed.
+      if (idempotencyKey) {
+        await Payment.updateOne(
+          { _id: paymentId },
+          { $pull: { manualArtifactClaims: { key: idempotencyKey } } }
+        ).catch(() => undefined);
+      }
+      console.error('[ADMIN][PAYMENTS] Failed to create manual invoice artifact', error);
+      if (error instanceof ManualInvoiceValidationError) {
+        return res.status(400).json({ success: false, msg: error.message });
+      }
+      return res.status(500).json({ success: false, msg: 'Failed to create manual invoice artifact' });
+    }
   } catch (error: any) {
     console.error('[ADMIN][PAYMENTS] Failed to create manual invoice artifact', error);
     if (error instanceof ManualInvoiceValidationError) {
