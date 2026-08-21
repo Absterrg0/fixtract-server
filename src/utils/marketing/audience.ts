@@ -156,7 +156,13 @@ export async function syncSubscribersFromUsers(): Promise<{
         if (existing) {
           operations.push({
             updateMany: {
-              filter: { $or: [{ userId: user._id }, { email }] },
+              filter: {
+                $or: [
+                  { userId: user._id },
+                  { email },
+                  { emailNormalized: email },
+                ],
+              },
               update: {
                 $set: { unsubscribedAt: new Date() },
                 $unset: { consentVerifiedAt: 1 },
@@ -170,6 +176,7 @@ export async function syncSubscribersFromUsers(): Promise<{
 
       const metadata: Record<string, unknown> = {
         userId: user._id,
+        emailNormalized: email,
         role: user.role,
         interestedServices,
         serviceKeys: interestedServices,
