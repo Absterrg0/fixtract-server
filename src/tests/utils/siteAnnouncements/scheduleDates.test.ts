@@ -53,7 +53,14 @@ describe('buildPublicListQuery', () => {
 
   it('includes base language for region-tagged locales', () => {
     const query = buildPublicListQuery({ locale: 'nl-be' }, now);
-    expect(query.locale).toEqual({ $in: ['nl-be', 'nl', 'en'] });
+    expect(query.$and).toEqual([
+      {
+        $or: [
+          { locale: { $in: ['nl-be', 'nl', 'en'] } },
+          { autoTranslate: true },
+        ],
+      },
+    ]);
   });
 });
 
