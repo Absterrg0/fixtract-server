@@ -33,6 +33,29 @@ export function defaultMarketingLocaleForCountry(country: unknown): MarketingLoc
   return DEFAULT_LOCALE_BY_COUNTRY[code] || 'en';
 }
 
+export function resolveSubscriberLocale(
+  user: any,
+  country?: string,
+): { locale: MarketingLocale; source: 'explicit' | 'country_default' | 'fallback' } {
+  const explicitLocale = normalizeMarketingLocale(user?.marketingLocale);
+  if (explicitLocale) return { locale: explicitLocale, source: 'explicit' };
+
+  // Keep legacy preference fields readable while the canonical marketingLocale
+  // field rolls out. They still represent an explicit user choice.
+  const legacyLocale = normalizeMarketingLocale(
+    user?.preferredLocale ?? user?.locale ?? user?.language,
+  );
+  if (legacyLocale) return { locale: legacyLocale, source: 'explicit' };
+
+  if (country) {
+    return {
+      locale: defaultMarketingLocaleForCountry(country),
+      source: 'country_default',
+    };
+  }
+  return { locale: 'en', source: 'fallback' };
+}
+
 export function marketingLanguagesForCountries(countries: readonly string[]): MarketingLocale[] {
   if (countries.length === 0) return [...MARKETING_LOCALES];
   const normalized = new Set(countries.map((country) => country.trim().toUpperCase()));

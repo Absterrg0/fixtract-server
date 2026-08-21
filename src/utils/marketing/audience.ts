@@ -12,7 +12,7 @@ import {
   suppressBrevoMarketingContact,
 } from './brevoMarketing';
 import { normalizeEmail } from './normalizeEmail';
-import { normalizeMarketingLocale } from './marketingCatalog';
+import { normalizeMarketingLocale, resolveSubscriberLocale } from './marketingCatalog';
 
 export type AudienceMember = {
   email: string;
@@ -137,11 +137,9 @@ export async function syncSubscribersFromUsers(): Promise<{
       const fromPro =
         Array.isArray((user as any).serviceCategories) ? (user as any).serviceCategories : [];
       const interestedServices = Array.from(new Set([...fromBookings, ...fromPro].map(String)));
-      // Seed locale from preference fields when present (schema may not declare them yet)
-      const explicitLocale = normalizeMarketingLocale((user as any).marketingLocale);
-      const locale = explicitLocale || normalizeLocale(
-        (user as any).preferredLocale ?? (user as any).locale ?? (user as any).language,
-      );
+      // Seed locale from explicit user preference, then country default, then English.
+      const resolvedLocale = resolveSubscriberLocale(user, region);
+      const locale = resolvedLocale.locale;
       const existingByCurrentEmail = existingByEmail.get(email);
       const existingByUser = existingByUserId.get(String(user._id));
       const existing = existingByCurrentEmail || existingByUser;
@@ -170,7 +168,7 @@ export async function syncSubscribersFromUsers(): Promise<{
         interestedServices,
         serviceKeys: interestedServices,
         locale,
-        localeSource: explicitLocale ? 'explicit' : 'fallback',
+        localeSource: resolvedLocale.source,
         lastEngagedAt,
         consentVerifiedAt: user.marketingConsentAt,
       };

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeEmail, isValidEmail } from '../../../utils/marketing/normalizeEmail';
-import { defaultMarketingLocaleForCountry, marketingLanguagesForCountries } from '../../../utils/marketing/marketingCatalog';
+import { defaultMarketingLocaleForCountry, marketingLanguagesForCountries, resolveSubscriberLocale } from '../../../utils/marketing/marketingCatalog';
 import { renderMarketingEmail, resolveGreeting } from '../../../utils/marketing/renderCampaign';
 
 describe('marketing foundational utilities', () => {
@@ -14,6 +14,21 @@ describe('marketing foundational utilities', () => {
     expect(defaultMarketingLocaleForCountry('DE')).toBe('de');
     expect(marketingLanguagesForCountries(['DE'])).toEqual(['en', 'de']);
     expect(marketingLanguagesForCountries([])).toEqual(['en', 'nl', 'fr', 'de']);
+  });
+
+  it('uses the user choice, then country default, then English fallback for subscriber sync', () => {
+    expect(resolveSubscriberLocale({ marketingLocale: 'fr' }, 'DE')).toEqual({
+      locale: 'fr',
+      source: 'explicit',
+    });
+    expect(resolveSubscriberLocale({}, 'DE')).toEqual({
+      locale: 'de',
+      source: 'country_default',
+    });
+    expect(resolveSubscriberLocale({}, undefined)).toEqual({
+      locale: 'en',
+      source: 'fallback',
+    });
   });
 
   it('escapes names and appends a localized opt-out footer', () => {
