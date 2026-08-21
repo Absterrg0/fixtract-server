@@ -30,6 +30,19 @@ async function main(): Promise<void> {
     const ids = subscriberEmails.get(emailNormalized) || [];
     ids.push(String(subscriber._id));
     subscriberEmails.set(emailNormalized, ids);
+  }
+
+  const collisions = Array.from(subscriberEmails.entries())
+    .filter(([, ids]) => ids.length > 1)
+    .map(([emailNormalized, ids]) => ({ emailNormalized, ids }));
+  if (collisions.length > 0) {
+    throw new Error(
+      `Marketing identity backfill found ${collisions.length} normalized email collision(s): ${JSON.stringify(collisions)}`,
+    );
+  }
+
+  for (const subscriber of subscribers) {
+    const emailNormalized = normalizeEmail(subscriber.emailNormalized || subscriber.email);
     const legacyServices = Array.isArray(subscriber.interestedServices) ? subscriber.interestedServices : [];
     const existingKeys = Array.isArray(subscriber.serviceKeys) ? subscriber.serviceKeys : [];
     const mappedLegacy = legacyServices.map((value) => {
@@ -57,9 +70,6 @@ async function main(): Promise<void> {
     await MarketingCampaign.updateOne({ _id: campaign._id }, { $set: { 'audience.serviceKeys': mappedKeys } });
   }
 
-  const collisions = Array.from(subscriberEmails.entries())
-    .filter(([, ids]) => ids.length > 1)
-    .map(([emailNormalized, ids]) => ({ emailNormalized, ids }));
   console.log(JSON.stringify({
     subscribersProcessed: subscribers.length,
     campaignsProcessed: campaigns.length,

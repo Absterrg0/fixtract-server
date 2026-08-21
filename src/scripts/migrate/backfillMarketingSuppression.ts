@@ -12,16 +12,18 @@ async function main(): Promise<void> {
   const rows = await MarketingSubscriber.find({ unsubscribedAt: { $ne: null } })
     .select('email emailNormalized')
     .lean();
-  const operations = rows
-    .map((row) => normalizeEmail(row.emailNormalized || row.email))
-    .filter(Boolean)
-    .map((emailNormalized) => ({
+  const emails = new Set(
+    rows
+      .map((row) => normalizeEmail(row.emailNormalized || row.email))
+      .filter(Boolean),
+  );
+  const operations = Array.from(emails).map((emailNormalized) => ({
       updateOne: {
         filter: { emailNormalized },
         update: { $set: { emailNormalized, reason: 'unsubscribe' as const, source: 'subscriber' as const } },
         upsert: true,
       },
-    }));
+  }));
   if (operations.length > 0) await MarketingSuppression.bulkWrite(operations, { ordered: false });
   console.log(`Backfilled ${operations.length} marketing suppressions.`);
   process.exitCode = 0;
