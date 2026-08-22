@@ -17,6 +17,7 @@ import { sendBrevoTransactionalMarketingEmail } from '../../utils/marketing/brev
 import { resolveMarketingAudience } from '../../utils/marketing/audienceResolver';
 import {
   assertInlineMarketingContent,
+  MarketingContentError,
   renderMarketingEmail,
   renderMarketingTemplateEmail,
 } from '../../utils/marketing/renderCampaign';
@@ -436,7 +437,19 @@ export const previewMarketingAudience = async (req: Request, res: Response) => {
     }
     return res.json({
       success: true,
-      data: { ...resolution, count: resolution.exactTotal, truncated: resolution.overLimit, audience },
+      data: {
+        exactTotal: resolution.exactTotal,
+        byLocale: resolution.byLocale,
+        byRole: resolution.byRole,
+        deduplicated: resolution.deduplicated,
+        excluded: resolution.excluded,
+        fallbackLocaleCount: resolution.fallbackLocaleCount,
+        overLimit: resolution.overLimit,
+        criteriaHash: resolution.criteriaHash,
+        count: resolution.exactTotal,
+        truncated: resolution.overLimit,
+        audience,
+      },
     });
   } catch (error: any) {
     if (error instanceof MarketingInputError) {
@@ -496,9 +509,8 @@ export const sendMarketingCampaignTestEmail = async (req: Request, res: Response
     });
     return res.json({ success: true, data: { to, locale } });
   } catch (error: any) {
-    const message = error instanceof Error ? error.message : 'Failed to send test email';
-    if (message.includes('require') || message.includes('missing') || message.includes('Test sends') || message.includes('template')) {
-      return res.status(400).json({ success: false, msg: message });
+    if (error instanceof MarketingContentError) {
+      return res.status(400).json({ success: false, msg: error.message });
     }
     console.error('sendMarketingCampaignTestEmail:', error);
     return res.status(502).json({ success: false, msg: 'Failed to send test email' });

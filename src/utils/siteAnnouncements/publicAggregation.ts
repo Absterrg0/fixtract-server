@@ -39,8 +39,6 @@ export function buildPublicAnnouncementAggregationPipeline(
         activeCountries: 1,
         locale: 1,
         frequency: 1,
-        autoTranslate: 1,
-        translations: 1,
         priority: 1,
         delaySeconds: 1,
         dismissible: 1,

@@ -18,12 +18,6 @@ export interface ISiteAnnouncement extends Document {
   activeCountries: string[];
   locale: string;
   frequency: AnnouncementFrequency;
-  autoTranslate: boolean;
-  translations: Record<string, {
-    title: string;
-    message: string;
-    ctaLabel?: string;
-  }>;
   startsAt: Date;
   endsAt: Date;
   isActive: boolean;
@@ -95,14 +89,6 @@ const siteAnnouncementSchema = new Schema<ISiteAnnouncement>({
     type: String,
     enum: [...ANNOUNCEMENT_FREQUENCIES],
     default: 'once_pageview',
-  },
-  autoTranslate: {
-    type: Boolean,
-    default: false,
-  },
-  translations: {
-    type: Schema.Types.Mixed,
-    default: {},
   },
   startsAt: {
     type: Date,

@@ -35,7 +35,6 @@ describe('buildPublicAnnouncementAggregationPipeline', () => {
           {
             $or: [
               { locale: { $in: ['fr', 'en'] } },
-              { autoTranslate: true },
             ],
           },
         ],

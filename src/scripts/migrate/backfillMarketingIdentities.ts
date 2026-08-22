@@ -37,7 +37,7 @@ async function main(): Promise<void> {
     .map(([emailNormalized, ids]) => ({ emailNormalized, ids }));
   if (collisions.length > 0) {
     throw new Error(
-      `Marketing identity backfill found ${collisions.length} normalized email collision(s): ${JSON.stringify(collisions)}`,
+      `Marketing identity backfill found ${collisions.length} normalized email collision(s)`,
     );
   }
 
@@ -74,7 +74,7 @@ async function main(): Promise<void> {
     subscribersProcessed: subscribers.length,
     campaignsProcessed: campaigns.length,
     unresolvedServices: unresolved,
-    emailCollisions: collisions,
+    emailCollisions: collisions.length,
   }, null, 2));
 }
 

@@ -111,7 +111,7 @@ async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
         { $set: { unsubscribedAt: now }, $unset: { consentVerifiedAt: 1 } },
         { new: false },
       );
-      already = true;
+      already = raced ? Boolean(raced.unsubscribedAt) : true;
       if (!raced) {
         await MarketingSubscriber.updateOne(
           { $or: [{ email: normalized }, { emailNormalized: normalized }] },

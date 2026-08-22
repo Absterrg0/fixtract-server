@@ -8,37 +8,14 @@ import { params } from '../../utils/requestParams';
 
 const DEFAULT_ANNOUNCEMENT_FREQUENCY = 'once_pageview';
 
-type TranslationContent = {
-  title?: string;
-  message?: string;
-  ctaLabel?: string;
-};
-
-function localizeAnnouncement<T extends Record<string, unknown>>(
-  announcement: T,
-  requestedLocale: string,
-): T {
-  const translations = announcement.translations as Record<string, TranslationContent> | undefined;
-  const baseLocale = requestedLocale.split('-')[0] || requestedLocale;
-  const sourceLocale = String(announcement.locale || 'en').split('-')[0];
-  const translated = announcement.autoTranslate
-    ? translations?.[requestedLocale] ?? translations?.[baseLocale] ?? translations?.[sourceLocale]
-    : undefined;
-
-  const localized = {
+function normalizeAnnouncement<T extends Record<string, unknown>>(announcement: T): T {
+  return {
     ...announcement,
     frequency:
       typeof announcement.frequency === 'string'
         ? announcement.frequency
         : DEFAULT_ANNOUNCEMENT_FREQUENCY,
-    ...(translated?.title ? { title: translated.title } : {}),
-    ...(translated?.message ? { message: translated.message } : {}),
-    ...(translated?.ctaLabel ? { ctaLabel: translated.ctaLabel } : {}),
-    ...(translated ? { locale: requestedLocale } : {}),
-  };
-  delete (localized as Record<string, unknown>).translations;
-  delete (localized as Record<string, unknown>).autoTranslate;
-  return localized as T;
+  } as T;
 }
 
 /**
@@ -58,10 +35,7 @@ export const listPublicSiteAnnouncements = async (
     const filters = parsePublicListFilters(req.query);
     const pipeline = buildPublicAnnouncementAggregationPipeline(filters);
     const announcements = (await SiteAnnouncement.aggregate(pipeline)).map((announcement) =>
-      localizeAnnouncement(
-        announcement as Record<string, unknown>,
-        filters.locale,
-      ),
+      normalizeAnnouncement(announcement as Record<string, unknown>),
     );
 
     return res.status(200).json({
@@ -96,8 +70,14 @@ export const recordSiteAnnouncementEvent = async (
     }
 
     const field = `${event}s` as 'impressions' | 'clicks' | 'dismissals';
+    const now = new Date();
     const updated = await SiteAnnouncement.findByIdAndUpdate(
-      id,
+      {
+        _id: id,
+        isActive: true,
+        startsAt: { $lte: now },
+        endsAt: { $gte: now },
+      },
       { $inc: { [field]: 1 } },
       { new: true, runValidators: true },
     );

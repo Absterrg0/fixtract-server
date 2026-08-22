@@ -10,7 +10,6 @@ import {
   parseSiteAnnouncementWriteBody,
 } from '../../utils/siteAnnouncements/parseWriteBody';
 import type { SiteAnnouncementWriteInput } from '../../utils/siteAnnouncements/types';
-import { buildAnnouncementTranslations } from '../../utils/siteAnnouncements/translateAnnouncement';
 
 const DEFAULT_ANNOUNCEMENT_FREQUENCY = 'once_pageview' as const;
 
@@ -26,7 +25,6 @@ function toWriteInput(doc: ISiteAnnouncement): SiteAnnouncementWriteInput {
     activeCountries: [...doc.activeCountries],
     locale: doc.locale,
     frequency: doc.frequency ?? DEFAULT_ANNOUNCEMENT_FREQUENCY,
-    autoTranslate: doc.autoTranslate === true,
     startsAt: doc.startsAt,
     endsAt: doc.endsAt,
     isActive: doc.isActive,
@@ -39,7 +37,6 @@ function toWriteInput(doc: ISiteAnnouncement): SiteAnnouncementWriteInput {
 
 function normalizeAnnouncementResponse<T extends Record<string, unknown>>(value: T): T & {
   frequency: string;
-  autoTranslate: boolean;
   impressions: number;
   clicks: number;
   dismissals: number;
@@ -47,23 +44,15 @@ function normalizeAnnouncementResponse<T extends Record<string, unknown>>(value:
   return {
     ...value,
     frequency: typeof value.frequency === 'string' ? value.frequency : DEFAULT_ANNOUNCEMENT_FREQUENCY,
-    autoTranslate: value.autoTranslate === true,
     impressions: Number(value.impressions) || 0,
     clicks: Number(value.clicks) || 0,
     dismissals: Number(value.dismissals) || 0,
   } as T & {
     frequency: string;
-    autoTranslate: boolean;
     impressions: number;
     clicks: number;
     dismissals: number;
   };
-}
-
-function translationFailure(res: Response, error: unknown): Response | null {
-  const message = error instanceof Error ? error.message : '';
-  if (!message.startsWith('Automatic announcement translation')) return null;
-  return res.status(503).json({ success: false, msg: message });
 }
 
 export const listSiteAnnouncements = async (
@@ -145,18 +134,8 @@ export const createSiteAnnouncement = async (
       return res.status(400).json({ success: false, msg: parsed.error });
     }
 
-    let translations;
-    try {
-      translations = await buildAnnouncementTranslations(parsed.value);
-    } catch (error) {
-      const response = translationFailure(res, error);
-      if (response) return response;
-      throw error;
-    }
-
     const created = await SiteAnnouncement.create({
       ...parsed.value,
-      translations,
       createdBy: adminId,
     });
 
@@ -244,35 +223,6 @@ export const updateSiteAnnouncement = async (
       } else if (value !== undefined) {
         $set[key] = value;
       }
-    }
-
-    const nextAutoTranslate = parsed.value.autoTranslate ?? existing.autoTranslate === true;
-    const contentChanged = ['title', 'message', 'ctaLabel', 'locale'].some((key) =>
-      Object.prototype.hasOwnProperty.call(parsed.value, key),
-    );
-    if (nextAutoTranslate && (!existing.autoTranslate || contentChanged)) {
-      let translations;
-      try {
-        translations = await buildAnnouncementTranslations({
-          ...toWriteInput(existing),
-          ...parsed.value,
-          autoTranslate: true,
-          title: parsed.value.title ?? existing.title,
-          message: parsed.value.message ?? existing.message,
-          ctaLabel:
-            parsed.value.ctaLabel === null
-              ? undefined
-              : parsed.value.ctaLabel ?? existing.ctaLabel,
-          locale: parsed.value.locale ?? existing.locale,
-        });
-      } catch (error) {
-        const response = translationFailure(res, error);
-        if (response) return response;
-        throw error;
-      }
-      $set.translations = translations;
-    } else if (parsed.value.autoTranslate === false) {
-      $unset.translations = 1;
     }
 
     const updateDoc =

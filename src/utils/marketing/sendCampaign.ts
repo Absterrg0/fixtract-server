@@ -5,6 +5,7 @@ import MarketingCampaign, {
 } from '../../models/marketingCampaign';
 import MarketingSubscriber from '../../models/marketingSubscriber';
 import { randomUUID } from 'node:crypto';
+import { MARKETING_AUDIENCE_LIMIT } from './audience';
 import { resolveMarketingAudience } from './audienceResolver';
 import { renderMarketingEmail, renderMarketingFooter } from './renderCampaign';
 import {
@@ -182,7 +183,7 @@ export async function sendMarketingCampaign(
       inactiveDays: resolveReengagementInactiveDays(campaign),
       limitMode: 'delivery',
     });
-    if (resolved.overLimit) throw new Error(`Audience has ${resolved.exactTotal} recipients, exceeding the configured delivery limit of 5000`);
+    if (resolved.overLimit) throw new Error(`Audience has ${resolved.exactTotal} recipients, exceeding the configured delivery limit of ${MARKETING_AUDIENCE_LIMIT}`);
     audienceAudit = {
       subscriberCount: resolved.exactTotal,
       deduplicatedRecipientCount: resolved.deduplicated,

@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { subscriberFind, suppressionFind, userFind } = vi.hoisted(() => ({
+const { subscriberFind, subscriberCountDocuments, suppressionFind, userFind } = vi.hoisted(() => ({
   subscriberFind: vi.fn(),
+  subscriberCountDocuments: vi.fn(),
   suppressionFind: vi.fn(),
   userFind: vi.fn(),
 }));
@@ -10,13 +11,14 @@ function queryResult(rows: unknown[]) {
   const query = {
     select: () => query,
     sort: () => query,
+    limit: () => query,
     lean: async () => rows,
   };
   return query;
 }
 
 vi.mock('../../../models/marketingSubscriber', () => ({
-  default: { find: subscriberFind },
+  default: { find: subscriberFind, countDocuments: subscriberCountDocuments },
 }));
 vi.mock('../../../models/marketingSuppression', () => ({
   default: { find: suppressionFind },
@@ -31,6 +33,7 @@ import { resolveMarketingAudience } from '../../../utils/marketing/audienceResol
 describe('resolveMarketingAudience', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    subscriberCountDocuments.mockResolvedValue(3);
     suppressionFind.mockReturnValue(queryResult([{ emailNormalized: 'optedout@example.com' }]));
     userFind.mockReturnValue(queryResult([]));
     subscriberFind.mockImplementation((query: Record<string, unknown>) => query.unsubscribedAt
@@ -123,5 +126,38 @@ describe('resolveMarketingAudience', () => {
     expect(result.byLocale).toEqual({ fr: 1 });
     expect(result.byRole).toEqual({ customer: 1, professional: 0 });
     expect(result.excluded.localeMismatch).toBe(0);
+  });
+
+  it('reports over-limit audiences while delivery mode caps recipients', async () => {
+    const rows = Array.from({ length: 5001 }, (_, index) => ({
+      _id: `subscriber-${index}`,
+      email: `recipient-${index}@example.com`,
+      emailNormalized: `recipient-${index}@example.com`,
+      locale: 'en',
+      region: 'BE',
+      role: 'customer',
+      consentVerifiedAt: new Date(),
+      unsubscribedAt: null,
+      brevoUnsubscribedAt: null,
+    }));
+    subscriberFind.mockImplementation((query: Record<string, unknown>) =>
+      query.unsubscribedAt ? queryResult([]) : queryResult(rows),
+    );
+    subscriberCountDocuments.mockResolvedValue(rows.length);
+
+    const input = {
+      campaignType: 'newsletter' as const,
+      filters: { countries: ['BE'], interestedServices: [], serviceKeys: [], locales: ['en'], roles: ['customer'] as const },
+      contentLocales: ['en'],
+    };
+    const preview = await resolveMarketingAudience({ ...input, limitMode: 'preview' });
+    const delivery = await resolveMarketingAudience({ ...input, limitMode: 'delivery' });
+
+    expect(preview.exactTotal).toBe(5001);
+    expect(preview.overLimit).toBe(true);
+    expect(preview.recipients).toHaveLength(5001);
+    expect(delivery.exactTotal).toBe(5001);
+    expect(delivery.overLimit).toBe(true);
+    expect(delivery.recipients).toHaveLength(5000);
   });
 });

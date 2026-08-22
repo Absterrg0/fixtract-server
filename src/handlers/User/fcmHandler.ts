@@ -204,7 +204,9 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
       marketingLocale?: string;
     };
 
-    if (marketingLocale !== undefined && !isMarketingLocale(marketingLocale)) {
+    const normalizedMarketingLocale =
+      marketingLocale === undefined ? undefined : marketingLocale.trim().toLowerCase();
+    if (normalizedMarketingLocale !== undefined && !isMarketingLocale(normalizedMarketingLocale)) {
       res.status(400).json({ success: false, msg: `marketingLocale must be one of: ${MARKETING_LOCALES.join(', ')}` });
       return;
     }
@@ -214,7 +216,7 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
     if (marketingLocale !== undefined && type === undefined && channel === undefined && enabled === undefined) {
       const updatedUser = await User.findByIdAndUpdate(
         userId,
-        { $set: { marketingLocale: marketingLocale.trim().toLowerCase(), marketingLocaleSource: 'explicit' } },
+        { $set: { marketingLocale: normalizedMarketingLocale, marketingLocaleSource: 'explicit' } },
         { new: true },
       ).select('_id');
       if (!updatedUser) {

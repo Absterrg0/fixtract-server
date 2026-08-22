@@ -21,7 +21,6 @@ export interface SiteAnnouncementWriteInput {
   activeCountries: string[];
   locale: string;
   frequency: AnnouncementFrequency;
-  autoTranslate: boolean;
   startsAt: Date;
   endsAt: Date;
   isActive: boolean;
@@ -46,7 +45,6 @@ export interface SiteAnnouncementWriteBody {
   activeCountries?: string[];
   locale?: string;
   frequency?: string;
-  autoTranslate?: boolean;
   startsAt?: DateInput;
   endsAt?: DateInput;
   isActive?: boolean;

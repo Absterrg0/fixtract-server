@@ -53,7 +53,6 @@ export function buildPublicListQuery(
     {
       $or: [
         { locale: { $in: [...new Set([filters.locale, localeBase, 'en'])] } },
-        { autoTranslate: true },
       ],
     },
   ];

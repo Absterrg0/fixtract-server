@@ -241,4 +241,41 @@ describe('marketing campaign admin handlers', () => {
       htmlContent: expect.stringContaining('Hi Ada,'),
     }));
   });
+
+  it('rejects an invalid test recipient before calling Brevo', async () => {
+    const res = mockRes();
+    await sendMarketingCampaignTestEmail(
+      { body: { to: 'not-an-email', locale: 'en', campaign: { content: { en: { subject: 'Draft', htmlContent: '<p>Body content</p>' } } } } } as unknown as Request,
+      res,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(sendTestEmail).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsupported locales and missing locale content', async () => {
+    const unsupported = mockRes();
+    await sendMarketingCampaignTestEmail(
+      { body: { to: 'admin@example.com', locale: 'es', campaign: { content: {} } } } as unknown as Request,
+      unsupported,
+    );
+    expect(unsupported.statusCode).toBe(400);
+
+    const missing = mockRes();
+    await sendMarketingCampaignTestEmail(
+      { body: { to: 'admin@example.com', locale: 'nl', campaign: { content: { en: { subject: 'Draft', htmlContent: '<p>Body content</p>' } } } } } as unknown as Request,
+      missing,
+    );
+    expect(missing.statusCode).toBe(400);
+  });
+
+  it('returns a provider failure as a 502', async () => {
+    sendTestEmail.mockRejectedValueOnce(new Error('Brevo unavailable'));
+    const res = mockRes();
+    await sendMarketingCampaignTestEmail(
+      { body: { to: 'admin@example.com', locale: 'en', campaign: { content: { en: { subject: 'Draft', htmlContent: '<p>Body content</p>' } } } } } as unknown as Request,
+      res,
+    );
+    expect(res.statusCode).toBe(502);
+    expect(res.body).toEqual({ success: false, msg: 'Failed to send test email' });
+  });
 });

@@ -17,9 +17,8 @@ import {
   UpdateContact,
   TransactionalEmailsApi,
   TransactionalEmailsApiApiKeys,
-  SendSmtpEmail,
 } from '@getbrevo/brevo';
-import { assertTemplateGreetingContract } from './renderCampaign';
+import { assertTemplateGreetingContract, MarketingContentError } from './renderCampaign';
 
 const FOLDER_NAME = 'Fixtract Campaigns';
 const CONTACT_ATTRIBUTES = ['FIRSTNAME', 'REGION', 'LOCALE', 'UNSUB_TOKEN'] as const;
@@ -80,6 +79,56 @@ function sanitizedBrevoError(error: unknown): { status?: number | string; code?:
   };
 }
 
+function brevoRequestTimeoutMs(): number {
+  const configured = Number(process.env.BREVO_REQUEST_TIMEOUT_MS);
+  return Number.isFinite(configured)
+    ? Math.min(Math.max(Math.floor(configured), 1_000), 120_000)
+    : 15_000;
+}
+
+async function requestBrevoJson<T>(
+  path: string,
+  options: { method: 'GET' | 'POST'; body?: Record<string, unknown> },
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), brevoRequestTimeoutMs());
+  try {
+    const response = await fetch(`https://api.brevo.com/v3${path}`, {
+      method: options.method,
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'api-key': requireApiKey(),
+      },
+      ...(options.body ? { body: JSON.stringify(options.body) } : {}),
+      signal: controller.signal,
+    });
+    const raw = await response.text();
+    let body: unknown = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+      body = { message: raw.slice(0, 200) };
+    }
+    if (!response.ok) {
+      const message =
+        body && typeof body === 'object' && 'message' in body && typeof body.message === 'string'
+          ? body.message
+          : `Brevo request failed with status ${response.status}`;
+      const error = new Error(message) as Error & {
+        status?: number;
+        response?: { status: number };
+      };
+      error.status = response.status;
+      error.response = { status: response.status };
+      throw error;
+    }
+    return body as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export function isBrevoMarketingConfigured(): boolean {
   return Boolean(process.env.BREVO_API_KEY?.trim());
 }
@@ -95,20 +144,22 @@ export async function sendBrevoTransactionalMarketingEmail(input: {
   previewText?: string;
 }): Promise<void> {
   if (isMarketingDryRun()) return;
-  const api = createTransactionalEmailsApi();
-  const message = new SendSmtpEmail();
-  message.to = [{ email: input.to }];
-  message.subject = input.subject;
-  message.htmlContent = input.htmlContent;
-  if (input.previewText) message.textContent = input.previewText;
   const fromEmail = process.env.FROM_EMAIL?.trim();
   if (!fromEmail) throw new Error('FROM_EMAIL is required to send a test email');
-  message.sender = {
-    email: fromEmail,
-    name: process.env.BREVO_SENDER_NAME?.trim() || 'Fixtract',
-  };
   try {
-    await api.sendTransacEmail(message);
+    await requestBrevoJson('/smtp/email', {
+      method: 'POST',
+      body: {
+        sender: {
+          email: fromEmail,
+          name: process.env.BREVO_SENDER_NAME?.trim() || 'Fixtract',
+        },
+        to: [{ email: input.to }],
+        subject: input.subject,
+        htmlContent: input.htmlContent,
+        ...(input.previewText ? { textContent: input.previewText } : {}),
+      },
+    });
   } catch (error) {
     console.error('[Brevo] test transactional email failed', sanitizedBrevoError(error));
     throw new Error('Brevo test email failed');
@@ -201,14 +252,16 @@ export async function getBrevoMarketingTemplateHtml(
   templateId: number,
   locale: 'en' | 'nl' | 'fr' | 'de',
 ): Promise<string> {
-  const api = createTransactionalEmailsApi();
   try {
-    const response = await api.getSmtpTemplate(templateId);
-    const htmlContent = response.body?.htmlContent || '';
+    const response = await requestBrevoJson<{ htmlContent?: string }>(
+      `/smtp/templates/${encodeURIComponent(String(templateId))}`,
+      { method: 'GET' },
+    );
+    const htmlContent = response.htmlContent || '';
     assertTemplateGreetingContract(htmlContent, locale);
     return htmlContent;
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith('Brevo template must begin')) throw error;
+    if (error instanceof MarketingContentError) throw error;
     console.error('[Brevo] template contract lookup failed', {
       templateId,
       ...sanitizedBrevoError(error),

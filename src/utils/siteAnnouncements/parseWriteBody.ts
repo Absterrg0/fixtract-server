@@ -167,7 +167,6 @@ export function parseSiteAnnouncementWriteBody(
       activeCountries,
       locale,
       frequency,
-      autoTranslate: typeof body.autoTranslate === 'boolean' ? body.autoTranslate : false,
       startsAt,
       endsAt,
       isActive: typeof body.isActive === 'boolean' ? body.isActive : true,
@@ -367,13 +366,6 @@ export function parseSiteAnnouncementPatchBody(
       return { ok: false, error: 'requireMarketingConsent must be a boolean' };
     }
     update.requireMarketingConsent = body.requireMarketingConsent;
-  }
-
-  if (isPresent(body, 'autoTranslate')) {
-    if (typeof body.autoTranslate !== 'boolean') {
-      return { ok: false, error: 'autoTranslate must be a boolean' };
-    }
-    update.autoTranslate = body.autoTranslate;
   }
 
   if ((update.type ?? existing.type) === 'top_bar') {

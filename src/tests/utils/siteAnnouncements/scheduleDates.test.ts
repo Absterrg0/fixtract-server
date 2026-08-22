@@ -57,7 +57,6 @@ describe('buildPublicListQuery', () => {
       {
         $or: [
           { locale: { $in: ['nl-be', 'nl', 'en'] } },
-          { autoTranslate: true },
         ],
       },
     ]);

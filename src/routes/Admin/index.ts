@@ -1,5 +1,5 @@
 import { Router } from "express";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import {
   getPendingProfessionals,
   getProfessionalDetails,
@@ -200,6 +200,7 @@ const marketingTestSendLimiter = rateLimit({
   limit: 20,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => String(req.admin?._id || ipKeyGenerator(req.ip ?? 'unknown')),
   message: { success: false, msg: 'Too many test emails, please try again later' },
 });
 

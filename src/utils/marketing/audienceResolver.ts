@@ -122,10 +122,16 @@ function resolvedLocale(raw: unknown, country: unknown, contentLocales: Set<Mark
   return { locale: undefined, fallback: true };
 }
 
-async function suppressedEmailSet(): Promise<Set<string>> {
+async function suppressedEmailSet(emails: string[]): Promise<Set<string>> {
+  if (emails.length === 0) return new Set();
   const [suppressionRows, unsubscribedRows] = await Promise.all([
-    MarketingSuppression.find().select('emailNormalized').lean(),
-    MarketingSubscriber.find({ unsubscribedAt: { $ne: null } }).select('emailNormalized email').lean(),
+    MarketingSuppression.find({ emailNormalized: { $in: emails } }).select('emailNormalized').lean(),
+    MarketingSubscriber.find({
+      emailNormalized: { $in: emails },
+      unsubscribedAt: { $ne: null },
+    })
+      .select('emailNormalized email')
+      .lean(),
   ]);
   return new Set([
     ...suppressionRows.map((row) => normalizeEmail(row.emailNormalized)),
@@ -140,10 +146,18 @@ export async function resolveMarketingAudience(input: ResolveMarketingAudienceIn
       .map((locale) => normalizeMarketingLocale(locale))
       .filter((locale): locale is MarketingLocale => Boolean(locale)),
   );
-  const [suppressed, subscribers] = await Promise.all([
-    suppressedEmailSet(),
-    MarketingSubscriber.find(subscriberQuery(input.filters, input.inactiveDays)).sort({ _id: 1 }).lean(),
+  const query = subscriberQuery(input.filters, input.inactiveDays);
+  const [subscribers, matchedSubscriberCount] = await Promise.all([
+    MarketingSubscriber.find(query)
+      .sort({ _id: 1 })
+      .limit(MARKETING_AUDIENCE_LIMIT + 1)
+      .lean(),
+    MarketingSubscriber.countDocuments(query),
   ]);
+  const candidateEmails = subscribers
+    .map((row: any) => normalizeEmail(row.emailNormalized || row.email))
+    .filter(Boolean);
+  const suppressed = await suppressedEmailSet(candidateEmails);
 
   const userIds = subscribers.map((row: any) => row.userId).filter(Boolean);
   const users = userIds.length > 0
@@ -217,11 +231,15 @@ export async function resolveMarketingAudience(input: ResolveMarketingAudienceIn
 
   for (const row of subscribers) add(row);
 
-  const overLimit = recipients.length > MARKETING_AUDIENCE_LIMIT;
+  const overLimit = matchedSubscriberCount > MARKETING_AUDIENCE_LIMIT || recipients.length > MARKETING_AUDIENCE_LIMIT;
+  const exactTotal =
+    matchedSubscriberCount > MARKETING_AUDIENCE_LIMIT
+      ? matchedSubscriberCount
+      : recipients.length;
   const criteriaHash = hashCriteria({ campaignType: input.campaignType, filters, contentLocales: [...contentLocales], inactiveDays: input.inactiveDays || null });
   return {
     recipients: input.limitMode === 'delivery' ? recipients.slice(0, MARKETING_AUDIENCE_LIMIT) : recipients,
-    exactTotal: recipients.length,
+    exactTotal,
     byLocale,
     byRole,
     deduplicated,

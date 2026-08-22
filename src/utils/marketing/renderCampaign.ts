@@ -8,6 +8,13 @@ export type CampaignRenderContent = {
   brevoTemplateId?: number;
 };
 
+export class MarketingContentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MarketingContentError';
+  }
+}
+
 const GENERIC_GREETING: Record<MarketingLocale, string> = {
   en: 'Hi there,',
   nl: 'Hallo,',
@@ -124,7 +131,7 @@ export function assertTemplateGreetingContract(htmlContent: string, locale: Mark
     de: /^hallo(?:\s|,|!|<)/i,
   };
   if (!greetingByLocale[locale].test(visible) || !/\{\{\s*contact\.FIRSTNAME\s*\}\}/i.test(htmlContent)) {
-    throw new Error(
+    throw new MarketingContentError(
       `Brevo template must begin with a localized ${locale} greeting using {{ contact.FIRSTNAME }}`,
     );
   }
@@ -132,9 +139,9 @@ export function assertTemplateGreetingContract(htmlContent: string, locale: Mark
 
 export function assertInlineMarketingContent(content: CampaignRenderContent): void {
   if (content.brevoTemplateId && (!content.htmlContent || content.htmlContent.trim().length <= 10)) {
-    throw new Error('Test sends require inline HTML content so the greeting and footer can be verified');
+    throw new MarketingContentError('Test sends require inline HTML content so the greeting and footer can be verified');
   }
   if (!content.subject?.trim() || !content.htmlContent?.trim()) {
-    throw new Error('Campaign content requires a subject and HTML body');
+    throw new MarketingContentError('Campaign content requires a subject and HTML body');
   }
 }
