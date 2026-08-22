@@ -17,6 +17,7 @@ import {
     getEmployeeEffectiveAvailability,
     updateManagedEmployeeAvailability
 } from "../../handlers/User/employeeAvailability";
+import { getAdminAvailability, updateAdminAvailability } from '../../handlers/User/adminAvailability';
 import {
     getServiceConfigurationForProfessional,
     getDynamicFieldsForService,
@@ -119,6 +120,7 @@ userRouter.route("/employee/availability/preference").put(updateEmployeeAvailabi
 userRouter.route("/employee/availability").put(updateEmployeeAvailability)
 userRouter.route("/employee/availability/effective").get(getEmployeeEffectiveAvailability)
 userRouter.route("/employee/:employeeId/availability").put(updateManagedEmployeeAvailability)
+userRouter.route("/admin/availability").get(getAdminAvailability).put(updateAdminAvailability)
 
 // Service Configuration Routes (for Professionals)
 userRouter.route("/service-configuration").get(getServiceConfigurationForProfessional)

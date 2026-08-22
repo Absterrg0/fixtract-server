@@ -10,7 +10,7 @@ export function denyUnlessPermission(user: IUser | undefined | null, permission:
     };
   }
   const adminRole = resolveAdminRole((user as any).adminRole);
-  if (!hasPermission(adminRole, permission)) {
+  if (!hasPermission(adminRole, permission, (user as any).adminPermissionLevels)) {
     return {
       status: 403 as const,
       body: {

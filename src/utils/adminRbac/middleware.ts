@@ -1,7 +1,8 @@
 import { NextFunction, Request, Response } from 'express';
 import type { AdminPermission } from './types';
-import { hasAnyPermission, hasPermission, resolveAdminRole } from './rolePermissions';
-import { permissionForAdminPath } from './routePermissions';
+import { hasAccessLevel, hasPermission, resolveAdminRole } from './rolePermissions';
+import { accessAreaForAdminPath, accessRequirementForAdminPath, permissionForAdminPath } from './routePermissions';
+import { getEffectiveAccessForUser } from './roleAccess';
 
 /** Attach resolved adminRole onto req.admin for downstream handlers. */
 export function attachResolvedAdminRole(req: Request, _res: Response, next: NextFunction) {
@@ -12,25 +13,29 @@ export function attachResolvedAdminRole(req: Request, _res: Response, next: Next
 }
 
 /** Enforce permission for the current admin-router path (after requireAdmin). */
-export function enforceAdminRoutePermission(req: Request, res: Response, next: NextFunction) {
+export async function enforceAdminRoutePermission(req: Request, res: Response, next: NextFunction) {
   const permission = permissionForAdminPath(req.path);
   if (!permission) {
     return next();
   }
 
   const adminRole = resolveAdminRole((req.admin as any)?.adminRole);
-  if (!hasPermission(adminRole, permission)) {
+  const area = accessAreaForAdminPath(req.path);
+  const levels = await getEffectiveAccessForUser(req.admin as any);
+  const required = accessRequirementForAdminPath(req.path, req.method);
+  if (!area || !hasAccessLevel(levels, area, required)) {
     return res.status(403).json({
       success: false,
       msg: 'You do not have permission to perform this action',
       code: 'ADMIN_PERMISSION_DENIED',
       permission,
       adminRole,
+      requiredAccess: required,
     });
   }
 
   // Force-status needs write, not just read
-  if (req.path.includes('/force-status') && !hasPermission(adminRole, 'bookings.write')) {
+  if (req.path.includes('/force-status') && !hasPermission(adminRole, 'bookings.write', levels)) {
     return res.status(403).json({
       success: false,
       msg: 'You do not have permission to force booking status',
@@ -44,9 +49,10 @@ export function enforceAdminRoutePermission(req: Request, res: Response, next: N
 }
 
 export function requirePermission(...permissions: AdminPermission[]) {
-  return (req: Request, res: Response, next: NextFunction) => {
+  return async (req: Request, res: Response, next: NextFunction) => {
     const adminRole = resolveAdminRole((req.admin as any)?.adminRole);
-    if (!hasAnyPermission(adminRole, permissions)) {
+    const levels = await getEffectiveAccessForUser(req.admin as any);
+    if (!permissions.some((permission) => hasPermission(adminRole, permission, levels))) {
       return res.status(403).json({
         success: false,
         msg: 'You do not have permission to perform this action',
