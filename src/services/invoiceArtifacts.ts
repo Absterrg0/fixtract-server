@@ -203,6 +203,34 @@ const clearCreditNoteGenerationClaim = async (bookingId: string) => {
   );
 };
 
+/**
+ * Atomically reserve the supplier self-bill generation for a booking. Only one
+ * concurrent caller can win, so a losing caller must never reserve a second
+ * SUP- sequence number or upload duplicate artifacts. Abandoned claims are
+ * reclaimed by clearStaleGenerationClaimsIfNeeded once they exceed the TTL.
+ */
+const claimSupplierInvoiceGeneration = async (bookingId: string) =>
+  Booking.findOneAndUpdate(
+    {
+      _id: bookingId,
+      $or: [
+        { "payment.supplierInvoiceNumber": { $exists: false } },
+        { "payment.supplierInvoiceNumber": null },
+        { "payment.supplierInvoiceNumber": "" },
+      ],
+      "payment.supplierInvoiceGenerationClaim": { $in: [null, ""] },
+    },
+    { $set: { "payment.supplierInvoiceGenerationClaim": `GENERATING-SUP-${Date.now()}` } },
+    { new: true }
+  );
+
+const clearSupplierInvoiceGenerationClaim = async (bookingId: string) => {
+  await Booking.updateOne(
+    { _id: bookingId, "payment.supplierInvoiceGenerationClaim": /^GENERATING-SUP-/ },
+    { $unset: { "payment.supplierInvoiceGenerationClaim": "" } }
+  );
+};
+
 /** Short TTL so a hung/background generation does not block admin retries for 15 minutes. */
 const GENERATION_CLAIM_TTL_MS = 60 * 1000;
 
@@ -220,12 +248,17 @@ const isStaleGenerationClaim = (value?: string | null, prefix = "GENERATING-"): 
 };
 
 const clearStaleGenerationClaimsIfNeeded = async (bookingId: string) => {
-  const booking = await Booking.findById(bookingId).select("payment.invoiceNumber payment.creditNoteGenerationClaim");
+  const booking = await Booking.findById(bookingId).select(
+    "payment.invoiceNumber payment.creditNoteGenerationClaim payment.supplierInvoiceGenerationClaim"
+  );
   if (isStaleGenerationClaim(booking?.payment?.invoiceNumber, "GENERATING-")) {
     await clearInvoiceGenerationClaim(bookingId);
   }
   if (isStaleGenerationClaim(booking?.payment?.creditNoteGenerationClaim, "GENERATING-CN-")) {
     await clearCreditNoteGenerationClaim(bookingId);
+  }
+  if (isStaleGenerationClaim(booking?.payment?.supplierInvoiceGenerationClaim, "GENERATING-SUP-")) {
+    await clearSupplierInvoiceGenerationClaim(bookingId);
   }
 };
 
@@ -957,6 +990,24 @@ const retryPeppolForExistingArtifacts = async (
  * every customer-facing field untouched.
  */
 const generateMissingSupplierInvoiceArtifacts = async (
+  bookingId: string,
+  paymentId: string | undefined,
+  existing: any,
+): Promise<InvoiceArtifactResult> => {
+  // Reserve the generation atomically: concurrent callers must not reserve a
+  // second SUP- number, overwrite each other's artifacts, or submit duplicate
+  // self-bills. A losing caller returns the existing artifact state as-is.
+  const claimed = await claimSupplierInvoiceGeneration(bookingId);
+  if (!claimed) return toInvoiceArtifactResult(existing.payment);
+
+  try {
+    return await generateSupplierInvoiceArtifactsWithClaim(bookingId, paymentId, existing);
+  } finally {
+    await clearSupplierInvoiceGenerationClaim(bookingId);
+  }
+};
+
+const generateSupplierInvoiceArtifactsWithClaim = async (
   bookingId: string,
   paymentId: string | undefined,
   existing: any,

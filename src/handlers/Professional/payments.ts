@@ -43,9 +43,12 @@ export const getPaymentStats = async (req: Request, res: Response) => {
             { status: 'authorized' },
             { status: 'completed', $or: [
               { transferStatus: { $in: ['pending', 'failed'] } },
-              { transferStatus: { $exists: false }, 'metadata.transferFailed': true },
+              // MongoDB equality to null matches an explicit null as well as a
+              // missing field, so legacy documents without any transfer state
+              // still land in the pending bucket.
+              { transferStatus: null, 'metadata.transferFailed': true },
               {
-                transferStatus: { $exists: false },
+                transferStatus: null,
                 stripeTransferId: null,
                 'metadata.transferFailed': { $ne: true },
               },

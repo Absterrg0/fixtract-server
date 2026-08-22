@@ -331,6 +331,7 @@ export interface IBooking extends Document {
     creditNotePeppolDispatchReason?: string;
     creditNotePeppolDispatchReference?: string;
     creditNoteGenerationClaim?: string;
+    supplierInvoiceGenerationClaim?: string;
     supplierCreditNoteNumber?: string;
     supplierCreditNoteUrl?: string;
     supplierCreditNoteUblUrl?: string;
@@ -996,6 +997,7 @@ const BookingSchema = new Schema({
     creditNotePeppolDispatchReason: { type: String },
     creditNotePeppolDispatchReference: { type: String },
     creditNoteGenerationClaim: { type: String },
+    supplierInvoiceGenerationClaim: { type: String },
     supplierCreditNoteNumber: { type: String },
     supplierCreditNoteUrl: { type: String },
     supplierCreditNoteUblUrl: { type: String },

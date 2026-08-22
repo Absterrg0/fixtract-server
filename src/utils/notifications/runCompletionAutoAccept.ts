@@ -113,16 +113,23 @@ export async function finalizeBookingCompletion(args: {
     : '';
 
   if (!transferResult.success) {
-    // transferFailed can be persisted only on the Payment document metadata, so
-    // read the failure state from the payment record instead of the booking.
+    // captureAndTransferPayment persists payout failures on both records:
+    // booking.payment.transferStatus first, then the Payment document. A
+    // stale or failed Payment upsert must not hide a failed payout, so treat
+    // either persisted record reporting failed as a payout failure.
     const paymentRecord = await Payment.findOne({ booking: completedBooking._id })
       .select('transferStatus stripeTransferId metadata')
       .lean();
-    const transferFailed = getTransferStatus({
+    const bookingTransferFailed = getTransferStatus({
+      transferStatus: refreshedBooking?.payment?.transferStatus,
+      stripeTransferId: refreshedBooking?.payment?.stripeTransferId,
+    }) === 'failed';
+    const paymentTransferFailed = getTransferStatus({
       transferStatus: paymentRecord?.transferStatus,
       stripeTransferId: paymentRecord?.stripeTransferId,
       metadata: paymentRecord?.metadata as { transferFailed?: boolean } | undefined,
     }) === 'failed';
+    const transferFailed = paymentTransferFailed || bookingTransferFailed;
     if (transferFailed) {
       await Booking.findOneAndUpdate(
         { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },
