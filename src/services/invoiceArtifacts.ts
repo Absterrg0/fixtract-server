@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { randomUUID } from "node:crypto";
 import Booking from "../models/booking";
 import Payment from "../models/payment";
 import PlatformSettings from "../models/platformSettings";
@@ -204,13 +205,36 @@ const clearCreditNoteGenerationClaim = async (bookingId: string) => {
 };
 
 /**
- * Atomically reserve the supplier self-bill generation for a booking. Only one
- * concurrent caller can win, so a losing caller must never reserve a second
- * SUP- sequence number or upload duplicate artifacts. Abandoned claims are
- * reclaimed by clearStaleGenerationClaimsIfNeeded once they exceed the TTL.
+ * Supplier self-bill generation claim.
+ *
+ * The token is opaque and owner-bound: a caller may only release the exact
+ * token it acquired, so one caller's cleanup can never drop another caller's
+ * live claim. The reclaim TTL deliberately exceeds PDF rendering, S3 upload,
+ * and Peppol dispatch time, so clearStaleGenerationClaimsIfNeeded never
+ * steals a lease from work that is still in flight.
  */
-const claimSupplierInvoiceGeneration = async (bookingId: string) =>
-  Booking.findOneAndUpdate(
+const SUPPLIER_CLAIM_PREFIX = "GENERATING-SUP-";
+const SUPPLIER_GENERATION_CLAIM_TTL_MS = 15 * 60 * 1000;
+
+const parseSupplierClaimIssuedAt = (value?: string | null): number | null => {
+  if (!value?.startsWith(SUPPLIER_CLAIM_PREFIX)) return null;
+  // Tokens carry "<issuedAt>-<random>"; tolerate legacy timestamp-only values.
+  const rest = value.slice(SUPPLIER_CLAIM_PREFIX.length);
+  const separator = rest.indexOf("-");
+  const issuedAt = Number(separator === -1 ? rest : rest.slice(0, separator));
+  return Number.isFinite(issuedAt) ? issuedAt : null;
+};
+
+const isStaleSupplierGenerationClaim = (value?: string | null): boolean => {
+  if (!value?.startsWith(SUPPLIER_CLAIM_PREFIX)) return false;
+  const issuedAt = parseSupplierClaimIssuedAt(value);
+  if (issuedAt == null) return true;
+  return Date.now() - issuedAt > SUPPLIER_GENERATION_CLAIM_TTL_MS;
+};
+
+const claimSupplierInvoiceGeneration = async (bookingId: string): Promise<string | null> => {
+  const token = `${SUPPLIER_CLAIM_PREFIX}${Date.now()}-${randomUUID()}`;
+  const claimed = await Booking.findOneAndUpdate(
     {
       _id: bookingId,
       $or: [
@@ -220,13 +244,19 @@ const claimSupplierInvoiceGeneration = async (bookingId: string) =>
       ],
       "payment.supplierInvoiceGenerationClaim": { $in: [null, ""] },
     },
-    { $set: { "payment.supplierInvoiceGenerationClaim": `GENERATING-SUP-${Date.now()}` } },
+    { $set: { "payment.supplierInvoiceGenerationClaim": token } },
     { new: true }
   );
+  return claimed ? token : null;
+};
 
-const clearSupplierInvoiceGenerationClaim = async (bookingId: string) => {
+/** Release only the exact token this caller acquired. */
+const releaseSupplierInvoiceGenerationClaim = async (
+  bookingId: string,
+  token: string
+) => {
   await Booking.updateOne(
-    { _id: bookingId, "payment.supplierInvoiceGenerationClaim": /^GENERATING-SUP-/ },
+    { _id: bookingId, "payment.supplierInvoiceGenerationClaim": token },
     { $unset: { "payment.supplierInvoiceGenerationClaim": "" } }
   );
 };
@@ -257,8 +287,14 @@ const clearStaleGenerationClaimsIfNeeded = async (bookingId: string) => {
   if (isStaleGenerationClaim(booking?.payment?.creditNoteGenerationClaim, "GENERATING-CN-")) {
     await clearCreditNoteGenerationClaim(bookingId);
   }
-  if (isStaleGenerationClaim(booking?.payment?.supplierInvoiceGenerationClaim, "GENERATING-SUP-")) {
-    await clearSupplierInvoiceGenerationClaim(bookingId);
+  const staleSupplierClaim = booking?.payment?.supplierInvoiceGenerationClaim;
+  if (isStaleSupplierGenerationClaim(staleSupplierClaim)) {
+    // Match the exact stale token so a claim issued to a newer caller after
+    // this read can never be released here.
+    await Booking.updateOne(
+      { _id: bookingId, "payment.supplierInvoiceGenerationClaim": staleSupplierClaim! },
+      { $unset: { "payment.supplierInvoiceGenerationClaim": "" } }
+    );
   }
 };
 
@@ -994,16 +1030,17 @@ const generateMissingSupplierInvoiceArtifacts = async (
   paymentId: string | undefined,
   existing: any,
 ): Promise<InvoiceArtifactResult> => {
-  // Reserve the generation atomically: concurrent callers must not reserve a
-  // second SUP- number, overwrite each other's artifacts, or submit duplicate
-  // self-bills. A losing caller returns the existing artifact state as-is.
-  const claimed = await claimSupplierInvoiceGeneration(bookingId);
-  if (!claimed) return toInvoiceArtifactResult(existing.payment);
+  // Reserve the generation atomically with an owner-bound token: concurrent
+  // callers must not reserve a second SUP- number, overwrite each other's
+  // artifacts, or submit duplicate self-bills. A losing caller returns the
+  // existing artifact state as-is.
+  const claimToken = await claimSupplierInvoiceGeneration(bookingId);
+  if (!claimToken) return toInvoiceArtifactResult(existing.payment);
 
   try {
     return await generateSupplierInvoiceArtifactsWithClaim(bookingId, paymentId, existing);
   } finally {
-    await clearSupplierInvoiceGenerationClaim(bookingId);
+    await releaseSupplierInvoiceGenerationClaim(bookingId, claimToken);
   }
 };
 

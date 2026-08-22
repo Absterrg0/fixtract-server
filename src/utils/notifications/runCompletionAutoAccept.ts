@@ -117,7 +117,12 @@ export async function finalizeBookingCompletion(args: {
     // booking.payment.transferStatus first, then the Payment document. A
     // stale or failed Payment upsert must not hide a failed payout, so treat
     // either persisted record reporting failed as a payout failure.
-    const paymentRecord = await Payment.findOne({ booking: completedBooking._id })
+    // milestoneIndex: null selects the booking-level payment; a milestone
+    // payment's transfer state must not drive base-booking payout recovery.
+    const paymentRecord = await Payment.findOne({
+      booking: completedBooking._id,
+      milestoneIndex: null,
+    })
       .select('transferStatus stripeTransferId metadata')
       .lean();
     const bookingTransferFailed = getTransferStatus({

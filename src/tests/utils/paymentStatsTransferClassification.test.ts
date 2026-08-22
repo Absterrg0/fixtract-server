@@ -95,7 +95,7 @@ describe("supplier generation claim", () => {
     ).toBe(false);
   });
 
-  it("allows reclaiming after the claim was released", () => {
+  it("allows reclaiming after the exact owner released its own token", () => {
     expect(
       canClaimSupplierGeneration({
         supplierInvoiceGenerationClaim: null,
@@ -110,5 +110,74 @@ describe("supplier generation claim", () => {
         supplierInvoiceGenerationClaim: null,
       })
     ).toBe(false);
+  });
+});
+
+/**
+ * Mirrors the owner-bound release predicate: a caller may clear only the
+ * exact token it acquired, so one generation's cleanup can never drop a
+ * newer caller's live claim.
+ */
+const releaseClearsClaim = (
+  storedClaim: string | null | undefined,
+  ownedToken: string
+) => storedClaim === ownedToken;
+
+/**
+ * Mirrors isStaleSupplierGenerationClaim: tokens carry
+ * "<issuedAt>-<random>" and expire only after the supplier-specific TTL,
+ * which exceeds PDF rendering, S3 upload, and Peppol dispatch time.
+ */
+const SUPPLIER_CLAIM_PREFIX = "GENERATING-SUP-";
+const SUPPLIER_GENERATION_CLAIM_TTL_MS = 15 * 60 * 1000;
+
+const parseSupplierClaimIssuedAt = (value?: string | null): number | null => {
+  if (!value?.startsWith(SUPPLIER_CLAIM_PREFIX)) return null;
+  const rest = value.slice(SUPPLIER_CLAIM_PREFIX.length);
+  const separator = rest.indexOf("-");
+  const issuedAt = Number(separator === -1 ? rest : rest.slice(0, separator));
+  return Number.isFinite(issuedAt) ? issuedAt : null;
+};
+
+const isStaleSupplierGenerationClaim = (value?: string | null): boolean => {
+  if (!value?.startsWith(SUPPLIER_CLAIM_PREFIX)) return false;
+  const issuedAt = parseSupplierClaimIssuedAt(value);
+  if (issuedAt == null) return true;
+  return Date.now() - issuedAt > SUPPLIER_GENERATION_CLAIM_TTL_MS;
+};
+
+describe("supplier generation claim ownership and expiry", () => {
+  it("does not let an old token release a newer caller's claim", () => {
+    const firstCallerToken = `${SUPPLIER_CLAIM_PREFIX}1783597440000-firstcaller`;
+    const secondCallerToken = `${SUPPLIER_CLAIM_PREFIX}1783597500000-secondcaller`;
+    // The first caller's finally block runs after its lease was already
+    // reclaimed and re-issued; the stored claim must survive.
+    expect(releaseClearsClaim(secondCallerToken, firstCallerToken)).toBe(false);
+    expect(releaseClearsClaim(firstCallerToken, firstCallerToken)).toBe(true);
+  });
+
+  it("keeps a live claim past the short generic claim TTL", () => {
+    // Generation legitimately exceeds the 60s invoice-claim TTL; the supplier
+    // lease must not be treated as stale while work is still running.
+    const ninetySecondsAgo = Date.now() - 90 * 1000;
+    expect(isStaleSupplierGenerationClaim(`${SUPPLIER_CLAIM_PREFIX}${ninetySecondsAgo}-sample`)).toBe(false);
+  });
+
+  it("expires claims older than the supplier TTL so hung generations can be reclaimed", () => {
+    const sixteenMinutesAgo = Date.now() - 16 * 60 * 1000;
+    expect(isStaleSupplierGenerationClaim(`${SUPPLIER_CLAIM_PREFIX}${sixteenMinutesAgo}-sample`)).toBe(true);
+  });
+
+  it("treats malformed supplier tokens as stale but ignores other claim formats", () => {
+    expect(isStaleSupplierGenerationClaim(`${SUPPLIER_CLAIM_PREFIX}not-a-number`)).toBe(true);
+    expect(isStaleSupplierGenerationClaim("GENERATING-CN-1783597446295")).toBe(false);
+    expect(isStaleSupplierGenerationClaim(null)).toBe(false);
+  });
+
+  it("supports legacy timestamp-only supplier tokens", () => {
+    const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
+    expect(isStaleSupplierGenerationClaim(`${SUPPLIER_CLAIM_PREFIX}${tenMinutesAgo}`)).toBe(false);
+    const twentyMinutesAgo = Date.now() - 20 * 60 * 1000;
+    expect(isStaleSupplierGenerationClaim(`${SUPPLIER_CLAIM_PREFIX}${twentyMinutesAgo}`)).toBe(true);
   });
 });
