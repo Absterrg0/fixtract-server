@@ -4,6 +4,7 @@
  */
 
 import { SupportedCurrency, IdempotencyKeyParams } from '../Types/stripe';
+import { createHash } from 'crypto';
 
 const ZERO_DECIMAL_CURRENCIES = new Set([
   'BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA',
@@ -27,19 +28,79 @@ export function convertToStripeAmount(amount: number, currency: string = "EUR"):
   return Math.round(amount * 100);
 }
 
+type GrossBookingAmountInput = {
+  quote?: {
+    amount?: number;
+    breakdown?: Array<{ item?: string; totalPrice?: number }>;
+  };
+  selectedExtraOptions?: Array<{ bookedPrice?: number } | number>;
+  checkoutSnapshot?: {
+    baseSubtotal?: number;
+    extraOptionsTotal?: number;
+    totalAmount?: number;
+  };
+};
+
+const sameMoney = (a: number, b: number): boolean =>
+  Number.isFinite(a) && Number.isFinite(b) && Math.round(a * 100) === Math.round(b * 100);
+
+const sumSelectedExtraOptionPrices = (
+  selectedExtraOptions?: Array<{ bookedPrice?: number } | number>
+): number => {
+  if (!Array.isArray(selectedExtraOptions)) return 0;
+  let total = 0;
+  for (const entry of selectedExtraOptions) {
+    if (typeof entry === "number") {
+      total += entry;
+      continue;
+    }
+    if (typeof entry?.bookedPrice === "number") {
+      total += entry.bookedPrice;
+    }
+  }
+  return total;
+};
+
+/** Pay-at-checkout used to store package+extras in quote.amount and then add extras again. */
+export function quoteAmountIncludesSelectedExtras(booking: GrossBookingAmountInput): boolean {
+  const extrasTotal = sumSelectedExtraOptionPrices(booking.selectedExtraOptions);
+  if (extrasTotal <= 0) return false;
+  const quoteAmount = Number(booking.quote?.amount || 0);
+  const snapshot = booking.checkoutSnapshot;
+  const computedTotalLine = booking.quote?.breakdown?.find((line) => line.item === 'checkout_snapshot:computed_total');
+  if (computedTotalLine && sameMoney(quoteAmount, Number(computedTotalLine.totalPrice))) {
+    return true;
+  }
+  if (
+    snapshot &&
+    Number(snapshot.extraOptionsTotal) > 0 &&
+    Number.isFinite(Number(snapshot.totalAmount)) &&
+    sameMoney(quoteAmount, Number(snapshot.totalAmount))
+  ) {
+    return true;
+  }
+  const baseSubtotal = Number(snapshot?.baseSubtotal);
+  if (Number.isFinite(baseSubtotal) && sameMoney(quoteAmount, baseSubtotal + extrasTotal)) {
+    return true;
+  }
+  if (Number.isFinite(baseSubtotal) && sameMoney(quoteAmount, baseSubtotal)) {
+    return false;
+  }
+  return sameMoney(quoteAmount, baseSubtotal + extrasTotal);
+}
+
 export function computeGrossBookingAmount(
-  booking: { quote?: { amount?: number }; selectedExtraOptions?: Array<{ bookedPrice?: number } | number> },
+  booking: GrossBookingAmountInput,
   commissionPercent: number
 ): number {
-  const optionsTotal = Array.isArray(booking?.selectedExtraOptions)
-    ? booking.selectedExtraOptions.reduce((sum: number, entry) => {
-        const bookedPrice = (entry as { bookedPrice?: number })?.bookedPrice;
-        return typeof bookedPrice === 'number' ? sum + bookedPrice : sum;
-      }, 0)
-    : 0;
-  const commissionedOptions = +(optionsTotal * (1 + commissionPercent / 100)).toFixed(2);
+  const optionsTotal = sumSelectedExtraOptionPrices(booking.selectedExtraOptions);
   const quoteAmount = booking?.quote?.amount || 0;
-  return +(quoteAmount * (1 + commissionPercent / 100) + commissionedOptions).toFixed(2);
+  const commissionedQuote = +(quoteAmount * (1 + commissionPercent / 100)).toFixed(2);
+  if (quoteAmountIncludesSelectedExtras(booking) || optionsTotal <= 0) {
+    return commissionedQuote;
+  }
+  const commissionedOptions = +(optionsTotal * (1 + commissionPercent / 100)).toFixed(2);
+  return +(commissionedQuote + commissionedOptions).toFixed(2);
 }
 
 /**
@@ -171,6 +232,67 @@ export function generateIdempotencyKey(params: IdempotencyKeyParams): string {
   }
 
   return key;
+}
+
+/**
+ * Build a deterministic key for one logical payment-intent attempt.
+ *
+ * The amount/configuration is part of the fingerprint so a deliberate retry
+ * after a changed quote or discount gets a new Stripe intent, while two
+ * concurrent requests for the same attempt are deduplicated by Stripe.
+ */
+export function buildPaymentIntentIdempotencyKey(params: {
+  bookingId: string;
+  amount: number;
+  currency: string;
+  milestoneIndex?: number | null;
+  pointsToRedeem?: number;
+  discountCode?: string | null;
+  quoteVersion?: number | null;
+}): string {
+  const fingerprint = JSON.stringify({
+    amountMinor: convertToStripeAmount(params.amount, params.currency),
+    currency: params.currency.toUpperCase(),
+    milestoneIndex: params.milestoneIndex ?? null,
+    pointsToRedeem: params.pointsToRedeem ?? 0,
+    discountCode: params.discountCode?.trim().toUpperCase() || null,
+    quoteVersion: params.quoteVersion ?? null,
+  });
+  const digest = createHash('sha256').update(fingerprint).digest('hex').slice(0, 32);
+  return generateIdempotencyKey({
+    bookingId: params.bookingId,
+    operation: 'payment-intent',
+    version: `v2-${digest}`,
+  });
+}
+
+/**
+ * Build a stable key for the exact Connect transfer payload. A corrected payout,
+ * destination, settlement currency, or source charge intentionally gets a new
+ * key; repeating the same transfer after a transient failure reuses the key.
+ */
+export function buildTransferIdempotencyKey(params: {
+  bookingId: string;
+  /** Stripe transfer amount in minor units, exactly as sent to Stripe. */
+  amountMinor: number;
+  currency: string;
+  destination: string;
+  sourceTransaction: string;
+  attempt?: number;
+}): string {
+  const fingerprint = JSON.stringify({
+    amountMinor: Math.round(params.amountMinor),
+    currency: params.currency.toUpperCase(),
+    destination: params.destination,
+    sourceTransaction: params.sourceTransaction,
+    attempt: params.attempt ?? 0,
+  });
+  const digest = createHash('sha256').update(fingerprint).digest('hex').slice(0, 32);
+  return generateIdempotencyKey({
+    bookingId: params.bookingId,
+    operation: 'transfer',
+    version: `v2-${digest}`,
+  });
 }
 
 // ==================== Payment Amount Calculations ====================
@@ -341,7 +463,7 @@ export function buildTransferMetadata(
     bookingId,
     bookingNumber,
     type: 'booking_completion_payout',
-    payoutDate,
+    ...(payoutDate ? { payoutDate } : {}),
     environment: computedEnv,
   };
 }
@@ -357,6 +479,8 @@ export default {
   getCurrencyByCountry,
   calculateStripeFee,
   generateIdempotencyKey,
+  buildPaymentIntentIdempotencyKey,
+  buildTransferIdempotencyKey,
   calculateProfessionalPayout,
   calculatePlatformCommission,
   determineBookingCurrency,

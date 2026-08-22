@@ -2,6 +2,8 @@ import mongoose, { Schema, model, Document, Types } from "mongoose";
 import { getNextSequence } from "../utils/counterSequence";
 import { STRIPE_CONFIG } from "../services/stripe";
 import { VatBreakdownLine } from "../Types/stripe";
+import { PEPPOL_DISPATCH_STATUSES, type PeppolDispatchStatus } from "../constants/peppol";
+import type { InvoiceArtifactHistoryEntry } from "../Types/invoice";
 
 const SUPPORTED_CURRENCIES = STRIPE_CONFIG.supportedCurrencies.length
   ? STRIPE_CONFIG.supportedCurrencies
@@ -203,11 +205,14 @@ export interface IBooking extends Document {
   };
   vatDecision?: {
     action: 'standard_rate' | 'reduced_rate' | 'rfq';
-    country: string;
+    country?: string;
     standardRate: number;
     appliedRate: number;
     reducedRate?: number;
     reverseCharge?: boolean;
+    vatLabel?: string;
+    exemptFromBelgianReverseCharge?: boolean;
+    propertyNature?: 'movable' | 'immovable';
     explanation?: string;
     matchedRuleText?: string;
     ruleGroup?: string;
@@ -241,6 +246,11 @@ export interface IBooking extends Document {
     stripeDestinationPayment?: string;
     transferCurrency?: string;
     transferAmount?: number;
+    transferStatus?: 'pending' | 'succeeded' | 'failed';
+    transferIdempotencyKey?: string;
+    transferAttempt?: number;
+    transferFailureReason?: string;
+    transferAttemptedAt?: Date;
 
     // Financial breakdown
     stripeFeeAmount?: number;
@@ -280,21 +290,57 @@ export interface IBooking extends Document {
     extraCostStripePaymentIntentId?: string;
     extraCostClientSecret?: string;
     extraCostAmount?: number;
+    extraCostCustomerNetAmount?: number;
+    extraCostVatAmount?: number;
+    extraCostPlatformFee?: number;
+    extraCostNetAmount?: number;
+    extraCostCustomerDiscount?: number;
+    extraCostPlatformCommission?: number;
+    extraCostProfessionalPayout?: number;
+    extraCostStatus?: 'pending' | 'succeeded' | 'failed' | 'refunded';
+    extraCostPaymentSucceeded?: boolean;
+    extraCostPaidAt?: Date;
+    extraCostStripeChargeId?: string;
+    extraCostTransferId?: string;
+    extraCostTransferStatus?: 'pending' | 'succeeded' | 'failed';
+    extraCostTransferFailureReason?: string;
+    extraCostTransferAttemptedAt?: Date;
 
     invoiceNumber?: string;
     invoiceUrl?: string;
     invoiceUblUrl?: string;
     invoiceGeneratedAt?: Date;
-    peppolDispatchStatus?: string;
+    peppolDispatchStatus?: PeppolDispatchStatus;
+    peppolDispatchReason?: string;
     peppolDispatchReference?: string;
     peppolDispatchedAt?: Date;
+    supplierPeppolDispatchStatus?: PeppolDispatchStatus;
+    supplierPeppolDispatchReason?: string;
+    supplierPeppolDispatchReference?: string;
+    supplierPeppolDispatchedAt?: Date;
+    supplierInvoiceNumber?: string;
+    supplierInvoiceUrl?: string;
+    supplierInvoiceUblUrl?: string;
+    supplierInvoiceGeneratedAt?: Date;
     creditNoteNumber?: string;
     creditNoteUrl?: string;
     creditNoteUblUrl?: string;
     creditNoteGeneratedAt?: Date;
     creditNoteRelatedInvoiceNumber?: string;
-    creditNotePeppolDispatchStatus?: string;
+    creditNotePeppolDispatchStatus?: PeppolDispatchStatus;
+    creditNotePeppolDispatchReason?: string;
     creditNotePeppolDispatchReference?: string;
+    creditNoteGenerationClaim?: string;
+    supplierInvoiceGenerationClaim?: string;
+    supplierCreditNoteNumber?: string;
+    supplierCreditNoteUrl?: string;
+    supplierCreditNoteUblUrl?: string;
+    supplierCreditNoteGeneratedAt?: Date;
+    supplierCreditNoteRelatedInvoiceNumber?: string;
+    supplierCreditNotePeppolDispatchStatus?: PeppolDispatchStatus;
+    supplierCreditNotePeppolDispatchReason?: string;
+    supplierCreditNotePeppolDispatchReference?: string;
+    invoiceArtifactHistory?: InvoiceArtifactHistoryEntry[];
 
     // Auto-discount breakdown
     discount?: {
@@ -481,6 +527,20 @@ export interface IBooking extends Document {
 }
 
 const TIME_24H_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+const InvoiceArtifactHistorySchema = new Schema<InvoiceArtifactHistoryEntry>(
+  {
+    side: { type: String, enum: ["customer", "supplier"], required: true },
+    documentType: { type: String, enum: ["invoice", "credit_note"], required: true },
+    invoiceNumber: { type: String, required: true },
+    invoiceUrl: { type: String },
+    invoiceUblUrl: { type: String },
+    generatedAt: { type: Date },
+    relatedInvoiceNumber: { type: String },
+    replacedAt: { type: Date, required: true },
+  },
+  { _id: false },
+);
 
 const BookingSchema = new Schema({
   // Core references
@@ -765,11 +825,14 @@ const BookingSchema = new Schema({
   },
   vatDecision: {
     action: { type: String, enum: ['standard_rate', 'reduced_rate', 'rfq'], required: true },
-    country: { type: String, required: true },
+    country: { type: String },
     standardRate: { type: Number, required: true, min: 0, max: 100 },
     appliedRate: { type: Number, required: true, min: 0, max: 100 },
     reducedRate: { type: Number, min: 0, max: 100 },
     reverseCharge: { type: Boolean },
+    vatLabel: { type: String },
+    exemptFromBelgianReverseCharge: { type: Boolean },
+    propertyNature: { type: String, enum: ['movable', 'immovable'] },
     explanation: { type: String, maxlength: 1000 },
     matchedRuleText: { type: String, maxlength: 1000 },
     ruleGroup: { type: String },
@@ -834,6 +897,11 @@ const BookingSchema = new Schema({
     stripeDestinationPayment: { type: String },
     transferCurrency: { type: String, enum: SUPPORTED_CURRENCIES },
     transferAmount: { type: Number, min: [0, 'transferAmount cannot be negative'] },
+    transferStatus: { type: String, enum: ['pending', 'succeeded', 'failed'] },
+    transferIdempotencyKey: { type: String },
+    transferAttempt: { type: Number, min: 0, default: 0 },
+    transferFailureReason: { type: String, maxlength: 1000 },
+    transferAttemptedAt: { type: Date },
 
     // Financial breakdown
     stripeFeeAmount: { type: Number },
@@ -887,22 +955,58 @@ const BookingSchema = new Schema({
     extraCostStripePaymentIntentId: { type: String },
     extraCostClientSecret: { type: String },
     extraCostAmount: { type: Number },
+    extraCostCustomerNetAmount: { type: Number },
+    extraCostVatAmount: { type: Number },
+    extraCostPlatformFee: { type: Number },
+    extraCostNetAmount: { type: Number },
+    extraCostCustomerDiscount: { type: Number },
+    extraCostPlatformCommission: { type: Number },
+    extraCostProfessionalPayout: { type: Number },
+    extraCostStatus: { type: String, enum: ['pending', 'succeeded', 'failed', 'refunded'] },
+    extraCostPaymentSucceeded: { type: Boolean },
+    extraCostPaidAt: { type: Date },
+    extraCostStripeChargeId: { type: String },
+    extraCostTransferId: { type: String },
+    extraCostTransferStatus: { type: String, enum: ['pending', 'succeeded', 'failed'] },
+    extraCostTransferFailureReason: { type: String, maxlength: 1000 },
+    extraCostTransferAttemptedAt: { type: Date },
 
     // Invoice
     invoiceNumber: { type: String },
     invoiceUrl: { type: String },
     invoiceUblUrl: { type: String },
     invoiceGeneratedAt: { type: Date },
-    peppolDispatchStatus: { type: String },
+    peppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    peppolDispatchReason: { type: String },
     peppolDispatchReference: { type: String },
     peppolDispatchedAt: { type: Date },
+    supplierPeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    supplierPeppolDispatchReason: { type: String },
+    supplierPeppolDispatchReference: { type: String },
+    supplierPeppolDispatchedAt: { type: Date },
+    supplierInvoiceNumber: { type: String },
+    supplierInvoiceUrl: { type: String },
+    supplierInvoiceUblUrl: { type: String },
+    supplierInvoiceGeneratedAt: { type: Date },
     creditNoteNumber: { type: String },
     creditNoteUrl: { type: String },
     creditNoteUblUrl: { type: String },
     creditNoteGeneratedAt: { type: Date },
     creditNoteRelatedInvoiceNumber: { type: String },
-    creditNotePeppolDispatchStatus: { type: String },
+    creditNotePeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    creditNotePeppolDispatchReason: { type: String },
     creditNotePeppolDispatchReference: { type: String },
+    creditNoteGenerationClaim: { type: String },
+    supplierInvoiceGenerationClaim: { type: String },
+    supplierCreditNoteNumber: { type: String },
+    supplierCreditNoteUrl: { type: String },
+    supplierCreditNoteUblUrl: { type: String },
+    supplierCreditNoteGeneratedAt: { type: Date },
+    supplierCreditNoteRelatedInvoiceNumber: { type: String },
+    supplierCreditNotePeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    supplierCreditNotePeppolDispatchReason: { type: String },
+    supplierCreditNotePeppolDispatchReference: { type: String },
+    invoiceArtifactHistory: { type: [InvoiceArtifactHistorySchema], default: [] },
 
     // Auto-discount breakdown
     discount: {

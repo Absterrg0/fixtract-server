@@ -5,6 +5,7 @@
 
 import { Request, Response } from 'express';
 import Payment from '../../models/payment';
+import { buildSettledTransferExpression, getTransferStatus } from '../../utils/paymentSafety';
 
 /**
  * Get payment stats for the authenticated professional
@@ -22,7 +23,11 @@ export const getPaymentStats = async (req: Request, res: Response) => {
 
     const [completedStats, pendingStats] = await Promise.all([
       Payment.aggregate([
-        { $match: { professional: userId, status: 'completed' } },
+        { $match: {
+          professional: userId,
+          status: 'completed',
+          $expr: buildSettledTransferExpression(),
+        } },
         {
           $group: {
             _id: { currency: { $ifNull: ['$currency', 'EUR'] } },
@@ -32,7 +37,24 @@ export const getPaymentStats = async (req: Request, res: Response) => {
         },
       ]),
       Payment.aggregate([
-        { $match: { professional: userId, status: 'authorized' } },
+        { $match: {
+          professional: userId,
+          $or: [
+            { status: 'authorized' },
+            { status: 'completed', $or: [
+              { transferStatus: { $in: ['pending', 'failed'] } },
+              // MongoDB equality to null matches an explicit null as well as a
+              // missing field, so legacy documents without any transfer state
+              // still land in the pending bucket.
+              { transferStatus: null, 'metadata.transferFailed': true },
+              {
+                transferStatus: null,
+                stripeTransferId: null,
+                'metadata.transferFailed': { $ne: true },
+              },
+            ] },
+          ],
+        } },
         {
           $group: {
             _id: { currency: { $ifNull: ['$currency', 'EUR'] } },
@@ -111,7 +133,7 @@ export const getTransactions = async (req: Request, res: Response) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 10, 1), 50);
 
     const transactions = await Payment.find({ professional: userId })
-      .select('bookingNumber status currency professionalPayout createdAt capturedAt transferredAt')
+      .select('bookingNumber status currency professionalPayout createdAt capturedAt transferredAt transferStatus stripeTransferId metadata')
       .sort({ createdAt: -1 })
       .limit(limit)
       .lean();
@@ -120,7 +142,7 @@ export const getTransactions = async (req: Request, res: Response) => {
       _id: t._id,
       date: t.transferredAt || t.capturedAt || t.createdAt,
       bookingNumber: t.bookingNumber || 'N/A',
-      status: t.status,
+      status: t.status === 'completed' ? getTransferStatus(t) === 'succeeded' ? 'completed' : `transfer_${getTransferStatus(t)}` : t.status,
       currency: t.currency || 'EUR',
       amount: t.professionalPayout || 0,
     }));

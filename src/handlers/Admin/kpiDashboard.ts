@@ -12,6 +12,7 @@ import { STRIPE_CONFIG } from '../../services/stripe';
 import { generateKpiPdf } from '../../utils/kpiReport';
 import { sendKpiReportEmail } from '../../utils/emailService';
 import { uploadBufferToS3 } from '../../utils/s3Upload';
+import { buildSettledTransferExpression } from '../../utils/paymentSafety';
 
 const REPORTING_CURRENCY = STRIPE_CONFIG.defaultCurrency || 'EUR';
 
@@ -113,6 +114,7 @@ const round1 = (n: number | null | undefined) => (n == null || !Number.isFinite(
 const money2 = (n: number | null | undefined) => Math.round(((n as number) || 0) * 100) / 100;
 
 const PAID_STATUSES = ['booked', 'in_progress', 'professional_completed', 'completed'];
+const settledPayoutExpr = buildSettledTransferExpression();
 
 const quotedExpr = { $or: [{ $ifNull: ['$quote.submittedAt', false] }, { $gt: [{ $size: { $ifNull: ['$quoteVersions', []] } }, 0] }] };
 const firstQuoteAtExpr = { $ifNull: [{ $arrayElemAt: ['$quoteVersions.createdAt', 0] }, '$quote.submittedAt'] };
@@ -131,6 +133,9 @@ const bookingMetricsProjection = (currencyField: string) => ({
   platformCommission: '$payment.platformCommission',
   paymentCurrency: currencyField,
   paymentStatus: '$payment.status',
+  transferStatus: '$payment.transferStatus',
+  stripeTransferId: '$payment.stripeTransferId',
+  metadata: '$payment.metadata',
   refundAmount: {
     $ifNull: [
       '$payment.refundAmount',
@@ -164,8 +169,8 @@ const bookingMetricsAccumulators = {
   reschedulingCount: { $sum: { $cond: [{ $ifNull: ['$rescheduleRequestAt', false] }, 1, 0] } },
   reviewCount: { $sum: { $cond: [{ $ifNull: ['$reviewedAt', false] }, 1, 0] } },
   avgReviewScore: { $avg: { $cond: [{ $ifNull: ['$reviewedAt', false] }, '$reviewAvg', null] } },
-  grossRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$paymentCurrency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$paymentAmount', 0] }, 0] } },
-  platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$paymentCurrency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$platformCommission', 0] }, 0] } },
+  grossRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, settledPayoutExpr, { $eq: [{ $ifNull: ['$paymentCurrency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$paymentAmount', 0] }, 0] } },
+  platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, settledPayoutExpr, { $eq: [{ $ifNull: ['$paymentCurrency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$platformCommission', 0] }, 0] } },
   avgTtfqHours: { $avg: { $cond: ['$quoted', { $divide: [{ $subtract: ['$firstQuoteAt', '$createdAt'] }, 1000 * 60 * 60] }, null] } },
   startOverdueEligible: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$scheduledStartDate', false] }] }, 1, 0] } },
   startOverdueCount: { $sum: { $cond: [{ $and: [{ $in: ['$status', ['completed', 'professional_completed', 'in_progress']] }, { $ifNull: ['$actualStartDate', false] }, { $ifNull: ['$scheduledStartDate', false] }, { $gt: [{ $subtract: ['$actualStartDate', '$scheduledStartDate'] }, 0] }] }, 1, 0] } },
@@ -282,12 +287,17 @@ export const getKpiSummary = async (req: Request, res: Response) => {
     const completedRevenueMatch: Record<string, unknown> = {
       status: 'completed',
       ...bookingCountryMatch,
-      $or: [
-        { 'payment.capturedAt': { $gte: from, $lte: to } },
+      $expr: settledPayoutExpr,
+      $and: [
         {
-          $and: [
-            { $or: [{ 'payment.capturedAt': { $exists: false } }, { 'payment.capturedAt': null }] },
-            { updatedAt: { $gte: from, $lte: to } },
+          $or: [
+            { 'payment.capturedAt': { $gte: from, $lte: to } },
+            {
+              $and: [
+                { $or: [{ 'payment.capturedAt': { $exists: false } }, { 'payment.capturedAt': null }] },
+                { updatedAt: { $gte: from, $lte: to } },
+              ],
+            },
           ],
         },
       ],

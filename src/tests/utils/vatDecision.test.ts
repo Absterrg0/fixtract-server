@@ -17,6 +17,7 @@ const belgianRenovationConfig = {
   service: "Solar panel installation",
   vatManagement: {
     enabled: true,
+    article47Classification: "immovable",
     rateRuleGroup: "building_work",
     reducedVatQuestions: [],
     logicRules: [
@@ -103,6 +104,20 @@ describe("resolveVatDecisionFromConfig", () => {
     expect(decision.appliedRate).toBe(21);
   });
 
+  it("requires admin review instead of guessing Article 47 for legacy VAT configs", async () => {
+    mockConfig({
+      category: "Solar",
+      vatManagement: { enabled: true, reducedVatQuestions: [], logicRules: [] },
+    });
+    const decision = await resolveVatDecisionFromConfig({
+      serviceConfigurationId: "652f1f77bcf86cd799439011",
+      country: "BE",
+      customerType: "individual",
+    });
+    expect(decision.action).toBe("rfq");
+    expect(decision.explanation).toContain("Article 47 classification");
+  });
+
   it("overrides with reverse charge for verified EU B2B outside exception countries", async () => {
     mockConfig(null);
     const decision = await resolveVatDecisionFromConfig({
@@ -114,6 +129,42 @@ describe("resolveVatDecisionFromConfig", () => {
     });
     expect(decision.reverseCharge).toBe(true);
     expect(decision.appliedRate).toBe(0);
+    expect(decision.vatLabel).toBe("Reverse Charge");
+  });
+
+  it("uses the Dutch business country for a movable Dutch B2B customer", async () => {
+    mockConfig(null);
+    const decision = await resolveVatDecisionFromConfig({
+      country: "Belgium",
+      bookingCountry: "Belgium",
+      businessCountry: "Nederland",
+      propertyNature: "movable",
+      customerType: "business",
+      vatNumber: "NL123456789B01",
+      isVatVerified: true,
+    });
+
+    expect(decision.country).toBe("NL");
+    expect(decision.appliedRate).toBe(0);
+    expect(decision.reverseCharge).toBe(true);
+  });
+
+  it("applies Reverse Charge for Belgian B2B immovable work", async () => {
+    mockConfig({
+      category: "Cleaning",
+      vatManagement: { enabled: false, article47Classification: "immovable" },
+    });
+    const decision = await resolveVatDecisionFromConfig({
+      category: "Cleaning",
+      country: "BE",
+      customerType: "business",
+      vatNumber: "BE0123456789",
+      isVatVerified: true,
+      propertyNature: "immovable",
+    });
+    expect(decision.reverseCharge).toBe(true);
+    expect(decision.appliedRate).toBe(0);
+    expect(decision.vatLabel).toBe("Reverse Charge");
   });
 
   it("keeps local VAT for Belgian B2B (same-as-B2C exception)", async () => {
@@ -134,6 +185,27 @@ describe("resolveVatDecisionFromConfig", () => {
       country: "Atlantis",
       customerType: "individual",
     });
+    expect(decision.action).toBe("rfq");
+    expect(decision.appliedRate).toBe(0);
+  });
+
+  it("does not treat an unrecognized two-letter country code as a real country", async () => {
+    const decision = await resolveVatDecisionFromConfig({
+      country: "XX",
+      customerType: "individual",
+    });
+    expect(decision.country).toBe("");
+    expect(decision.action).toBe("rfq");
+    expect(decision.appliedRate).toBe(0);
+  });
+
+  it("requires VAT review when place-of-supply context is present but unknown", async () => {
+    const decision = await resolveVatDecisionFromConfig({
+      bookingCountry: "Atlantis",
+      businessCountry: "Unknown",
+      customerType: "business",
+    });
+    expect(decision.country).toBe("");
     expect(decision.action).toBe("rfq");
     expect(decision.appliedRate).toBe(0);
   });
@@ -166,6 +238,7 @@ describe("getVatRateOptionsFromConfig", () => {
     expect(options).toHaveLength(1);
     expect(options[0].rate).toBe(0);
     expect(options[0].reverseCharge).toBe(true);
+    expect(options[0].label).toBe("Reverse Charge");
     expect(options[0].source).toBe("b2b_exempt");
   });
 

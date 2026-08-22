@@ -12,6 +12,7 @@ import DiscountCode from '../models/discountCode';
 import DiscountCodeUsage from '../models/discountCodeUsage';
 import { getCurrentTier } from './loyaltySystem';
 import mongoose from 'mongoose';
+export { calculateDiscountedPayouts } from './discountAccounting';
 
 export interface LoyaltyDiscountInfo {
   percentage: number;
@@ -132,51 +133,6 @@ const roundToTwo = (value: number): number => Math.round(value * 100) / 100;
 const hasNumericCap = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value);
 const MINIMUM_PAYMENT_AMOUNT = 0.50; // Stripe minimum in EUR
-
-/**
- * Calculate how the discount affects commission and professional payout.
- *
- * Hybrid model:
- * - Platform absorbs loyalty discount -> professional gets full payout as if no loyalty discount
- * - Professional absorbs repeat-buyer discount -> professional payout reduced by their discount
- * - Platform absorbs points discount -> same as loyalty, professional unaffected
- *
- * Customer pays: originalAmount - totalDiscount
- * Platform commission: calculated on (originalAmount - repeatBuyerDiscount) then minus loyaltyDiscount minus pointsDiscount
- * Professional payout: calculated on (originalAmount - repeatBuyerDiscount)
- */
-export function calculateDiscountedPayouts(
-  discount: DiscountBreakdown,
-  commissionPercent: number
-): {
-  customerPays: number;
-  platformCommission: number;
-  professionalPayout: number;
-} {
-  const { originalAmount, finalAmount, loyaltyDiscount, repeatBuyerDiscount, pointsDiscount, codeDiscount } = discount;
-
-  // The amount the professional's world sees (before platform commission)
-  // = original amount minus the repeat-buyer discount they offered
-  const professionalBaseAmount = roundToTwo(originalAmount - repeatBuyerDiscount.amount);
-
-  // Platform commission is on the professional's base amount
-  const platformCommissionOnBase = roundToTwo((professionalBaseAmount * commissionPercent) / 100);
-
-  // Professional payout = their base amount minus commission
-  const professionalPayout = roundToTwo(professionalBaseAmount - platformCommissionOnBase);
-
-  const codeAmount = codeDiscount?.amount || 0;
-  const platformAbsorbed = roundToTwo(loyaltyDiscount.amount + pointsDiscount.discountAmount + codeAmount);
-  const platformCommission = roundToTwo(platformCommissionOnBase - platformAbsorbed);
-
-  // When loyalty+points absorption exceeds the base commission, platform subsidizes
-  // the difference. Keep accounting identity: customerPays = platformCommission + professionalPayout
-  return {
-    customerPays: finalAmount,
-    platformCommission,
-    professionalPayout,
-  };
-}
 
 /**
  * Calculate auto-discount for a booking based on loyalty tier, repeat-buyer config, and optional points

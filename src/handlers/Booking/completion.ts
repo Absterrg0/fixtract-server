@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import Booking, { BookingStatus, ExtraCostType } from '../../models/booking';
 import User from '../../models/user';
 import PlatformSettings from '../../models/platformSettings';
@@ -35,6 +36,8 @@ import { sendDisputeRaisedAdminEmail } from '../../utils/emailService';
 import { notify } from '../../utils/notifications/notify';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
+import { calculateExtraCostBreakdown } from '../../utils/extraCostAccounting';
+import { getTransferStatus } from '../../utils/paymentSafety';
 
 const ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
@@ -79,17 +82,39 @@ const computeCustomerLoyaltyDiscount = async (customer: any, commissionInclusive
   }
 };
 
-const computeExtraCostCustomerCharge = async (customer: any, extraCostTotal: number) => {
+const computeExtraCostCustomerCharge = async (
+  customer: any,
+  extraCostTotal: number,
+  vatRate = 0,
+  reverseCharge = false,
+) => {
   const commissionPercent = await getPlatformCommissionPercent();
   const subtotalInclCommission = roundToTwo(extraCostTotal * (1 + commissionPercent / 100));
   const loyalty = await computeCustomerLoyaltyDiscount(customer, subtotalInclCommission);
-  const platformMargin = roundToTwo(subtotalInclCommission - extraCostTotal);
-  const cappedLoyalty = Math.max(0, Math.min(loyalty.amount, platformMargin));
-  (loyalty as any).cappedAmount = cappedLoyalty;
-  (loyalty as any).amount = cappedLoyalty;
-  const customerChargeAmount = Math.max(0, roundToTwo(subtotalInclCommission - cappedLoyalty));
-  const platformCommissionAmount = roundToTwo(subtotalInclCommission - extraCostTotal - cappedLoyalty);
-  return { commissionPercent, subtotalInclCommission, loyalty, cappedLoyalty, customerChargeAmount, platformCommissionAmount };
+  const breakdown = calculateExtraCostBreakdown({
+    extraCostNetAmount: extraCostTotal,
+    commissionPercent,
+    customerDiscount: loyalty.amount,
+  });
+  const appliedLoyalty = {
+    ...loyalty,
+    requestedAmount: loyalty.amount,
+    amount: breakdown.customerDiscount,
+  };
+  const customerNetChargeAmount = breakdown.customerChargeAmount;
+  const vatAmount = reverseCharge ? 0 : roundToTwo(customerNetChargeAmount * Math.max(0, vatRate) / 100);
+  const customerChargeAmount = roundToTwo(customerNetChargeAmount + vatAmount);
+  return {
+    commissionPercent,
+    subtotalInclCommission,
+    loyalty: appliedLoyalty,
+    cappedLoyalty: breakdown.customerDiscount,
+    customerNetChargeAmount,
+    vatAmount,
+    customerChargeAmount,
+    platformCommissionAmount: breakdown.platformCommissionAmount,
+    platformFeeAmount: roundToTwo(breakdown.platformCommissionAmount + vatAmount),
+  };
 };
 
 export const professionalCompleteBooking = async (req: Request, res: Response) => {
@@ -263,13 +288,20 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
               error: { code: 'VALIDATION_ERROR', message: 'Other extra cost requires name and amount' }
             });
           }
+          const otherAmount = Number(cost.amount);
+          if (!Number.isFinite(otherAmount) || otherAmount < 0) {
+            return res.status(400).json({
+              success: false,
+              error: { code: 'VALIDATION_ERROR', message: 'Other extra cost amount must be a non-negative number' }
+            });
+          }
           validatedExtraCosts.push({
             type: 'other',
             name: cost.name,
             justification: cost.justification,
-            amount: cost.amount,
+            amount: otherAmount,
           });
-          extraCostTotal += cost.amount;
+          extraCostTotal += otherAmount;
         } else {
           return res.status(400).json({
             success: false,
@@ -356,7 +388,12 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
       const professionalUser = await User.findById(authUser._id).select('email name username businessInfo').lean();
       if (customerUser?._id) {
         const emailExtraCostTotal = extraCostTotal > 0
-          ? (await computeExtraCostCustomerCharge(customerUser, extraCostTotal)).customerChargeAmount
+          ? (await computeExtraCostCustomerCharge(
+              customerUser,
+              extraCostTotal,
+              updatedBooking.payment?.vatRate,
+              updatedBooking.payment?.reverseCharge,
+            )).customerChargeAmount
           : extraCostTotal;
         await notify({
           userId: customerUser._id.toString(),
@@ -469,14 +506,20 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     }
 
     const currency = (booking.payment?.currency || 'EUR').toLowerCase();
-    const { subtotalInclCommission, loyalty, customerChargeAmount, platformCommissionAmount } =
-      await computeExtraCostCustomerCharge(booking.customer as any, extraCostTotal);
-    const applicationFeeAmount = convertToStripeAmount(Math.max(0, platformCommissionAmount), currency);
+    const { subtotalInclCommission, loyalty, cappedLoyalty, customerNetChargeAmount, customerChargeAmount, vatAmount, platformFeeAmount, platformCommissionAmount } =
+      await computeExtraCostCustomerCharge(
+        booking.customer as any,
+        extraCostTotal,
+        booking.payment?.vatRate,
+        booking.payment?.reverseCharge,
+      );
+    const applicationFeeAmount = convertToStripeAmount(Math.max(0, platformFeeAmount), currency);
 
     const paymentIntent = await stripe.paymentIntents.create({
       amount: convertToStripeAmount(customerChargeAmount, currency),
       currency,
       payment_method_types: ['card'],
+      capture_method: 'automatic',
       transfer_data: {
         destination: professional.stripe.accountId,
       },
@@ -504,7 +547,62 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     booking.set('payment.extraCostStripePaymentIntentId', paymentIntent.id);
     booking.set('payment.extraCostClientSecret', paymentIntent.client_secret);
     booking.set('payment.extraCostAmount', customerChargeAmount);
-    await booking.save();
+    booking.set('payment.extraCostCustomerNetAmount', customerNetChargeAmount);
+    booking.set('payment.extraCostVatAmount', vatAmount);
+    booking.set('payment.extraCostPlatformFee', platformFeeAmount);
+    booking.set('payment.extraCostNetAmount', extraCostTotal);
+    booking.set('payment.extraCostCustomerDiscount', cappedLoyalty);
+    booking.set('payment.extraCostPlatformCommission', platformCommissionAmount);
+    booking.set('payment.extraCostProfessionalPayout', extraCostTotal);
+    booking.set('payment.extraCostStatus', 'pending');
+    booking.set('payment.extraCostPaymentSucceeded', false);
+    booking.set('payment.extraCostTransferStatus', 'pending');
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await Payment.findOneAndUpdate(
+          { booking: booking._id },
+          {
+            $set: {
+              extraCostAmount: customerChargeAmount,
+              extraCostCustomerNetAmount: customerNetChargeAmount,
+              extraCostVatAmount: vatAmount,
+              extraCostPlatformFee: platformFeeAmount,
+              extraCostNetAmount: extraCostTotal,
+              extraCostCustomerDiscount: cappedLoyalty,
+              extraCostPlatformCommission: platformCommissionAmount,
+              extraCostProfessionalPayout: extraCostTotal,
+              extraCostStatus: 'pending',
+              extraCostPaymentSucceeded: false,
+              extraCostStripePaymentIntentId: paymentIntent.id,
+              extraCostTransferStatus: 'pending',
+            },
+            $setOnInsert: {
+              booking: booking._id,
+              bookingNumber: booking.bookingNumber,
+              customer: (booking.customer as any)._id,
+              professional: professional._id,
+              currency: currency.toUpperCase(),
+              amount: booking.payment?.amount || 0,
+              status: booking.payment?.status || 'pending',
+            },
+          },
+          { upsert: true, session },
+        );
+        await booking.save({ session });
+      });
+    } catch (writeError) {
+      // The PaymentIntent was created before the database transaction. Cancel it
+      // so a failed persistence attempt cannot leave a chargeable orphan.
+      try {
+        await stripe.paymentIntents.cancel(paymentIntent.id);
+      } catch (cancelError) {
+        console.error(`Failed to cancel orphaned extra-cost PaymentIntent ${paymentIntent.id}:`, cancelError);
+      }
+      throw writeError;
+    } finally {
+      await session.endSession();
+    }
 
     return res.json({
       success: true,
@@ -596,6 +694,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       {
         $set: {
           status: COMPLETED_BOOKING_STATUS,
+          actualStartDate: booking.actualStartDate || completionDate,
           actualEndDate: completionDate,
           ...(booking.extraCosts && booking.extraCosts.length > 0 ? { extraCostStatus: 'confirmed' } : {}),
         },
@@ -639,6 +738,37 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
     const paymentStatus = refreshedBooking?.payment?.status ? String(refreshedBooking.payment.status) : '';
 
     if (!transferResult.success) {
+      const transferFailed = getTransferStatus({
+        transferStatus: refreshedBooking?.payment?.transferStatus,
+        stripeTransferId: refreshedBooking?.payment?.stripeTransferId,
+        metadata: undefined,
+      }) === 'failed';
+      if (transferFailed) {
+        await Booking.findOneAndUpdate(
+          { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },
+          {
+            $set: { status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
+            $unset: { actualEndDate: 1 },
+            $push: {
+              statusHistory: {
+                status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
+                timestamp: new Date(),
+                updatedBy: authUser._id,
+                note: `Completion is awaiting professional payout recovery: ${transferResult.error?.message || 'transfer failed'}`,
+              },
+            },
+          },
+        );
+        return res.status(502).json({
+          success: false,
+          error: {
+            code: 'PAYOUT_RECOVERY_REQUIRED',
+            message: 'Payment was captured, but the professional transfer failed. Completion can be retried after the transfer is recovered.',
+            cause: transferResult.error,
+          },
+          data: { transferStatus: 'failed', paymentStatus },
+        });
+      }
       if (paymentStatus !== 'completed' && paymentStatus !== 'captured') {
         await Booking.findOneAndUpdate(
           { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },

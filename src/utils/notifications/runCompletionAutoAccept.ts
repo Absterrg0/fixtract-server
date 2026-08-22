@@ -1,6 +1,8 @@
 import Booking, { BookingStatus } from '../../models/booking';
+import Payment from '../../models/payment';
 import { SYSTEM_USER_ID } from '../../constants/system';
 import { captureAndTransferPayment } from '../../handlers/Stripe/payment';
+import { getTransferStatus } from '../../utils/paymentSafety';
 import { stripe } from '../../services/stripe';
 import {
   generateIdempotencyKey,
@@ -84,6 +86,7 @@ export async function finalizeBookingCompletion(args: {
     {
       $set: {
         status: COMPLETED_BOOKING_STATUS,
+        actualStartDate: booking.actualStartDate || completionDate,
         actualEndDate: completionDate,
         ...(booking.extraCosts && booking.extraCosts.length > 0 ? { extraCostStatus: 'confirmed' } : {}),
       },
@@ -110,6 +113,46 @@ export async function finalizeBookingCompletion(args: {
     : '';
 
   if (!transferResult.success) {
+    // captureAndTransferPayment persists payout failures on both records:
+    // booking.payment.transferStatus first, then the Payment document. A
+    // stale or failed Payment upsert must not hide a failed payout, so treat
+    // either persisted record reporting failed as a payout failure.
+    // milestoneIndex: null selects the booking-level payment; a milestone
+    // payment's transfer state must not drive base-booking payout recovery.
+    const paymentRecord = await Payment.findOne({
+      booking: completedBooking._id,
+      milestoneIndex: null,
+    })
+      .select('transferStatus stripeTransferId metadata')
+      .lean();
+    const bookingTransferFailed = getTransferStatus({
+      transferStatus: refreshedBooking?.payment?.transferStatus,
+      stripeTransferId: refreshedBooking?.payment?.stripeTransferId,
+    }) === 'failed';
+    const paymentTransferFailed = getTransferStatus({
+      transferStatus: paymentRecord?.transferStatus,
+      stripeTransferId: paymentRecord?.stripeTransferId,
+      metadata: paymentRecord?.metadata as { transferFailed?: boolean } | undefined,
+    }) === 'failed';
+    const transferFailed = paymentTransferFailed || bookingTransferFailed;
+    if (transferFailed) {
+      await Booking.findOneAndUpdate(
+        { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },
+        {
+          $set: { status: PROFESSIONAL_COMPLETION_PENDING_STATUS },
+          $unset: { actualEndDate: 1 },
+          $push: {
+            statusHistory: {
+              status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
+              timestamp: new Date(),
+              updatedBy: actorId,
+              note: `Completion is awaiting professional payout recovery: ${transferResult.error?.message || 'transfer failed'}`,
+            },
+          },
+        },
+      );
+      return { ok: false, reason: 'payout_recovery_required', skipped: true };
+    }
     if (paymentStatus !== 'completed' && paymentStatus !== 'captured') {
       await Booking.findOneAndUpdate(
         { _id: completedBooking._id, status: COMPLETED_BOOKING_STATUS },
@@ -262,6 +305,7 @@ export async function runCompletionAutoAccept(): Promise<{
   const cutoff = new Date(Date.now() - 10 * DAY_MS);
   const result = { autoAccepted: 0, skipped: 0, errors: [] as string[] };
 
+  const MAX_TRANSFER_RECOVERY_ATTEMPTS = 3;
   const candidates = await Booking.find({
     status: 'professional_completed',
     professionalCompletedAt: { $lte: cutoff },
@@ -273,6 +317,11 @@ export async function runCompletionAutoAccept(): Promise<{
 
   for (const booking of candidates) {
     try {
+      const transferAttempt = Number(booking.payment?.transferAttempt || 0);
+      if (transferAttempt >= MAX_TRANSFER_RECOVERY_ATTEMPTS) {
+        result.errors.push(`${booking._id}: payout recovery exhausted after ${transferAttempt} attempts`);
+        continue;
+      }
       const unpaidMilestoneCount = getUnpaidMilestoneCount(booking.milestonePayments);
       const extraCostTotal = Number(booking.extraCostTotal || 0);
       let extraCostPaymentSucceeded = extraCostTotal <= 0;
@@ -312,7 +361,11 @@ export async function runCompletionAutoAccept(): Promise<{
       if (finalize.ok) {
         result.autoAccepted++;
       } else if (finalize.skipped) {
-        result.skipped++;
+        if (finalize.reason === 'payout_recovery_required') {
+          result.errors.push(`${booking._id}: ${finalize.reason}`);
+        } else {
+          result.skipped++;
+        }
       } else {
         result.errors.push(`${booking._id}: ${finalize.reason}`);
       }

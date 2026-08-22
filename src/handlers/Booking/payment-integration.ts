@@ -651,7 +651,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       const finalizeCompletedBooking = async () => {
         const atomicUpdate = await Booking.findOneAndUpdate(
           { _id: booking._id, status: { $in: COMPLETABLE_BOOKING_STATUSES } },
-          { $set: { status: 'completed', actualEndDate: completionDate } },
+          { $set: { status: 'completed', actualStartDate: booking.actualStartDate || completionDate, actualEndDate: completionDate } },
           { new: true }
         );
 

@@ -7,7 +7,7 @@
 import { VATCalculation, VATCalculationParams } from '../Types/stripe';
 import { EU_COUNTRIES } from './viesApi';
 import {
-  B2B_VAT_EXEMPTION_NOTE,
+  REVERSE_CHARGE_LABEL,
   getStandardVatRate,
   isB2BSameAsB2CCountry,
   normalizeVatCountry,
@@ -118,7 +118,7 @@ export function getVATExplanation(
   customerCountry: string
 ): string {
   if (calculation.reverseCharge) {
-    return B2B_VAT_EXEMPTION_NOTE;
+    return REVERSE_CHARGE_LABEL;
   }
 
   if (calculation.vatRate === 0 && !isEUCountry(customerCountry)) {

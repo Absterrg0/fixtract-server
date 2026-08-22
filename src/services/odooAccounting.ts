@@ -8,6 +8,7 @@ export type OdooAccountingConfig = {
   apiKey: string;
   companyId: number;
   incomeAccountId: number;
+  expenseAccountId: number;
   salesJournalId?: number;
   defaultTaxId: number;
   reverseChargeTaxId?: number;
@@ -188,9 +189,10 @@ const pickSaleTax = (
   preferredNames: string[]
 ): number | undefined => {
   const normalizedPreferred = preferredNames.map((name) => name.toLowerCase());
-  const exact = taxes.find((tax) => normalizedPreferred.includes(String(tax.name || "").toLowerCase()));
+  const stableTaxes = [...taxes].sort((left, right) => left.id - right.id);
+  const exact = stableTaxes.find((tax) => normalizedPreferred.includes(String(tax.name || "").toLowerCase()));
   if (exact?.id) return exact.id;
-  const byAmount = taxes.find((tax) => Number(tax.amount) === amount);
+  const byAmount = stableTaxes.find((tax) => Number(tax.amount) === amount);
   return byAmount?.id;
 };
 
@@ -230,6 +232,55 @@ const discoverIncomeAccount = async (
   return pickIncomeAccount(mergedAccounts);
 };
 
+/**
+ * Deterministically rank expense accounts the way pickIncomeAccount does.
+ * Broad accounts such as "Services and other goods" must not win over the
+ * specific subcontracting account, and ties break on the stable Odoo id so
+ * discovery-cache refreshes always post to the same P&L account.
+ */
+const pickExpenseAccount = (
+  accounts: Array<{ id: number; code?: string | false; name?: string }>
+): number => {
+  const ranked = [...accounts].sort((left, right) => {
+    const score = (account: typeof left): number => {
+      const code = String(account.code || "");
+      const name = String(account.name || "").toLowerCase();
+      if (name.includes("subcontract")) return 0;
+      if (code.startsWith("604")) return 1;
+      if (name.includes("third part") || name.includes("façon") || name.includes("facon")) return 2;
+      if (name.includes("service") && !name.includes("goods")) return 3;
+      if (code.startsWith("6")) return 5;
+      return 10;
+    };
+    const byScore = score(left) - score(right);
+    return byScore !== 0 ? byScore : left.id - right.id;
+  });
+  const selected = ranked[0];
+  if (!selected?.id) {
+    throw new Error("No Odoo expense account found for supplier invoices");
+  }
+  return selected.id;
+};
+
+const discoverExpenseAccount = async (
+  credentials: OdooCredentials,
+  companyId: number,
+): Promise<number> => {
+  const accounts = await odooJson2CallWithRetries<Array<{ id: number; code?: string | false; name?: string }>>(
+    credentials,
+    "account.account",
+    "search_read",
+    {
+      domain: [["account_type", "=", "expense"]],
+      fields: ["id", "code", "name"],
+      order: "id asc",
+      limit: 50,
+    },
+    companyId,
+  );
+  return pickExpenseAccount(accounts);
+};
+
 const discoverSaleTaxes = async (
   credentials: OdooCredentials,
   companyId: number
@@ -241,13 +292,13 @@ const discoverSaleTaxes = async (
     {
       domain: [["type_tax_use", "=", "sale"]],
       fields: ["id", "name", "amount"],
+      order: "id asc",
       limit: 100,
     },
     companyId
   );
 
   const tax21 = pickSaleTax(taxes, 21, ["21% S", "21%"]);
-  const tax6 = pickSaleTax(taxes, 6, ["6% S", "6%"]);
   if (!tax21) {
     throw new Error("Could not find a 21% Odoo sales tax (expected Belgian tax such as 21% S)");
   }
@@ -262,17 +313,27 @@ const discoverSaleTaxes = async (
         ["amount", "=", 0],
       ],
       fields: ["id", "name", "amount"],
+      order: "id asc",
       limit: 20,
     },
     companyId
   );
-  const reverseChargeTaxId = reverseTaxes.find((tax) => /ic|intra|reverse|co-contractor/i.test(String(tax.name || "")))?.id;
+  const reverseChargeTaxId = [...reverseTaxes]
+    .sort((left, right) => left.id - right.id)
+    .find((tax) => /ic|intra|reverse|co-contractor/i.test(String(tax.name || "")))?.id;
+
+  const taxIdsByRate = [...taxes].sort((left, right) => left.id - right.id).reduce<Record<string, number>>((mapping, tax) => {
+    const rate = Number(tax.amount);
+    if (tax.id && Number.isFinite(rate) && rate > 0 && mapping[String(rate)] == null) {
+      mapping[String(rate)] = tax.id;
+    }
+    return mapping;
+  }, {});
 
   return {
-    taxIdsByRate: {
-      ...(tax21 ? { "21": tax21 } : {}),
-      ...(tax6 ? { "6": tax6 } : {}),
-    },
+    // Keep every configured Odoo sales tax, not only the Belgian 21% and 6%
+    // defaults. This lets Peppol dispatch handle Dutch and other EU rates.
+    taxIdsByRate,
     defaultTaxId: tax21,
     reverseChargeTaxId,
   };
@@ -308,6 +369,7 @@ export const discoverOdooAccountingConfig = async (): Promise<OdooAccountingConf
   }
 
   const { accountId: incomeAccountId, companyId } = await discoverIncomeAccount(credentials);
+  const expenseAccountId = await discoverExpenseAccount(credentials, companyId);
   const { taxIdsByRate, defaultTaxId, reverseChargeTaxId } = await discoverSaleTaxes(credentials, companyId);
   const salesJournalId = await discoverSalesJournal(credentials, companyId);
 
@@ -316,6 +378,7 @@ export const discoverOdooAccountingConfig = async (): Promise<OdooAccountingConf
     apiKey: credentials.apiKey,
     companyId,
     incomeAccountId,
+    expenseAccountId,
     salesJournalId,
     defaultTaxId,
     reverseChargeTaxId,

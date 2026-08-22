@@ -3,6 +3,7 @@ import ServiceConfiguration from '../../models/serviceConfiguration';
 import CmsContent from '../../models/cmsContent';
 import { IUser } from '../../models/user';
 import { toSlug } from '../../utils/slug';
+import { withArticle47ProfessionalQuestion } from '../../utils/vatManagement';
 
 function respondWithSchemaError(res: Response, error: any, fallbackMessage: string) {
     if (error?.name === 'ValidationError' && error.errors) {
@@ -129,14 +130,19 @@ export const getServiceConfigurationById = async (req: Request, res: Response) =
 const validateVatManagement = (vatManagement: any): string | null => {
     if (!vatManagement || !vatManagement.enabled) return null;
 
-    const questions = Array.isArray(vatManagement.reducedVatQuestions)
-        ? vatManagement.reducedVatQuestions
-        : [];
+    if (!['movable', 'immovable', 'project_dependent'].includes(vatManagement.article47Classification)) {
+        return 'VAT management requires an explicit Article 47 classification before it can be enabled.';
+    }
+
+    const questions = [
+      ...(Array.isArray(vatManagement.reducedVatQuestions) ? vatManagement.reducedVatQuestions : []),
+      ...(Array.isArray(vatManagement.professionalVatQuestions) ? vatManagement.professionalVatQuestions : []),
+    ];
     const fieldNames = new Set<string>();
     for (const question of questions) {
         const fieldName = String(question?.fieldName || '').trim();
         if (!fieldName || !String(question?.question || '').trim()) {
-            return 'Every reduced VAT question needs both a question text and a field name.';
+            return 'Every VAT question needs both a question text and a field name.';
         }
         if (fieldNames.has(fieldName)) {
             return `Duplicate VAT question field name "${fieldName}".`;
@@ -166,7 +172,7 @@ const validateVatManagement = (vatManagement: any): string | null => {
         for (const condition of Array.isArray(rule?.conditions) ? rule.conditions : []) {
             const conditionField = String(condition?.fieldName || '').trim();
             if (!conditionField || !fieldNames.has(conditionField)) {
-                return `VAT rule condition references unknown field "${conditionField || '(empty)'}". Define it as a reduced VAT question first.`;
+                return `VAT rule condition references unknown field "${conditionField || '(empty)'}". Define it as a customer or professional VAT question first.`;
             }
         }
     }
@@ -191,6 +197,9 @@ const mergeVatManagement = (existingVatManagement: any, patch: any) => {
         reducedVatQuestions: Array.isArray(patch.reducedVatQuestions)
             ? patch.reducedVatQuestions
             : existing.reducedVatQuestions || [],
+        professionalVatQuestions: Array.isArray(patch.professionalVatQuestions)
+            ? patch.professionalVatQuestions
+            : existing.professionalVatQuestions || [],
         logicRules: Array.isArray(patch.logicRules)
             ? patch.logicRules
             : existing.logicRules || [],
@@ -204,6 +213,11 @@ const mergeVatManagement = (existingVatManagement: any, patch: any) => {
 export const createServiceConfiguration = async (req: Request, res: Response) => {
     try {
         const configurationData = req.body;
+
+        if (configurationData?.vatManagement) {
+            configurationData.vatManagement.professionalVatQuestions =
+                withArticle47ProfessionalQuestion(configurationData.vatManagement);
+        }
 
         const vatError = validateVatManagement(configurationData?.vatManagement);
         if (vatError) {
@@ -259,6 +273,8 @@ export const updateServiceConfiguration = async (req: Request, res: Response) =>
 
         if (updateData?.vatManagement !== undefined) {
             updateData.vatManagement = mergeVatManagement(existingConfiguration.vatManagement, updateData.vatManagement);
+            updateData.vatManagement.professionalVatQuestions =
+                withArticle47ProfessionalQuestion(updateData.vatManagement);
             const vatError = validateVatManagement(updateData.vatManagement);
             if (vatError) {
                 return res.status(400).json({ success: false, message: vatError });

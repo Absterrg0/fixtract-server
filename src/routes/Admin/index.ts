@@ -38,7 +38,13 @@ import {
   getCategories,
   getServicesByCategory
 } from "../../handlers/Admin/serviceConfigurationManagement";
-import { getPayments, capturePayment, generatePaymentInvoice, generatePaymentCreditNote } from "../../handlers/Admin/payments";
+import {
+  getPayments,
+  capturePayment,
+  generatePaymentInvoice,
+  generatePaymentCreditNote,
+  createManualPaymentArtifact,
+} from "../../handlers/Admin/payments";
 import {
   getReferralConfig,
   updateReferralConfig,
@@ -258,6 +264,7 @@ adminRouter.route('/payments').get(getPayments);
 adminRouter.route('/payments/:paymentId/capture').post(capturePayment);
 adminRouter.route('/payments/:paymentId/invoice').post(generatePaymentInvoice);
 adminRouter.route('/payments/:paymentId/credit-note').post(generatePaymentCreditNote);
+adminRouter.route('/payments/:paymentId/manual-artifact').post(createManualPaymentArtifact);
 
 // Review moderation routes
 adminRouter.route('/reviews').get(getAdminReviews);

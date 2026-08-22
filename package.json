@@ -28,6 +28,7 @@
     "migrate:fix-invoice-sequence-indexes": "npx tsx src/scripts/fix/fixInvoiceSequenceIndexes.ts",
     "fix:conversation-indexes": "npx tsx src/scripts/fix/fixConversationIndexes.ts",
     "fix:invoice-sequence-indexes": "npx tsx src/scripts/fix/fixInvoiceSequenceIndexes.ts",
+    "fix:payment-indexes": "npx tsx src/scripts/fix/fixPaymentIndexes.ts",
     "fix:merge-solar": "npx tsx src/scripts/fix/mergeDuplicateSolarServices.ts",
     "fix:solar-service-names": "npx tsx src/scripts/fix/fixSolarServiceNames.ts",
     "fix:stuck-milestone-quotes": "npx tsx src/scripts/fix/migrateStuckMilestoneQuotes.ts",
@@ -62,7 +63,7 @@
     "luxon": "^3.5.0",
     "mongoose": "^8.24.1",
     "multer": "^2.0.2",
-    "pdfkit": "^0.17.2",
+    "pdfkit": "0.17.2",
     "stripe": "^20.0.0",
     "twilio": "^5.8.0"
   },

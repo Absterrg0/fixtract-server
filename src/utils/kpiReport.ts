@@ -4,8 +4,10 @@ import User from '../models/user';
 import WarrantyClaim from '../models/warrantyClaim';
 import ServiceView from '../models/serviceView';
 import { STRIPE_CONFIG } from '../services/stripe';
+import { buildSettledTransferExpression } from './paymentSafety';
 
 const REPORTING_CURRENCY = STRIPE_CONFIG.defaultCurrency || 'EUR';
+const settledPayoutExpr = buildSettledTransferExpression('payment');
 
 interface KpiRange { from: Date; to: Date; }
 
@@ -23,8 +25,8 @@ async function aggregateSummary({ from, to }: KpiRange) {
         $group: {
           _id: null,
           completedBookings: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
-          grossRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.amount', 0] }, 0] } },
-          platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.platformCommission', 0] }, 0] } },
+          grossRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, settledPayoutExpr, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.amount', 0] }, 0] } },
+          platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, settledPayoutExpr, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.platformCommission', 0] }, 0] } },
         },
       },
     ]),
@@ -133,8 +135,8 @@ async function aggregateByRegion({ from, to }: KpiRange) {
         $group: {
           _id: normalizeBookingCityExpr,
           totalBookings: { $sum: 1 },
-          bookedValue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.amount', 0] }, 0] } },
-          platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.platformCommission', 0] }, 0] } },
+          bookedValue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, settledPayoutExpr, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.amount', 0] }, 0] } },
+          platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, settledPayoutExpr, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.platformCommission', 0] }, 0] } },
           disputeCount: { $sum: { $cond: [{ $ifNull: ['$dispute.raisedAt', false] }, 1, 0] } },
           refundCount: { $sum: { $cond: [{ $eq: ['$status', 'refunded'] }, 1, 0] } },
           quotedCount: {

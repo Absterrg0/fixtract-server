@@ -1,9 +1,19 @@
 import { Schema, model, Document, Types } from "mongoose";
 import { STRIPE_CONFIG } from "../services/stripe";
 import { VatBreakdownLine } from "../Types/stripe";
-import { PeppolDispatchStatus } from "../services/peppolDispatch";
+import { PEPPOL_DISPATCH_STATUSES, type PeppolDispatchStatus } from "../constants/peppol";
+import type { TransferStatus } from "../utils/paymentSafety";
+import type { InvoiceArtifactHistoryEntry } from "../Types/invoice";
 
-const PEPPOL_DISPATCH_STATUSES: PeppolDispatchStatus[] = ["skipped", "queued", "sent", "failed"];
+type PaymentPeppolStatus = PeppolDispatchStatus;
+
+export interface ManualArtifactClaim {
+  key: string;
+  side: "customer" | "supplier";
+  documentType: "invoice" | "credit_note";
+  invoiceNumber?: string;
+  createdAt: Date;
+}
 
 export type PaymentStatus =
   | "pending"
@@ -13,6 +23,8 @@ export type PaymentStatus =
   | "refunded"
   | "partially_refunded"
   | "disputed";
+
+export type { TransferStatus } from "../utils/paymentSafety";
 
 export interface IPaymentRefund {
   amount: number;
@@ -43,11 +55,33 @@ export interface IPayment extends Document {
   vatBreakdown?: VatBreakdownLine[];
   platformCommission?: number;
   professionalPayout?: number;
+  extraCostAmount?: number;
+  extraCostCustomerNetAmount?: number;
+  extraCostVatAmount?: number;
+  extraCostPlatformFee?: number;
+  extraCostNetAmount?: number;
+  extraCostCustomerDiscount?: number;
+  extraCostPlatformCommission?: number;
+  extraCostProfessionalPayout?: number;
+  extraCostStatus?: "pending" | "succeeded" | "failed" | "refunded";
+  extraCostPaymentSucceeded?: boolean;
+  extraCostPaidAt?: Date;
+  extraCostStripePaymentIntentId?: string;
+  extraCostStripeChargeId?: string;
+  extraCostTransferId?: string;
+  extraCostTransferStatus?: "pending" | "succeeded" | "failed";
+  extraCostTransferFailureReason?: string;
+  extraCostTransferAttemptedAt?: Date;
 
   stripePaymentIntentId?: string;
   stripeChargeId?: string;
   stripeTransferId?: string;
   stripeDestinationPayment?: string;
+  transferStatus?: TransferStatus;
+  transferIdempotencyKey?: string;
+  transferAttempt?: number;
+  transferFailureReason?: string;
+  transferAttemptedAt?: Date;
 
   refunds: IPaymentRefund[];
 
@@ -61,16 +95,39 @@ export interface IPayment extends Document {
   invoiceUrl?: string;
   invoiceUblUrl?: string;
   invoiceGeneratedAt?: Date;
-  peppolDispatchStatus?: string;
+  peppolDispatchStatus?: PaymentPeppolStatus;
+  peppolDispatchReason?: string;
   peppolDispatchReference?: string;
   peppolDispatchedAt?: Date;
+  supplierPeppolDispatchStatus?: PaymentPeppolStatus;
+  supplierPeppolDispatchReason?: string;
+  supplierPeppolDispatchReference?: string;
+  supplierPeppolDispatchedAt?: Date;
+  supplierInvoiceNumber?: string;
+  supplierInvoiceUrl?: string;
+  supplierInvoiceUblUrl?: string;
+  supplierInvoiceGeneratedAt?: Date;
   creditNoteNumber?: string;
   creditNoteUrl?: string;
   creditNoteUblUrl?: string;
   creditNoteGeneratedAt?: Date;
   creditNoteRelatedInvoiceNumber?: string;
-  creditNotePeppolDispatchStatus?: string;
+  creditNotePeppolDispatchStatus?: PaymentPeppolStatus;
+  creditNotePeppolDispatchReason?: string;
   creditNotePeppolDispatchReference?: string;
+  creditNoteGenerationClaim?: string;
+  supplierCreditNoteNumber?: string;
+  supplierCreditNoteUrl?: string;
+  supplierCreditNoteUblUrl?: string;
+  supplierCreditNoteGeneratedAt?: Date;
+  supplierCreditNoteRelatedInvoiceNumber?: string;
+  supplierCreditNotePeppolDispatchStatus?: PaymentPeppolStatus;
+  supplierCreditNotePeppolDispatchReason?: string;
+  supplierCreditNotePeppolDispatchReference?: string;
+
+  invoiceArtifactHistory?: InvoiceArtifactHistoryEntry[];
+
+  manualArtifactClaims?: ManualArtifactClaim[];
 
   metadata?: Record<string, any>;
 
@@ -93,6 +150,31 @@ const PaymentRefundSchema = new Schema<IPaymentRefund>(
     notes: { type: String, maxlength: 1000 },
   },
   { _id: false }
+);
+
+const InvoiceArtifactHistorySchema = new Schema<InvoiceArtifactHistoryEntry>(
+  {
+    side: { type: String, enum: ["customer", "supplier"], required: true },
+    documentType: { type: String, enum: ["invoice", "credit_note"], required: true },
+    invoiceNumber: { type: String, required: true },
+    invoiceUrl: { type: String },
+    invoiceUblUrl: { type: String },
+    generatedAt: { type: Date },
+    relatedInvoiceNumber: { type: String },
+    replacedAt: { type: Date, required: true },
+  },
+  { _id: false },
+);
+
+const ManualArtifactClaimSchema = new Schema<ManualArtifactClaim>(
+  {
+    key: { type: String, required: true },
+    side: { type: String, enum: ["customer", "supplier"], required: true },
+    documentType: { type: String, enum: ["invoice", "credit_note"], required: true },
+    invoiceNumber: { type: String },
+    createdAt: { type: Date, required: true },
+  },
+  { _id: false },
 );
 
 const SUPPORTED_CURRENCIES = STRIPE_CONFIG.supportedCurrencies.length
@@ -139,11 +221,33 @@ const PaymentSchema = new Schema<IPayment>(
     }],
     platformCommission: { type: Number },
     professionalPayout: { type: Number },
+    extraCostAmount: { type: Number },
+    extraCostCustomerNetAmount: { type: Number },
+    extraCostVatAmount: { type: Number },
+    extraCostPlatformFee: { type: Number },
+    extraCostNetAmount: { type: Number },
+    extraCostCustomerDiscount: { type: Number },
+    extraCostPlatformCommission: { type: Number },
+    extraCostProfessionalPayout: { type: Number },
+    extraCostStatus: { type: String, enum: ["pending", "succeeded", "failed", "refunded"] },
+    extraCostPaymentSucceeded: { type: Boolean },
+    extraCostPaidAt: { type: Date },
+    extraCostStripePaymentIntentId: { type: String },
+    extraCostStripeChargeId: { type: String },
+    extraCostTransferId: { type: String },
+    extraCostTransferStatus: { type: String, enum: ["pending", "succeeded", "failed"] },
+    extraCostTransferFailureReason: { type: String, maxlength: 1000 },
+    extraCostTransferAttemptedAt: { type: Date },
 
     stripePaymentIntentId: { type: String },
     stripeChargeId: { type: String },
     stripeTransferId: { type: String },
     stripeDestinationPayment: { type: String },
+    transferStatus: { type: String, enum: ["pending", "succeeded", "failed"] },
+    transferIdempotencyKey: { type: String },
+    transferAttempt: { type: Number, min: 0, default: 0 },
+    transferFailureReason: { type: String, maxlength: 1000 },
+    transferAttemptedAt: { type: Date },
 
     refunds: { type: [PaymentRefundSchema], default: [] },
 
@@ -158,15 +262,36 @@ const PaymentSchema = new Schema<IPayment>(
     invoiceUblUrl: { type: String },
     invoiceGeneratedAt: { type: Date },
     peppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    peppolDispatchReason: { type: String },
     peppolDispatchReference: { type: String },
     peppolDispatchedAt: { type: Date },
+    supplierPeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    supplierPeppolDispatchReason: { type: String },
+    supplierPeppolDispatchReference: { type: String },
+    supplierPeppolDispatchedAt: { type: Date },
+    supplierInvoiceNumber: { type: String },
+    supplierInvoiceUrl: { type: String },
+    supplierInvoiceUblUrl: { type: String },
+    supplierInvoiceGeneratedAt: { type: Date },
     creditNoteNumber: { type: String },
     creditNoteUrl: { type: String },
     creditNoteUblUrl: { type: String },
     creditNoteGeneratedAt: { type: Date },
     creditNoteRelatedInvoiceNumber: { type: String },
     creditNotePeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    creditNotePeppolDispatchReason: { type: String },
     creditNotePeppolDispatchReference: { type: String },
+    creditNoteGenerationClaim: { type: String },
+    supplierCreditNoteNumber: { type: String },
+    supplierCreditNoteUrl: { type: String },
+    supplierCreditNoteUblUrl: { type: String },
+    supplierCreditNoteGeneratedAt: { type: Date },
+    supplierCreditNoteRelatedInvoiceNumber: { type: String },
+    supplierCreditNotePeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
+    supplierCreditNotePeppolDispatchReason: { type: String },
+    supplierCreditNotePeppolDispatchReference: { type: String },
+    invoiceArtifactHistory: { type: [InvoiceArtifactHistorySchema], default: [] },
+    manualArtifactClaims: { type: [ManualArtifactClaimSchema], default: [] },
 
     metadata: { type: Schema.Types.Mixed },
   },
@@ -185,6 +310,11 @@ PaymentSchema.index({ status: 1 });
 PaymentSchema.index({ customer: 1, status: 1 });
 PaymentSchema.index({ professional: 1, status: 1 });
 PaymentSchema.index({ bookingNumber: 1 });
+// Ignore legacy null/missing values while enforcing uniqueness for real Stripe IDs.
+PaymentSchema.index(
+  { stripePaymentIntentId: 1 },
+  { unique: true, partialFilterExpression: { stripePaymentIntentId: { $type: 'string' } } },
+);
 
 const Payment = model<IPayment>("Payment", PaymentSchema);
 

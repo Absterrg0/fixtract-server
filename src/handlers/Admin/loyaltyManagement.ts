@@ -8,6 +8,7 @@ import Payment from "../../models/payment";
 import Booking from "../../models/booking";
 import Project from "../../models/project";
 import { calculateLoyaltyStatus } from "../../utils/loyaltySystem";
+import { buildSettledTransferExpression } from "../../utils/paymentSafety";
 import { addPoints, deductPoints } from "../../utils/pointsSystem";
 import { updateProfessionalLevel } from "../../utils/professionalLevelSystem";
 import mongoose from 'mongoose';
@@ -573,7 +574,11 @@ export const listProfessionalManagement = async (req: Request, res: Response) =>
 
     const professionalIds = professionals.map((item: any) => item._id);
     const earnings = await Payment.aggregate([
-      { $match: { professional: { $in: professionalIds }, status: "completed" } },
+      { $match: {
+        professional: { $in: professionalIds },
+        status: "completed",
+        $expr: buildSettledTransferExpression(),
+      } },
       { $group: { _id: "$professional", moneyEarned: { $sum: { $ifNull: ["$professionalPayout", 0] } } } }
     ]);
     const earningsMap = new Map(earnings.map((item) => [String(item._id), item.moneyEarned || 0]));

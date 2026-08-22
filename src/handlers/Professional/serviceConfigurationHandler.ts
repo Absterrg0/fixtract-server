@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import ServiceConfiguration from '../../models/serviceConfiguration';
+import { withArticle47ProfessionalQuestion } from '../../utils/vatManagement';
 
 /**
  * Get service configuration for professional based on category, service, and area of work
@@ -28,7 +29,7 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
         }
 
         const configuration = await ServiceConfiguration.findOne(filter)
-            .select('category service areaOfWork pricingModel pricingOptions certificationRequired requiredCertifications projectTypes professionalInputFields includedItems extraOptions conditionsAndWarnings activeCountries');
+            .select('category service areaOfWork pricingModel pricingOptions certificationRequired requiredCertifications projectTypes professionalInputFields includedItems extraOptions conditionsAndWarnings activeCountries vatManagement');
 
         if (!configuration) {
             return res.status(404).json({
@@ -39,7 +40,15 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
 
         // Build pricingModels for backward compatibility with Step1 dropdown
         // Prefer structured pricingOptions; fall back to parsing legacy pricingModel string
-        const configObj = configuration.toObject();
+        const configObj: any = configuration.toObject();
+            if (configObj.vatManagement) {
+            const vatManagement = configObj.vatManagement;
+            configObj.vatManagement = {
+                enabled: vatManagement.enabled,
+                article47Classification: vatManagement.article47Classification,
+                professionalVatQuestions: withArticle47ProfessionalQuestion(vatManagement),
+            };
+        }
         let pricingModels: string[] = [];
         if (configObj.pricingOptions && configObj.pricingOptions.length > 0) {
             pricingModels = configObj.pricingOptions.map((o: any) => o.name);
