@@ -136,16 +136,7 @@ import {
   sendMarketingCampaignTestEmail,
 } from "../../handlers/Admin/marketingCampaigns";
 import { uploadProfileImage as cmsImageMulter, upload as adminFileUpload } from "../../utils/s3Upload";
-import multer from "multer";
-import {
-  listMarketingServiceOptions,
-  validateMarketingLeadImport,
-  commitMarketingLeadImport,
-  listMarketingLeadImports,
-  listMarketingLeads,
-  updateMarketingLead,
-  deleteMarketingLead,
-} from "../../handlers/Admin/marketingLeads";
+import { listMarketingServiceOptions } from "../../handlers/Admin/marketingServiceOptions";
 import { getAdminSiteSettings, updateAdminSiteSettings } from "../../handlers/Admin/siteSettings";
 import {
   adminListTickets,
@@ -203,17 +194,6 @@ import {
 } from "../../utils/adminRbac/middleware";
 
 const adminRouter = Router();
-
-const marketingLeadUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
-  fileFilter: (_req, file, callback) => {
-    const lowerName = file.originalname.toLowerCase();
-    const allowed = lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls');
-    if (allowed) callback(null, true);
-    else callback(new Error('Only .xlsx and .xls workbooks are allowed'));
-  },
-});
 
 const marketingTestSendLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -351,11 +331,6 @@ adminRouter.route('/marketing-campaigns/:id/stats').post(refreshMarketingCampaig
 adminRouter.route('/marketing-campaigns/:id').get(getMarketingCampaign).patch(updateMarketingCampaign).delete(deleteMarketingCampaign);
 adminRouter.route('/marketing-subscribers').get(listMarketingSubscribers);
 adminRouter.route('/marketing-subscribers/sync').post(syncMarketingSubscribers);
-adminRouter.route('/marketing-lead-imports/validate').post(marketingLeadUpload.single('file'), validateMarketingLeadImport);
-adminRouter.route('/marketing-lead-imports/:id/commit').post(commitMarketingLeadImport);
-adminRouter.route('/marketing-lead-imports').get(listMarketingLeadImports);
-adminRouter.route('/marketing-leads').get(listMarketingLeads);
-adminRouter.route('/marketing-leads/:id').patch(updateMarketingLead).delete(deleteMarketingLead);
 
 // CMS management routes
 adminRouter.route('/cms').get(listCmsContent).post(createCmsContent);

@@ -14,7 +14,7 @@ import { syncSubscribersFromUsers } from '../../utils/marketing/audience';
 import { refreshCampaignStats, sendMarketingCampaign } from '../../utils/marketing/sendCampaign';
 import { getBrevoMarketingTemplateHtml, listActiveBrevoTemplates } from '../../utils/marketing/brevoMarketing';
 import { sendBrevoTransactionalMarketingEmail } from '../../utils/marketing/brevoMarketing';
-import { isLeadOutreachEnabled, resolveMarketingAudience } from '../../utils/marketing/audienceResolver';
+import { resolveMarketingAudience } from '../../utils/marketing/audienceResolver';
 import {
   assertInlineMarketingContent,
   renderMarketingEmail,
@@ -23,22 +23,10 @@ import {
 import { isValidEmail, normalizeEmail } from '../../utils/marketing/normalizeEmail';
 import { signUnsubscribePayload } from '../../utils/marketing/unsubscribeToken';
 
-const MARKETING_AUDIENCE_TYPES = ['subscribers', 'leads', 'both'] as const;
-
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
 
 class MarketingInputError extends Error {}
-
-function defaultAudienceType(type: unknown): (typeof MARKETING_AUDIENCE_TYPES)[number] {
-  return type === 'invitation' ? 'leads' : 'subscribers';
-}
-
-function assertAudienceTypeAllowed(type: string, audienceType: string): void {
-  if (audienceType === 'subscribers') return;
-  if (type !== 'invitation') throw new MarketingInputError('Only invitation campaigns may target leads');
-  if (!isLeadOutreachEnabled()) throw new MarketingInputError('Lead outreach is not enabled or legally approved');
-}
 
 function configuredInactiveDays(): number {
   const value = Math.floor(Number(process.env.MARKETING_REENGAGEMENT_INACTIVE_DAYS));
@@ -151,24 +139,22 @@ function validateLocaleContent(
 
 function serializeCampaign(doc: any) {
   const obj = doc.toObject ? doc.toObject() : doc;
+  const { audienceType: _legacyAudienceType, ...campaign } = obj;
   return {
-    ...obj,
-    _id: String(obj._id),
-    createdBy: obj.createdBy ? String(obj.createdBy) : undefined,
+    ...campaign,
+    _id: String(campaign._id),
+    createdBy: campaign.createdBy ? String(campaign.createdBy) : undefined,
   };
 }
 
 export const listMarketingCampaigns = async (req: Request, res: Response) => {
   try {
-    const { type, status, audienceType, page, limit, q } = req.query;
+    const { type, status, page, limit, q } = req.query;
     if (typeof type === 'string' && !(MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(type)) {
       return res.status(400).json({ success: false, msg: 'Invalid campaign type filter' });
     }
     if (typeof status === 'string' && !(MARKETING_CAMPAIGN_STATUSES as readonly string[]).includes(status)) {
       return res.status(400).json({ success: false, msg: 'Invalid campaign status filter' });
-    }
-    if (typeof audienceType === 'string' && !(MARKETING_AUDIENCE_TYPES as readonly string[]).includes(audienceType)) {
-      return res.status(400).json({ success: false, msg: 'Invalid audience type filter' });
     }
     const pageNumber = Math.max(Math.floor(Number(page) || 1), 1);
     const limitNumber = Math.min(Math.max(Math.floor(Number(limit) || DEFAULT_LIMIT), 1), MAX_LIMIT);
@@ -177,11 +163,11 @@ export const listMarketingCampaigns = async (req: Request, res: Response) => {
     const query: Record<string, unknown> = {};
     if (typeof type === 'string' && (MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(type)) {
       query.type = type;
+    } else {
+      // Do not expose legacy lead/invitation campaigns through the active UI.
+      query.type = { $in: MARKETING_CAMPAIGN_TYPES };
     }
     if (typeof status === 'string' && status.trim()) query.status = status.trim();
-    if (typeof audienceType === 'string' && (MARKETING_AUDIENCE_TYPES as readonly string[]).includes(audienceType)) {
-      query.audienceType = audienceType;
-    }
     if (typeof q === 'string' && q.trim().length >= 2) {
       query.name = new RegExp(q.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
     }
@@ -246,12 +232,6 @@ export const createMarketingCampaign = async (req: Request, res: Response) => {
     if (!(MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(type)) {
       return res.status(400).json({ success: false, msg: 'Invalid campaign type' });
     }
-    const audienceType = req.body?.audienceType || defaultAudienceType(type);
-    if (!(MARKETING_AUDIENCE_TYPES as readonly string[]).includes(audienceType)) {
-      return res.status(400).json({ success: false, msg: 'Invalid audienceType' });
-    }
-    assertAudienceTypeAllowed(type, audienceType);
-
     const content = parseContent(req.body);
     if (Object.keys(content).length === 0) {
       return res.status(400).json({
@@ -274,7 +254,6 @@ export const createMarketingCampaign = async (req: Request, res: Response) => {
     const campaign = await MarketingCampaign.create({
       name: name.trim(),
       type: type as MarketingCampaignType,
-      audienceType,
       status: scheduled && scheduled.getTime() > Date.now() ? 'scheduled' : 'draft',
       content,
       audience,
@@ -345,16 +324,8 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
         return res.status(400).json({ success: false, msg: 'Invalid campaign type' });
       }
       if (req.body.type !== campaign.type) {
-        assertAudienceTypeAllowed(req.body.type, campaign.audienceType || 'subscribers');
         campaign.type = req.body.type as MarketingCampaignType;
       }
-    }
-    if (req.body?.audienceType !== undefined) {
-      if (!(MARKETING_AUDIENCE_TYPES as readonly string[]).includes(req.body.audienceType)) {
-        return res.status(400).json({ success: false, msg: 'Invalid audienceType' });
-      }
-      assertAudienceTypeAllowed(campaign.type, req.body.audienceType);
-      campaign.audienceType = req.body.audienceType;
     }
     if (scheduledAt !== undefined) {
       if (scheduledAt === null || scheduledAt === '') {
@@ -441,11 +412,8 @@ export const previewMarketingAudience = async (req: Request, res: Response) => {
         ? Math.max(1, Math.floor(rawInactive))
         : undefined;
     const campaignType = (req.body?.type || 'newsletter') as MarketingCampaignType;
-    const audienceType = req.body?.audienceType || defaultAudienceType(campaignType);
-    assertAudienceTypeAllowed(campaignType, audienceType);
     const resolution = await resolveMarketingAudience({
       campaignType,
-      audienceType,
       filters: audience,
       contentLocales: Array.isArray(req.body?.contentLocales)
         ? req.body.contentLocales

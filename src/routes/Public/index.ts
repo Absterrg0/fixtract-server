@@ -24,7 +24,10 @@ import {
   listPublicPolicyLinks,
 } from "../../handlers/Public/cms";
 import { getPublicSiteSettings } from "../../handlers/Public/siteSettings";
-import { listPublicSiteAnnouncements } from "../../handlers/Public/siteAnnouncements";
+import {
+  listPublicSiteAnnouncements,
+  recordSiteAnnouncementEvent,
+} from "../../handlers/Public/siteAnnouncements";
 import { unsubscribeMarketing } from "../../handlers/Public/marketingUnsubscribe";
 import { getMarketingLanguages } from "../../handlers/Public/marketingLanguages";
 import { recordProfessionalView } from "../../handlers/Public/profileView";
@@ -111,6 +114,9 @@ publicRouter.route("/site-settings").get(getPublicSiteSettings);
 
 // Marketing site announcements (top bar / modal / exit-intent)
 publicRouter.route("/site-announcements").get(schedulingRateLimiter, listPublicSiteAnnouncements);
+publicRouter
+  .route("/site-announcements/:id/event")
+  .post(schedulingRateLimiter, recordSiteAnnouncementEvent);
 
 // CMS public endpoints
 publicRouter.route("/cms/sitemap").get(listCmsSitemapEntries);

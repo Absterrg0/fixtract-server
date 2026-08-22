@@ -10,6 +10,9 @@ import {
   parseSiteAnnouncementWriteBody,
 } from '../../utils/siteAnnouncements/parseWriteBody';
 import type { SiteAnnouncementWriteInput } from '../../utils/siteAnnouncements/types';
+import { buildAnnouncementTranslations } from '../../utils/siteAnnouncements/translateAnnouncement';
+
+const DEFAULT_ANNOUNCEMENT_FREQUENCY = 'once_pageview' as const;
 
 function toWriteInput(doc: ISiteAnnouncement): SiteAnnouncementWriteInput {
   return {
@@ -22,6 +25,8 @@ function toWriteInput(doc: ISiteAnnouncement): SiteAnnouncementWriteInput {
     discountCode: doc.discountCode,
     activeCountries: [...doc.activeCountries],
     locale: doc.locale,
+    frequency: doc.frequency ?? DEFAULT_ANNOUNCEMENT_FREQUENCY,
+    autoTranslate: doc.autoTranslate === true,
     startsAt: doc.startsAt,
     endsAt: doc.endsAt,
     isActive: doc.isActive,
@@ -30,6 +35,35 @@ function toWriteInput(doc: ISiteAnnouncement): SiteAnnouncementWriteInput {
     dismissible: doc.dismissible,
     requireMarketingConsent: doc.requireMarketingConsent,
   };
+}
+
+function normalizeAnnouncementResponse<T extends Record<string, unknown>>(value: T): T & {
+  frequency: string;
+  autoTranslate: boolean;
+  impressions: number;
+  clicks: number;
+  dismissals: number;
+} {
+  return {
+    ...value,
+    frequency: typeof value.frequency === 'string' ? value.frequency : DEFAULT_ANNOUNCEMENT_FREQUENCY,
+    autoTranslate: value.autoTranslate === true,
+    impressions: Number(value.impressions) || 0,
+    clicks: Number(value.clicks) || 0,
+    dismissals: Number(value.dismissals) || 0,
+  } as T & {
+    frequency: string;
+    autoTranslate: boolean;
+    impressions: number;
+    clicks: number;
+    dismissals: number;
+  };
+}
+
+function translationFailure(res: Response, error: unknown): Response | null {
+  const message = error instanceof Error ? error.message : '';
+  if (!message.startsWith('Automatic announcement translation')) return null;
+  return res.status(503).json({ success: false, msg: message });
 }
 
 export const listSiteAnnouncements = async (
@@ -53,7 +87,9 @@ export const listSiteAnnouncements = async (
     return res.status(200).json({
       success: true,
       data: {
-        announcements,
+        announcements: announcements.map((announcement) =>
+          normalizeAnnouncementResponse(announcement as unknown as Record<string, unknown>),
+        ),
         total,
         page: filters.page,
         limit: filters.limit,
@@ -81,7 +117,12 @@ export const getSiteAnnouncement = async (
       return res.status(404).json({ success: false, msg: 'Announcement not found' });
     }
 
-    return res.status(200).json({ success: true, data: { announcement } });
+    return res.status(200).json({
+      success: true,
+      data: {
+        announcement: normalizeAnnouncementResponse(announcement as unknown as Record<string, unknown>),
+      },
+    });
   } catch (error: unknown) {
     console.error('Get site announcement error:', error);
     return res.status(500).json({ success: false, msg: 'Failed to load announcement' });
@@ -104,12 +145,29 @@ export const createSiteAnnouncement = async (
       return res.status(400).json({ success: false, msg: parsed.error });
     }
 
+    let translations;
+    try {
+      translations = await buildAnnouncementTranslations(parsed.value);
+    } catch (error) {
+      const response = translationFailure(res, error);
+      if (response) return response;
+      throw error;
+    }
+
     const created = await SiteAnnouncement.create({
       ...parsed.value,
+      translations,
       createdBy: adminId,
     });
 
-    return res.status(201).json({ success: true, data: { announcement: created } });
+    return res.status(201).json({
+      success: true,
+      data: {
+        announcement: normalizeAnnouncementResponse(
+          (created.toObject?.() ?? created) as unknown as Record<string, unknown>,
+        ),
+      },
+    });
   } catch (error: unknown) {
     console.error('Create site announcement error:', error);
     return res.status(500).json({ success: false, msg: 'Failed to create announcement' });
@@ -141,7 +199,14 @@ export const setSiteAnnouncementActive = async (
       return res.status(404).json({ success: false, msg: 'Announcement not found' });
     }
 
-    return res.status(200).json({ success: true, data: { announcement: updated } });
+    return res.status(200).json({
+      success: true,
+      data: {
+        announcement: normalizeAnnouncementResponse(
+          (updated.toObject?.() ?? updated) as unknown as Record<string, unknown>,
+        ),
+      },
+    });
   } catch (error: unknown) {
     console.error('Set site announcement active error:', error);
     return res
@@ -180,6 +245,36 @@ export const updateSiteAnnouncement = async (
         $set[key] = value;
       }
     }
+
+    const nextAutoTranslate = parsed.value.autoTranslate ?? existing.autoTranslate === true;
+    const contentChanged = ['title', 'message', 'ctaLabel', 'locale'].some((key) =>
+      Object.prototype.hasOwnProperty.call(parsed.value, key),
+    );
+    if (nextAutoTranslate && (!existing.autoTranslate || contentChanged)) {
+      let translations;
+      try {
+        translations = await buildAnnouncementTranslations({
+          ...toWriteInput(existing),
+          ...parsed.value,
+          autoTranslate: true,
+          title: parsed.value.title ?? existing.title,
+          message: parsed.value.message ?? existing.message,
+          ctaLabel:
+            parsed.value.ctaLabel === null
+              ? undefined
+              : parsed.value.ctaLabel ?? existing.ctaLabel,
+          locale: parsed.value.locale ?? existing.locale,
+        });
+      } catch (error) {
+        const response = translationFailure(res, error);
+        if (response) return response;
+        throw error;
+      }
+      $set.translations = translations;
+    } else if (parsed.value.autoTranslate === false) {
+      $unset.translations = 1;
+    }
+
     const updateDoc =
       Object.keys($unset).length > 0
         ? {
@@ -206,7 +301,14 @@ export const updateSiteAnnouncement = async (
       });
     }
 
-    return res.status(200).json({ success: true, data: { announcement: updated } });
+    return res.status(200).json({
+      success: true,
+      data: {
+        announcement: normalizeAnnouncementResponse(
+          (updated.toObject?.() ?? updated) as unknown as Record<string, unknown>,
+        ),
+      },
+    });
   } catch (error: unknown) {
     console.error('Update site announcement error:', error);
     return res.status(500).json({ success: false, msg: 'Failed to update announcement' });
@@ -233,7 +335,14 @@ export const deleteSiteAnnouncement = async (
       return res.status(404).json({ success: false, msg: 'Announcement not found' });
     }
 
-    return res.status(200).json({ success: true, data: { announcement: updated } });
+    return res.status(200).json({
+      success: true,
+      data: {
+        announcement: normalizeAnnouncementResponse(
+          (updated.toObject?.() ?? updated) as unknown as Record<string, unknown>,
+        ),
+      },
+    });
   } catch (error: unknown) {
     console.error('Delete site announcement error:', error);
     return res.status(500).json({ success: false, msg: 'Failed to delete announcement' });

@@ -1,10 +1,7 @@
-import MarketingLead from '../../models/marketingLead';
 import MarketingSubscriber, { type MarketingLocale } from '../../models/marketingSubscriber';
 import MarketingSuppression from '../../models/marketingSuppression';
 import User from '../../models/user';
 import {
-  MARKETING_AUDIENCE_TYPES,
-  type MarketingAudienceType,
   type MarketingCampaignType,
   type ICampaignAudience,
 } from '../../models/marketingCampaign';
@@ -23,16 +20,15 @@ export type ResolvedMarketingRecipient = {
   country?: string;
   serviceKeys: string[];
   role?: 'customer' | 'professional';
-  source: 'subscriber' | 'lead';
   subscriberId?: string;
-  leadId?: string;
   userId?: string;
 };
 
 export type MarketingAudienceResolution = {
   recipients: ResolvedMarketingRecipient[];
   exactTotal: number;
-  bySource: { subscribers: number; leads: number };
+  byLocale: Record<string, number>;
+  byRole: { customer: number; professional: number };
   deduplicated: number;
   excluded: {
     suppressed: number;
@@ -48,17 +44,11 @@ export type MarketingAudienceResolution = {
 
 export type ResolveMarketingAudienceInput = {
   campaignType: MarketingCampaignType;
-  audienceType?: MarketingAudienceType;
   filters: ICampaignAudience;
   contentLocales?: readonly string[];
   inactiveDays?: number;
   limitMode?: 'delivery' | 'preview';
 };
-
-export function isLeadOutreachEnabled(): boolean {
-  return process.env.MARKETING_LEAD_OUTREACH_ENABLED === 'true'
-    && process.env.MARKETING_LEAD_LEGAL_APPROVED === 'true';
-}
 
 function clean(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -116,25 +106,10 @@ function subscriberQuery(filters: ICampaignAudience, inactiveDays?: number): Rec
   return { $and: clauses };
 }
 
-function leadQuery(filters: ICampaignAudience): Record<string, unknown> {
-  const normalized = canonicalFilters(filters);
-  const clauses: Record<string, unknown>[] = [{ status: 'active' }, { unsubscribedAt: null }];
-  if (normalized.countries.length) clauses.push({ country: { $in: normalized.countries } });
-  if (normalized.locales.length) clauses.push({ locale: { $in: normalized.locales } });
-  if (normalized.serviceKeys.length) clauses.push({ serviceKeys: { $in: normalized.serviceKeys } });
-  if (normalized.roles.length === 1 && normalized.roles[0] === 'customer') clauses.push({ _id: { $in: [] } });
-  return { $and: clauses };
-}
-
 function firstNameForSubscriber(subscriber: any, user?: any): string | undefined {
   if (typeof subscriber.firstName === 'string' && subscriber.firstName.trim()) return subscriber.firstName.trim();
   if (typeof subscriber.name === 'string' && subscriber.name.trim()) return subscriber.name.trim().split(/\s+/)[0];
   if (typeof user?.name === 'string' && user.name.trim()) return user.name.trim().split(/\s+/)[0];
-  return undefined;
-}
-
-function firstNameForLead(lead: any): string | undefined {
-  if (typeof lead.firstName === 'string' && lead.firstName.trim()) return lead.firstName.trim();
   return undefined;
 }
 
@@ -159,23 +134,15 @@ async function suppressedEmailSet(): Promise<Set<string>> {
 }
 
 export async function resolveMarketingAudience(input: ResolveMarketingAudienceInput): Promise<MarketingAudienceResolution> {
-  const audienceType = input.audienceType || 'subscribers';
-  if (!(MARKETING_AUDIENCE_TYPES as readonly string[]).includes(audienceType)) throw new Error('Invalid audience type');
-  if (audienceType !== 'subscribers') {
-    if (input.campaignType !== 'invitation') throw new Error('Only invitation campaigns may target leads');
-    if (!isLeadOutreachEnabled()) throw new Error('Lead outreach is not enabled or legally approved');
-  }
-
   const filters = canonicalFilters(input.filters);
   const contentLocales = new Set(
     (input.contentLocales && input.contentLocales.length ? input.contentLocales : MARKETING_LOCALES)
       .map((locale) => normalizeMarketingLocale(locale))
       .filter((locale): locale is MarketingLocale => Boolean(locale)),
   );
-  const [suppressed, subscribers, leads] = await Promise.all([
+  const [suppressed, subscribers] = await Promise.all([
     suppressedEmailSet(),
-    audienceType === 'leads' ? Promise.resolve([]) : MarketingSubscriber.find(subscriberQuery(input.filters, input.inactiveDays)).sort({ _id: 1 }).lean(),
-    audienceType === 'subscribers' ? Promise.resolve([]) : MarketingLead.find(leadQuery(input.filters)).sort({ _id: 1 }).lean(),
+    MarketingSubscriber.find(subscriberQuery(input.filters, input.inactiveDays)).sort({ _id: 1 }).lean(),
   ]);
 
   const userIds = subscribers.map((row: any) => row.userId).filter(Boolean);
@@ -186,7 +153,8 @@ export async function resolveMarketingAudience(input: ResolveMarketingAudienceIn
 
   const seen = new Set<string>();
   const recipients: ResolvedMarketingRecipient[] = [];
-  const sourceCounts = { subscribers: 0, leads: 0 };
+  const byLocale: Record<string, number> = {};
+  const byRole = { customer: 0, professional: 0 };
   let invalidEmail = 0;
   let missingLocale = 0;
   let suppressedCount = 0;
@@ -195,7 +163,7 @@ export async function resolveMarketingAudience(input: ResolveMarketingAudienceIn
   let deduplicated = 0;
   let fallbackLocaleCount = 0;
 
-  const add = (row: any, source: 'subscriber' | 'lead') => {
+  const add = (row: any) => {
     const email = normalizeEmail(row.emailNormalized || row.email);
     if (!isValidEmail(email)) {
       invalidEmail += 1;
@@ -209,8 +177,8 @@ export async function resolveMarketingAudience(input: ResolveMarketingAudienceIn
       deduplicated += 1;
       return;
     }
-    const user = source === 'subscriber' && row.userId ? usersById.get(String(row.userId)) : undefined;
-    const role = source === 'lead' ? 'professional' : row.role;
+    const user = row.userId ? usersById.get(String(row.userId)) : undefined;
+    const role = row.role as 'customer' | 'professional' | undefined;
     const requestedRoles = filters.roles.length ? filters.roles : ['customer', 'professional'];
     if (role && !requestedRoles.includes(role)) {
       roleMismatch += 1;
@@ -218,7 +186,7 @@ export async function resolveMarketingAudience(input: ResolveMarketingAudienceIn
     }
     const locale = resolvedLocale(
       row.locale,
-      source === 'lead' ? row.country : row.region,
+      row.region,
       contentLocales,
       user?.marketingLocale,
     );
@@ -232,30 +200,30 @@ export async function resolveMarketingAudience(input: ResolveMarketingAudienceIn
     }
     seen.add(email);
     if (locale.fallback) fallbackLocaleCount += 1;
-    sourceCounts[source === 'subscriber' ? 'subscribers' : 'leads'] += 1;
+    const resolvedRole = role === 'professional' ? 'professional' : 'customer';
+    byLocale[locale.locale] = (byLocale[locale.locale] || 0) + 1;
+    byRole[resolvedRole] += 1;
     recipients.push({
       email,
-      firstName: source === 'subscriber' ? firstNameForSubscriber(row, user) : firstNameForLead(row),
+      firstName: firstNameForSubscriber(row, user),
       locale: locale.locale,
-      country: source === 'lead' ? row.country : row.region,
+      country: row.region,
       serviceKeys: Array.isArray(row.serviceKeys) && row.serviceKeys.length ? row.serviceKeys : (row.interestedServices || []),
-      role,
-      source,
-      subscriberId: source === 'subscriber' ? String(row._id) : undefined,
-      leadId: source === 'lead' ? String(row._id) : undefined,
-      userId: source === 'subscriber' && row.userId ? String(row.userId) : undefined,
+      role: resolvedRole,
+      subscriberId: String(row._id),
+      userId: row.userId ? String(row.userId) : undefined,
     });
   };
 
-  for (const row of subscribers) add(row, 'subscriber');
-  for (const row of leads) add(row, 'lead');
+  for (const row of subscribers) add(row);
 
   const overLimit = recipients.length > MARKETING_AUDIENCE_LIMIT;
-  const criteriaHash = hashCriteria({ campaignType: input.campaignType, audienceType, filters, contentLocales: [...contentLocales], inactiveDays: input.inactiveDays || null });
+  const criteriaHash = hashCriteria({ campaignType: input.campaignType, filters, contentLocales: [...contentLocales], inactiveDays: input.inactiveDays || null });
   return {
     recipients: input.limitMode === 'delivery' ? recipients.slice(0, MARKETING_AUDIENCE_LIMIT) : recipients,
     exactTotal: recipients.length,
-    bySource: sourceCounts,
+    byLocale,
+    byRole,
     deduplicated,
     excluded: { suppressed: suppressedCount, invalidEmail, missingLocale, roleMismatch, localeMismatch },
     fallbackLocaleCount,

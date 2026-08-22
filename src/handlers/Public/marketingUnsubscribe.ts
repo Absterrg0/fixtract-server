@@ -1,7 +1,6 @@
 import { Request, Response } from 'express';
 import User from '../../models/user';
 import MarketingSubscriber from '../../models/marketingSubscriber';
-import MarketingLead from '../../models/marketingLead';
 import MarketingSuppression from '../../models/marketingSuppression';
 import {
   generateUnsubscribeToken,
@@ -121,11 +120,6 @@ async function applyUnsubscribe(email: string): Promise<{ already: boolean }> {
       }
     }
   }
-
-  await MarketingLead.updateMany(
-    { emailNormalized: normalized, status: 'active' },
-    { $set: { unsubscribedAt: now } },
-  );
 
   return { already };
 }

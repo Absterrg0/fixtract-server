@@ -1,8 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { subscriberFind, leadFind, suppressionFind, userFind } = vi.hoisted(() => ({
+const { subscriberFind, suppressionFind, userFind } = vi.hoisted(() => ({
   subscriberFind: vi.fn(),
-  leadFind: vi.fn(),
   suppressionFind: vi.fn(),
   userFind: vi.fn(),
 }));
@@ -19,17 +18,11 @@ function queryResult(rows: unknown[]) {
 vi.mock('../../../models/marketingSubscriber', () => ({
   default: { find: subscriberFind },
 }));
-vi.mock('../../../models/marketingLead', () => ({
-  default: { find: leadFind },
-}));
 vi.mock('../../../models/marketingSuppression', () => ({
   default: { find: suppressionFind },
 }));
 vi.mock('../../../models/user', () => ({
   default: { find: userFind },
-}));
-vi.mock('../../../models/marketingCampaign', () => ({
-  MARKETING_AUDIENCE_TYPES: ['subscribers', 'leads', 'both'],
 }));
 vi.mock('../../../utils/marketing/audience', () => ({ MARKETING_AUDIENCE_LIMIT: 5000 }));
 
@@ -38,8 +31,6 @@ import { resolveMarketingAudience } from '../../../utils/marketing/audienceResol
 describe('resolveMarketingAudience', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    delete process.env.MARKETING_LEAD_OUTREACH_ENABLED;
-    delete process.env.MARKETING_LEAD_LEGAL_APPROVED;
     suppressionFind.mockReturnValue(queryResult([{ emailNormalized: 'optedout@example.com' }]));
     userFind.mockReturnValue(queryResult([]));
     subscriberFind.mockImplementation((query: Record<string, unknown>) => query.unsubscribedAt
@@ -58,62 +49,49 @@ describe('resolveMarketingAudience', () => {
             unsubscribedAt: null,
             brevoUnsubscribedAt: null,
           },
+          {
+            _id: 'subscriber-duplicate',
+            email: 'person@example.com',
+            emailNormalized: 'person@example.com',
+            locale: 'de',
+            region: 'DE',
+            role: 'professional',
+            consentVerifiedAt: new Date(),
+            unsubscribedAt: null,
+            brevoUnsubscribedAt: null,
+          },
+          {
+            _id: 'subscriber-opted-out',
+            email: 'optedout@example.com',
+            emailNormalized: 'optedout@example.com',
+            locale: 'de',
+            region: 'DE',
+            role: 'professional',
+            consentVerifiedAt: new Date(),
+            unsubscribedAt: null,
+            brevoUnsubscribedAt: null,
+          },
         ]));
-    leadFind.mockReturnValue(queryResult([
-      {
-        _id: 'lead-1',
-        email: 'person@example.com',
-        emailNormalized: 'person@example.com',
-        firstName: 'Lead',
-        country: 'DE',
-        locale: 'de',
-        serviceKeys: ['plumbing'],
-        status: 'active',
-        unsubscribedAt: null,
-      },
-      {
-        _id: 'lead-2',
-        email: 'optedout@example.com',
-        emailNormalized: 'optedout@example.com',
-        country: 'DE',
-        locale: 'de',
-        serviceKeys: ['plumbing'],
-        status: 'active',
-        unsubscribedAt: null,
-      },
-    ]));
   });
 
-  it('deduplicates both audiences with subscriber metadata winning and suppressions excluded', async () => {
-    process.env.MARKETING_LEAD_OUTREACH_ENABLED = 'true';
-    process.env.MARKETING_LEAD_LEGAL_APPROVED = 'true';
+  it('deduplicates subscribers and reports exact language and account-type counts', async () => {
     const result = await resolveMarketingAudience({
-      campaignType: 'invitation',
-      audienceType: 'both',
+      campaignType: 'newsletter',
       filters: { countries: ['DE'], interestedServices: [], serviceKeys: ['plumbing'], locales: ['de'], roles: ['professional'] },
       contentLocales: ['de'],
       limitMode: 'preview',
     });
 
     expect(result.exactTotal).toBe(1);
-    expect(result.bySource).toEqual({ subscribers: 1, leads: 0 });
+    expect(result.byLocale).toEqual({ de: 1 });
+    expect(result.byRole).toEqual({ customer: 0, professional: 1 });
     expect(result.deduplicated).toBe(1);
     expect(result.excluded.suppressed).toBe(1);
     expect(result.recipients[0]).toMatchObject({
       email: 'person@example.com',
       firstName: 'Person',
-      source: 'subscriber',
       subscriberId: 'subscriber-1',
     });
-  });
-
-  it('keeps lead audiences disabled without both safety flags', async () => {
-    await expect(resolveMarketingAudience({
-      campaignType: 'invitation',
-      audienceType: 'leads',
-      filters: { countries: [], interestedServices: [], serviceKeys: [], locales: ['en'], roles: ['professional'] },
-      contentLocales: ['en'],
-    })).rejects.toThrow('not enabled');
   });
 
   it('uses an explicit user language before the stored subscriber locale and reports mismatches', async () => {
@@ -136,13 +114,14 @@ describe('resolveMarketingAudience', () => {
 
     const result = await resolveMarketingAudience({
       campaignType: 'newsletter',
-      audienceType: 'subscribers',
       filters: { countries: ['BE'], interestedServices: [], serviceKeys: [], locales: ['fr'], roles: ['customer'] },
       contentLocales: ['fr'],
       limitMode: 'preview',
     });
 
     expect(result.recipients[0]).toMatchObject({ locale: 'fr', firstName: 'Language' });
+    expect(result.byLocale).toEqual({ fr: 1 });
+    expect(result.byRole).toEqual({ customer: 1, professional: 0 });
     expect(result.excluded.localeMismatch).toBe(0);
   });
 });

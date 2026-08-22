@@ -2,10 +2,8 @@ import mongoose, { Document, Schema } from 'mongoose';
 import { MARKETING_LOCALES, type MarketingLocale } from '../utils/marketing/marketingCatalog';
 export { MARKETING_LOCALES } from '../utils/marketing/marketingCatalog';
 
-export const MARKETING_CAMPAIGN_TYPES = ['newsletter', 'promotion', 'reengagement', 'invitation'] as const;
+export const MARKETING_CAMPAIGN_TYPES = ['newsletter', 'promotion', 'reengagement'] as const;
 export type MarketingCampaignType = (typeof MARKETING_CAMPAIGN_TYPES)[number];
-export const MARKETING_AUDIENCE_TYPES = ['subscribers', 'leads', 'both'] as const;
-export type MarketingAudienceType = (typeof MARKETING_AUDIENCE_TYPES)[number];
 
 export const MARKETING_CAMPAIGN_STATUSES = [
   'draft',
@@ -44,7 +42,6 @@ export interface ICampaignLocaleDelivery {
   brevoStatus?: 'created' | 'sent';
   recipientCount: number;
   subscriberCount?: number;
-  leadCount?: number;
   deduplicatedRecipientCount?: number;
   criteriaHash?: string;
   stats?: {
@@ -63,7 +60,6 @@ export interface IMarketingCampaign extends Document {
   name: string;
   type: MarketingCampaignType;
   status: MarketingCampaignStatus;
-  audienceType: MarketingAudienceType;
   /** Content keyed by locale */
   content: Partial<Record<string, ICampaignLocaleContent>>;
   audience: ICampaignAudience;
@@ -125,7 +121,6 @@ const deliverySchema = new Schema<ICampaignLocaleDelivery>(
     brevoStatus: { type: String, enum: ['created', 'sent'] },
     recipientCount: { type: Number, default: 0 },
     subscriberCount: { type: Number, default: 0 },
-    leadCount: { type: Number, default: 0 },
     deduplicatedRecipientCount: { type: Number, default: 0 },
     criteriaHash: { type: String, trim: true },
     stats: {
@@ -155,12 +150,6 @@ const marketingCampaignSchema = new Schema<IMarketingCampaign>(
       type: String,
       enum: MARKETING_CAMPAIGN_STATUSES,
       default: 'draft',
-      index: true,
-    },
-    audienceType: {
-      type: String,
-      enum: MARKETING_AUDIENCE_TYPES,
-      default: 'subscribers',
       index: true,
     },
     // Mixed keeps old en/nl/fr documents readable while allowing the catalog

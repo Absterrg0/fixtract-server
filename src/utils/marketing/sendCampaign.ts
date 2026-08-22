@@ -4,7 +4,6 @@ import MarketingCampaign, {
   MARKETING_LOCALES,
 } from '../../models/marketingCampaign';
 import MarketingSubscriber from '../../models/marketingSubscriber';
-import MarketingLead from '../../models/marketingLead';
 import { randomUUID } from 'node:crypto';
 import { resolveMarketingAudience } from './audienceResolver';
 import { renderMarketingEmail, renderMarketingFooter } from './renderCampaign';
@@ -172,14 +171,12 @@ export async function sendMarketingCampaign(
   let members;
   let audienceAudit = {
     subscriberCount: 0,
-    leadCount: 0,
     deduplicatedRecipientCount: 0,
     criteriaHash: '',
   };
   try {
     const resolved = await resolveMarketingAudience({
       campaignType: campaign.type,
-      audienceType: campaign.audienceType || 'subscribers',
       filters: campaign.audience,
       contentLocales: locales,
       inactiveDays: resolveReengagementInactiveDays(campaign),
@@ -187,8 +184,7 @@ export async function sendMarketingCampaign(
     });
     if (resolved.overLimit) throw new Error(`Audience has ${resolved.exactTotal} recipients, exceeding the configured delivery limit of 5000`);
     audienceAudit = {
-      subscriberCount: resolved.bySource.subscribers,
-      leadCount: resolved.bySource.leads,
+      subscriberCount: resolved.exactTotal,
       deduplicatedRecipientCount: resolved.deduplicated,
       criteriaHash: resolved.criteriaHash,
     };
@@ -199,7 +195,6 @@ export async function sendMarketingCampaign(
       region: recipient.country,
       subscriberId: recipient.subscriberId,
       userId: recipient.userId,
-      leadId: recipient.leadId,
     }));
   } catch (err: any) {
     const error = err?.message || String(err) || 'Failed to resolve campaign audience';
@@ -224,7 +219,6 @@ export async function sendMarketingCampaign(
     brevoStatus: delivery.brevoStatus,
     recipientCount: delivery.recipientCount,
     subscriberCount: delivery.subscriberCount,
-    leadCount: delivery.leadCount,
     deduplicatedRecipientCount: delivery.deduplicatedRecipientCount,
     criteriaHash: delivery.criteriaHash,
     stats: delivery.stats,
@@ -392,13 +386,6 @@ export async function sendMarketingCampaign(
       if (ids.length > 0) {
         await MarketingSubscriber.updateMany(
           { _id: { $in: ids } },
-          { $set: { lastCampaignSentAt: new Date() } },
-        );
-      }
-      const leadIds = recipients.map((r) => r.leadId).filter(Boolean);
-      if (leadIds.length > 0) {
-        await MarketingLead.updateMany(
-          { _id: { $in: leadIds } },
           { $set: { lastCampaignSentAt: new Date() } },
         );
       }
