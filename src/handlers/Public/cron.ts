@@ -116,7 +116,7 @@ async function executeKpiMonthlyReport(
       deletedAt: { $exists: false },
       accountStatus: { $nin: ['suspended', 'rejected'] },
     })
-      .select('_id email adminRole')
+      .select('_id email adminRole adminPermissionLevels')
       .lean();
 
     // KPI_REPORT_EMAILS is authoritative when set — include addresses even if not in admin collection.
@@ -132,7 +132,7 @@ async function executeKpiMonthlyReport(
         const email = typeof admin.email === 'string' ? admin.email.trim().toLowerCase() : '';
         if (!email) return false;
         const role = resolveAdminRole(admin.adminRole);
-        return hasPermission(role, 'kpi.read');
+        return hasPermission(role, 'kpi.read', admin.adminPermissionLevels);
       });
     }
 

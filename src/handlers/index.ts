@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { IUser } from "../models/user";
+import { permissionsForLevels, permissionsForRole, resolveAdminRole } from "../utils/adminRbac/rolePermissions";
 // Handler to get current authenticated user
 export const GetCurrentUser = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -17,6 +18,10 @@ export const GetCurrentUser = async (req: Request, res: Response, next: NextFunc
     console.log('📤 GetCurrentUser - companyBlockedDates from DB:', user.companyBlockedDates);
     console.log('📤 GetCurrentUser - companyBlockedRanges from DB:', user.companyBlockedRanges);
 
+    const adminPermissions = user.role === 'admin'
+      ? [...(user.adminPermissionLevels ? permissionsForLevels(user.adminPermissionLevels) : permissionsForRole(resolveAdminRole(user.adminRole)))]
+      : undefined;
+
     return res.status(200).json({
       success: true,
       user: {
@@ -25,6 +30,9 @@ export const GetCurrentUser = async (req: Request, res: Response, next: NextFunc
         email: user.email,
         phone: user.phone,
         role: user.role,
+        adminRole: user.adminRole,
+        adminPermissions,
+        adminPermissionLevels: user.role === 'admin' ? (user as any).adminPermissionLevels : undefined,
         isEmailVerified: user.isEmailVerified || false,
         isPhoneVerified: user.isPhoneVerified || false,
         vatNumber: user.vatNumber,
@@ -58,6 +66,8 @@ export const GetCurrentUser = async (req: Request, res: Response, next: NextFunc
         totalSpent: user.totalSpent,
         totalBookings: user.totalBookings,
         employee: user.employee,
+        availability: user.availability,
+        timeZone: user.timeZone,
         customerType: user.customerType,
         businessName: user.businessName,
         companyAddress: user.companyAddress,
