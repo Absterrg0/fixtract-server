@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   cmsCountryVisibilityFilter,
+  isCmsCountryCode,
   isCmsContentVisibleForCountry,
   parseCmsCountryCode,
   sanitizeCmsActiveCountries,
@@ -18,14 +19,23 @@ describe('CMS country targeting', () => {
     expect(sanitizeCmsActiveCountries(['be', ' BE ', 'NL', 'invalid', 42])).toEqual(['BE', 'NL']);
     expect(parseCmsCountryCode(' be ')).toBe('BE');
     expect(parseCmsCountryCode('BEL')).toBeUndefined();
+    expect(isCmsCountryCode('ZZ')).toBe(false);
+    expect(sanitizeCmsActiveCountries(['ZZ', 'BE'])).toEqual(['BE']);
   });
 
   it('queries global content plus country-specific content for known visitors', () => {
     expect(cmsCountryVisibilityFilter('BE')).toEqual({
-      $or: [{ activeCountries: { $size: 0 } }, { activeCountries: 'BE' }],
+      $or: [
+        { activeCountries: { $size: 0 } },
+        { activeCountries: { $exists: false } },
+        { activeCountries: 'BE' },
+      ],
     });
     expect(cmsCountryVisibilityFilter()).toEqual({
-      activeCountries: { $size: 0 },
+      $or: [
+        { activeCountries: { $size: 0 } },
+        { activeCountries: { $exists: false } },
+      ],
     });
   });
 });

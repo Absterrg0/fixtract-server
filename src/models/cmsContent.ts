@@ -1,4 +1,5 @@
 import { Schema, model, Document, Types } from "mongoose";
+import { isCmsCountryCode } from "../utils/cms/activeCountries";
 
 export type CmsContentType = "blog" | "news" | "faq" | "policy" | "landing";
 export type CmsContentStatus = "draft" | "published";
@@ -97,7 +98,16 @@ const CmsContentSchema = new Schema<ICmsContent>(
     relatedServices: [{ type: Schema.Types.ObjectId, ref: "ServiceCategory" }],
     relatedServiceSlug: { type: String, trim: true, lowercase: true, maxlength: 200 },
     activeCountries: {
-      type: [{ type: String, trim: true, uppercase: true, maxlength: 2 }],
+      type: [{
+        type: String,
+        trim: true,
+        uppercase: true,
+        maxlength: 2,
+        validate: {
+          validator: isCmsCountryCode,
+          message: "activeCountries must contain ISO 3166-1 alpha-2 country codes",
+        },
+      }],
       default: [],
     },
     viewCount: { type: Number, default: 0, min: 0 },
