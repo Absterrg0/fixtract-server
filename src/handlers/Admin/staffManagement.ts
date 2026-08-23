@@ -250,7 +250,12 @@ export const inviteStaff = async (req: Request, res: Response) => {
     }
 
     if (resolveAdminRole(admin.adminRole) !== 'super') {
-      return res.status(403).json({ success: false, msg: 'Only a super admin can invite staff members' });
+      return res.status(403).json({
+        success: false,
+        msg: adminRole === 'super'
+          ? 'Only a super admin can assign the super admin role'
+          : 'Only a super admin can invite staff members',
+      });
     }
 
     const normalizedEmail = email.trim().toLowerCase();

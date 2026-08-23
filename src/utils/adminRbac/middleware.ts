@@ -14,6 +14,24 @@ export function attachResolvedAdminRole(req: Request, _res: Response, next: Next
 
 /** Enforce permission for the current admin-router path (after requireAdmin). */
 export async function enforceAdminRoutePermission(req: Request, res: Response, next: NextFunction) {
+  const normalizedPath = req.path.split('?')[0] || '/';
+  if (
+    normalizedPath === '/platform-settings' ||
+    normalizedPath.startsWith('/platform-settings/') ||
+    normalizedPath === '/site-settings' ||
+    normalizedPath.startsWith('/site-settings/')
+  ) {
+    const adminRole = resolveAdminRole((req.admin as any)?.adminRole);
+    if (adminRole !== 'super') {
+      return res.status(403).json({
+        success: false,
+        msg: 'Only a super admin can change platform or site settings',
+        code: 'ADMIN_PERMISSION_DENIED',
+        adminRole,
+      });
+    }
+  }
+
   const permission = permissionForAdminPath(req.path);
   if (!permission) {
     return next();

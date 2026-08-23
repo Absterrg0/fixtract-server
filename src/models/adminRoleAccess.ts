@@ -19,6 +19,8 @@ const schema = new Schema<IAdminRoleAccess>({
   roles: { type: Schema.Types.Mixed, default: {} },
   lastModifiedBy: { type: Schema.Types.ObjectId, ref: 'User' },
   lastModified: { type: Date, default: Date.now },
+}, {
+  optimisticConcurrency: true,
 });
 
 schema.statics.getCurrentConfig = async function (): Promise<IAdminRoleAccess> {

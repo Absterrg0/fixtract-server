@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { DateTime } from 'luxon';
+import type { IUser } from '../../../models/user';
 import { isAdminAvailableForMeeting } from '../../../handlers/User/adminAvailability';
 
 const meetingAt = (value: string, timeZone: string) =>
   DateTime.fromISO(value, { zone: timeZone }).toUTC().toJSDate();
 
 describe('admin support meeting availability', () => {
-  const admin = {
+  const admin: Pick<IUser, 'timeZone' | 'adminAvailabilityConfigured' | 'availability' | 'blockedDates' | 'blockedRanges'> = {
     timeZone: 'Europe/Brussels',
     adminAvailabilityConfigured: true,
     availability: {
@@ -15,7 +16,7 @@ describe('admin support meeting availability', () => {
     },
     blockedDates: [],
     blockedRanges: [],
-  } as const;
+  };
 
   it('accepts a meeting inside the admin schedule and rejects one outside it', () => {
     expect(isAdminAvailableForMeeting(admin, meetingAt('2026-08-24T10:00', admin.timeZone), 60)).toBe(true);

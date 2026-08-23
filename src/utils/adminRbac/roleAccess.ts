@@ -1,5 +1,6 @@
+import mongoose from 'mongoose';
 import User, { type IUser } from '../../models/user';
-import AdminRoleAccess from '../../models/adminRoleAccess';
+import AdminRoleAccess, { type IAdminRoleAccess } from '../../models/adminRoleAccess';
 import {
   ADMIN_ACCESS_AREAS,
   ADMIN_ACCESS_LEVELS,
@@ -45,7 +46,9 @@ export async function getConfiguredAccessForRole(role: AdminRole): Promise<Admin
 export async function getEffectiveAccessForUser(user: Pick<IUser, 'adminRole' | 'adminPermissionLevels'>): Promise<AdminPermissionLevels> {
   const stored = normalizePermissionLevels(user.adminPermissionLevels);
   if (Object.keys(stored).length > 0) return stored;
-  return getConfiguredAccessForRole(resolveAdminRole(user.adminRole) || 'super');
+  const resolvedRole = resolveAdminRole(user.adminRole);
+  if (!resolvedRole) return {};
+  return getConfiguredAccessForRole(resolvedRole);
 }
 
 export function validatePermissionMatrix(value: unknown): Partial<Record<AdminRole, AdminPermissionLevels>> | null {
@@ -63,22 +66,59 @@ export function validatePermissionMatrix(value: unknown): Partial<Record<AdminRo
   return matrix;
 }
 
+const ROLE_ACCESS_SINGLETON_ID = 'admin-role-access';
+const ROLE_ACCESS_SAVE_MAX_RETRIES = 3;
+
+function isVersionError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === 'object' &&
+      'name' in error &&
+      (error as { name?: string }).name === 'VersionError',
+  );
+}
+
 /** Persist a role matrix and copy the selected role's settings to existing admins. */
 export async function saveConfiguredRoleAccess(
   matrix: Partial<Record<AdminRole, AdminPermissionLevels>>,
   modifiedBy?: IUser['_id'],
 ) {
-  const config = await AdminRoleAccess.getCurrentConfig();
-  config.roles = { ...(config.roles || {}), ...matrix };
-  config.lastModifiedBy = modifiedBy as any;
-  config.lastModified = new Date();
-  await config.save();
+  let lastError: unknown;
+  for (let attempt = 0; attempt < ROLE_ACCESS_SAVE_MAX_RETRIES; attempt += 1) {
+    const session = await mongoose.startSession();
+    try {
+      let saved: IAdminRoleAccess | undefined;
+      await session.withTransaction(async () => {
+        let config = await AdminRoleAccess.findOne({ _id: ROLE_ACCESS_SINGLETON_ID }).session(session);
+        if (!config) {
+          config = new AdminRoleAccess({ _id: ROLE_ACCESS_SINGLETON_ID, roles: {}, lastModified: new Date() });
+        }
+        config.roles = { ...(config.roles || {}), ...matrix };
+        config.lastModifiedBy = modifiedBy as any;
+        config.lastModified = new Date();
+        await config.save({ session });
 
-  for (const [role, levels] of Object.entries(matrix) as Array<[AdminRole, AdminPermissionLevels]>) {
-    await User.updateMany(
-      { role: 'admin', adminRole: role },
-      { $set: { adminPermissionLevels: levels } },
-    );
+        for (const [role, levels] of Object.entries(matrix) as Array<[AdminRole, AdminPermissionLevels]>) {
+          await User.updateMany(
+            { role: 'admin', adminRole: role },
+            { $set: { adminPermissionLevels: levels } },
+            { session },
+          );
+        }
+        saved = config;
+      });
+      if (!saved) {
+        throw new Error('Failed to save role access configuration');
+      }
+      return saved;
+    } catch (error) {
+      lastError = error;
+      if (!isVersionError(error) || attempt === ROLE_ACCESS_SAVE_MAX_RETRIES - 1) {
+        throw error;
+      }
+    } finally {
+      await session.endSession();
+    }
   }
-  return config;
+  throw lastError instanceof Error ? lastError : new Error('Failed to save role access configuration');
 }

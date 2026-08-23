@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { hasAccessLevel, permissionsForRole, hasPermission, permissionLevelsForRole, resolveAdminRole } from '../../../utils/adminRbac/rolePermissions';
-import { validatePermissionMatrix } from '../../../utils/adminRbac/roleAccess';
+import { validatePermissionMatrix, getEffectiveAccessForUser } from '../../../utils/adminRbac/roleAccess';
 import { accessRequirementForAdminPath, permissionForAdminPath } from '../../../utils/adminRbac/routePermissions';
 
 describe('admin RBAC role packs', () => {
   it('defaults only legacy missing roles to super and rejects malformed roles', () => {
     expect(resolveAdminRole(undefined)).toBe('super');
     expect(resolveAdminRole('nope')).toBeNull();
+  });
+
+  it('returns no effective access for malformed roles without stored overrides', async () => {
+    await expect(getEffectiveAccessForUser({ adminRole: 'nope' as any })).resolves.toEqual({});
   });
 
   it('gives care chat + disputes but not payments or staff', () => {
