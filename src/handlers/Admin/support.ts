@@ -196,6 +196,15 @@ export const adminUpdateMeetingRequest = async (req: Request, res: Response) => 
       }
 
       const windowEnd = new Date(effectiveScheduledAt.getTime() + doc.durationMinutes * 60 * 1000);
+      const maxDurationMinutes = 240;
+      const updateFields: Record<string, unknown> = {};
+      if (nextStatus) updateFields.status = nextStatus;
+      if (parsedScheduledAt) updateFields.scheduledAt = parsedScheduledAt;
+      else if (clearScheduledAt) updateFields.scheduledAt = undefined;
+      if (typeof req.body?.adminResponse === "string") {
+        updateFields.adminResponse = req.body.adminResponse.trim().slice(0, 2000);
+      }
+
       const session = await mongoose.startSession();
       let scheduleConflict = false;
       try {
@@ -203,7 +212,10 @@ export const adminUpdateMeetingRequest = async (req: Request, res: Response) => 
           const nearbyRequests = await MeetingRequest.find({
             _id: { $ne: doc._id },
             status: 'scheduled',
-            scheduledAt: { $lt: windowEnd, $gte: new Date(effectiveScheduledAt.getTime() - 4 * 60 * 60 * 1000) },
+            scheduledAt: {
+              $lt: windowEnd,
+              $gte: new Date(effectiveScheduledAt.getTime() - maxDurationMinutes * 60 * 1000),
+            },
           }).select('scheduledAt durationMinutes').session(session);
           const hasConflict = nearbyRequests.some((request) => {
             if (!request.scheduledAt) return false;
@@ -212,27 +224,21 @@ export const adminUpdateMeetingRequest = async (req: Request, res: Response) => 
           });
           if (hasConflict) {
             scheduleConflict = true;
-            throw new Error('MEETING_SCHEDULE_CONFLICT');
+            return;
           }
 
-          if (nextStatus) doc.status = nextStatus;
-          if (parsedScheduledAt) doc.scheduledAt = parsedScheduledAt;
-          else if (clearScheduledAt) doc.scheduledAt = undefined;
-          if (typeof req.body?.adminResponse === "string") {
-            doc.adminResponse = req.body.adminResponse.trim().slice(0, 2000);
-          }
-          await doc.save({ session });
+          await MeetingRequest.updateOne({ _id: doc._id }, { $set: updateFields }, { session });
         });
-      } catch (error) {
-        if (scheduleConflict) {
-          return res.status(409).json({ success: false, msg: "The selected time overlaps another scheduled support meeting" });
-        }
-        throw error;
       } finally {
         await session.endSession();
       }
 
-      return res.status(200).json({ success: true, data: doc });
+      if (scheduleConflict) {
+        return res.status(409).json({ success: false, msg: "The selected time overlaps another scheduled support meeting" });
+      }
+
+      const refreshed = await MeetingRequest.findById(doc._id);
+      return res.status(200).json({ success: true, data: refreshed ?? doc });
     }
 
     if (nextStatus) doc.status = nextStatus;
