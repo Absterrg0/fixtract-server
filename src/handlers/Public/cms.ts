@@ -125,9 +125,14 @@ export const getPublicCmsContentBySlug = async (req: Request, res: Response) => 
     }
 
     const presigned = await presignCmsDoc(doc);
-    if (Array.isArray(presigned.relatedContent)) {
-      presigned.relatedContent = presigned.relatedContent.filter((item: { activeCountries?: string[] }) =>
-        isCmsContentVisibleForCountry(item.activeCountries, countryCode),
+    const relatedContent = presigned.relatedContent as unknown as Array<{
+      activeCountries?: string[];
+    }> | undefined;
+    if (Array.isArray(relatedContent)) {
+      // Mongoose types the populated field as ObjectId[], but the runtime value
+      // is a populated document because of the populate() above.
+      (presigned as unknown as { relatedContent: typeof relatedContent }).relatedContent = relatedContent.filter(
+        (item) => isCmsContentVisibleForCountry(item.activeCountries, countryCode),
       );
     }
     return res.status(200).json({ success: true, data: presigned });

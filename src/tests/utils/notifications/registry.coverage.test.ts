@@ -91,4 +91,11 @@ describe('notification registry coverage', () => {
       expect(built.clickUrl.length).toBeGreaterThan(0);
     }
   });
+
+  it('routes project status notices to the specific project', () => {
+    const event = getEventDef('professional.project_published');
+    const built = event!.build({ projectId: '507f1f77bcf86cd799439011' });
+
+    expect(built.clickUrl).toContain('/professional/projects/507f1f77bcf86cd799439011');
+  });
 });
