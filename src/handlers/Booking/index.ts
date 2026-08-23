@@ -494,7 +494,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
 
     const hasServiceAddressFields = Boolean(
       serviceLocation &&
-      ['address', 'city', 'country', 'postalCode'].some((field) => {
+      ['address', 'city', 'postalCode'].some((field) => {
         const value = (serviceLocation as any)[field];
         return value != null && String(value).trim() !== '';
       }),
