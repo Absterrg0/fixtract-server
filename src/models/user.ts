@@ -22,6 +22,8 @@ export interface IUser extends Document {
     adminPermissionLevels?: AdminPermissionLevels;
     adminStatusSince?: Date;
     timeZone?: string;
+    /** Set when an admin explicitly saves their support availability schedule. */
+    adminAvailabilityConfigured?: boolean;
     adminStaff?: {
         invitedBy?: string;
         invitedByEmail?: string;
@@ -256,6 +258,10 @@ const UserSchema = new Schema({
         required: false,
         trim: true,
         maxlength: 80,
+    },
+    adminAvailabilityConfigured: {
+        type: Boolean,
+        default: false,
     },
     adminStaff: {
         invitedBy: { type: String, required: false },

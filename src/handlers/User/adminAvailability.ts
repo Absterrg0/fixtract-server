@@ -87,16 +87,31 @@ function minutesSinceMidnight(value: string | undefined): number | null {
 }
 
 /** Check a scheduled support meeting against the logged-in admin's schedule and blocks. */
-export function isAdminAvailableForMeeting(admin: Pick<IUser, 'availability' | 'blockedDates' | 'blockedRanges' | 'timeZone'>, start: Date, durationMinutes: number): boolean {
+export function isAdminAvailableForMeeting(
+  admin: Pick<IUser, 'availability' | 'blockedDates' | 'blockedRanges' | 'timeZone' | 'adminAvailabilityConfigured'>,
+  start: Date,
+  durationMinutes: number,
+): boolean {
   const timeZone = admin.timeZone || 'UTC';
   const startZoned = DateTime.fromJSDate(start, { zone: 'utc' }).setZone(timeZone);
   const endZoned = startZoned.plus({ minutes: durationMinutes });
   if (!startZoned.isValid || !endZoned.isValid) return false;
 
-  const blockedDate = startZoned.toISODate();
-  if (admin.blockedDates?.some((item: any) => DateTime.fromJSDate(new Date(item.date), { zone: 'utc' }).setZone(timeZone).toISODate() === blockedDate)) {
-    return false;
+  let dayCursor = startZoned.startOf('day');
+  const endDay = endZoned.startOf('day');
+  while (dayCursor <= endDay) {
+    const blockedDate = dayCursor.toISODate();
+    if (
+      admin.blockedDates?.some(
+        (item: any) =>
+          DateTime.fromJSDate(new Date(item.date), { zone: 'utc' }).setZone(timeZone).toISODate() === blockedDate,
+      )
+    ) {
+      return false;
+    }
+    dayCursor = dayCursor.plus({ days: 1 });
   }
+
   if (admin.blockedRanges?.some((range: any) => {
     const rangeStart = new Date(range.startDate).getTime();
     const rangeEnd = new Date(range.endDate).getTime();
@@ -106,10 +121,12 @@ export function isAdminAvailableForMeeting(admin: Pick<IUser, 'availability' | '
   }
 
   const availability = admin.availability as Record<string, any> | undefined;
-  // The User schema supplies empty weekday objects for legacy accounts. Treat those as
-  // unconfigured (24/7) until an admin saves an explicit schedule.
-  const hasConfiguredSchedule = Boolean(availability && Object.values(availability).some((day) => day && typeof day === 'object' && (day.startTime || day.endTime)));
+  const hasConfiguredSchedule = Boolean(
+    admin.adminAvailabilityConfigured ||
+      (availability && Object.values(availability).some((day) => day && typeof day === 'object' && (day.startTime || day.endTime))),
+  );
   if (!hasConfiguredSchedule) return true;
+
   if (startZoned.toISODate() !== endZoned.toISODate()) return false;
 
   const dayKey = startZoned.toFormat('cccc').toLowerCase();
@@ -155,6 +172,7 @@ export const updateAdminAvailability = async (req: Request, res: Response) => {
   user.blockedDates = blockedDates;
   user.blockedRanges = blockedRanges;
   user.timeZone = timeZone.trim();
+  user.adminAvailabilityConfigured = true;
   await user.save();
   return res.json({ success: true, data: serialize(user) });
 };

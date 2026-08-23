@@ -249,6 +249,10 @@ export const inviteStaff = async (req: Request, res: Response) => {
       });
     }
 
+    if (resolveAdminRole(admin.adminRole) !== 'super') {
+      return res.status(403).json({ success: false, msg: 'Only a super admin can invite staff members' });
+    }
+
     const normalizedEmail = email.trim().toLowerCase();
     const resolvedPhone = resolveInvitePhone(phone);
     const trimmedName = name.trim();
