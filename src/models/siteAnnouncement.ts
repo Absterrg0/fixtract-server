@@ -1,5 +1,9 @@
 import mongoose, { Document, Schema } from 'mongoose';
-import { ANNOUNCEMENT_TYPES } from '../utils/siteAnnouncements/constants';
+import {
+  ANNOUNCEMENT_FREQUENCIES,
+  ANNOUNCEMENT_TYPES,
+  type AnnouncementFrequency,
+} from '../utils/siteAnnouncements/constants';
 
 export type AnnouncementType = 'top_bar' | 'modal' | 'exit_intent';
 
@@ -13,6 +17,7 @@ export interface ISiteAnnouncement extends Document {
   discountCode?: string;
   activeCountries: string[];
   locale: string;
+  frequency: AnnouncementFrequency;
   startsAt: Date;
   endsAt: Date;
   isActive: boolean;
@@ -20,6 +25,9 @@ export interface ISiteAnnouncement extends Document {
   delaySeconds: number;
   dismissible: boolean;
   requireMarketingConsent: boolean;
+  impressions: number;
+  clicks: number;
+  dismissals: number;
   createdBy: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -77,6 +85,11 @@ const siteAnnouncementSchema = new Schema<ISiteAnnouncement>({
     lowercase: true,
     maxlength: 10,
   },
+  frequency: {
+    type: String,
+    enum: [...ANNOUNCEMENT_FREQUENCIES],
+    default: 'once_pageview',
+  },
   startsAt: {
     type: Date,
     required: true,
@@ -107,6 +120,21 @@ const siteAnnouncementSchema = new Schema<ISiteAnnouncement>({
   requireMarketingConsent: {
     type: Boolean,
     default: true,
+  },
+  impressions: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
+  clicks: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
+  dismissals: {
+    type: Number,
+    default: 0,
+    min: 0,
   },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,

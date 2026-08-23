@@ -1,16 +1,20 @@
 import mongoose, { Document, Schema } from 'mongoose';
-
-export const MARKETING_LOCALES = ['en', 'nl', 'fr'] as const;
-export type MarketingLocale = (typeof MARKETING_LOCALES)[number];
+import { MARKETING_LOCALES, type MarketingLocale } from '../utils/marketing/marketingCatalog';
+export { MARKETING_LOCALES } from '../utils/marketing/marketingCatalog';
+export type { MarketingLocale } from '../utils/marketing/marketingCatalog';
 
 export interface IMarketingSubscriber extends Document {
   email: string;
+  emailNormalized: string;
   name?: string;
+  firstName?: string;
   userId?: mongoose.Types.ObjectId;
   role?: 'customer' | 'professional';
   region?: string;
   interestedServices: string[];
   locale: MarketingLocale;
+  localeSource?: 'explicit' | 'country_default' | 'fallback';
+  serviceKeys: string[];
   subscribedAt: Date;
   consentVerifiedAt?: Date | null;
   unsubscribedAt?: Date | null;
@@ -34,7 +38,16 @@ const marketingSubscriberSchema = new Schema<IMarketingSubscriber>(
       lowercase: true,
       trim: true,
     },
+    emailNormalized: {
+      type: String,
+      lowercase: true,
+      trim: true,
+      default: function (this: IMarketingSubscriber) {
+        return this.email?.trim().toLowerCase();
+      },
+    },
     name: { type: String, trim: true },
+    firstName: { type: String, trim: true },
     userId: {
       type: Schema.Types.ObjectId,
       ref: 'User',
@@ -57,10 +70,15 @@ const marketingSubscriberSchema = new Schema<IMarketingSubscriber>(
     },
     locale: {
       type: String,
-      enum: MARKETING_LOCALES,
       default: 'en',
       index: true,
     },
+    localeSource: {
+      type: String,
+      enum: ['explicit', 'country_default', 'fallback'],
+      default: 'fallback',
+    },
+    serviceKeys: { type: [String], default: [] },
     subscribedAt: {
       type: Date,
       default: Date.now,
@@ -110,6 +128,7 @@ marketingSubscriberSchema.index({ unsubscribedAt: 1, role: 1, subscribedAt: 1 })
 marketingSubscriberSchema.index({ unsubscribedAt: 1, lastCampaignSentAt: 1, subscribedAt: 1 });
 marketingSubscriberSchema.index({ unsubscribedAt: 1, lastEngagedAt: 1, subscribedAt: 1 });
 marketingSubscriberSchema.index({ subscribedAt: -1 });
+marketingSubscriberSchema.index({ emailNormalized: 1 }, { unique: true, sparse: true });
 
 const MarketingSubscriber = mongoose.model<IMarketingSubscriber>(
   'MarketingSubscriber',

@@ -1,5 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
-import { MARKETING_LOCALES, type MarketingLocale } from './marketingSubscriber';
+import { MARKETING_LOCALES, type MarketingLocale } from '../utils/marketing/marketingCatalog';
+export { MARKETING_LOCALES } from '../utils/marketing/marketingCatalog';
 
 export const MARKETING_CAMPAIGN_TYPES = ['newsletter', 'promotion', 'reengagement'] as const;
 export type MarketingCampaignType = (typeof MARKETING_CAMPAIGN_TYPES)[number];
@@ -26,6 +27,8 @@ export interface ICampaignAudience {
   countries: string[];
   /** Service interest strings; empty = all services */
   interestedServices: string[];
+  /** Canonical service identifiers; legacy interestedServices remains readable. */
+  serviceKeys: string[];
   /** Locales to send; empty = all locales that have content */
   locales: MarketingLocale[];
   /** Include customers / professionals; defaults both true via empty = both */
@@ -38,6 +41,9 @@ export interface ICampaignLocaleDelivery {
   brevoCampaignId?: number;
   brevoStatus?: 'created' | 'sent';
   recipientCount: number;
+  subscriberCount?: number;
+  deduplicatedRecipientCount?: number;
+  criteriaHash?: string;
   stats?: {
     sent: number;
     delivered: number;
@@ -55,7 +61,7 @@ export interface IMarketingCampaign extends Document {
   type: MarketingCampaignType;
   status: MarketingCampaignStatus;
   /** Content keyed by locale */
-  content: Partial<Record<MarketingLocale, ICampaignLocaleContent>>;
+  content: Partial<Record<string, ICampaignLocaleContent>>;
   audience: ICampaignAudience;
   /** For reengagement auto-sends: inactive for this many days */
   inactiveDays?: number;
@@ -75,6 +81,9 @@ export interface IMarketingCampaign extends Document {
   nextRetryAt?: Date | null;
   lastError?: string;
   utmCampaign?: string;
+  lastPreviewCount?: number;
+  lastPreviewAt?: Date | null;
+  lastPreviewCriteriaHash?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -93,6 +102,7 @@ const audienceSchema = new Schema<ICampaignAudience>(
   {
     countries: { type: [String], default: [] },
     interestedServices: { type: [String], default: [] },
+    serviceKeys: { type: [String], default: [] },
     locales: { type: [String], enum: MARKETING_LOCALES, default: [] },
     roles: {
       type: [String],
@@ -110,6 +120,9 @@ const deliverySchema = new Schema<ICampaignLocaleDelivery>(
     brevoCampaignId: { type: Number },
     brevoStatus: { type: String, enum: ['created', 'sent'] },
     recipientCount: { type: Number, default: 0 },
+    subscriberCount: { type: Number, default: 0 },
+    deduplicatedRecipientCount: { type: Number, default: 0 },
+    criteriaHash: { type: String, trim: true },
     stats: {
       sent: { type: Number, default: 0 },
       delivered: { type: Number, default: 0 },
@@ -139,14 +152,9 @@ const marketingCampaignSchema = new Schema<IMarketingCampaign>(
       default: 'draft',
       index: true,
     },
-    content: {
-      type: {
-        en: { type: localeContentSchema, required: false },
-        nl: { type: localeContentSchema, required: false },
-        fr: { type: localeContentSchema, required: false },
-      },
-      default: {},
-    },
+    // Mixed keeps old en/nl/fr documents readable while allowing the catalog
+    // to grow without another schema deployment.
+    content: { type: Schema.Types.Mixed, default: {} },
     audience: {
       type: audienceSchema,
       default: () => ({
@@ -168,6 +176,9 @@ const marketingCampaignSchema = new Schema<IMarketingCampaign>(
     nextRetryAt: { type: Date, default: null, index: true },
     lastError: { type: String },
     utmCampaign: { type: String, trim: true },
+    lastPreviewCount: { type: Number, min: 0 },
+    lastPreviewAt: { type: Date, default: null },
+    lastPreviewCriteriaHash: { type: String, trim: true },
   },
   { timestamps: true },
 );
@@ -180,5 +191,4 @@ const MarketingCampaign = mongoose.model<IMarketingCampaign>(
 );
 
 export default MarketingCampaign;
-export { MARKETING_LOCALES };
 export type { MarketingLocale };

@@ -1,4 +1,8 @@
-import { ANNOUNCEMENT_LIMITS, isAnnouncementType } from './constants';
+import {
+  ANNOUNCEMENT_LIMITS,
+  isAnnouncementFrequency,
+  isAnnouncementType,
+} from './constants';
 import { parseScheduleEnd, parseScheduleStart } from './scheduleDates';
 import type {
   ParseResult,
@@ -121,6 +125,14 @@ export function parseSiteAnnouncementWriteBody(
     return { ok: false, error: 'endsAt must be after startsAt' };
   }
 
+  const frequency =
+    body.type === 'top_bar'
+      ? 'once_pageview'
+      : optionalTrimmed(body.frequency) || 'once_pageview';
+  if (!isAnnouncementFrequency(frequency)) {
+    return { ok: false, error: 'frequency must be once, once_week, once_3_days, once_day, once_session, or once_pageview' };
+  }
+
   const delaySeconds = Math.min(
     ANNOUNCEMENT_LIMITS.delaySeconds.max,
     Math.max(
@@ -154,6 +166,7 @@ export function parseSiteAnnouncementWriteBody(
       discountCode,
       activeCountries,
       locale,
+      frequency,
       startsAt,
       endsAt,
       isActive: typeof body.isActive === 'boolean' ? body.isActive : true,
@@ -290,6 +303,14 @@ export function parseSiteAnnouncementPatchBody(
     update.locale = locale;
   }
 
+  if (isPresent(body, 'frequency')) {
+    const frequency = typeof body.frequency === 'string' ? body.frequency.trim() : '';
+    if (!isAnnouncementFrequency(frequency)) {
+      return { ok: false, error: 'frequency must be once, once_week, once_3_days, once_day, once_session, or once_pageview' };
+    }
+    update.frequency = frequency;
+  }
+
   if (isPresent(body, 'startsAt')) {
     const startsAt = parseScheduleStart(body.startsAt);
     if (!startsAt) {
@@ -345,6 +366,15 @@ export function parseSiteAnnouncementPatchBody(
       return { ok: false, error: 'requireMarketingConsent must be a boolean' };
     }
     update.requireMarketingConsent = body.requireMarketingConsent;
+  }
+
+  if ((update.type ?? existing.type) === 'top_bar') {
+    // Do not add an unrelated frequency write to a title-only patch.
+    if (isPresent(body, 'type') || isPresent(body, 'frequency')) {
+      update.frequency = 'once_pageview';
+    }
+  } else if (update.frequency && !isAnnouncementFrequency(update.frequency)) {
+    return { ok: false, error: 'Invalid frequency' };
   }
 
   const type = update.type ?? existing.type;

@@ -1,12 +1,14 @@
 import { Request, Response } from 'express';
 import User from '../../models/user';
 import MarketingSubscriber from '../../models/marketingSubscriber';
+import MarketingSuppression from '../../models/marketingSuppression';
 import { syncPendingBrevoResubscribes } from '../../utils/marketing/audience';
 import { generateUnsubscribeToken } from '../../utils/marketing/unsubscribeToken';
 import {
   getOriginFromRequest,
   isAllowedOrigin,
 } from '../../utils/fcmTokenUtils';
+import { MARKETING_LOCALES, isMarketingLocale } from '../../utils/marketing/marketingCatalog';
 
 // ------------------------------------------------------------------
 // Register / Unregister FCM tokens
@@ -156,7 +158,7 @@ export const getNotificationPreferences = async (req: Request, res: Response): P
     }
 
     const user = await User.findById(userId).select(
-      'notificationPreferences marketingConsentAt',
+      'notificationPreferences marketingConsentAt marketingLocale marketingLocaleSource',
     );
     if (!user) {
       res.status(404).json({ success: false, msg: 'User not found' });
@@ -174,7 +176,7 @@ export const getNotificationPreferences = async (req: Request, res: Response): P
 
     res.status(200).json({
       success: true,
-      data: preferences,
+      data: { ...preferences, marketingLocale: user.marketingLocale, marketingLocaleSource: user.marketingLocaleSource },
     });
   } catch (err) {
     console.error('getNotificationPreferences error:', err);
@@ -195,11 +197,35 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
       return;
     }
 
-    const { type, channel, enabled } = req.body as {
+    const { type, channel, enabled, marketingLocale } = req.body as {
       type?: string;
       channel?: 'push' | 'email';
       enabled?: boolean;
+      marketingLocale?: string;
     };
+
+    const normalizedMarketingLocale =
+      marketingLocale === undefined ? undefined : marketingLocale.trim().toLowerCase();
+    if (normalizedMarketingLocale !== undefined && !isMarketingLocale(normalizedMarketingLocale)) {
+      res.status(400).json({ success: false, msg: `marketingLocale must be one of: ${MARKETING_LOCALES.join(', ')}` });
+      return;
+    }
+
+    // Language-only updates are intentionally supported by the same preference
+    // endpoint used for channel toggles.
+    if (marketingLocale !== undefined && type === undefined && channel === undefined && enabled === undefined) {
+      const updatedUser = await User.findByIdAndUpdate(
+        userId,
+        { $set: { marketingLocale: normalizedMarketingLocale, marketingLocaleSource: 'explicit' } },
+        { new: true },
+      ).select('_id');
+      if (!updatedUser) {
+        res.status(404).json({ success: false, msg: 'User not found' });
+        return;
+      }
+      res.status(200).json({ success: true, msg: 'Marketing language updated' });
+      return;
+    }
 
     if (!type || !(VALID_TYPES as readonly string[]).includes(type)) {
       res.status(400).json({ success: false, msg: `type must be one of: ${VALID_TYPES.join(', ')}` });
@@ -220,6 +246,10 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
     const userUpdate: Record<string, Record<string, unknown>> = {
       $set: { [updatePath]: enabled },
     };
+    if (marketingLocale !== undefined) {
+      userUpdate.$set.marketingLocale = marketingLocale.trim().toLowerCase();
+      userUpdate.$set.marketingLocaleSource = 'explicit';
+    }
     if (type === 'promotions' && channel === 'email') {
       if (enabled) {
         userUpdate.$set.marketingConsentAt = new Date();
@@ -239,18 +269,28 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
       const normalizedEmail = updatedUser.email.toLowerCase().trim();
       const consentUpdatedAt = new Date();
       if (enabled) {
+        await MarketingSuppression.deleteOne({ emailNormalized: normalizedEmail, reason: 'unsubscribe' });
         await MarketingSubscriber.updateOne(
-          { email: normalizedEmail },
+          {
+            $or: [
+              { userId: updatedUser._id },
+              { email: normalizedEmail },
+              { emailNormalized: normalizedEmail },
+            ],
+          },
           {
             $set: {
               userId: updatedUser._id,
+              emailNormalized: normalizedEmail,
               unsubscribedAt: null,
               subscribedAt: consentUpdatedAt,
               consentVerifiedAt: consentUpdatedAt,
             },
             $setOnInsert: {
               email: normalizedEmail,
+              emailNormalized: normalizedEmail,
               interestedServices: [],
+              serviceKeys: [],
               locale: 'en',
               unsubscribeToken: generateUnsubscribeToken(),
               source: 'user_sync',
@@ -264,7 +304,13 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
         await syncPendingBrevoResubscribes(1, normalizedEmail);
       } else {
         await MarketingSubscriber.updateMany(
-          { $or: [{ userId: updatedUser._id }, { email: normalizedEmail }] },
+          {
+            $or: [
+              { userId: updatedUser._id },
+              { email: normalizedEmail },
+              { emailNormalized: normalizedEmail },
+            ],
+          },
           {
             $set: { unsubscribedAt: consentUpdatedAt },
             $unset: { consentVerifiedAt: 1 },

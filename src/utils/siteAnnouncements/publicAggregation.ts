@@ -38,6 +38,7 @@ export function buildPublicAnnouncementAggregationPipeline(
         discountCode: 1,
         activeCountries: 1,
         locale: 1,
+        frequency: 1,
         priority: 1,
         delaySeconds: 1,
         dismissible: 1,

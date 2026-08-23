@@ -86,6 +86,29 @@ describe('parseSiteAnnouncementWriteBody', () => {
       error: 'Non-dismissible overlays require a CTA URL or discount code',
     });
   });
+
+  it('preserves a supported frequency for overlays', () => {
+    const result = parseSiteAnnouncementWriteBody({
+      ...validBody,
+      type: 'modal',
+      frequency: 'once_3_days',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.frequency).toBe('once_3_days');
+  });
+
+  it('rejects an unsupported frequency for overlays', () => {
+    const result = parseSiteAnnouncementWriteBody({
+      ...validBody,
+      type: 'exit_intent',
+      frequency: 'every_visit',
+    });
+    expect(result).toEqual({
+      ok: false,
+      error: 'frequency must be once, once_week, once_3_days, once_day, once_session, or once_pageview',
+    });
+  });
 });
 
 describe('parseSiteAnnouncementPatchBody', () => {
@@ -141,6 +164,14 @@ describe('parseSiteAnnouncementPatchBody', () => {
       { ...existing, type: 'exit_intent', ctaUrl: '/services' },
     );
     expect(result.ok).toBe(false);
+  });
+
+  it('accepts a frequency patch for an overlay', () => {
+    const result = parseSiteAnnouncementPatchBody(
+      { frequency: 'once_week' },
+      { ...existing, type: 'modal', frequency: 'once_pageview' },
+    );
+    expect(result).toEqual({ ok: true, value: { frequency: 'once_week' } });
   });
 });
 

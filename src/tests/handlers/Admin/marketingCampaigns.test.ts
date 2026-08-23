@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Request, Response } from 'express';
 
-const { campaignCreate, campaignFindById } = vi.hoisted(() => ({
+const { campaignCreate, campaignFindById, sendTestEmail, getTemplateHtml } = vi.hoisted(() => ({
   campaignCreate: vi.fn(),
   campaignFindById: vi.fn(),
+  sendTestEmail: vi.fn(),
+  getTemplateHtml: vi.fn(),
 }));
 
 vi.mock('../../../models/marketingCampaign', () => ({
@@ -31,11 +33,17 @@ vi.mock('../../../utils/marketing/sendCampaign', () => ({
 
 vi.mock('../../../utils/marketing/brevoMarketing', () => ({
   listActiveBrevoTemplates: vi.fn(),
+  sendBrevoTransactionalMarketingEmail: sendTestEmail,
+  getBrevoMarketingTemplateHtml: getTemplateHtml,
+}));
+vi.mock('../../../utils/marketing/unsubscribeToken', () => ({
+  signUnsubscribePayload: vi.fn(() => 'signed-test-token'),
 }));
 
 import {
   createMarketingCampaign,
   updateMarketingCampaign,
+  sendMarketingCampaignTestEmail,
 } from '../../../handlers/Admin/marketingCampaigns';
 
 function mockRes() {
@@ -181,5 +189,93 @@ describe('marketing campaign admin handlers', () => {
     expect(campaign.nextRetryAt).toBeNull();
     expect(campaign.status).toBe('draft');
     expect(campaign.save).toHaveBeenCalled();
+  });
+
+  it('sends an unsaved draft through the renderer without touching campaign state', async () => {
+    const res = mockRes();
+
+    await sendMarketingCampaignTestEmail(
+      {
+        body: {
+          to: ' Admin@Example.COM ',
+          locale: 'en',
+          campaign: {
+            content: { en: { subject: 'Draft', htmlContent: '<p>Body content</p>' } },
+          },
+        },
+      } as unknown as Request,
+      res,
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(sendTestEmail).toHaveBeenCalledWith(expect.objectContaining({
+      to: 'admin@example.com',
+      subject: '[TEST] Draft',
+      htmlContent: expect.stringContaining('Notification preferences'),
+    }));
+    expect(campaignCreate).not.toHaveBeenCalled();
+  });
+
+  it('validates and renders a remote Brevo template for a test send', async () => {
+    getTemplateHtml.mockResolvedValue('<p>Hi {{ contact.FIRSTNAME }},</p><p>Template body</p>');
+    const res = mockRes();
+
+    await sendMarketingCampaignTestEmail(
+      {
+        body: {
+          to: 'admin@example.com',
+          locale: 'en',
+          firstName: 'Ada',
+          campaign: {
+            content: { en: { subject: 'Template', htmlContent: '', brevoTemplateId: 42 } },
+          },
+        },
+      } as unknown as Request,
+      res,
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(getTemplateHtml).toHaveBeenCalledWith(42, 'en');
+    expect(sendTestEmail).toHaveBeenCalledWith(expect.objectContaining({
+      subject: '[TEST] Template',
+      htmlContent: expect.stringContaining('Hi Ada,'),
+    }));
+  });
+
+  it('rejects an invalid test recipient before calling Brevo', async () => {
+    const res = mockRes();
+    await sendMarketingCampaignTestEmail(
+      { body: { to: 'not-an-email', locale: 'en', campaign: { content: { en: { subject: 'Draft', htmlContent: '<p>Body content</p>' } } } } } as unknown as Request,
+      res,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(sendTestEmail).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsupported locales and missing locale content', async () => {
+    const unsupported = mockRes();
+    await sendMarketingCampaignTestEmail(
+      { body: { to: 'admin@example.com', locale: 'es', campaign: { content: {} } } } as unknown as Request,
+      unsupported,
+    );
+    expect(unsupported.statusCode).toBe(400);
+
+    const missing = mockRes();
+    await sendMarketingCampaignTestEmail(
+      { body: { to: 'admin@example.com', locale: 'nl', campaign: { content: { en: { subject: 'Draft', htmlContent: '<p>Body content</p>' } } } } } as unknown as Request,
+      missing,
+    );
+    expect(missing.statusCode).toBe(400);
+  });
+
+  it('returns a provider failure as a 502', async () => {
+    sendTestEmail.mockRejectedValueOnce(new Error('Brevo unavailable'));
+    const res = mockRes();
+    await sendMarketingCampaignTestEmail(
+      { body: { to: 'admin@example.com', locale: 'en', campaign: { content: { en: { subject: 'Draft', htmlContent: '<p>Body content</p>' } } } } } as unknown as Request,
+      res,
+    );
+    expect(res.statusCode).toBe(502);
+    expect(res.body).toEqual({ success: false, msg: 'Failed to send test email' });
   });
 });

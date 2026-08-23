@@ -2,15 +2,27 @@ import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import MarketingCampaign, {
   MARKETING_CAMPAIGN_TYPES,
+  MARKETING_CAMPAIGN_STATUSES,
   MARKETING_LOCALES,
   type MarketingCampaignType,
   type MarketingLocale,
 } from '../../models/marketingCampaign';
 import MarketingSubscriber from '../../models/marketingSubscriber';
+import MarketingSuppression from '../../models/marketingSuppression';
 import { params } from '../../utils/requestParams';
-import { countCampaignAudience, syncSubscribersFromUsers } from '../../utils/marketing/audience';
+import { syncSubscribersFromUsers } from '../../utils/marketing/audience';
 import { refreshCampaignStats, sendMarketingCampaign } from '../../utils/marketing/sendCampaign';
-import { listActiveBrevoTemplates } from '../../utils/marketing/brevoMarketing';
+import { getBrevoMarketingTemplateHtml, listActiveBrevoTemplates } from '../../utils/marketing/brevoMarketing';
+import { sendBrevoTransactionalMarketingEmail } from '../../utils/marketing/brevoMarketing';
+import { resolveMarketingAudience } from '../../utils/marketing/audienceResolver';
+import {
+  assertInlineMarketingContent,
+  MarketingContentError,
+  renderMarketingEmail,
+  renderMarketingTemplateEmail,
+} from '../../utils/marketing/renderCampaign';
+import { isValidEmail, normalizeEmail } from '../../utils/marketing/normalizeEmail';
+import { signUnsubscribePayload } from '../../utils/marketing/unsubscribeToken';
 
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
@@ -25,6 +37,7 @@ function configuredInactiveDays(): number {
 function parseAudience(body: any, existing?: {
   countries?: string[];
   interestedServices?: string[];
+  serviceKeys?: string[];
   locales?: string[];
   roles?: Array<'customer' | 'professional'>;
 }) {
@@ -43,7 +56,7 @@ function parseAudience(body: any, existing?: {
         !(MARKETING_LOCALES as readonly string[]).includes(locale.trim().toLowerCase()),
     )
   ) {
-    throw new MarketingInputError('locales may only contain en, nl, or fr');
+    throw new MarketingInputError('locales contain an unsupported marketing language');
   }
   if (
     Array.isArray(source.roles) &&
@@ -70,6 +83,11 @@ function parseAudience(body: any, existing?: {
     : existing?.interestedServices
       ? [...existing.interestedServices]
       : [];
+  const serviceKeys = Array.isArray(source.serviceKeys)
+    ? source.serviceKeys.map((s: any) => String(s).trim()).filter(Boolean)
+    : existing?.serviceKeys
+      ? [...existing.serviceKeys]
+      : [];
   const locales = Array.isArray(source.locales)
     ? source.locales
         .map((l: any) => String(l).trim().toLowerCase())
@@ -82,7 +100,7 @@ function parseAudience(body: any, existing?: {
     : existing?.roles?.length
       ? [...existing.roles]
       : ['customer', 'professional'];
-  return { countries, interestedServices, locales, roles };
+  return { countries, interestedServices, serviceKeys, locales, roles };
 }
 
 function parseContent(body: any): Record<string, { subject: string; htmlContent: string; previewText?: string; brevoTemplateId?: number }> {
@@ -122,16 +140,23 @@ function validateLocaleContent(
 
 function serializeCampaign(doc: any) {
   const obj = doc.toObject ? doc.toObject() : doc;
+  const { audienceType: _legacyAudienceType, ...campaign } = obj;
   return {
-    ...obj,
-    _id: String(obj._id),
-    createdBy: obj.createdBy ? String(obj.createdBy) : undefined,
+    ...campaign,
+    _id: String(campaign._id),
+    createdBy: campaign.createdBy ? String(campaign.createdBy) : undefined,
   };
 }
 
 export const listMarketingCampaigns = async (req: Request, res: Response) => {
   try {
     const { type, status, page, limit, q } = req.query;
+    if (typeof type === 'string' && !(MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(type)) {
+      return res.status(400).json({ success: false, msg: 'Invalid campaign type filter' });
+    }
+    if (typeof status === 'string' && !(MARKETING_CAMPAIGN_STATUSES as readonly string[]).includes(status)) {
+      return res.status(400).json({ success: false, msg: 'Invalid campaign status filter' });
+    }
     const pageNumber = Math.max(Math.floor(Number(page) || 1), 1);
     const limitNumber = Math.min(Math.max(Math.floor(Number(limit) || DEFAULT_LIMIT), 1), MAX_LIMIT);
     const skip = (pageNumber - 1) * limitNumber;
@@ -139,6 +164,9 @@ export const listMarketingCampaigns = async (req: Request, res: Response) => {
     const query: Record<string, unknown> = {};
     if (typeof type === 'string' && (MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(type)) {
       query.type = type;
+    } else {
+      // Do not expose legacy lead/invitation campaigns through the active UI.
+      query.type = { $in: MARKETING_CAMPAIGN_TYPES };
     }
     if (typeof status === 'string' && status.trim()) query.status = status.trim();
     if (typeof q === 'string' && q.trim().length >= 2) {
@@ -205,12 +233,11 @@ export const createMarketingCampaign = async (req: Request, res: Response) => {
     if (!(MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(type)) {
       return res.status(400).json({ success: false, msg: 'Invalid campaign type' });
     }
-
     const content = parseContent(req.body);
     if (Object.keys(content).length === 0) {
       return res.status(400).json({
         success: false,
-        msg: 'Provide content for at least one locale (en/nl/fr) with subject + htmlContent or brevoTemplateId',
+        msg: 'Provide content for at least one supported locale with subject + htmlContent or brevoTemplateId',
       });
     }
 
@@ -279,6 +306,7 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
       req.body?.audience ||
       req.body?.countries ||
       req.body?.interestedServices ||
+      req.body?.serviceKeys ||
       req.body?.locales ||
       req.body?.roles
     ) {
@@ -291,6 +319,14 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
         return res.status(400).json({ success: false, msg: 'Content update cleared all locales' });
       }
       campaign.content = content as any;
+    }
+    if (req.body?.type !== undefined) {
+      if (!(MARKETING_CAMPAIGN_TYPES as readonly string[]).includes(req.body.type)) {
+        return res.status(400).json({ success: false, msg: 'Invalid campaign type' });
+      }
+      if (req.body.type !== campaign.type) {
+        campaign.type = req.body.type as MarketingCampaignType;
+      }
     }
     if (scheduledAt !== undefined) {
       if (scheduledAt === null || scheduledAt === '') {
@@ -376,14 +412,108 @@ export const previewMarketingAudience = async (req: Request, res: Response) => {
       Number.isFinite(rawInactive) && rawInactive > 0
         ? Math.max(1, Math.floor(rawInactive))
         : undefined;
-    const { count, truncated } = await countCampaignAudience(audience, { inactiveDays });
-    return res.json({ success: true, data: { count, truncated, audience } });
+    const campaignType = (req.body?.type || 'newsletter') as MarketingCampaignType;
+    const resolution = await resolveMarketingAudience({
+      campaignType,
+      filters: audience,
+      contentLocales: Array.isArray(req.body?.contentLocales)
+        ? req.body.contentLocales
+        : Object.keys(req.body?.content || {}),
+      inactiveDays,
+      limitMode: 'preview',
+    });
+    const campaignId = typeof req.body?.campaignId === 'string' ? req.body.campaignId : '';
+    if (mongoose.Types.ObjectId.isValid(campaignId)) {
+      await MarketingCampaign.updateOne(
+        { _id: campaignId },
+        {
+          $set: {
+            lastPreviewCount: resolution.exactTotal,
+            lastPreviewAt: new Date(),
+            lastPreviewCriteriaHash: resolution.criteriaHash,
+          },
+        },
+      );
+    }
+    return res.json({
+      success: true,
+      data: {
+        exactTotal: resolution.exactTotal,
+        byLocale: resolution.byLocale,
+        byRole: resolution.byRole,
+        deduplicated: resolution.deduplicated,
+        excluded: resolution.excluded,
+        fallbackLocaleCount: resolution.fallbackLocaleCount,
+        overLimit: resolution.overLimit,
+        criteriaHash: resolution.criteriaHash,
+        count: resolution.exactTotal,
+        truncated: resolution.overLimit,
+        audience,
+      },
+    });
   } catch (error: any) {
     if (error instanceof MarketingInputError) {
       return res.status(400).json({ success: false, msg: error.message });
     }
     console.error('previewMarketingAudience:', error);
     return res.status(500).json({ success: false, msg: 'Failed to preview audience' });
+  }
+};
+
+/** Send the current editor payload without creating or mutating a campaign. */
+export const sendMarketingCampaignTestEmail = async (req: Request, res: Response) => {
+  try {
+    const to = normalizeEmail(req.body?.to);
+    if (!isValidEmail(to)) {
+      return res.status(400).json({ success: false, msg: 'A valid test recipient email is required' });
+    }
+    const locale = typeof req.body?.locale === 'string' ? req.body.locale.trim().toLowerCase() : 'en';
+    if (!(MARKETING_LOCALES as readonly string[]).includes(locale)) {
+      return res.status(400).json({ success: false, msg: 'Unsupported test email locale' });
+    }
+    const rawContent = req.body?.campaign?.content?.[locale];
+    if (!rawContent || typeof rawContent !== 'object') {
+      return res.status(400).json({ success: false, msg: `Campaign content is missing for ${locale}` });
+    }
+    const content = {
+      subject: typeof rawContent.subject === 'string' ? rawContent.subject.trim() : '',
+      htmlContent: typeof rawContent.htmlContent === 'string' ? rawContent.htmlContent : '',
+      previewText: typeof rawContent.previewText === 'string' ? rawContent.previewText.trim() : undefined,
+      brevoTemplateId: Number.isInteger(Number(rawContent.brevoTemplateId)) && Number(rawContent.brevoTemplateId) > 0
+        ? Number(rawContent.brevoTemplateId)
+        : undefined,
+    };
+    const firstName = typeof req.body?.firstName === 'string' ? req.body.firstName : undefined;
+    const rendered = content.brevoTemplateId
+      ? renderMarketingTemplateEmail({
+        content,
+        templateHtml: await getBrevoMarketingTemplateHtml(content.brevoTemplateId, locale as any),
+        locale: locale as any,
+        firstName,
+        unsubscribeToken: signUnsubscribePayload(to),
+      })
+      : (() => {
+        assertInlineMarketingContent(content);
+        return renderMarketingEmail({
+          content,
+          locale: locale as any,
+          firstName,
+          unsubscribeToken: signUnsubscribePayload(to),
+        });
+      })();
+    await sendBrevoTransactionalMarketingEmail({
+      to,
+      subject: `[TEST] ${rendered.subject}`,
+      htmlContent: rendered.htmlContent,
+      previewText: rendered.previewText,
+    });
+    return res.json({ success: true, data: { to, locale } });
+  } catch (error: any) {
+    if (error instanceof MarketingContentError) {
+      return res.status(400).json({ success: false, msg: error.message });
+    }
+    console.error('sendMarketingCampaignTestEmail:', error);
+    return res.status(502).json({ success: false, msg: 'Failed to send test email' });
   }
 };
 
@@ -441,6 +571,12 @@ export const listMarketingSubscribers = async (req: Request, res: Response) => {
     if (typeof locale === 'string' && (MARKETING_LOCALES as readonly string[]).includes(locale)) {
       query.locale = locale;
     }
+    if (typeof req.query.serviceKey === 'string' && req.query.serviceKey.trim()) {
+      query.$or = [
+        { serviceKeys: req.query.serviceKey.trim() },
+        { interestedServices: req.query.serviceKey.trim() },
+      ];
+    }
     if (status === 'active') query.unsubscribedAt = null;
     if (status === 'unsubscribed') query.unsubscribedAt = { $ne: null };
     if (typeof q === 'string' && q.trim().length >= 2) {
@@ -457,10 +593,30 @@ export const listMarketingSubscribers = async (req: Request, res: Response) => {
       MarketingSubscriber.countDocuments(query),
     ]);
 
+    const normalizedEmails = rows
+      .map((row) => normalizeEmail(row.emailNormalized || row.email))
+      .filter(Boolean);
+    const suppressions = normalizedEmails.length > 0
+      ? await MarketingSuppression.find({ emailNormalized: { $in: normalizedEmails } })
+        .select('emailNormalized reason')
+        .lean()
+      : [];
+    const suppressionByEmail = new Map(
+      suppressions.map((suppression) => [normalizeEmail(suppression.emailNormalized), suppression]),
+    );
+    const subscribers = rows.map((row) => {
+      const suppression = suppressionByEmail.get(normalizeEmail(row.emailNormalized || row.email));
+      return {
+        ...row,
+        suppressed: Boolean(suppression || row.unsubscribedAt || row.brevoUnsubscribedAt),
+        suppressionReason: suppression?.reason || (row.brevoUnsubscribedAt ? 'provider' : undefined),
+      };
+    });
+
     return res.json({
       success: true,
       data: {
-        subscribers: rows,
+        subscribers,
         pagination: {
           page: pageNumber,
           limit: limitNumber,

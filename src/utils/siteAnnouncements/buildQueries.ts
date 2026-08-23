@@ -47,8 +47,15 @@ export function buildPublicListQuery(
     isActive: true,
     startsAt: { $lte: now },
     endsAt: { $gte: now },
-    locale: { $in: [...new Set([filters.locale, localeBase, 'en'])] },
   };
+
+  query.$and = [
+    {
+      $or: [
+        { locale: { $in: [...new Set([filters.locale, localeBase, 'en'])] } },
+      ],
+    },
+  ];
 
   if (filters.type) {
     query.type = filters.type;

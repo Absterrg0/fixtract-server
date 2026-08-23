@@ -1,6 +1,9 @@
 import type { AnnouncementType } from '../../models/siteAnnouncement';
 import type { DateInput } from '../dateUtils';
-import type { AnnouncementListStatus } from './constants';
+import type {
+  AnnouncementFrequency,
+  AnnouncementListStatus,
+} from './constants';
 
 export type ParseSuccess<T> = { ok: true; value: T };
 export type ParseFailure = { ok: false; error: string };
@@ -17,6 +20,7 @@ export interface SiteAnnouncementWriteInput {
   discountCode?: string | null;
   activeCountries: string[];
   locale: string;
+  frequency: AnnouncementFrequency;
   startsAt: Date;
   endsAt: Date;
   isActive: boolean;
@@ -40,6 +44,7 @@ export interface SiteAnnouncementWriteBody {
   discountCode?: string;
   activeCountries?: string[];
   locale?: string;
+  frequency?: string;
   startsAt?: DateInput;
   endsAt?: DateInput;
   isActive?: boolean;

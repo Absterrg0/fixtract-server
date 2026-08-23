@@ -31,7 +31,13 @@ describe('buildPublicAnnouncementAggregationPipeline', () => {
     expect(pipeline[0]).toMatchObject({
       $match: {
         isActive: true,
-        locale: { $in: ['fr', 'en'] },
+        $and: [
+          {
+            $or: [
+              { locale: { $in: ['fr', 'en'] } },
+            ],
+          },
+        ],
         $or: [{ activeCountries: { $size: 0 } }, { activeCountries: 'BE' }],
       },
     });

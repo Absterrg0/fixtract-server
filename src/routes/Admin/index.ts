@@ -1,4 +1,5 @@
 import { Router } from "express";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import {
   getPendingProfessionals,
   getProfessionalDetails,
@@ -132,8 +133,10 @@ import {
   syncMarketingSubscribers,
   listMarketingSubscribers,
   listMarketingTemplates,
+  sendMarketingCampaignTestEmail,
 } from "../../handlers/Admin/marketingCampaigns";
 import { uploadProfileImage as cmsImageMulter, upload as adminFileUpload } from "../../utils/s3Upload";
+import { listMarketingServiceOptions } from "../../handlers/Admin/marketingServiceOptions";
 import { getAdminSiteSettings, updateAdminSiteSettings } from "../../handlers/Admin/siteSettings";
 import {
   adminListTickets,
@@ -191,6 +194,15 @@ import {
 } from "../../utils/adminRbac/middleware";
 
 const adminRouter = Router();
+
+const marketingTestSendLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => String(req.admin?._id || ipKeyGenerator(req.ip ?? 'unknown')),
+  message: { success: false, msg: 'Too many test emails, please try again later' },
+});
 
 // All admin routes require authentication and admin role
 adminRouter.use(requireAdmin);
@@ -312,7 +324,9 @@ adminRouter.route('/site-announcements/:id').get(getSiteAnnouncement).patch(upda
 // Marketing email campaigns (Brevo)
 adminRouter.route('/marketing-campaigns').get(listMarketingCampaigns).post(createMarketingCampaign);
 adminRouter.route('/marketing-campaigns/preview-audience').post(previewMarketingAudience);
+adminRouter.route('/marketing-campaigns/test-send').post(marketingTestSendLimiter, sendMarketingCampaignTestEmail);
 adminRouter.route('/marketing-campaigns/templates').get(listMarketingTemplates);
+adminRouter.route('/marketing-campaigns/service-options').get(listMarketingServiceOptions);
 adminRouter.route('/marketing-campaigns/:id/send').post(sendMarketingCampaignNow);
 adminRouter.route('/marketing-campaigns/:id/stats').post(refreshMarketingCampaignStats);
 adminRouter.route('/marketing-campaigns/:id').get(getMarketingCampaign).patch(updateMarketingCampaign).delete(deleteMarketingCampaign);

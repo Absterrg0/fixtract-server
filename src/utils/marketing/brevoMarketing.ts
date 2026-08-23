@@ -18,6 +18,7 @@ import {
   TransactionalEmailsApi,
   TransactionalEmailsApiApiKeys,
 } from '@getbrevo/brevo';
+import { assertTemplateGreetingContract, MarketingContentError } from './renderCampaign';
 
 const FOLDER_NAME = 'Fixtract Campaigns';
 const CONTACT_ATTRIBUTES = ['FIRSTNAME', 'REGION', 'LOCALE', 'UNSUB_TOKEN'] as const;
@@ -78,12 +79,91 @@ function sanitizedBrevoError(error: unknown): { status?: number | string; code?:
   };
 }
 
+function brevoRequestTimeoutMs(): number {
+  const configured = Number(process.env.BREVO_REQUEST_TIMEOUT_MS);
+  return Number.isFinite(configured)
+    ? Math.min(Math.max(Math.floor(configured), 1_000), 120_000)
+    : 15_000;
+}
+
+async function requestBrevoJson<T>(
+  path: string,
+  options: { method: 'GET' | 'POST'; body?: Record<string, unknown> },
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), brevoRequestTimeoutMs());
+  try {
+    const response = await fetch(`https://api.brevo.com/v3${path}`, {
+      method: options.method,
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'api-key': requireApiKey(),
+      },
+      ...(options.body ? { body: JSON.stringify(options.body) } : {}),
+      signal: controller.signal,
+    });
+    const raw = await response.text();
+    let body: unknown = {};
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+      body = { message: raw.slice(0, 200) };
+    }
+    if (!response.ok) {
+      const message =
+        body && typeof body === 'object' && 'message' in body && typeof body.message === 'string'
+          ? body.message
+          : `Brevo request failed with status ${response.status}`;
+      const error = new Error(message) as Error & {
+        status?: number;
+        response?: { status: number };
+      };
+      error.status = response.status;
+      error.response = { status: response.status };
+      throw error;
+    }
+    return body as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export function isBrevoMarketingConfigured(): boolean {
   return Boolean(process.env.BREVO_API_KEY?.trim());
 }
 
 export function isMarketingDryRun(): boolean {
   return process.env.EMAIL_DEV_NO_SEND === 'true' || process.env.MARKETING_CAMPAIGN_DRY_RUN === 'true';
+}
+
+export async function sendBrevoTransactionalMarketingEmail(input: {
+  to: string;
+  subject: string;
+  htmlContent: string;
+  previewText?: string;
+}): Promise<void> {
+  if (isMarketingDryRun()) return;
+  const fromEmail = process.env.FROM_EMAIL?.trim();
+  if (!fromEmail) throw new Error('FROM_EMAIL is required to send a test email');
+  try {
+    await requestBrevoJson('/smtp/email', {
+      method: 'POST',
+      body: {
+        sender: {
+          email: fromEmail,
+          name: process.env.BREVO_SENDER_NAME?.trim() || 'Fixtract',
+        },
+        to: [{ email: input.to }],
+        subject: input.subject,
+        htmlContent: input.htmlContent,
+        ...(input.previewText ? { textContent: input.previewText } : {}),
+      },
+    });
+  } catch (error) {
+    console.error('[Brevo] test transactional email failed', sanitizedBrevoError(error));
+    throw new Error('Brevo test email failed');
+  }
 }
 
 async function setBrevoContactBlacklist(
@@ -159,6 +239,35 @@ export async function listActiveBrevoTemplates(): Promise<
   }
 
   return templates;
+}
+
+export async function assertBrevoMarketingTemplateContract(
+  templateId: number,
+  locale: 'en' | 'nl' | 'fr' | 'de',
+): Promise<void> {
+  await getBrevoMarketingTemplateHtml(templateId, locale);
+}
+
+export async function getBrevoMarketingTemplateHtml(
+  templateId: number,
+  locale: 'en' | 'nl' | 'fr' | 'de',
+): Promise<string> {
+  try {
+    const response = await requestBrevoJson<{ htmlContent?: string }>(
+      `/smtp/templates/${encodeURIComponent(String(templateId))}`,
+      { method: 'GET' },
+    );
+    const htmlContent = response.htmlContent || '';
+    assertTemplateGreetingContract(htmlContent, locale);
+    return htmlContent;
+  } catch (error) {
+    if (error instanceof MarketingContentError) throw error;
+    console.error('[Brevo] template contract lookup failed', {
+      templateId,
+      ...sanitizedBrevoError(error),
+    });
+    throw new Error(`Brevo template ${templateId} could not be validated`);
+  }
 }
 
 /** Resolve or create the Fixtract marketing folder in Brevo. */
@@ -351,7 +460,12 @@ export async function createBrevoCampaign(
       .trim();
     if (utmCampaign) campaign.utmCampaign = utmCampaign;
   }
-  if (input.footer) campaign.footer = input.footer;
+  // Inline HTML is already rendered with the application footer. Passing a
+  // Brevo footer as well would append it a second time. Template-backed
+  // campaigns rely on Brevo to append the footer remotely.
+  if (input.footer && !/data-fixera-marketing-footer\s*=\s*["']true["']/i.test(input.htmlContent)) {
+    campaign.footer = input.footer;
+  }
   if (input.templateId && Number.isFinite(input.templateId)) {
     campaign.templateId = input.templateId;
   } else {

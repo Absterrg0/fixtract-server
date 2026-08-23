@@ -17,6 +17,8 @@
     "seed:rfq-flow": "npx tsx src/scripts/dev/seedRfqFlowProject695.ts",
     "migrate:service-config-countries": "npx tsx src/scripts/migrate/migrateServiceConfigCountries.ts",
     "migrate:service-config-active-countries": "npx tsx src/scripts/migrate/migrateServiceConfigActiveCountries.ts",
+    "migrate:marketing-suppressions": "npx tsx src/scripts/migrate/backfillMarketingSuppression.ts",
+    "migrate:marketing-identities": "npx tsx src/scripts/migrate/backfillMarketingIdentities.ts",
     "migrate:project-statuses": "npx tsx src/scripts/migrate/migrateProjectStatuses.ts",
     "migrate:preparation-duration": "npx tsx src/scripts/migrate/migratePreparationDuration.ts",
     "migrate:professional-id-objectids": "npx tsx src/scripts/migrate/migrateProfessionalIdObjectIds.ts",
@@ -65,7 +67,8 @@
     "multer": "^2.0.2",
     "pdfkit": "0.17.2",
     "stripe": "^20.0.0",
-    "twilio": "^5.8.0"
+    "twilio": "^5.8.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
