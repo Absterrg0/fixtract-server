@@ -92,10 +92,21 @@ describe('notification registry coverage', () => {
     }
   });
 
-  it('routes project status notices to the specific project', () => {
-    const event = getEventDef('professional.project_published');
-    const built = event!.build({ projectId: '507f1f77bcf86cd799439011' });
+  it('routes every project status notice to the specific project when available', () => {
+    const projectId = '507f1f77bcf86cd799439011';
+    for (const key of [
+      'professional.project_published',
+      'professional.project_rejected',
+      'professional.project_suspended',
+    ]) {
+      const built = getEventDef(key)!.build({ projectId });
+      expect(built.clickUrl).toContain(`/professional/projects/${projectId}`);
+    }
+  });
 
-    expect(built.clickUrl).toContain('/professional/projects/507f1f77bcf86cd799439011');
+  it('falls back to the projects index when a status notice lacks a project ID', () => {
+    expect(getEventDef('professional.project_published')!.build({}).clickUrl).toMatch(
+      /\/professional\/projects\/?$/,
+    );
   });
 });

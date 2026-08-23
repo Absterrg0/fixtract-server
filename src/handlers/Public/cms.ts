@@ -22,6 +22,10 @@ const LISTING_FIELDS =
 const BOT_UA_RE =
   /bot|crawl|spider|slurp|bingpreview|facebookexternalhit|linkedinbot|twitterbot|whatsapp|telegram|prerender|headlesschrome|lighthouse/i;
 
+function requestCountryCode(req: Request): string | undefined {
+  return parseCmsCountryCode(req.get("x-vercel-ip-country") || req.get("cf-ipcountry"));
+}
+
 export const listPublicCmsContent = async (req: Request, res: Response) => {
   try {
     const type = param(req.params.type) as CmsContentType;
@@ -39,7 +43,7 @@ export const listPublicCmsContent = async (req: Request, res: Response) => {
     const skip = (page - 1) * limit;
 
     const locale = typeof req.query.locale === "string" ? req.query.locale.toLowerCase() : "en";
-    const countryCode = parseCmsCountryCode(req.query.country);
+    const countryCode = requestCountryCode(req);
     const filter: Record<string, unknown> = { type, status: "published", locale };
 
     if (CMS_COUNTRY_TARGETED_TYPES.has(type)) {
@@ -94,7 +98,7 @@ export const getPublicCmsContentBySlug = async (req: Request, res: Response) => 
     if (!slug) return res.status(404).json({ success: false, msg: "Not found" });
 
     const locale = typeof req.query.locale === "string" ? req.query.locale.toLowerCase() : "en";
-    const countryCode = parseCmsCountryCode(req.query.country);
+    const countryCode = requestCountryCode(req);
 
     await connectDB();
 
@@ -126,13 +130,16 @@ export const getPublicCmsContentBySlug = async (req: Request, res: Response) => 
 
     const presigned = await presignCmsDoc(doc);
     const relatedContent = presigned.relatedContent as unknown as Array<{
+      type?: CmsContentType;
       activeCountries?: string[];
     }> | undefined;
     if (Array.isArray(relatedContent)) {
       // Mongoose types the populated field as ObjectId[], but the runtime value
       // is a populated document because of the populate() above.
       (presigned as unknown as { relatedContent: typeof relatedContent }).relatedContent = relatedContent.filter(
-        (item) => isCmsContentVisibleForCountry(item.activeCountries, countryCode),
+        (item) =>
+          !CMS_COUNTRY_TARGETED_TYPES.has(item.type || "") ||
+          isCmsContentVisibleForCountry(item.activeCountries, countryCode),
       );
     }
     return res.status(200).json({ success: true, data: presigned });
@@ -169,7 +176,7 @@ export const listPublicPolicyLinks = async (req: Request, res: Response) => {
 export const listPublicFaq = async (req: Request, res: Response) => {
   try {
     const locale = typeof req.query.locale === "string" ? req.query.locale.toLowerCase() : "en";
-    const countryCode = parseCmsCountryCode(req.query.country);
+    const countryCode = requestCountryCode(req);
 
     await connectDB();
 

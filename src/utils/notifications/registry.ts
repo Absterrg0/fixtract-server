@@ -109,6 +109,11 @@ export interface EventDef {
 
 const frontend = (path: string) => `${getFrontendUrl()}${path.startsWith('/') ? path : `/${path}`}`;
 
+const projectNotificationUrl = (projectId?: unknown) =>
+  typeof projectId === 'string' && projectId.trim()
+    ? frontend(`/professional/projects/${projectId.trim()}`)
+    : frontend('/professional/projects');
+
 function buildUnreadChatMirrorResult(
   ctx: NotifyContext,
   inboxTitle: string,
@@ -823,7 +828,7 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       body: ctx.projectTitle
         ? `"${ctx.projectTitle}" is now live.`
         : 'Your project has been published.',
-      clickUrl: frontend(`/professional/projects/${ctx.projectId || ''}`),
+      clickUrl: projectNotificationUrl(ctx.projectId),
     }),
     'project',
   ),
@@ -837,7 +842,7 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       body: ctx.projectTitle
         ? `"${ctx.projectTitle}" was rejected${ctx.reason ? `: ${ctx.reason}` : '.'}`
         : 'Your project was rejected.',
-      clickUrl: frontend(`/professional/projects/${ctx.projectId || ''}`),
+      clickUrl: projectNotificationUrl(ctx.projectId),
     }),
     'project',
   ),
@@ -851,7 +856,7 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
       body: ctx.projectTitle
         ? `"${ctx.projectTitle}" has been suspended.`
         : 'One of your projects was suspended.',
-      clickUrl: frontend(`/professional/projects/${ctx.projectId || ''}`),
+      clickUrl: projectNotificationUrl(ctx.projectId),
     }),
     'project',
   ),
