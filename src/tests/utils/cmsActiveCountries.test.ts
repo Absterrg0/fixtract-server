@@ -20,6 +20,8 @@ describe('CMS country targeting', () => {
     expect(parseCmsCountryCode(' be ')).toBe('BE');
     expect(parseCmsCountryCode('BEL')).toBeUndefined();
     expect(isCmsCountryCode('ZZ')).toBe(false);
+    expect(isCmsCountryCode('EU')).toBe(false);
+    expect(isCmsCountryCode('UN')).toBe(false);
     expect(sanitizeCmsActiveCountries(['ZZ', 'BE'])).toEqual(['BE']);
   });
 
