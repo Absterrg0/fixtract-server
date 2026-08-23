@@ -447,6 +447,7 @@ export const previewMarketingAudience = async (req: Request, res: Response) => {
       success: true,
       data: {
         exactTotal: resolution.exactTotal,
+        exactTotalIsEstimate: resolution.exactTotalIsEstimate,
         byLocale: resolution.byLocale,
         byRole: resolution.byRole,
         deduplicated: resolution.deduplicated,

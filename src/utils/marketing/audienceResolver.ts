@@ -27,6 +27,7 @@ export type ResolvedMarketingRecipient = {
 export type MarketingAudienceResolution = {
   recipients: ResolvedMarketingRecipient[];
   exactTotal: number;
+  exactTotalIsEstimate: boolean;
   byLocale: Record<string, number>;
   byRole: { customer: number; professional: number };
   deduplicated: number;
@@ -232,14 +233,16 @@ export async function resolveMarketingAudience(input: ResolveMarketingAudienceIn
   for (const row of subscribers) add(row);
 
   const overLimit = matchedSubscriberCount > MARKETING_AUDIENCE_LIMIT || recipients.length > MARKETING_AUDIENCE_LIMIT;
+  const exactTotalIsEstimate = matchedSubscriberCount > MARKETING_AUDIENCE_LIMIT;
   const exactTotal =
-    matchedSubscriberCount > MARKETING_AUDIENCE_LIMIT
+    exactTotalIsEstimate
       ? matchedSubscriberCount
       : recipients.length;
   const criteriaHash = hashCriteria({ campaignType: input.campaignType, filters, contentLocales: [...contentLocales], inactiveDays: input.inactiveDays || null });
   return {
     recipients: input.limitMode === 'delivery' ? recipients.slice(0, MARKETING_AUDIENCE_LIMIT) : recipients,
     exactTotal,
+    exactTotalIsEstimate,
     byLocale,
     byRole,
     deduplicated,

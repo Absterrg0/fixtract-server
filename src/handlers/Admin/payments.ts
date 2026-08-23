@@ -342,6 +342,9 @@ const parseManualNumber = (value: unknown): number => {
   return Number.isFinite(parsed) ? parsed : Number.NaN;
 };
 
+const isBlankManualField = (value: unknown): boolean =>
+  value === undefined || value === null || value === '';
+
 const roundManualNumber = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
 const readManualParty = (value: unknown) => {
@@ -383,8 +386,8 @@ export const createManualPaymentArtifact = async (req: Request, res: Response) =
     const lines = body.lines.map((rawLine: any, index: number) => {
       const amount = parseManualNumber(rawLine?.amount);
       const vatRate = parseManualNumber(rawLine?.vatRate);
-      const quantity = rawLine?.quantity === undefined || rawLine?.quantity === '' ? undefined : parseManualNumber(rawLine.quantity);
-      const unitPrice = rawLine?.unitPrice === undefined || rawLine?.unitPrice === '' ? undefined : parseManualNumber(rawLine.unitPrice);
+      const quantity = isBlankManualField(rawLine?.quantity) ? undefined : parseManualNumber(rawLine.quantity);
+      const unitPrice = isBlankManualField(rawLine?.unitPrice) ? undefined : parseManualNumber(rawLine.unitPrice);
       const description = String(rawLine?.description || '').trim();
       if (!description || description.length > 500) throw new ManualInvoiceValidationError(`Line ${index + 1} needs a description of at most 500 characters.`);
       if (!Number.isFinite(amount) || amount < 0) throw new ManualInvoiceValidationError(`Line ${index + 1} has an invalid amount.`);
@@ -469,8 +472,25 @@ export const createManualPaymentArtifact = async (req: Request, res: Response) =
       }
     }
 
+    let result;
     try {
-      const result = await createManualInvoiceArtifact(payment.booking.toString(), paymentId, input);
+      result = await createManualInvoiceArtifact(payment.booking.toString(), paymentId, input);
+    } catch (error: any) {
+      // Release the idempotency claim so a corrected retry can proceed.
+      if (idempotencyKey) {
+        await Payment.updateOne(
+          { _id: paymentId },
+          { $pull: { manualArtifactClaims: { key: idempotencyKey } } }
+        ).catch(() => undefined);
+      }
+      console.error('[ADMIN][PAYMENTS] Failed to create manual invoice artifact', error);
+      if (error instanceof ManualInvoiceValidationError) {
+        return res.status(400).json({ success: false, msg: error.message });
+      }
+      return res.status(500).json({ success: false, msg: 'Failed to create manual invoice artifact' });
+    }
+
+    try {
       if (idempotencyKey) {
         await Payment.updateOne(
           { _id: paymentId, 'manualArtifactClaims.key': idempotencyKey },
@@ -496,18 +516,13 @@ export const createManualPaymentArtifact = async (req: Request, res: Response) =
       const signedResult = await withPresignedInvoiceUrls(result as Record<string, any>);
       return res.status(201).json({ success: true, msg: 'Manual invoice artifact created', data: signedResult });
     } catch (error: any) {
-      // Release the idempotency claim so a corrected retry can proceed.
-      if (idempotencyKey) {
-        await Payment.updateOne(
-          { _id: paymentId },
-          { $pull: { manualArtifactClaims: { key: idempotencyKey } } }
-        ).catch(() => undefined);
-      }
-      console.error('[ADMIN][PAYMENTS] Failed to create manual invoice artifact', error);
-      if (error instanceof ManualInvoiceValidationError) {
-        return res.status(400).json({ success: false, msg: error.message });
-      }
-      return res.status(500).json({ success: false, msg: 'Failed to create manual invoice artifact' });
+      // The artifact exists. Keep the claim and report the post-processing failure.
+      console.error('[ADMIN][PAYMENTS] Manual artifact created but post-processing failed', error);
+      return res.status(500).json({
+        success: false,
+        msg: 'Manual invoice artifact created, but the response could not be finalized',
+        data: { invoiceNumber: result.invoiceNumber },
+      });
     }
   } catch (error: any) {
     console.error('[ADMIN][PAYMENTS] Failed to create manual invoice artifact', error);

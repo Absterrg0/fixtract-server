@@ -86,6 +86,7 @@ describe('resolveMarketingAudience', () => {
     });
 
     expect(result.exactTotal).toBe(1);
+    expect(result.exactTotalIsEstimate).toBe(false);
     expect(result.byLocale).toEqual({ de: 1 });
     expect(result.byRole).toEqual({ customer: 0, professional: 1 });
     expect(result.deduplicated).toBe(1);
@@ -154,9 +155,11 @@ describe('resolveMarketingAudience', () => {
     const delivery = await resolveMarketingAudience({ ...input, limitMode: 'delivery' });
 
     expect(preview.exactTotal).toBe(5001);
+    expect(preview.exactTotalIsEstimate).toBe(true);
     expect(preview.overLimit).toBe(true);
     expect(preview.recipients).toHaveLength(5001);
     expect(delivery.exactTotal).toBe(5001);
+    expect(delivery.exactTotalIsEstimate).toBe(true);
     expect(delivery.overLimit).toBe(true);
     expect(delivery.recipients).toHaveLength(5000);
   });
