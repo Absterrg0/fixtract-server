@@ -1,6 +1,6 @@
 import { Schema, model, Document, Types } from "mongoose";
 import { normalizePendingIdChanges } from "../utils/pendingIdChanges";
-import { ADMIN_ROLES, type AdminRole } from "../utils/adminRbac/types";
+import { ADMIN_ROLES, type AdminPermissionLevels, type AdminRole } from "../utils/adminRbac/types";
 
 export type UserRole = "admin" | "visitor" | "customer" | "professional" | "employee";
 export type CustomerType = "individual" | "business";
@@ -19,6 +19,11 @@ export interface IUser extends Document {
     role: UserRole;
     /** Platform staff pack when role === 'admin'. Legacy admins default to super. */
     adminRole?: AdminRole;
+    adminPermissionLevels?: AdminPermissionLevels;
+    adminStatusSince?: Date;
+    timeZone?: string;
+    /** Set when an admin explicitly saves their support availability schedule. */
+    adminAvailabilityConfigured?: boolean;
     adminStaff?: {
         invitedBy?: string;
         invitedByEmail?: string;
@@ -238,6 +243,25 @@ const UserSchema = new Schema({
         enum: [...ADMIN_ROLES],
         required: false,
         default: undefined,
+    },
+    adminPermissionLevels: {
+        type: Schema.Types.Mixed,
+        required: false,
+        default: undefined,
+    },
+    adminStatusSince: {
+        type: Date,
+        required: false,
+    },
+    timeZone: {
+        type: String,
+        required: false,
+        trim: true,
+        maxlength: 80,
+    },
+    adminAvailabilityConfigured: {
+        type: Boolean,
+        default: false,
     },
     adminStaff: {
         invitedBy: { type: String, required: false },

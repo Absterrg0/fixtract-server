@@ -190,9 +190,16 @@ const isTruthyAnswer = (value: unknown): boolean => {
 export const resolvePropertyNature = (params: {
   classification?: Article47Classification | string | null;
   professionalAnswers?: Record<string, unknown>;
-}): PropertyNature => {
+}): PropertyNature | undefined => {
   if (params.classification === "immovable") return "immovable";
   if (params.classification === "movable") return "movable";
+  if (params.classification === "project_dependent") {
+    const answer = params.professionalAnswers?.[ARTICLE_47_FIELD_NAME];
+    if (answer === undefined || answer === null || String(answer).trim() === "") {
+      return undefined;
+    }
+    return isTruthyAnswer(answer) ? "immovable" : "movable";
+  }
   const answer = params.professionalAnswers?.[ARTICLE_47_FIELD_NAME];
   return isTruthyAnswer(answer) ? "immovable" : "movable";
 };
@@ -435,10 +442,12 @@ export const resolveVatDecisionFromConfig = async (params: {
     : null;
 
   const vat = config?.vatManagement;
-  const propertyNature = params.propertyNature || resolvePropertyNature({
-    classification: vat?.article47Classification,
-    professionalAnswers: params.professionalAnswers,
-  });
+  const propertyNature =
+    params.propertyNature ??
+    resolvePropertyNature({
+      classification: vat?.article47Classification,
+      professionalAnswers: params.professionalAnswers,
+    });
   const exemptFromBelgianReverseCharge =
     params.exemptFromBelgianReverseCharge ?? Boolean(vat?.exemptFromBelgianReverseCharge);
   const b2bContext: B2BInvoiceContext = { propertyNature, exemptFromBelgianReverseCharge };
@@ -455,6 +464,21 @@ export const resolveVatDecisionFromConfig = async (params: {
     : parseVatCountryCode(params.country);
 
   const fallbackRate = getStandardVatRate(country);
+  if (
+    !params.propertyNature &&
+    vat?.article47Classification === "project_dependent" &&
+    propertyNature === undefined
+  ) {
+    return {
+      action: "rfq",
+      country,
+      standardRate: fallbackRate,
+      appliedRate: 0,
+      reverseCharge: false,
+      exemptFromBelgianReverseCharge,
+      explanation: "Article 47 property classification must be answered before VAT can be determined.",
+    };
+  }
   if (!country) {
     return {
       action: "rfq",

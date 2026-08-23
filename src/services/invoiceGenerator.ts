@@ -466,7 +466,10 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
             ? ` (${item.vatRate}% VAT)`
             : "";
         const quantity = Number(item.quantity);
-        const unitPrice = Number(item.unitPrice ?? (quantity > 0 ? item.amount / quantity : Number.NaN));
+        let unitPrice = Number(item.unitPrice ?? (quantity > 0 ? item.amount / quantity : Number.NaN));
+        if (data.documentType === "credit_note" && item.unitPrice == null && Number.isFinite(unitPrice)) {
+          unitPrice = Math.abs(unitPrice);
+        }
         doc
           .text(`${item.description}${vatSuffix}`, 50, rowY, { width: 300 })
           .text(Number.isFinite(quantity) && quantity > 0 ? `${quantity}${item.unit ? ` ${item.unit}` : ""}` : "", 360, rowY, { align: "right", width: 35 })

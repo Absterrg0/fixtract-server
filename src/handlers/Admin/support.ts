@@ -8,6 +8,7 @@ import MeetingRequest, {
 import connectDB from "../../config/db";
 import { IUser } from "../../models/user";
 import { params } from "../../utils/requestParams";
+import { isAdminAvailableForMeeting } from "../User/adminAvailability";
 
 const isValidObjectId = (id: string): boolean => mongoose.Types.ObjectId.isValid(id);
 
@@ -147,6 +148,8 @@ export const adminListMeetingRequests = async (req: Request, res: Response) => {
 
 export const adminUpdateMeetingRequest = async (req: Request, res: Response) => {
   try {
+    const admin = (req as Request & { admin?: IUser }).admin;
+    if (!admin) return res.status(401).json({ success: false, msg: "Unauthorized" });
     const { id } = params(req.params);
     if (!isValidObjectId(id)) return res.status(400).json({ success: false, msg: "Invalid request ID" });
 
@@ -182,6 +185,60 @@ export const adminUpdateMeetingRequest = async (req: Request, res: Response) => 
         success: false,
         msg: "scheduledAt is required when status is 'scheduled'",
       });
+    }
+
+    if (willBeScheduled && effectiveScheduledAt) {
+      if (effectiveScheduledAt.getTime() <= Date.now()) {
+        return res.status(400).json({ success: false, msg: "A support meeting must be scheduled in the future" });
+      }
+      if (!isAdminAvailableForMeeting(admin, effectiveScheduledAt, doc.durationMinutes)) {
+        return res.status(409).json({ success: false, msg: "The selected time is outside your availability or is blocked" });
+      }
+
+      const windowEnd = new Date(effectiveScheduledAt.getTime() + doc.durationMinutes * 60 * 1000);
+      const maxDurationMinutes = 240;
+      const updateFields: Record<string, unknown> = {};
+      if (nextStatus) updateFields.status = nextStatus;
+      if (parsedScheduledAt) updateFields.scheduledAt = parsedScheduledAt;
+      else if (clearScheduledAt) updateFields.scheduledAt = undefined;
+      if (typeof req.body?.adminResponse === "string") {
+        updateFields.adminResponse = req.body.adminResponse.trim().slice(0, 2000);
+      }
+
+      const session = await mongoose.startSession();
+      let scheduleConflict = false;
+      try {
+        await session.withTransaction(async () => {
+          const nearbyRequests = await MeetingRequest.find({
+            _id: { $ne: doc._id },
+            status: 'scheduled',
+            scheduledAt: {
+              $lt: windowEnd,
+              $gte: new Date(effectiveScheduledAt.getTime() - maxDurationMinutes * 60 * 1000),
+            },
+          }).select('scheduledAt durationMinutes').session(session);
+          const hasConflict = nearbyRequests.some((request) => {
+            if (!request.scheduledAt) return false;
+            const requestEnd = new Date(request.scheduledAt.getTime() + request.durationMinutes * 60 * 1000);
+            return request.scheduledAt < windowEnd && requestEnd > effectiveScheduledAt;
+          });
+          if (hasConflict) {
+            scheduleConflict = true;
+            return;
+          }
+
+          await MeetingRequest.updateOne({ _id: doc._id }, { $set: updateFields }, { session });
+        });
+      } finally {
+        await session.endSession();
+      }
+
+      if (scheduleConflict) {
+        return res.status(409).json({ success: false, msg: "The selected time overlaps another scheduled support meeting" });
+      }
+
+      const refreshed = await MeetingRequest.findById(doc._id);
+      return res.status(200).json({ success: true, data: refreshed ?? doc });
     }
 
     if (nextStatus) doc.status = nextStatus;

@@ -10,14 +10,16 @@ import { buildBookingBlockedRanges } from "../../utils/bookingBlocks";
 import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../utils/viesApi";
 import { generateReferralCode, validateReferralCode, createReferral } from "../../utils/referralSystem";
 import { sendIdExpiredEmail } from "../../utils/emailService";
-import { permissionsForRole, resolveAdminRole } from "../../utils/adminRbac/rolePermissions";
+import { permissionsForLevels, permissionsForRole, resolveAdminRole } from "../../utils/adminRbac/rolePermissions";
 
-function adminAccessFields(user: { role?: string; adminRole?: string }) {
+function adminAccessFields(user: { role?: string; adminRole?: string; adminPermissionLevels?: any; timeZone?: string }) {
   if (user.role !== 'admin') return {};
   const adminRole = resolveAdminRole(user.adminRole);
   return {
     adminRole,
-    adminPermissions: [...permissionsForRole(adminRole)],
+    adminPermissions: [...(user.adminPermissionLevels ? permissionsForLevels(user.adminPermissionLevels) : permissionsForRole(adminRole))],
+    adminPermissionLevels: user.adminPermissionLevels,
+    timeZone: user.timeZone,
   };
 }
 
@@ -638,4 +640,3 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
     return res.status(200).json({ success: false, authenticated: false, user: null });
   }
 };
-

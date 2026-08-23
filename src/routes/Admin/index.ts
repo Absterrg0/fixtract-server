@@ -183,6 +183,8 @@ import { adminAnonymizeUser } from "../../handlers/Admin/userAnonymize";
 import { auditAdmin } from "../../middlewares/auditAdmin";
 import {
   getMyAdminAccess,
+  getAdminRoleAccess,
+  updateAdminRoleAccess,
   inviteStaff,
   listStaff,
   resendStaffInvite,
@@ -212,6 +214,7 @@ adminRouter.use(enforceAdminRoutePermission);
 
 // Staff RBAC management (super only via staff.manage — except /access for any admin)
 adminRouter.route('/access').get(getMyAdminAccess);
+adminRouter.route('/staff/permissions').get(getAdminRoleAccess).put(updateAdminRoleAccess);
 adminRouter.route('/staff').get(listStaff).post(inviteStaff);
 adminRouter.route('/staff/:staffId/resend-invite').post(resendStaffInvite);
 adminRouter.route('/staff/:staffId').patch(updateStaff);

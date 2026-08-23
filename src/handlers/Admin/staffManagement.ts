@@ -3,7 +3,14 @@ import crypto from 'crypto';
 import User, { IUser } from '../../models/user';
 import connecToDatabase from '../../config/db';
 import { ADMIN_ROLES, isAdminRole, type AdminRole } from '../../utils/adminRbac/types';
-import { permissionsForRole, resolveAdminRole } from '../../utils/adminRbac/rolePermissions';
+import { permissionsForLevels, permissionsForRole, resolveAdminRole } from '../../utils/adminRbac/rolePermissions';
+import {
+  getConfiguredAccessForRole,
+  getConfiguredRoleAccess,
+  getEffectiveAccessForUser,
+  saveConfiguredRoleAccess,
+  validatePermissionMatrix,
+} from '../../utils/adminRbac/roleAccess';
 import { sendAdminStaffInvitationEmail } from '../../utils/emailService';
 import {
   adminInviteExpiresAt,
@@ -123,6 +130,7 @@ async function regeneratePendingInvite(
 
   staff.name = opts.name.trim();
   (staff as any).adminRole = opts.adminRole;
+  (staff as any).adminPermissionLevels = await getConfiguredAccessForRole(opts.adminRole);
   if (opts.phone) {
     staff.phone = opts.phone;
   }
@@ -153,6 +161,7 @@ async function regeneratePendingInvite(
 
 function serializeStaff(user: IUser) {
   const adminRole = resolveAdminRole((user as any).adminRole);
+  const permissionLevels = (user as any).adminPermissionLevels || undefined;
   const pending = isInvitePending(user);
   const expiredInvite =
     !pending &&
@@ -176,7 +185,8 @@ function serializeStaff(user: IUser) {
     phone: user.phone,
     role: user.role,
     adminRole,
-    permissions: [...permissionsForRole(adminRole)],
+    permissions: [...(permissionLevels ? permissionsForLevels(permissionLevels) : permissionsForRole(adminRole))],
+    permissionLevels,
     accountStatus,
     invitePending: pending,
     inviteExpired: expiredInvite,
@@ -186,6 +196,11 @@ function serializeStaff(user: IUser) {
     updatedAt: user.updatedAt,
     invitedBy: (user as any).adminStaff?.invitedBy ?? null,
     invitedAt: (user as any).adminStaff?.invitedAt ?? null,
+    currentStatusSince: (user as any).adminStatusSince || user.createdAt,
+    timeZone: (user as any).timeZone || 'UTC',
+    availability: user.availability || {},
+    blockedDates: user.blockedDates || [],
+    blockedRanges: user.blockedRanges || [],
   };
 }
 
@@ -194,13 +209,20 @@ export const listStaff = async (_req: Request, res: Response) => {
     await connecToDatabase();
     const staff = await User.find({ role: 'admin' })
       .select(
-        'name email phone role adminRole accountStatus isEmailVerified createdAt updatedAt adminStaff.invitedBy adminStaff.invitedAt adminStaff.inviteTokenHash adminStaff.inviteTokenExpires adminStaff.inviteAcceptedAt'
+        'name email phone role adminRole adminPermissionLevels adminStatusSince timeZone availability blockedDates blockedRanges accountStatus isEmailVerified createdAt updatedAt adminStaff.invitedBy adminStaff.invitedAt adminStaff.inviteTokenHash adminStaff.inviteTokenExpires adminStaff.inviteAcceptedAt'
       )
       .sort({ createdAt: -1 });
 
+    const rows = await Promise.all(staff.map(async (member) => {
+      if (!(member as any).adminPermissionLevels && resolveAdminRole((member as any).adminRole)) {
+        (member as any).adminPermissionLevels = await getConfiguredAccessForRole(resolveAdminRole((member as any).adminRole) as AdminRole);
+      }
+      return serializeStaff(member);
+    }));
+
     return res.json({
       success: true,
-      data: staff.map(serializeStaff),
+      data: rows,
       roles: ADMIN_ROLES,
     });
   } catch (error) {
@@ -227,10 +249,20 @@ export const inviteStaff = async (req: Request, res: Response) => {
       });
     }
 
+    if (resolveAdminRole(admin.adminRole) !== 'super') {
+      return res.status(403).json({
+        success: false,
+        msg: adminRole === 'super'
+          ? 'Only a super admin can assign the super admin role'
+          : 'Only a super admin can invite staff members',
+      });
+    }
+
     const normalizedEmail = email.trim().toLowerCase();
     const resolvedPhone = resolveInvitePhone(phone);
     const trimmedName = name.trim();
     const role = adminRole as AdminRole;
+    const permissionLevels = await getConfiguredAccessForRole(role);
     await connecToDatabase();
 
     const existing = await User.findOne({ email: normalizedEmail }).select(
@@ -304,6 +336,8 @@ export const inviteStaff = async (req: Request, res: Response) => {
       password: unusablePassword,
       role: 'admin',
       adminRole: role,
+      adminPermissionLevels: permissionLevels,
+      adminStatusSince: new Date(),
       isEmailVerified: false,
       // Placeholder phones must stay unverified; real phones still require OTP later
       isPhoneVerified: false,
@@ -402,6 +436,10 @@ export const updateStaff = async (req: Request, res: Response) => {
       }
     }
 
+    if (adminRole !== undefined && resolveAdminRole(admin.adminRole) !== 'super') {
+      return res.status(403).json({ success: false, msg: 'Only a super admin can change admin roles' });
+    }
+
     const targetIsActiveSuper =
       resolveAdminRole(staff.adminRole) === 'super' &&
       !['suspended', 'rejected'].includes(staff.accountStatus || '') &&
@@ -464,11 +502,15 @@ export const updateStaff = async (req: Request, res: Response) => {
         });
       }
       (staff as any).adminRole = adminRole;
+      (staff as any).adminPermissionLevels = await getConfiguredAccessForRole(adminRole as AdminRole);
     }
 
     if (accountStatus !== undefined) {
       if (!['active', 'suspended'].includes(accountStatus)) {
         return res.status(400).json({ success: false, msg: 'accountStatus must be active or suspended' });
+      }
+      if ((staff.accountStatus || 'active') !== accountStatus) {
+        staff.adminStatusSince = new Date();
       }
       staff.accountStatus = accountStatus;
     }
@@ -494,14 +536,47 @@ export const getMyAdminAccess = async (req: Request, res: Response, next: NextFu
   try {
     const admin = req.admin as IUser;
     const adminRole = resolveAdminRole((admin as any).adminRole);
+    const permissionLevels = await getEffectiveAccessForUser(admin);
     return res.json({
       success: true,
       data: {
         adminRole,
-        permissions: [...permissionsForRole(adminRole)],
+        permissions: [...permissionsForLevels(permissionLevels)],
+        permissionLevels,
         roles: ADMIN_ROLES,
       },
     });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const getAdminRoleAccess = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const adminRole = resolveAdminRole((req.admin as any)?.adminRole);
+    if (adminRole !== 'super') {
+      return res.status(403).json({ success: false, msg: 'Only a super admin can configure role access' });
+    }
+    const roles = await getConfiguredRoleAccess();
+    return res.json({ success: true, data: { roles, levels: ['write', 'read', 'none'] } });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const updateAdminRoleAccess = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const admin = req.admin as IUser;
+    if (resolveAdminRole((admin as any).adminRole) !== 'super') {
+      return res.status(403).json({ success: false, msg: 'Only a super admin can configure role access' });
+    }
+    const matrix = validatePermissionMatrix(req.body?.roles);
+    if (!matrix) {
+      return res.status(400).json({ success: false, msg: 'Invalid role access matrix' });
+    }
+    const config = await saveConfiguredRoleAccess(matrix, admin._id);
+    const roles = await getConfiguredRoleAccess();
+    return res.json({ success: true, data: { roles, lastModified: config.lastModified } });
   } catch (error) {
     return next(error);
   }

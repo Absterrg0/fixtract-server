@@ -4,7 +4,7 @@ import mongoose from 'mongoose';
 import User from '../../models/user';
 import connecToDatabase from '../../config/db';
 import generateToken from '../../utils/functions';
-import { permissionsForRole, resolveAdminRole } from '../../utils/adminRbac/rolePermissions';
+import { permissionsForLevels, permissionsForRole, resolveAdminRole } from '../../utils/adminRbac/rolePermissions';
 import { hashAdminInviteToken } from '../../utils/adminRbac/inviteToken';
 import { ADMIN_ROLE_LABELS, type AdminRole } from '../../utils/adminRbac/types';
 
@@ -19,12 +19,14 @@ function setTokenCookie(res: Response, token: string) {
   });
 }
 
-function adminAccessFields(user: { role?: string; adminRole?: string }) {
+function adminAccessFields(user: { role?: string; adminRole?: string; adminPermissionLevels?: any; timeZone?: string }) {
   if (user.role !== 'admin') return {};
   const adminRole = resolveAdminRole(user.adminRole);
   return {
     adminRole,
-    adminPermissions: [...permissionsForRole(adminRole)],
+    adminPermissions: [...(user.adminPermissionLevels ? permissionsForLevels(user.adminPermissionLevels) : permissionsForRole(adminRole))],
+    adminPermissionLevels: user.adminPermissionLevels,
+    timeZone: user.timeZone,
   };
 }
 

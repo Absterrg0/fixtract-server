@@ -370,6 +370,15 @@ describe("resolvePropertyNature", () => {
       })
     ).toBe("movable");
   });
+
+  it("returns undefined when project-dependent classification is unanswered", () => {
+    expect(
+      resolvePropertyNature({
+        classification: "project_dependent",
+        professionalAnswers: {},
+      })
+    ).toBeUndefined();
+  });
 });
 
 describe("resolvePlaceOfSupplyCountry", () => {
