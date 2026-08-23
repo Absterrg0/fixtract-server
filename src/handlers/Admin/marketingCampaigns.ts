@@ -326,6 +326,14 @@ export const updateMarketingCampaign = async (req: Request, res: Response) => {
       }
       if (req.body.type !== campaign.type) {
         campaign.type = req.body.type as MarketingCampaignType;
+        if (campaign.type === 'reengagement') {
+          if (!Number.isFinite(Number(campaign.inactiveDays)) || Number(campaign.inactiveDays) <= 0) {
+            campaign.inactiveDays = configuredInactiveDays();
+          }
+        } else {
+          campaign.inactiveDays = undefined;
+          campaign.autoSend = false;
+        }
       }
     }
     if (scheduledAt !== undefined) {
@@ -484,6 +492,9 @@ export const sendMarketingCampaignTestEmail = async (req: Request, res: Response
         : undefined,
     };
     const firstName = typeof req.body?.firstName === 'string' ? req.body.firstName : undefined;
+    if (!content.subject) {
+      return res.status(400).json({ success: false, msg: `Campaign subject is missing for ${locale}` });
+    }
     const rendered = content.brevoTemplateId
       ? renderMarketingTemplateEmail({
         content,
