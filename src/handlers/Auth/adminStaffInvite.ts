@@ -19,13 +19,14 @@ function setTokenCookie(res: Response, token: string) {
   });
 }
 
-function adminAccessFields(user: { role?: string; adminRole?: string; adminPermissionLevels?: any }) {
+function adminAccessFields(user: { role?: string; adminRole?: string; adminPermissionLevels?: any; timeZone?: string }) {
   if (user.role !== 'admin') return {};
   const adminRole = resolveAdminRole(user.adminRole);
   return {
     adminRole,
     adminPermissions: [...(user.adminPermissionLevels ? permissionsForLevels(user.adminPermissionLevels) : permissionsForRole(adminRole))],
     adminPermissionLevels: user.adminPermissionLevels,
+    timeZone: user.timeZone,
   };
 }
 

@@ -12,13 +12,14 @@ import { generateReferralCode, validateReferralCode, createReferral } from "../.
 import { sendIdExpiredEmail } from "../../utils/emailService";
 import { permissionsForLevels, permissionsForRole, resolveAdminRole } from "../../utils/adminRbac/rolePermissions";
 
-function adminAccessFields(user: { role?: string; adminRole?: string; adminPermissionLevels?: any }) {
+function adminAccessFields(user: { role?: string; adminRole?: string; adminPermissionLevels?: any; timeZone?: string }) {
   if (user.role !== 'admin') return {};
   const adminRole = resolveAdminRole(user.adminRole);
   return {
     adminRole,
     adminPermissions: [...(user.adminPermissionLevels ? permissionsForLevels(user.adminPermissionLevels) : permissionsForRole(adminRole))],
     adminPermissionLevels: user.adminPermissionLevels,
+    timeZone: user.timeZone,
   };
 }
 
