@@ -17,13 +17,19 @@ export function parseCmsCountryCode(value: unknown): string | undefined {
 }
 
 export function sanitizeCmsActiveCountries(input: unknown): string[] {
-  if (!Array.isArray(input)) return [];
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input)) {
+    throw new Error('activeCountries must be an array of ISO 3166-1 alpha-2 country codes');
+  }
   const out: string[] = [];
   for (const entry of input) {
     if (typeof entry !== "string") continue;
     const code = entry.trim().toUpperCase();
     if (!isCmsCountryCode(code)) continue;
     if (!out.includes(code)) out.push(code);
+  }
+  if (input.length > 0 && out.length === 0) {
+    throw new Error('activeCountries contains no valid ISO 3166-1 alpha-2 country codes');
   }
   return out.slice(0, 50);
 }
@@ -34,8 +40,9 @@ export function isCmsContentVisibleForCountry(
 ): boolean {
   const countries = activeCountries || [];
   if (countries.length === 0) return true;
-  if (!countryCode) return false;
-  return countries.includes(countryCode);
+  const normalizedCountryCode = parseCmsCountryCode(countryCode);
+  if (!normalizedCountryCode) return false;
+  return countries.includes(normalizedCountryCode);
 }
 
 /** Empty/missing/null activeCountries = global; otherwise match visitor country or show global-only when unknown. */
@@ -45,9 +52,10 @@ export function cmsCountryVisibilityFilter(countryCode?: string): Record<string,
     { activeCountries: { $exists: false } },
     { activeCountries: null },
   ];
-  if (countryCode) {
+  const normalizedCountryCode = parseCmsCountryCode(countryCode);
+  if (normalizedCountryCode) {
     return {
-      $or: [...globalContent, { activeCountries: countryCode }],
+      $or: [...globalContent, { activeCountries: normalizedCountryCode }],
     };
   }
   return { $or: globalContent };

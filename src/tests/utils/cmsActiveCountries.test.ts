@@ -11,7 +11,9 @@ describe('CMS country targeting', () => {
   it('keeps empty targeting global and requires an exact visitor match otherwise', () => {
     expect(isCmsContentVisibleForCountry([], undefined)).toBe(true);
     expect(isCmsContentVisibleForCountry(['BE', 'NL'], 'BE')).toBe(true);
+    expect(isCmsContentVisibleForCountry(['BE', 'NL'], ' be ')).toBe(true);
     expect(isCmsContentVisibleForCountry(['BE', 'NL'], 'FR')).toBe(false);
+    expect(isCmsContentVisibleForCountry(['BE', 'NL'], 'BEL')).toBe(false);
     expect(isCmsContentVisibleForCountry(['BE', 'NL'], undefined)).toBe(false);
   });
 
@@ -23,6 +25,7 @@ describe('CMS country targeting', () => {
     expect(isCmsCountryCode('EU')).toBe(false);
     expect(isCmsCountryCode('UN')).toBe(false);
     expect(sanitizeCmsActiveCountries(['ZZ', 'BE'])).toEqual(['BE']);
+    expect(() => sanitizeCmsActiveCountries(['ZZ'])).toThrow('no valid ISO');
   });
 
   it('queries global content plus country-specific content for known visitors', () => {
@@ -41,5 +44,7 @@ describe('CMS country targeting', () => {
         { activeCountries: null },
       ],
     });
+    expect(cmsCountryVisibilityFilter(' be ')).toEqual(cmsCountryVisibilityFilter('BE'));
+    expect(cmsCountryVisibilityFilter('ZZ')).toEqual(cmsCountryVisibilityFilter());
   });
 });
