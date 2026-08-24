@@ -1,4 +1,5 @@
 import { Schema, model, Document, Types } from "mongoose";
+import { isCmsCountryCode } from "../utils/cms/activeCountries";
 
 export type CmsContentType = "blog" | "news" | "faq" | "policy" | "landing";
 export type CmsContentStatus = "draft" | "published";
@@ -47,6 +48,8 @@ export interface ICmsContent extends Document {
   relatedContent: Types.ObjectId[];
   relatedServices: Types.ObjectId[];
   relatedServiceSlug?: string;
+  /** ISO 3166-1 alpha-2 codes; empty = visible in all countries */
+  activeCountries: string[];
   viewCount: number;
   createdAt: Date;
   updatedAt: Date;
@@ -94,6 +97,19 @@ const CmsContentSchema = new Schema<ICmsContent>(
     relatedContent: [{ type: Schema.Types.ObjectId, ref: "CmsContent" }],
     relatedServices: [{ type: Schema.Types.ObjectId, ref: "ServiceCategory" }],
     relatedServiceSlug: { type: String, trim: true, lowercase: true, maxlength: 200 },
+    activeCountries: {
+      type: [{
+        type: String,
+        trim: true,
+        uppercase: true,
+        maxlength: 2,
+        validate: {
+          validator: isCmsCountryCode,
+          message: "activeCountries must contain ISO 3166-1 alpha-2 country codes",
+        },
+      }],
+      default: [],
+    },
     viewCount: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true }
@@ -104,6 +120,7 @@ CmsContentSchema.index({ type: 1, status: 1, publishedAt: -1 });
 CmsContentSchema.index({ tags: 1 });
 CmsContentSchema.index({ category: 1 });
 CmsContentSchema.index({ relatedServiceSlug: 1, type: 1, status: 1 });
+CmsContentSchema.index({ activeCountries: 1 });
 CmsContentSchema.index({ title: "text", excerpt: "text" });
 
 CmsContentSchema.pre("save", function (next) {

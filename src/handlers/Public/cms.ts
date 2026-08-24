@@ -9,12 +9,22 @@ import connectDB from "../../config/db";
 import { presignCmsDoc, presignCmsDocs } from "../../utils/cmsPresign";
 import { toSlug } from "../../utils/slug";
 import { param } from "../../utils/requestParams";
+import {
+  CMS_COUNTRY_TARGETED_TYPES,
+  cmsCountryVisibilityFilter,
+  isCmsContentVisibleForCountry,
+  parseCmsCountryCode,
+} from "../../utils/cms/activeCountries";
 
 const LISTING_FIELDS =
   "type title slug locale excerpt coverImage coverImageAlt tags publishedAt seo category author authorOverride relatedServiceSlug updatedAt";
 
 const BOT_UA_RE =
   /bot|crawl|spider|slurp|bingpreview|facebookexternalhit|linkedinbot|twitterbot|whatsapp|telegram|prerender|headlesschrome|lighthouse/i;
+
+function requestCountryCode(req: Request): string | undefined {
+  return parseCmsCountryCode(req.get("x-vercel-ip-country") || req.get("cf-ipcountry"));
+}
 
 export const listPublicCmsContent = async (req: Request, res: Response) => {
   try {
@@ -33,7 +43,12 @@ export const listPublicCmsContent = async (req: Request, res: Response) => {
     const skip = (page - 1) * limit;
 
     const locale = typeof req.query.locale === "string" ? req.query.locale.toLowerCase() : "en";
+    const countryCode = requestCountryCode(req);
     const filter: Record<string, unknown> = { type, status: "published", locale };
+
+    if (CMS_COUNTRY_TARGETED_TYPES.has(type)) {
+      Object.assign(filter, cmsCountryVisibilityFilter(countryCode));
+    }
 
     const tag = typeof req.query.tag === "string" ? req.query.tag.toLowerCase() : "";
     if (tag) filter.tags = tag;
@@ -83,6 +98,7 @@ export const getPublicCmsContentBySlug = async (req: Request, res: Response) => 
     if (!slug) return res.status(404).json({ success: false, msg: "Not found" });
 
     const locale = typeof req.query.locale === "string" ? req.query.locale.toLowerCase() : "en";
+    const countryCode = requestCountryCode(req);
 
     await connectDB();
 
@@ -91,12 +107,19 @@ export const getPublicCmsContentBySlug = async (req: Request, res: Response) => 
       .populate({
         path: "relatedContent",
         match: { status: "published" },
-        select: "title slug type excerpt coverImage coverImageAlt publishedAt",
+        select: "title slug type excerpt coverImage coverImageAlt publishedAt activeCountries",
       })
       .populate("relatedServices", "name slug")
       .lean();
 
     if (!doc) return res.status(404).json({ success: false, msg: "Not found" });
+
+    if (
+      CMS_COUNTRY_TARGETED_TYPES.has(type) &&
+      !isCmsContentVisibleForCountry(doc.activeCountries, countryCode)
+    ) {
+      return res.status(404).json({ success: false, msg: "Not found" });
+    }
 
     const ua = req.get("user-agent") || "";
     if (!BOT_UA_RE.test(ua)) {
@@ -106,6 +129,19 @@ export const getPublicCmsContentBySlug = async (req: Request, res: Response) => 
     }
 
     const presigned = await presignCmsDoc(doc);
+    const relatedContent = presigned.relatedContent as unknown as Array<{
+      type?: CmsContentType;
+      activeCountries?: string[];
+    }> | undefined;
+    if (Array.isArray(relatedContent)) {
+      // Mongoose types the populated field as ObjectId[], but the runtime value
+      // is a populated document because of the populate() above.
+      (presigned as unknown as { relatedContent: typeof relatedContent }).relatedContent = relatedContent.filter(
+        (item) =>
+          !CMS_COUNTRY_TARGETED_TYPES.has(item.type || "") ||
+          isCmsContentVisibleForCountry(item.activeCountries, countryCode),
+      );
+    }
     return res.status(200).json({ success: true, data: presigned });
   } catch (error) {
     console.error("Public get CMS content error:", error);
@@ -140,10 +176,16 @@ export const listPublicPolicyLinks = async (req: Request, res: Response) => {
 export const listPublicFaq = async (req: Request, res: Response) => {
   try {
     const locale = typeof req.query.locale === "string" ? req.query.locale.toLowerCase() : "en";
+    const countryCode = requestCountryCode(req);
 
     await connectDB();
 
-    const items = await CmsContent.find({ type: "faq", status: "published", locale })
+    const items = await CmsContent.find({
+      type: "faq",
+      status: "published",
+      locale,
+      ...cmsCountryVisibilityFilter(countryCode),
+    })
       .select("title slug body category publishedAt updatedAt")
       .sort({ category: 1, publishedAt: -1 })
       .lean();
