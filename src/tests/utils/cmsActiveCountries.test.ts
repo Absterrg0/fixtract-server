@@ -30,6 +30,7 @@ describe('CMS country targeting', () => {
       $or: [
         { activeCountries: { $size: 0 } },
         { activeCountries: { $exists: false } },
+        { activeCountries: null },
         { activeCountries: 'BE' },
       ],
     });
@@ -37,6 +38,7 @@ describe('CMS country targeting', () => {
       $or: [
         { activeCountries: { $size: 0 } },
         { activeCountries: { $exists: false } },
+        { activeCountries: null },
       ],
     });
   });

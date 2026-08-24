@@ -38,11 +38,12 @@ export function isCmsContentVisibleForCountry(
   return countries.includes(countryCode);
 }
 
-/** Empty/missing activeCountries = global; otherwise match visitor country or show global-only when unknown. */
+/** Empty/missing/null activeCountries = global; otherwise match visitor country or show global-only when unknown. */
 export function cmsCountryVisibilityFilter(countryCode?: string): Record<string, unknown> {
   const globalContent = [
     { activeCountries: { $size: 0 } },
     { activeCountries: { $exists: false } },
+    { activeCountries: null },
   ];
   if (countryCode) {
     return {
