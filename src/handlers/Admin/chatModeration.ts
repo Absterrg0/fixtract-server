@@ -715,17 +715,81 @@ export const adminListSupportConversations = async (req: Request, res: Response)
     }
     if (search) {
       const rx = new RegExp(escapeRegex(search), "i");
-      const matchedUsers = await User.find({
-        $or: [{ name: rx }, { email: rx }, { username: rx }, { phone: rx }],
-      })
-        .select("_id")
-        .limit(100)
-        .lean();
-      const matchedIds = matchedUsers.map((user) => user._id);
-      if (matchedIds.length === 0) {
-        return res.json({ success: true, data: { items: [], total: 0, page, limit } });
-      }
-      filter.supportTargetUserId = { $in: matchedIds };
+      const [facet] = await Conversation.aggregate([
+        { $match: filter },
+        {
+          $lookup: {
+            from: "users",
+            localField: "supportTargetUserId",
+            foreignField: "_id",
+            as: "supportTargetUserId",
+          },
+        },
+        { $unwind: { path: "$supportTargetUserId", preserveNullAndEmptyArrays: false } },
+        {
+          $match: {
+            $or: [
+              { "supportTargetUserId.name": rx },
+              { "supportTargetUserId.email": rx },
+              { "supportTargetUserId.username": rx },
+              { "supportTargetUserId.phone": rx },
+            ],
+          },
+        },
+        { $sort: { lastMessageAt: -1 } },
+        {
+          $facet: {
+            items: [
+              { $skip: skip },
+              { $limit: limit },
+              {
+                $lookup: {
+                  from: "users",
+                  localField: "supportAdminId",
+                  foreignField: "_id",
+                  as: "supportAdminId",
+                },
+              },
+              { $unwind: { path: "$supportAdminId", preserveNullAndEmptyArrays: true } },
+              {
+                $project: {
+                  _id: 1,
+                  lastMessagePreview: 1,
+                  lastMessageAt: 1,
+                  lastMessageSenderId: 1,
+                  supportAdminId: {
+                    _id: "$supportAdminId._id",
+                    name: "$supportAdminId.name",
+                    email: "$supportAdminId.email",
+                  },
+                  supportTargetUserId: {
+                    _id: "$supportTargetUserId._id",
+                    name: "$supportTargetUserId.name",
+                    email: "$supportTargetUserId.email",
+                    username: "$supportTargetUserId.username",
+                  },
+                },
+              },
+            ],
+            total: [{ $count: "count" }],
+          },
+        },
+      ]);
+      const conversations = Array.isArray(facet?.items) ? facet.items : [];
+      const total = Number(facet?.total?.[0]?.count) || 0;
+      const items = conversations.map((c: any) => {
+        const targetId = c.supportTargetUserId?._id?.toString();
+        const senderId = c.lastMessageSenderId?.toString();
+        return {
+          _id: c._id,
+          supportAdminId: c.supportAdminId || null,
+          supportTargetUserId: c.supportTargetUserId,
+          lastMessagePreview: c.lastMessagePreview || "",
+          lastMessageAt: c.lastMessageAt || null,
+          awaitingReply: Boolean(targetId && senderId && targetId === senderId),
+        };
+      });
+      return res.json({ success: true, data: { items, total, page, limit } });
     }
 
     const [conversations, total] = await Promise.all([

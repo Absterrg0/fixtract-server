@@ -4,6 +4,7 @@ import {
   escapeRegex,
   formatChatClosedMessage,
   INBOX_SEARCH_MAX_LENGTH,
+  money2,
   normalizeInboxSearch,
   ratePercent,
 } from "../../utils/adminSupportChat";
@@ -24,6 +25,11 @@ describe("admin support chat helpers", () => {
     expect(formatChatClosedMessage(new Date("2026-08-29T00:35:00.000Z"))).toBe(
       "Chat closed on 29 Aug 2026, 00:35 UTC",
     );
+  });
+
+  it("rounds half cents up for currency display", () => {
+    expect(money2(10.075)).toBe(10.08);
+    expect(money2(undefined)).toBe(0);
   });
 
   it("computes refund percent from booking count", () => {

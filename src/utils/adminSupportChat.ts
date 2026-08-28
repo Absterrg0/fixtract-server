@@ -28,7 +28,8 @@ export function round1(n: number | null | undefined): number | null {
 }
 
 export function money2(n: number | null | undefined): number {
-  return Math.round((n || 0) * 100) / 100;
+  const value = Number(n) || 0;
+  return Number(`${Math.round(Number(`${value}e2`))}e-2`);
 }
 
 export function ratePercent(numer: number, denom: number): number | null {
