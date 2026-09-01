@@ -51,4 +51,21 @@ describe('marketing template contract', () => {
 
     expect(result.htmlContent).toContain('Hallo {{ contact.FIRSTNAME }},');
   });
+
+  it('replaces {{ .PreviewText }} and hides the preview as a preheader', () => {
+    const result = renderMarketingEmail({
+      locale: 'en',
+      firstName: 'Ada',
+      content: {
+        subject: 'Why Equinix?',
+        previewText: 'Why Equinix?',
+        htmlContent: '<div style="display:none">{{ .PreviewText }}</div><p>Body</p>',
+      },
+    });
+
+    expect(result.previewText).toBe('Why Equinix?');
+    expect(result.htmlContent).not.toContain('{{ .PreviewText }}');
+    expect(result.htmlContent).toContain('Why Equinix?');
+    expect(result.htmlContent).toContain('data-fixera-preview-text="true"');
+  });
 });
