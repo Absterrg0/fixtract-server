@@ -64,8 +64,28 @@ describe("CMS cover image persist", () => {
     );
   });
 
-  it("strips query strings from media URLs without changing the key", () => {
+  it("canonicalizes img src attributes that have whitespace around =", () => {
+    const html = `<img alt="cover" src = "${PRESIGNED}">`;
+    expect(canonicalizeCmsHtmlImages(html)).toBe(`<img alt="cover" src = "${CANONICAL}">`);
+  });
+
+  it("does not treat src= text inside another attribute as an image URL", () => {
+    const html = `<img alt='diagram src="${PRESIGNED}"' src="${PRESIGNED}">`;
+    expect(canonicalizeCmsHtmlImages(html)).toBe(
+      `<img alt='diagram src="${PRESIGNED}"' src="${CANONICAL}">`
+    );
+  });
+
+  it("strips query strings from S3 media URLs without changing the key", () => {
     expect(canonicalizeCmsMediaUrl(` ${PRESIGNED} `)).toBe(CANONICAL);
     expect(canonicalizeCmsMediaUrl("not a url")).toBe("not a url");
+  });
+
+  it("keeps query parameters on non-S3 URLs", () => {
+    const cdn = "https://cdn.example.com/hero.jpg?w=1600&sig=abc";
+    expect(canonicalizeCmsMediaUrl(cdn)).toBe(cdn);
+    const result = applyCoverImageUpdate(cdn, `${cdn}&v=2`);
+    expect(result.coverImage).toBe(`${cdn}&v=2`);
+    expect(result.previousToCleanup).toBe(cdn);
   });
 });
