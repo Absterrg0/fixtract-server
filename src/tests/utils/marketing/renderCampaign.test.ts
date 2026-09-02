@@ -84,4 +84,21 @@ describe('marketing template contract', () => {
     expect(result.htmlContent).toContain('Save $&amp; more today');
     expect(result.htmlContent).not.toContain('{{ .PreviewText }}');
   });
+
+  it('replaces preview placeholders in remote templates', () => {
+    const result = renderMarketingTemplateEmail({
+      locale: 'en',
+      firstName: 'Ada',
+      templateHtml: '<p>Hi {{ contact.FIRSTNAME }},</p><div>{{ .PreviewText }}</div><p>Body</p>',
+      content: {
+        subject: 'Template',
+        previewText: 'Preview line',
+        htmlContent: '',
+      },
+    });
+
+    expect(result.previewText).toBe('Preview line');
+    expect(result.htmlContent).toContain('Preview line');
+    expect(result.htmlContent).not.toContain('{{ .PreviewText }}');
+  });
 });
