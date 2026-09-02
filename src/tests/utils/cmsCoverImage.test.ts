@@ -76,6 +76,11 @@ describe("CMS cover image persist", () => {
     );
   });
 
+  it("handles > characters inside quoted attribute values", () => {
+    const html = `<img alt="A > B" src="${PRESIGNED}">`;
+    expect(canonicalizeCmsHtmlImages(html)).toBe(`<img alt="A > B" src="${CANONICAL}">`);
+  });
+
   it("strips query strings from S3 media URLs without changing the key", () => {
     expect(canonicalizeCmsMediaUrl(` ${PRESIGNED} `)).toBe(CANONICAL);
     expect(canonicalizeCmsMediaUrl("not a url")).toBe("not a url");

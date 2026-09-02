@@ -42,7 +42,7 @@ const PREVIEW_PLACEHOLDER_RE = /\{\{\s*\.PreviewText\s*\}\}/gi;
 
 function applyPreviewText(html: string, previewText?: string): string {
   const text = typeof previewText === 'string' ? previewText.trim() : '';
-  const replaced = html.replace(PREVIEW_PLACEHOLDER_RE, escapeHtml(text));
+  const replaced = html.replace(PREVIEW_PLACEHOLDER_RE, () => escapeHtml(text));
   if (!text) return replaced;
   if (/data-fixera-preview-text\s*=/i.test(replaced)) return replaced;
   const preheader =

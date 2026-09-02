@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { promotionalEmailOptIn } from '../../../utils/marketing/promotionalConsent';
 
 describe('promotional email opt-in', () => {
-  it('treats the promotional-email toggle as a subscribe, even without a Date instance', () => {
+  it('requires a recorded consent timestamp when the promotional-email toggle is on', () => {
     const result = promotionalEmailOptIn({
       notificationPreferences: { promotions: { email: true, push: true } },
       marketingConsentAt: null,
     });
-    expect(result.optedIn).toBe(true);
-    expect(result.consentVerifiedAt).toBeInstanceOf(Date);
+    expect(result.optedIn).toBe(false);
+    expect(result.consentVerifiedAt).toBeUndefined();
   });
 
   it('accepts an ISO consent timestamp from a lean document', () => {

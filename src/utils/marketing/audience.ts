@@ -7,7 +7,7 @@ import MarketingSubscriber, {
 } from '../../models/marketingSubscriber';
 import type { ICampaignAudience } from '../../models/marketingCampaign';
 import { generateUnsubscribeToken } from './unsubscribeToken';
-import { promotionalEmailOptIn } from './promotionalConsent';
+import { promotionalEmailOptIn, isPromotionalEmailEnabled, toConsentDate } from './promotionalConsent';
 import {
   restoreBrevoMarketingContact,
   suppressBrevoMarketingContact,
@@ -135,6 +135,12 @@ export async function syncSubscribersFromUsers(): Promise<{
     for (const user of users) {
       const email = normalizeEmail(user.email);
       if (!email) continue;
+
+      if (isPromotionalEmailEnabled(user.notificationPreferences) && !toConsentDate(user.marketingConsentAt)) {
+        const backfilled = new Date();
+        await User.updateOne({ _id: user._id }, { $set: { marketingConsentAt: backfilled } });
+        (user as { marketingConsentAt?: Date }).marketingConsentAt = backfilled;
+      }
 
       const { optedIn, consentVerifiedAt } = promotionalEmailOptIn(user);
       const region = userCountry(user);

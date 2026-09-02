@@ -68,4 +68,20 @@ describe('marketing template contract', () => {
     expect(result.htmlContent).toContain('Why Equinix?');
     expect(result.htmlContent).toContain('data-fixera-preview-text="true"');
   });
+
+  it('does not treat preview text containing $& as a replacement pattern', () => {
+    const result = renderMarketingEmail({
+      locale: 'en',
+      firstName: 'Ada',
+      content: {
+        subject: 'Sale',
+        previewText: 'Save $& more today',
+        htmlContent: '<div>{{ .PreviewText }}</div><p>Body</p>',
+      },
+    });
+
+    expect(result.previewText).toBe('Save $& more today');
+    expect(result.htmlContent).toContain('Save $&amp; more today');
+    expect(result.htmlContent).not.toContain('{{ .PreviewText }}');
+  });
 });

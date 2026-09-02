@@ -25,8 +25,12 @@ export function promotionalEmailOptIn(user: {
   if (!isPromotionalEmailEnabled(user.notificationPreferences)) {
     return { optedIn: false };
   }
+  const consentVerifiedAt = toConsentDate(user.marketingConsentAt);
+  if (!consentVerifiedAt) {
+    return { optedIn: false };
+  }
   return {
     optedIn: true,
-    consentVerifiedAt: toConsentDate(user.marketingConsentAt, new Date()),
+    consentVerifiedAt,
   };
 }
