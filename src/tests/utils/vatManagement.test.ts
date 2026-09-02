@@ -379,6 +379,12 @@ describe("resolvePropertyNature", () => {
       })
     ).toBeUndefined();
   });
+
+  it("defaults missing classification to immovable when explicitly resolved", () => {
+    expect(resolvePropertyNature({ classification: "immovable" })).toBe("immovable");
+    expect(resolvePropertyNature({ classification: null })).toBeUndefined();
+    expect(resolvePropertyNature({})).toBeUndefined();
+  });
 });
 
 describe("resolvePlaceOfSupplyCountry", () => {
