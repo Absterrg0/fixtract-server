@@ -33,6 +33,8 @@ const withPresignedInvoiceUrls = async <T extends Record<string, any>>(payment: 
     invoiceUblUrl,
     creditNoteUrl,
     creditNoteUblUrl,
+    supplierInvoiceUrl,
+    supplierInvoiceUblUrl,
     supplierCreditNoteUrl,
     supplierCreditNoteUblUrl,
   ] = await Promise.all([
@@ -40,6 +42,8 @@ const withPresignedInvoiceUrls = async <T extends Record<string, any>>(payment: 
     presignMaybe(payment.invoiceUblUrl),
     presignMaybe(payment.creditNoteUrl),
     presignMaybe(payment.creditNoteUblUrl),
+    presignMaybe(payment.supplierInvoiceUrl),
+    presignMaybe(payment.supplierInvoiceUblUrl),
     presignMaybe(payment.supplierCreditNoteUrl),
     presignMaybe(payment.supplierCreditNoteUblUrl),
   ]);
@@ -50,6 +54,8 @@ const withPresignedInvoiceUrls = async <T extends Record<string, any>>(payment: 
     invoiceUblUrl,
     creditNoteUrl,
     creditNoteUblUrl,
+    supplierInvoiceUrl,
+    supplierInvoiceUblUrl,
     supplierCreditNoteUrl,
     supplierCreditNoteUblUrl,
   };

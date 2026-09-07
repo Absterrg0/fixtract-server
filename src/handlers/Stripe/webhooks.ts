@@ -16,8 +16,8 @@ import DiscountCodeUsage from '../../models/discountCodeUsage';
 import { convertFromStripeAmount } from '../../utils/payment';
 import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
 import { deductPoints } from '../../utils/pointsSystem';
-import { getProfessionalDisplayName } from '../../utils/displayName';
 import { notify } from '../../utils/notifications/notify';
+import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
 
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60 * 1000;
 
@@ -288,7 +288,29 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
     if (Object.keys(updateFields).length === 0) return;
 
     const updated = await Booking.findOneAndUpdate(filter, { $set: updateFields }, { new: true });
-    if (!updated) return;
+    if (!updated) {
+      // Lost the race with confirmPayment (or a duplicate delivery): the booking
+      // is already authorized. Ensure post-payment notifications still go out
+      // exactly once (deduped via deliveryKey).
+      const fresh = await Booking.findById(bookingId).select(
+        'payment.status payment.stripePaymentIntentId payment.amount',
+      );
+      if (
+        fresh?.payment &&
+        fresh.payment.stripePaymentIntentId === paymentIntent.id &&
+        (fresh.payment.status === 'authorized' || (fresh.payment as any).status === 'completed')
+      ) {
+        const amountPaid =
+          (fresh.payment as any)?.amount ?? convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency);
+        await notifyBookingPaymentConfirmed({
+          bookingId: String(fresh._id),
+          paymentIntentId: paymentIntent.id,
+          amount: typeof amountPaid === 'number' ? amountPaid : undefined,
+          currency: (paymentIntent.currency || 'EUR').toUpperCase(),
+        });
+      }
+      return;
+    }
 
     await Payment.findOneAndUpdate(
       { booking: booking._id },
@@ -383,49 +405,39 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
     console.log(`Payment authorized via webhook for booking ${bookingId}`);
 
     if (booking.payment.status === 'pending') {
-      const customerUser = booking.customer ? await User.findById(booking.customer).select('email name').lean() : null;
-      const professionalUser = booking.professional ? await User.findById(booking.professional).select('email name businessInfo username').lean() : null;
+      // First payment for this booking — notify both sides exactly once.
+      // Idempotent with confirmPayment via per-booking deliveryKey (never on
+      // checkout-page forward, only after payment).
       const amountPaid = (booking.payment as any)?.amount ?? convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency);
       const currency = (paymentIntent.currency || 'EUR').toUpperCase();
-      try {
-        if (customerUser?._id) {
-          await notify({
-            userId: customerUser._id.toString(),
-            eventKey: 'customer.payment_confirmed',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: {
-              bookingId: String(booking._id),
-              professionalName: professionalUser ? getProfessionalDisplayName(professionalUser) : 'Professional',
-              amount: amountPaid,
-              currency,
-            },
-          });
-        }
-      } catch (emailError: any) {
-        console.error('Failed to notify payment-confirmed:', emailError?.message || emailError);
-      }
-
-      // Inbox + email + push for professional "new booking"
-      // Await notify on serverless — fire-and-forget can be frozen before inbox/email complete.
-      try {
-        if (professionalUser?._id) {
-          await notify({
-            userId: professionalUser._id.toString(),
-            eventKey: 'professional.booking_created',
-            entityType: 'booking',
-            entityId: String(booking._id),
-            context: {
-              bookingId: String(booking._id),
-              customerName: customerUser?.name,
-              amount: amountPaid,
-              currency,
-            },
-          });
-        }
-      } catch (notifyError: any) {
-        console.error('Failed to notify booking_created:', notifyError?.message || notifyError);
-      }
+      await notifyBookingPaymentConfirmed({
+        bookingId: String(booking._id),
+        paymentIntentId: paymentIntent.id,
+        amount: typeof amountPaid === 'number' ? amountPaid : undefined,
+        currency,
+      });
+    }
+  } else {
+    // confirmPayment (sync frontend call) may have already flipped
+    // pending->authorized before this webhook ran. Ensure the post-payment
+    // notifications still go out exactly once (deduped via deliveryKey).
+    const fresh = await Booking.findById(bookingId).select(
+      'payment.status payment.stripePaymentIntentId payment.amount status',
+    );
+    if (
+      fresh?.payment &&
+      fresh.payment.stripePaymentIntentId === paymentIntent.id &&
+      (fresh.payment.status === 'authorized' || (fresh.payment as any).status === 'completed')
+    ) {
+      const amountPaid =
+        (fresh.payment as any)?.amount ?? convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency);
+      const currency = (paymentIntent.currency || 'EUR').toUpperCase();
+      await notifyBookingPaymentConfirmed({
+        bookingId: String(fresh._id),
+        paymentIntentId: paymentIntent.id,
+        amount: typeof amountPaid === 'number' ? amountPaid : undefined,
+        currency,
+      });
     }
   }
 }

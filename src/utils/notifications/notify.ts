@@ -13,6 +13,8 @@ export interface NotifyDeliveryOptions {
   sendPush?: boolean;
   /** Override registry/pref email channel resolution. */
   sendEmail?: boolean;
+  /** Propagate persistence/channel failures to retryable producers (for example Stripe webhooks). */
+  strict?: boolean;
 }
 
 export interface NotifyArgs {
@@ -96,9 +98,11 @@ async function finishDelivery(
  * Channel failures are logged and never thrown to the caller.
  */
 export async function notify(args: NotifyArgs): Promise<NotifyResult> {
+  const strict = args.delivery?.strict === true;
   const def = getEventDef(args.eventKey);
   if (!def) {
     console.error(`[notify] Unknown eventKey: ${args.eventKey}`);
+    if (strict) throw new Error(`Unknown notification event: ${args.eventKey}`);
     return { notificationId: null, emailSent: false, pushSent: false, skipped: 'unknown_event' };
   }
 
@@ -107,6 +111,7 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
   );
   if (!user) {
     console.warn(`[notify] User not found: ${args.userId}`);
+    if (strict) throw new Error(`Notification user not found: ${args.userId}`);
     return {
       notificationId: null,
       emailSent: false,
@@ -126,6 +131,7 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
       : undefined;
 
   let notificationId: string | null = null;
+  let deliveryError: unknown;
   if (persistInbox) {
     try {
       const notificationData = {
@@ -155,6 +161,7 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
       notificationId = doc._id.toString();
     } catch (err) {
       console.error(`[notify] Failed to persist inbox for ${args.eventKey}:`, err);
+      deliveryError = err;
       // Continue to attempt channels even if persist failed (best-effort)
     }
   }
@@ -183,6 +190,9 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
           userId: user._id.toString(),
         });
         emailOutcome = emailSent ? 'sent' : 'failed';
+        if (!emailSent) {
+          deliveryError ??= new Error(`Email provider returned false for ${args.eventKey}`);
+        }
         if (notificationId && emailClaim?.state === 'claimed') {
           await finishDelivery(notificationId, 'email', emailClaim.token, emailSent);
         }
@@ -192,6 +202,7 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
         await finishDelivery(notificationId, 'email', emailClaim.token, false);
       }
       emailOutcome = 'failed';
+      deliveryError ??= err;
       console.error(`[notify] Email failed for ${args.eventKey}:`, err);
     }
   } else if (sendEmail && built.sendEmail) {
@@ -232,9 +243,14 @@ export async function notify(args: NotifyArgs): Promise<NotifyResult> {
         await finishDelivery(notificationId, 'push', pushClaim.token, false);
       }
       console.error(`[notify] Push failed for ${args.eventKey}:`, err);
+      deliveryError ??= err;
     }
   }
 
+  if (strict && deliveryError) {
+    const message = deliveryError instanceof Error ? deliveryError.message : String(deliveryError);
+    throw new Error(`Notification delivery failed for ${args.eventKey}: ${message}`);
+  }
   return { notificationId, emailSent, pushSent, emailOutcome };
 }
 

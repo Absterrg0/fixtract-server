@@ -35,6 +35,7 @@ import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discoun
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
 import { auditLog } from '../../utils/auditLogger';
+import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
 
 const extractParticipantIds = (booking: any, professionalOverride?: any) => {
   const customerId = (booking.customer as any)?._id || booking.customer;
@@ -769,6 +770,18 @@ export const confirmPayment = async (req: Request, res: Response) => {
     // Check if payment is already authorized or completed
     if (booking.payment?.status === 'authorized' || booking.payment?.status === 'completed') {
       console.log(`[PAYMENT CONFIRM] Payment already ${booking.payment.status} for booking ${booking._id}`);
+      // Webhook may not have run yet — ensure post-payment notifications go out
+      // exactly once (deduped via deliveryKey).
+      try {
+        await notifyBookingPaymentConfirmed({
+          bookingId: String(booking._id),
+          paymentIntentId: typeof paymentIntentId === 'string' ? paymentIntentId : undefined,
+          amount: typeof (booking.payment as any)?.amount === 'number' ? (booking.payment as any).amount : undefined,
+          currency: (booking.payment as any)?.currency || 'EUR',
+        });
+      } catch (notifyError: any) {
+        console.error(`[PAYMENT CONFIRM] Post-payment notify failed for booking ${booking._id}:`, notifyError?.message || notifyError);
+      }
       return res.json({
         success: true,
         data: {
@@ -840,6 +853,19 @@ export const confirmPayment = async (req: Request, res: Response) => {
       );
 
       console.log(`✅ Payment authorized for booking ${booking._id}`);
+
+      // Notify both sides exactly once after payment (idempotent with webhook
+      // via per-booking deliveryKey — never on checkout-page forward).
+      try {
+        await notifyBookingPaymentConfirmed({
+          bookingId: String(booking._id),
+          paymentIntentId: paymentIntent.id,
+          amount: typeof (booking.payment as any)?.amount === 'number' ? (booking.payment as any).amount : undefined,
+          currency: (paymentIntent.currency || (booking.payment as any)?.currency || 'EUR').toUpperCase(),
+        });
+      } catch (notifyError: any) {
+        console.error(`[PAYMENT CONFIRM] Post-payment notify failed for booking ${booking._id}:`, notifyError?.message || notifyError);
+      }
 
       return res.json({
         success: true,

@@ -313,22 +313,25 @@ describe("resolveSupplierB2BInvoiceDecision", () => {
       buyerVatNumber: "BE1002103337",
       propertyNature: "movable",
     });
-    expect(result.country).toBe("BE");
+    // Flowchart SSOT supplier leg: movable -> professional (supplier) country.
+    expect(result.country).toBe("NL");
     expect(result.appliedRate).toBe(0);
     expect(result.reverseCharge).toBe(true);
   });
 
   it("keeps the configured B2C rate for cross-border exception countries", () => {
+    // Flowchart SSOT supplier leg: movable -> supplier country, so exception
+    // logic is evaluated on the supplier country here.
     const expectedRates: Record<string, number> = { CH: 8.1, LI: 8.1, NO: 25, GR: 24 };
-    for (const [buyerCountry, rate] of Object.entries(expectedRates)) {
+    for (const [supplierCountry, rate] of Object.entries(expectedRates)) {
       const result = resolveSupplierB2BInvoiceDecision({
-        supplierCountry: "NL",
-        buyerCountry,
-        supplierVatNumber: "NL123456789B01",
-        buyerVatNumber: `${buyerCountry}123456789`,
+        supplierCountry,
+        buyerCountry: "BE",
+        supplierVatNumber: `${supplierCountry}123456789`,
+        buyerVatNumber: "BE1002103337",
         propertyNature: "movable",
       });
-      expect(result.country).toBe(buyerCountry);
+      expect(result.country).toBe(supplierCountry);
       expect(result.reverseCharge).toBe(false);
       expect(result.appliedRate).toBe(rate);
     }

@@ -15,6 +15,7 @@ import { getProfessionalDisplayName } from "../../utils/displayName";
 import CancellationRequest, { ACTIVE_CANCELLATION_STATUSES, CANCELLATION_REASON_CATEGORIES, CANCELLATION_REASON_LABELS, CancellationReasonCategory } from "../../models/cancellationRequest";
 import { addBusinessDays, REFUND_RESPONSE_BUSINESS_DAYS } from "../../utils/businessDays";
 import { notify } from "../../utils/notifications/notify";
+import { filterInvoiceFieldsByRole } from "../../utils/invoiceVisibility";
 import { IUser } from "../../models/user";
 import { applyB2BInvoiceRule, firstVatCountry, parseVatCountryCode, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
 import ServiceConfiguration from "../../models/serviceConfiguration";
@@ -228,10 +229,20 @@ const buildCheckoutSnapshot = (params: {
 
   if (!(totalAmount > 0)) return null;
 
+  let unit: string | undefined;
+  try {
+    const { assertValidInvoiceUnit } = require("../../utils/invoiceUnits") as typeof import("../../utils/invoiceUnits");
+    const validated = assertValidInvoiceUnit(params.selectedSubproject?.pricing?.unit, "booking unit");
+    unit = validated ? validated.slice(0, 50) : undefined;
+  } catch (error: any) {
+    throw new Error(error?.message || "Unknown booking unit.");
+  }
+
   return {
     pricingType,
     unitAmount,
     quantity,
+    ...(unit ? { unit } : {}),
     baseSubtotal,
     extraOptionsTotal,
     totalAmount,
@@ -335,11 +346,25 @@ const presignBookingFiles = async (bookingDoc: any) => {
       creditNoteUblUrl: await presignMaybeS3Url(booking.payment.creditNoteUblUrl),
       supplierCreditNoteUrl: await presignMaybeS3Url(booking.payment.supplierCreditNoteUrl),
       supplierCreditNoteUblUrl: await presignMaybeS3Url(booking.payment.supplierCreditNoteUblUrl),
+      invoiceArtifactHistory: Array.isArray(booking.payment.invoiceArtifactHistory)
+        ? await Promise.all(booking.payment.invoiceArtifactHistory.map(async (entry: any) => ({
+            ...entry,
+            invoiceUrl: await presignMaybeS3Url(entry.invoiceUrl),
+            invoiceUblUrl: await presignMaybeS3Url(entry.invoiceUblUrl),
+          })))
+        : booking.payment.invoiceArtifactHistory,
     };
   }
 
   return booking;
 };
+
+/**
+ * Invoice visibility: customers see only the customer invoice (FIX),
+ * professionals see only the supplier self-bill (SUP). Admins see both.
+ * Call after presignBookingFiles.
+ */
+const filterInvoiceUrlsByRole = filterInvoiceFieldsByRole;
 
 // Create a new booking (RFQ submission)
 export const createBooking = async (req: Request, res: Response, next: NextFunction) => {
@@ -1242,11 +1267,13 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
     }
 
     const bookingWithSignedFiles = await presignBookingFiles(booking);
+    const viewerRole = isAdmin ? 'admin' : isCustomer ? 'customer' : 'professional';
+    filterInvoiceUrlsByRole(bookingWithSignedFiles, viewerRole);
 
     return res.status(200).json({
       success: true,
       booking: bookingWithSignedFiles,
-      viewerRole: isAdmin ? 'admin' : isCustomer ? 'customer' : 'professional',
+      viewerRole,
     });
 
   } catch (error: any) {

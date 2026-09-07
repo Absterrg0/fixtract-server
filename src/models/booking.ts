@@ -191,6 +191,7 @@ export interface IBooking extends Document {
     pricingType: 'fixed' | 'unit';
     unitAmount: number;
     quantity: number;
+    unit?: string;
     baseSubtotal: number;
     extraOptionsTotal: number;
     totalAmount: number;
@@ -811,6 +812,7 @@ const BookingSchema = new Schema({
     pricingType: { type: String, enum: ['fixed', 'unit'] },
     unitAmount: { type: Number, min: 0 },
     quantity: { type: Number, min: 0 },
+    unit: { type: String, maxlength: 50 },
     baseSubtotal: { type: Number, min: 0 },
     extraOptionsTotal: { type: Number, min: 0 },
     totalAmount: { type: Number, min: 0 },

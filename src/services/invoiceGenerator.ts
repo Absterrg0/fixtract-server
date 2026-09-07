@@ -4,6 +4,7 @@
  */
 
 import PDFDocument from "pdfkit";
+import path from "node:path";
 import InvoiceSequence from "../models/invoiceSequence";
 import PlatformSettings from "../models/platformSettings";
 import { getVATExplanation, isEUCountry } from "../utils/vat";
@@ -17,6 +18,12 @@ import {
   calculateSupplierInvoiceNet,
   getCustomerExtraCostNet,
 } from "../utils/invoiceAccounting";
+import {
+  assertValidInvoiceUnit,
+  formatVatAnswerWithUnit,
+  mapUnitToUneceCode,
+} from "../utils/invoiceUnits";
+import ServiceConfiguration from "../models/serviceConfiguration";
 
 interface InvoiceData {
   invoiceNumber: string;
@@ -354,24 +361,11 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
         reject(error);
       });
 
-      // Header. For self-billed documents the professional remains the legal
+      // Header: logo only on top. Platform info lives in the footer.
+      // For self-billed documents the professional remains the legal
       // supplier; the platform is only the preparer of the document.
       const issuer = data.issuer || {};
-      doc
-        .fontSize(20)
-        .text(issuer.name || "FIXTRACT", 50, 50)
-        .fontSize(10)
-        .text(
-          data.selfBilling
-            ? "Document prepared by the platform on behalf of the supplier"
-            : "Property Services Marketplace",
-          50,
-          75
-        )
-        .text([issuer.street, issuer.postalCode, issuer.city, issuer.country].filter(Boolean).join(", ") || "Belgium", 50, 90);
-      if (issuer.vatNumber) {
-        doc.text(`VAT: ${issuer.vatNumber}`, 50, 105);
-      }
+      doc.image(path.resolve(__dirname, "../../assets/fixtract-logo.png"), 50, 50, { fit: [140, 50] });
 
       // Invoice title
       doc.fontSize(20).text(data.documentType === "credit_note" ? "CREDIT NOTE" : "INVOICE", 400, 50, { align: "right" });
@@ -491,7 +485,7 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
       // VAT
       if (data.payment.reverseCharge) {
         doc
-          .text("VAT (Reverse Charge)", 50, rowY)
+          .text("Reverse Charge", 50, rowY)
           .text(formatCurrency(0, data.payment.currency), 450, rowY, {
             align: "right",
           });
@@ -526,9 +520,12 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
         });
       }
 
-      // Footer. Keep it anchored to the page bottom so a long description does
+      // Footer: platform info lives here (not in the header).
+      // Keep it anchored to the page bottom so a long description does
       // not create a blank page containing only a misnumbered footer.
-      const footerY = doc.page.height - doc.page.margins.bottom - 30;
+      const footerY = doc.page.height - doc.page.margins.bottom - 60;
+      const platformLine = [issuer.name || "Fixtract", issuer.street, [issuer.postalCode, issuer.city].filter(Boolean).join(" "), issuer.country].filter(Boolean).join(" · ");
+      const platformVatLine = issuer.vatNumber ? `VAT: ${issuer.vatNumber}` : undefined;
 
       doc
         .fontSize(8)
@@ -536,10 +533,16 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
           align: "center",
           width: 500,
         })
-        .text("This invoice was generated automatically by the Fixtract platform.", 50, footerY + 15, {
+        .text("This invoice was generated automatically by the Fixtract platform.", 50, footerY + 12, {
           align: "center",
           width: 500,
         });
+      if (platformLine) {
+        doc.text(platformLine, 50, footerY + 24, { align: "center", width: 500 });
+      }
+      if (platformVatLine) {
+        doc.text(platformVatLine, 50, footerY + 34, { align: "center", width: 500 });
+      }
 
       const pageRange = doc.bufferedPageRange();
       for (let pageIndex = pageRange.start; pageIndex < pageRange.start + pageRange.count; pageIndex += 1) {
@@ -605,6 +608,21 @@ export async function generateBookingInvoice(
     booking.vatDecision?.country || booking.location?.country || customer.companyAddress?.country || customer.location?.country,
   );
   const settings = await PlatformSettings.getCurrentConfig();
+  // Load VAT question units for answer rendering (best-effort, never blocks).
+  try {
+    const configId = (booking as any)?.project?.serviceConfigurationId || (booking as any)?.serviceConfigurationId;
+    const config = configId
+      ? await ServiceConfiguration.findById(configId).select("vatManagement.reducedVatQuestions vatManagement.professionalVatQuestions").lean()
+      : await ServiceConfiguration.findOne({
+          category: (booking as any)?.project?.category,
+          service: (booking as any)?.project?.service,
+        }).select("vatManagement.reducedVatQuestions vatManagement.professionalVatQuestions").lean();
+    if (config?.vatManagement) {
+      (booking as any).__vatQuestionConfig = config.vatManagement;
+    }
+  } catch {
+    // ignore, answers render without units
+  }
   const professionalCountry = parseVatCountryCode(professional.businessInfo?.country);
   const issuerCountry = parseVatCountryCode(settings.companyAddress?.country);
   if (!customerCountry) {
@@ -631,6 +649,13 @@ export async function generateBookingInvoice(
   const checkoutUnitPrice = booking.checkoutSnapshot?.pricingType === "unit"
     ? Number(booking.checkoutSnapshot.unitAmount)
     : undefined;
+  // Real service unit from the project pricing (m², hour...). Unknown units
+  // throw instead of silently becoming "units"/C62.
+  const checkoutUnit = assertValidInvoiceUnit(
+    (booking.checkoutSnapshot as any)?.unit ||
+      (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
+    "service unit",
+  );
   const manualLines = (booking as any).__manualInvoiceLines as ManualInvoiceLine[] | undefined;
   const quoteLines = manualLines?.length
     ? manualLines.map((line) => ({
@@ -648,7 +673,7 @@ export async function generateBookingInvoice(
         amount: line.netAmount * sign,
         vatRate: line.vatRate,
         ...(index === 0 && Number.isFinite(checkoutQuantity) && Number.isFinite(checkoutUnitPrice)
-          ? { quantity: checkoutQuantity, unitPrice: checkoutUnitPrice, unit: "units" }
+          ? { quantity: checkoutQuantity, unitPrice: checkoutUnitPrice, ...(checkoutUnit ? { unit: checkoutUnit } : {}) }
           : {}),
       }))
     : currentQuote?.pricingLines?.map((line, index) => ({
@@ -656,7 +681,7 @@ export async function generateBookingInvoice(
         amount: line.price * sign,
         vatRate: line.vatRate,
         ...(index === 0 && Number.isFinite(checkoutQuantity) && Number.isFinite(checkoutUnitPrice)
-          ? { quantity: checkoutQuantity, unitPrice: checkoutUnitPrice, unit: "units" }
+          ? { quantity: checkoutQuantity, unitPrice: checkoutUnitPrice, ...(checkoutUnit ? { unit: checkoutUnit } : {}) }
           : {}),
       })) || [];
 
@@ -696,13 +721,14 @@ export async function generateBookingInvoice(
   const customerExtraCostNet = getCustomerExtraCostNet(booking.payment, rawExtraCostTotal);
   const extraCostScale = rawExtraCostTotal > 0 ? customerExtraCostNet / rawExtraCostTotal : 1;
   const extraCostLines = manualLines?.length ? [] : (booking.extraCosts || []).map((cost) => {
+    const costUnit = assertValidInvoiceUnit((cost as any).unit, "extra-cost unit") || checkoutUnit;
     const unitDetail =
       cost.type === "unit_adjustment" &&
       Number.isFinite(cost.actualUnits) &&
       Number.isFinite(cost.estimatedUnits)
-        ? ` (${cost.estimatedUnits} est. → ${cost.actualUnits} actual)`
+        ? ` (${cost.estimatedUnits} est. → ${cost.actualUnits}${costUnit ? ` ${costUnit}` : ""} actual)`
         : cost.type === "unit_adjustment" && Number.isFinite(cost.actualUnits)
-          ? ` (${cost.actualUnits} units)`
+          ? ` (${cost.actualUnits}${costUnit ? ` ${costUnit}` : ""})`
           : "";
     return {
       description: `Extra cost: ${cost.name}${unitDetail}${cost.justification ? ` - ${cost.justification}` : ""}`,
@@ -710,7 +736,7 @@ export async function generateBookingInvoice(
       vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
       quantity: Number.isFinite(Number(cost.actualUnits)) ? Number(cost.actualUnits) : undefined,
       unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) * extraCostScale : undefined,
-      unit: Number.isFinite(Number(cost.actualUnits)) ? "units" : undefined,
+      ...(Number.isFinite(Number(cost.actualUnits)) && costUnit ? { unit: costUnit } : {}),
     };
   });
   const extraCostNet = extraCostLines.reduce((sum, line) => sum + line.amount, 0);
@@ -721,12 +747,18 @@ export async function generateBookingInvoice(
     : extraCostNet + extraCostVat;
   const discount = booking.payment.discount;
   const usingDiscountedVatBreakdown = Boolean(booking.payment.vatBreakdown?.length);
-  const discounts = usingDiscountedVatBreakdown ? [] : [
-    discount?.loyaltyAmount ? { label: "Loyalty discount", amount: discount.loyaltyAmount * sign } : undefined,
-    discount?.repeatBuyerAmount ? { label: "Repeat buyer discount", amount: discount.repeatBuyerAmount * sign } : undefined,
-    discount?.pointsDiscountAmount ? { label: "Points discount", amount: discount.pointsDiscountAmount * sign } : undefined,
-    discount?.codeDiscountAmount ? { label: `Discount code${discount.codeLabel ? ` (${discount.codeLabel})` : ""}`, amount: discount.codeDiscountAmount * sign } : undefined,
-  ].filter(Boolean) as { label: string; amount: number }[];
+  const discounts = usingDiscountedVatBreakdown ? [] : selfBilling
+    ? [
+        discount?.repeatBuyerAmount
+          ? { label: "Repeat buyer discount", amount: discount.repeatBuyerAmount * sign }
+          : undefined,
+      ].filter(Boolean) as { label: string; amount: number }[]
+    : [
+        discount?.loyaltyAmount ? { label: "Loyalty discount", amount: discount.loyaltyAmount * sign } : undefined,
+        discount?.repeatBuyerAmount ? { label: "Repeat buyer discount", amount: discount.repeatBuyerAmount * sign } : undefined,
+        discount?.pointsDiscountAmount ? { label: "Points discount", amount: discount.pointsDiscountAmount * sign } : undefined,
+        discount?.codeDiscountAmount ? { label: `Discount code${discount.codeLabel ? ` (${discount.codeLabel})` : ""}`, amount: discount.codeDiscountAmount * sign } : undefined,
+      ].filter(Boolean) as { label: string; amount: number }[];
 
   const issuer = {
     name: settings.companyAddress?.name || "Fixtract",
@@ -737,13 +769,16 @@ export async function generateBookingInvoice(
     country: settings.companyAddress?.country,
   };
 
-  const supplierCountry = parseVatCountryCode(professional.businessInfo?.country);
+  const supplierCountry = parseVatCountryCode(
+    professional.businessInfo?.country || (professional as any)?.location?.country,
+  );
   const supplierVatCountry = parseVatCountryCode(issuer.country);
   const supplierVatDecision = resolveSupplierB2BInvoiceDecision({
     supplierCountry,
     buyerCountry: supplierVatCountry,
-    supplierVatNumber: professional.vatNumber,
+    supplierVatNumber: (professional as any)?.businessInfo?.vatNumber || professional.vatNumber,
     buyerVatNumber: issuer.vatNumber,
+    bookingCountry: booking.vatDecision?.country || (booking as any)?.location?.country,
     propertyNature: booking.vatDecision?.propertyNature || "movable",
     exemptFromBelgianReverseCharge: booking.vatDecision?.exemptFromBelgianReverseCharge,
   });
@@ -785,13 +820,17 @@ export async function generateBookingInvoice(
       vatRate: supplierVatRate,
     };
   });
-  const supplierExtraCostLines = (booking.extraCosts || []).map((cost) => ({
-    description: `Extra cost: ${cost.name}${cost.justification ? ` - ${cost.justification}` : ""}`,
-    amount: (Number(cost.amount) || 0) * sign,
-    vatRate: supplierVatRate,
-    quantity: Number.isFinite(Number(cost.actualUnits)) ? Number(cost.actualUnits) : undefined,
-    unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) : undefined,
-  }));
+  const supplierExtraCostLines = (booking.extraCosts || []).map((cost) => {
+    const supplierCostUnit = assertValidInvoiceUnit((cost as any).unit, "extra-cost unit") || checkoutUnit;
+    return {
+      description: `Extra cost: ${cost.name}${cost.justification ? ` - ${cost.justification}` : ""}`,
+      amount: (Number(cost.amount) || 0) * sign,
+      vatRate: supplierVatRate,
+      quantity: Number.isFinite(Number(cost.actualUnits)) ? Number(cost.actualUnits) : undefined,
+      unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) : undefined,
+      ...(Number.isFinite(Number(cost.actualUnits)) && supplierCostUnit ? { unit: supplierCostUnit } : {}),
+    };
+  });
   const supplierLines = manualLines?.length
     ? manualLines.map((line) => ({
         description: line.description,
@@ -808,7 +847,7 @@ export async function generateBookingInvoice(
           vatRate: supplierVatRate,
           quantity: hasUnits ? unitQuantity : undefined,
           unitPrice: hasUnitPrice ? unitPrice : undefined,
-          unit: hasUnits ? "units" : undefined,
+          ...(hasUnits && checkoutUnit ? { unit: checkoutUnit } : {}),
         },
         ...supplierOptionLines,
         ...supplierExtraCostLines,
@@ -897,7 +936,7 @@ export async function generateBookingInvoice(
             ).join("\n")}`
           : undefined,
         booking.vatDecision?.answers?.length
-          ? `Customer VAT answers:\n${booking.vatDecision.answers.map((answer) => `- ${answer.fieldName}: ${Array.isArray(answer.value) ? answer.value.join(", ") : String(answer.value)}`).join("\n")}`
+          ? `Customer VAT answers:\n${booking.vatDecision.answers.map((answer) => formatVatAnswerWithUnit(answer.fieldName, (answer as any).value, (booking as any).__vatQuestionConfig)).join("\n")}`
           : undefined,
       ].filter(Boolean).join("\n"),
 
@@ -935,7 +974,7 @@ export async function generateBookingInvoice(
                 vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
                 quantity: hasUnits ? unitQuantity : undefined,
                 unitPrice: hasUnitPrice ? unitPrice * customerScale : undefined,
-                unit: hasUnits ? "units" : undefined,
+                ...(hasUnits && checkoutUnit ? { unit: checkoutUnit } : {}),
               }];
           const serviceLinesWithOptions = [...serviceLines, ...scaledOptionLines];
           const serviceLineTotal = serviceLinesWithOptions.reduce((sum, line) => sum + Number(line.amount || 0), 0);

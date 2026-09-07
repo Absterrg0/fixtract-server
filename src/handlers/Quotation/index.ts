@@ -15,7 +15,7 @@ import Project from '../../models/project';
 import { addWorkingDays } from '../../utils/workingDays';
 import { getNextSequence } from '../../utils/counterSequence';
 import { createPaymentIntent } from '../Stripe/payment';
-import { getVatRateOptionsFromConfig, parseFlexibleNumber, parseVatCountryCode, resolveVatDecisionFromConfig } from '../../utils/vatManagement';
+import { getQuotationTierRateOptionsFromConfig, getVatRateOptionsFromConfig, parseFlexibleNumber, parseVatCountryCode, resolveVatDecisionFromConfig } from '../../utils/vatManagement';
 import { notify } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
@@ -47,31 +47,70 @@ const getProfessionalAnswersFromProject = (project: any): Record<string, unknown
     return acc;
   }, {});
 
-const getAllowedVatOptionsForBooking = async (booking: any) => {
+/**
+ * Booking address for quotations (flowchart SSOT needs the service/property
+ * address to determine VAT country). The professional may correct the service
+ * location at quote time; it updates booking.location before VAT validation.
+ * Returns an error message when invalid, null when applied or absent.
+ */
+const applyQuotationServiceLocation = (booking: any, serviceLocation: any): string | null => {
+  if (serviceLocation == null) return null;
+  if (typeof serviceLocation !== "object") return "Service location must be an object.";
+  const country = parseVatCountryCode(serviceLocation.country);
+  if (!country) return "A valid ISO service country is required for the booking address.";
+  const coords = Array.isArray(serviceLocation.coordinates)
+    ? serviceLocation.coordinates.map(Number)
+    : [];
+  const hasCoords =
+    coords.length === 2 &&
+    Number.isFinite(coords[0]) &&
+    Number.isFinite(coords[1]) &&
+    coords[0] >= -180 && coords[0] <= 180 &&
+    coords[1] >= -90 && coords[1] <= 90;
+  const address = typeof serviceLocation.address === "string" ? serviceLocation.address.trim().slice(0, 500) : undefined;
+  const city = typeof serviceLocation.city === "string" ? serviceLocation.city.trim().slice(0, 200) : undefined;
+  const postalCode = typeof serviceLocation.postalCode === "string" ? serviceLocation.postalCode.trim().slice(0, 50) : undefined;
+  if ((address || city || postalCode) && !hasCoords && !booking.location?.coordinates) {
+    return "A service address must include valid coordinates; please select the address from the map suggestions.";
+  }
+  booking.location = {
+    type: "Point",
+    coordinates: hasCoords ? coords : (booking.location?.coordinates || [0, 0]),
+    ...(address ?? booking.location?.address ? { address: address ?? booking.location?.address } : {}),
+    ...(city ?? booking.location?.city ? { city: city ?? booking.location?.city } : {}),
+    country,
+    ...(postalCode ?? booking.location?.postalCode ? { postalCode: postalCode ?? booking.location?.postalCode } : {}),
+  };
+  return null;
+};
+
+const getAllowedVatOptionsForBooking = async (booking: any, serviceCountryOverride?: string) => {
   const customer = booking.customer as any;
   const project = booking.project as any;
   const projectService = Array.isArray(project?.services) && project.services.length > 0
     ? project.services[0]
     : null;
-  const country = booking.vatDecision?.country
+  const country = serviceCountryOverride
+    || booking.vatDecision?.country
     || booking.location?.country
     || customer?.companyAddress?.country
     || customer?.location?.country
     || project?.distance?.countryCode
     || '';
 
-  return getVatRateOptionsFromConfig({
+  // Quotation tier-only: professional chooses Standard/Reduced, country via
+  // flowchart SSOT, eligibility ignored. No custom % when country is known.
+  return getQuotationTierRateOptionsFromConfig({
     serviceConfigurationId: project?.serviceConfigurationId?.toString(),
     category: projectService?.category || project?.category,
     service: projectService?.service || project?.service,
     areaOfWork: projectService?.areaOfWork || project?.areaOfWork,
     country,
-    bookingCountry: booking.location?.country || customer?.location?.country,
+    bookingCountry: serviceCountryOverride || booking.location?.country || customer?.location?.country,
     businessCountry: customer?.companyAddress?.country,
     customerType: customer?.customerType || 'individual',
     vatNumber: customer?.vatNumber,
     isVatVerified: customer?.isVatVerified,
-    answers: getVatAnswersFromBooking(booking),
     professionalAnswers: getProfessionalAnswersFromProject(project),
     propertyNature: booking.vatDecision?.propertyNature,
   });
@@ -81,20 +120,89 @@ const validatePricingLinesAgainstAllowedVat = async (booking: any, lines: Array<
   const options = await getAllowedVatOptionsForBooking(booking);
   const allowedRates = new Set(options.map(option => Number(option.rate)));
   const bookingCountry = booking.vatDecision?.country || booking.location?.country;
-  // Custom rates are a server-authorized part of RFQ quotation workflow when
-  // the country is unresolved. A client label must never grant that authority.
-  const customVatRateAuthorized = booking.vatDecision?.action === 'rfq' || !parseVatCountryCode(bookingCountry);
-  const invalidLine = lines.find(line => {
-    const rate = Number(line.vatRate);
-    return !allowedRates.has(rate) && !customVatRateAuthorized;
-  });
+  // Professionals never get free custom %. If the VAT country cannot be
+  // resolved, require sufficient booking address data instead. Manual
+  // overrides remain admin-only via the manual-invoice artifact route.
+  if (!parseVatCountryCode(bookingCountry)) {
+    return {
+      valid: false,
+      message: "Booking address is required to determine VAT. Please provide the service location country before submitting the quotation.",
+    };
+  }
+  const invalidLine = lines.find(line => !allowedRates.has(Number(line.vatRate)));
   if (invalidLine) {
     return {
       valid: false,
-      message: `VAT rate ${invalidLine.vatRate}% is not available for this booking. Allowed rates: ${options.map(option => `${option.rate}%`).join(', ') || 'none'}.`,
+      message: `VAT rate ${invalidLine.vatRate}% is not available for this booking. Allowed rates: ${options.map(option => `${option.rate}%`).join(', ') || 'none'}. Select Standard or Reduced only.`,
     };
   }
   return { valid: true };
+};
+
+const canonicalizePricingLineVat = async (
+  booking: any,
+  lines: Array<{ vatRate: number; vatLabel?: string; description: string; price: number; vatCountry?: string }>,
+) => {
+  const options = await getAllowedVatOptionsForBooking(booking);
+  const country = options.find((option) => option.country)?.country || parseVatCountryCode(booking.location?.country);
+  return lines.map((line) => {
+    const matchingOption = options.find((option) => Number(option.rate) === Number(line.vatRate));
+    return {
+      ...line,
+      ...(country ? { vatCountry: country } : {}),
+      ...(matchingOption?.label ? { vatLabel: matchingOption.label } : {}),
+    };
+  });
+};
+
+/** Persist the professional's selected quotation tier as the booking VAT decision.
+ * RFQ bookings often have no customer-checkout VAT decision yet, but the
+ * booking schema requires one once a quote is saved. The country and rate come
+ * from the same allowed option list used by validation, so the invoice layer
+ * cannot silently fall back to the old 21% default.
+ */
+const syncQuotationVatDecision = async (
+  booking: any,
+  lines: Array<{ vatRate: number }>,
+) => {
+  const selectedRate = Number(lines[0]?.vatRate);
+  const options = await getAllowedVatOptionsForBooking(booking);
+  const selected = options.find((option) => Number(option.rate) === selectedRate);
+  if (!selected) {
+    throw new Error(`VAT rate ${selectedRate}% is not available for this booking`);
+  }
+
+  const customer = booking.customer as any;
+  const project = booking.project as any;
+  const projectService = Array.isArray(project?.services) && project.services.length > 0
+    ? project.services[0]
+    : undefined;
+  const base = await resolveVatDecisionFromConfig({
+    serviceConfigurationId: project?.serviceConfigurationId?.toString(),
+    category: projectService?.category || project?.category,
+    service: projectService?.service || project?.service,
+    areaOfWork: projectService?.areaOfWork || project?.areaOfWork,
+    country: booking.location?.country,
+    bookingCountry: booking.location?.country,
+    businessCountry: customer?.companyAddress?.country,
+    customerType: customer?.customerType || 'individual',
+    vatNumber: customer?.vatNumber,
+    isVatVerified: customer?.isVatVerified,
+    professionalAnswers: getProfessionalAnswersFromProject(project),
+    propertyNature: booking.vatDecision?.propertyNature,
+  });
+  const action = selected.reverseCharge || selected.source === 'standard' ? 'standard_rate' : 'reduced_rate';
+  booking.vatDecision = {
+    ...base,
+    action,
+    country: selected.country || base.country,
+    appliedRate: selected.rate,
+    reverseCharge: selected.reverseCharge,
+    vatLabel: selected.label,
+    explanation: selected.reverseCharge
+      ? selected.label
+      : `${selected.label} selected by the professional for this quotation.`,
+  };
 };
 
 const applyAllowedVatRateToLegacyPricingLines = async (
@@ -162,7 +270,8 @@ export const getQuotationVatRateOptions = async (req: Request, res: Response) =>
       || project?.distance?.countryCode
       || '';
 
-    const options = await getAllowedVatOptionsForBooking(booking);
+    const serviceCountry = parseVatCountryCode((req.query as any)?.serviceCountry);
+    const options = await getAllowedVatOptionsForBooking(booking, serviceCountry || undefined);
     const country = options.find((option) => option.country)?.country || options[0]?.country || fallbackCountry;
 
     return res.json({
@@ -585,11 +694,18 @@ export const submitQuotation = async (req: Request, res: Response) => {
 
     sanitizeIncompleteCheckoutSnapshot(booking);
 
+    const locationError = applyQuotationServiceLocation(booking, (req.body as any)?.serviceLocation);
+    if (locationError) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: locationError } });
+    }
+
     const pricingWithLegacyVat = await applyAllowedVatRateToLegacyPricingLines(booking, normalizedPricing);
-    const vatValidation = await validatePricingLinesAgainstAllowedVat(booking, pricingWithLegacyVat.lines || []);
+    const canonicalPricingLines = await canonicalizePricingLineVat(booking, pricingWithLegacyVat.lines || []);
+    const vatValidation = await validatePricingLinesAgainstAllowedVat(booking, canonicalPricingLines);
     if (!vatValidation.valid) {
       return res.status(400).json({ success: false, error: { code: 'INVALID_VAT_RATE', message: vatValidation.message } });
     }
+    await syncQuotationVatDecision(booking, canonicalPricingLines);
 
     const now = new Date();
     const versionNumber = 1;
@@ -601,7 +717,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
       materialsIncluded,
       materials: materialsIncluded ? materials : [],
       description,
-      pricingLines: pricingWithLegacyVat.lines,
+      pricingLines: canonicalPricingLines,
       totalAmount: normalizedTotalAmount,
       currency: currency || 'EUR',
       milestones: milestones ? milestones.map((m: any, i: number): IQuotationMilestone => ({
@@ -759,11 +875,18 @@ export const editQuotation = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'Quotation can only be edited when status is quoted or quote_rejected' } });
     }
 
+    const editLocationError = applyQuotationServiceLocation(booking, (req.body as any)?.serviceLocation);
+    if (editLocationError) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: editLocationError } });
+    }
+
     const pricingWithLegacyVat = await applyAllowedVatRateToLegacyPricingLines(booking, normalizedPricing);
-    const vatValidation = await validatePricingLinesAgainstAllowedVat(booking, pricingWithLegacyVat.lines || []);
+    const canonicalPricingLines = await canonicalizePricingLineVat(booking, pricingWithLegacyVat.lines || []);
+    const vatValidation = await validatePricingLinesAgainstAllowedVat(booking, canonicalPricingLines);
     if (!vatValidation.valid) {
       return res.status(400).json({ success: false, error: { code: 'INVALID_VAT_RATE', message: vatValidation.message } });
     }
+    await syncQuotationVatDecision(booking, canonicalPricingLines);
 
     const now = new Date();
     const newVersionNumber = (booking.quoteVersions?.length || 0) + 1;
@@ -776,7 +899,7 @@ export const editQuotation = async (req: Request, res: Response) => {
       materialsIncluded,
       materials: materialsIncluded ? materials : [],
       description,
-      pricingLines: pricingWithLegacyVat.lines,
+      pricingLines: canonicalPricingLines,
       totalAmount: normalizedTotalAmount,
       currency: currency || 'EUR',
       milestones: milestones ? milestones.map((m: any, i: number): IQuotationMilestone => ({
