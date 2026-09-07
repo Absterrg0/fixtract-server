@@ -13,6 +13,8 @@ const STAFF: Array<{ name: string; email: string; adminRole: AdminRole; phone: s
   { name: 'Marketing Lead', email: 'marketing.admin@fixtract.test', adminRole: 'marketing', phone: '+32000000003' },
   { name: 'Quality Reviewer', email: 'quality.admin@fixtract.test', adminRole: 'quality', phone: '+32000000004' },
   { name: 'Finance Analyst', email: 'finance.admin@fixtract.test', adminRole: 'finance', phone: '+32000000005' },
+  { name: 'Operations Lead', email: 'operations.admin@fixtract.test', adminRole: 'operations', phone: '+32000000006' },
+  { name: 'Content Creator', email: 'content.admin@fixtract.test', adminRole: 'content_creator', phone: '+32000000007' },
 ];
 
 async function upsertStaff() {

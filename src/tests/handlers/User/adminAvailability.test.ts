@@ -117,4 +117,21 @@ describe('admin weekly schedule normalization', () => {
     expect(parseClockTime('09:00')).toBe('09:00');
     expect(parseClockTime('24:00')).toBeUndefined();
   });
+
+  it('applies recurring hours in the admin timezone across daylight-saving time', () => {
+    const dstAdmin = {
+      timeZone: 'America/New_York',
+      adminAvailabilityConfigured: true,
+      availability: {
+        sunday: { available: true, startTime: '09:00', endTime: '17:00' },
+      },
+      blockedDates: [],
+      blockedRanges: [],
+    } as const;
+
+    expect(isAdminAvailableForMeeting(dstAdmin, new Date('2026-11-01T14:00:00.000Z'), 60)).toBe(true);
+    expect(isAdminAvailableForMeeting(dstAdmin, new Date('2026-11-01T13:00:00.000Z'), 60)).toBe(false);
+    expect(isAdminAvailableForMeeting(dstAdmin, new Date('2026-11-08T15:00:00.000Z'), 60)).toBe(true);
+    expect(isAdminAvailableForMeeting(dstAdmin, new Date('2026-11-08T13:00:00.000Z'), 60)).toBe(false);
+  });
 });

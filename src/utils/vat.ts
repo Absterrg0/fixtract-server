@@ -88,6 +88,7 @@ export function calculateVAT(params: VATCalculationParams): VATCalculation {
       reverseCharge: false,
       propertyNature: propertyNature || 'movable',
       exemptFromBelgianReverseCharge,
+      explanation: `Standard VAT rate ${localRate}% applied.`,
     },
     customerType,
     customerVATNumber,

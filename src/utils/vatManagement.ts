@@ -1,7 +1,39 @@
 import ServiceConfiguration, { IVatLogicCondition, IVatLogicRule } from "../models/serviceConfiguration";
 import { validateVATNumberFormat } from "./vatValidation";
+import {
+  flowchartPlaceOfSupplyCountry,
+  flowchartPropertyNature,
+  flowchartReverseCharge,
+  flowchartTierRateForCountry,
+} from "./vatFlowchart";
+import {
+  ARTICLE_47_FIELD_NAME,
+  B2B_SAME_AS_B2C_COUNTRIES,
+  firstVatCountry,
+  getStandardVatRate,
+  normalizeArticle47Classification,
+  parseVatCountryCode,
+  REVERSE_CHARGE_LABEL,
+  type Article47Classification,
+} from "./vatCountries";
+export {
+  ARTICLE_47_FIELD_NAME,
+  B2B_SAME_AS_B2C_COUNTRIES,
+  firstVatCountry,
+  getStandardVatRate,
+  normalizeArticle47Classification,
+  parseVatCountryCode,
+  REVERSE_CHARGE_LABEL,
+  STANDARD_RATES,
+} from "./vatCountries";
+export type { Article47Classification } from "./vatCountries";
 
 export type VatRoutingAction = "standard_rate" | "reduced_rate" | "rfq";
+
+export interface VatDecisionTraceStep {
+  step: string;
+  detail: string;
+}
 
 export interface VatDecision {
   action: VatRoutingAction;
@@ -12,6 +44,8 @@ export interface VatDecision {
   reverseCharge: boolean;
   vatLabel?: string;
   exemptFromBelgianReverseCharge?: boolean;
+  /** Branch-for-branch flowchart trace (SSOT audit trail). */
+  trace?: VatDecisionTraceStep[];
   explanation: string;
   matchedRuleText?: string;
   ruleGroup?: string;
@@ -26,123 +60,19 @@ export interface VatRateOption {
   source: "standard" | "reduced" | "b2b_exempt";
 }
 
-const COUNTRY_ALIASES: Record<string, string> = {
-  AUSTRIA: "AT",
-  BELGIUM: "BE",
-  BULGARIA: "BG",
-  CROATIA: "HR",
-  CYPRUS: "CY",
-  CZECHIA: "CZ",
-  "CZECH REPUBLIC": "CZ",
-  DENMARK: "DK",
-  ESTONIA: "EE",
-  FINLAND: "FI",
-  FRANCE: "FR",
-  MONACO: "MC",
-  GERMANY: "DE",
-  GREECE: "GR",
-  HUNGARY: "HU",
-  IRELAND: "IE",
-  ITALY: "IT",
-  LATVIA: "LV",
-  LITHUANIA: "LT",
-  LUXEMBOURG: "LU",
-  MALTA: "MT",
-  NETHERLANDS: "NL",
-  "THE NETHERLANDS": "NL",
-  NEDERLAND: "NL",
-  HOLLAND: "NL",
-  POLAND: "PL",
-  PORTUGAL: "PT",
-  ROMANIA: "RO",
-  SLOVAKIA: "SK",
-  SLOVENIA: "SI",
-  SPAIN: "ES",
-  SWEDEN: "SE",
-  SWITZERLAND: "CH",
-  LIECHTENSTEIN: "LI",
-  NORWAY: "NO",
-  "UNITED KINGDOM": "GB",
-  UK: "GB",
-  "GREAT BRITAIN": "GB",
-  ENGLAND: "GB",
-  SCOTLAND: "GB",
-  WALES: "GB",
-  "UNITED STATES": "US",
-  USA: "US",
-  "UNITED STATES OF AMERICA": "US",
-  CANADA: "CA",
-  AUSTRALIA: "AU",
-  "NEW ZEALAND": "NZ",
-  INDIA: "IN",
-  UKRAINE: "UA",
-  MOLDOVA: "MD",
-  ANDORRA: "AD",
-  "SAN MARINO": "SM",
-  TURKEY: "TR",
-  TÜRKIYE: "TR",
-  TURKIYE: "TR",
-};
-
-const STANDARD_RATES: Record<string, number> = {
-  BE: 21, NL: 21, DE: 19, CH: 8.1, AT: 20, LI: 8.1, FR: 20, MC: 20, GB: 20,
-  IE: 23, LT: 21, LV: 21, EE: 24, ES: 21, AD: 4.5, PT: 23, IT: 22, SM: 0,
-  DK: 25, NO: 25, SE: 25, FI: 25.5, PL: 23, CZ: 21, UA: 20, RO: 21, MD: 20,
-  SK: 23, HU: 27, SI: 22, HR: 25, GR: 24, CY: 19, BG: 20, TR: 20,
-  US: 0, CA: 0, AU: 0, NZ: 0, IN: 0,
-};
-
-export type Article47Classification = "movable" | "immovable" | "project_dependent";
 export type PropertyNature = "movable" | "immovable";
 
-export const REVERSE_CHARGE_LABEL = "Reverse Charge";
-export const ARTICLE_47_FIELD_NAME = "article47_immovable";
-export const DEFAULT_ARTICLE_47_CLASSIFICATION: Article47Classification = "immovable";
+export const DEFAULT_ARTICLE_47_CLASSIFICATION = "immovable" as const;
 export const ARTICLE_47_QUESTION =
   "Will the work be carried out on a fixed part of the property or on something that will become permanently fixed to the property? (Article 47)";
-
-export const B2B_SAME_AS_B2C_COUNTRIES = new Set(["CH", "LI", "NO", "GR"]);
-const KNOWN_COUNTRY_CODES = new Set([
-  ...Object.keys(STANDARD_RATES),
-  ...Object.values(COUNTRY_ALIASES),
-]);
-
-export const normalizeArticle47Classification = (
-  classification?: string | null
-): Article47Classification | undefined => {
-  if (classification === "movable" || classification === "immovable" || classification === "project_dependent") {
-    return classification;
-  }
-  return undefined;
-};
 
 /** Legacy VAT configs may omit Article 47; default to immovable (matches admin UI). */
 export const resolveArticle47Classification = (
   classification?: string | null
-): Article47Classification => normalizeArticle47Classification(classification) ?? DEFAULT_ARTICLE_47_CLASSIFICATION;
-
-/** ISO-2 when recognized; empty string when missing or unknown. Does not default to BE. */
-export const parseVatCountryCode = (country?: string | null): string => {
-  if (country == null || String(country).trim() === "") return "";
-  const raw = String(country).trim();
-  const upper = raw.toUpperCase();
-  if (upper === "EL") return "GR";
-  if (/^[A-Z]{2}$/.test(upper)) return KNOWN_COUNTRY_CODES.has(upper) ? upper : "";
-  if (COUNTRY_ALIASES[upper]) return COUNTRY_ALIASES[upper];
-  const normalizedName = upper.replace(/[.,']/g, "").replace(/\s+/g, " ");
-  if (COUNTRY_ALIASES[normalizedName]) return COUNTRY_ALIASES[normalizedName];
-  return "";
-};
+): import("./vatCountries").Article47Classification =>
+  normalizeArticle47Classification(classification) ?? DEFAULT_ARTICLE_47_CLASSIFICATION;
 
 export const normalizeVatCountry = (country?: string | null): string => parseVatCountryCode(country);
-
-export const firstVatCountry = (...candidates: Array<string | null | undefined>): string => {
-  for (const candidate of candidates) {
-    const parsed = parseVatCountryCode(candidate);
-    if (parsed) return parsed;
-  }
-  return "";
-};
 
 export const countryFromAddressComponents = (
   components?: Array<{ types?: string[]; short_name?: string; long_name?: string }> | null
@@ -168,12 +98,6 @@ export const countryFromAddressText = (address?: string | null): string => {
 export const requiresVatRfqReview = (
   decision?: Pick<VatDecision, "action" | "reverseCharge"> | null
 ): boolean => decision?.action === "rfq" && !decision?.reverseCharge;
-
-export const getStandardVatRate = (country?: string | null): number => {
-  const normalized = normalizeVatCountry(country);
-  if (!normalized) return 0;
-  return STANDARD_RATES[normalized] ?? 0;
-};
 
 /** Parse rates entered with either a decimal point or a decimal comma. */
 export const parseFlexibleNumber = (value: unknown): number => {
@@ -225,10 +149,30 @@ export const resolvePlaceOfSupplyCountry = (params: {
   bookingCountry?: string | null;
   businessCountry?: string | null;
 }): string => {
-  if (params.customerType === "business" && params.propertyNature === "movable") {
-    return firstVatCountry(params.businessCountry, params.bookingCountry);
-  }
-  return firstVatCountry(params.bookingCountry, params.businessCountry);
+  // Customer-leg SSOT is owned by vatFlowchart; this wrapper preserves the
+  // legacy signature for callers/tests.
+  return flowchartPlaceOfSupplyCountry({
+    leg: "customer",
+    customerType: params.customerType,
+    propertyNature: params.propertyNature,
+    bookingCountry: params.bookingCountry,
+    customerBusinessCountry: params.businessCountry,
+  }).country;
+};
+
+/** Supplier-leg place of supply (professional -> platform). Movable uses the
+ * professional business address per flowchart; immovable uses booking. */
+export const resolveSupplierPlaceOfSupplyCountry = (params: {
+  propertyNature?: PropertyNature | null;
+  bookingCountry?: string | null;
+  supplierBusinessCountry?: string | null;
+}): string => {
+  return flowchartPlaceOfSupplyCountry({
+    leg: "supplier",
+    propertyNature: params.propertyNature,
+    bookingCountry: params.bookingCountry,
+    supplierBusinessCountry: params.supplierBusinessCountry,
+  }).country;
 };
 
 export type B2BInvoiceContext = {
@@ -290,19 +234,21 @@ export const applyB2BInvoiceRule = (
   isVatVerified?: boolean,
   context?: B2BInvoiceContext
 ): VatDecision => {
-  if (customerType !== "business") return decision;
-  if (!hasVerifiedVatNumber(vatNumber, isVatVerified)) return decision;
-
+  // Customer-leg reverse charge via flowchart SSOT (explicit branches, no
+  // movable+B2B shortcut). Supplier country unknown on this path, so
+  // cross-border branch falls through to verified-EU-B2B.
   const country = parseVatCountryCode(decision.country);
   if (!country) return decision;
-  if (isB2BSameAsB2CCountry(country)) return decision;
-
   const propertyNature = context?.propertyNature || "movable";
-  const beKeepsB2CRate =
-    country === "BE" &&
-    (propertyNature !== "immovable" || Boolean(context?.exemptFromBelgianReverseCharge));
-  if (beKeepsB2CRate) return decision;
-
+  const { reverseCharge } = flowchartReverseCharge({
+    buyerType: customerType,
+    buyerVatNumber: vatNumber,
+    buyerVatVerified: isVatVerified,
+    buyerCountry: country,
+    propertyNature,
+    exemptFromBelgianReverseCharge: context?.exemptFromBelgianReverseCharge,
+  });
+  if (!reverseCharge) return decision;
   return {
     ...decision,
     appliedRate: 0,
@@ -313,17 +259,34 @@ export const applyB2BInvoiceRule = (
   };
 };
 
-/** Resolve VAT on the supplier's invoice to the platform buyer. */
+/** Resolve VAT on the supplier's invoice to the platform buyer.
+ * Supplier leg uses the flowchart SSOT independently from the customer leg:
+ * movable -> professional business country, immovable -> booking country
+ * (pass bookingCountry via buyerCountry fallback upstream when known).
+ * Reverse charge follows the same explicit branches, with supplier/buyer
+ * countries supplied (no movable+B2B shortcut). */
 export const resolveSupplierB2BInvoiceDecision = (params: {
   supplierCountry?: string | null;
   buyerCountry?: string | null;
   supplierVatNumber?: string | null;
   buyerVatNumber?: string | null;
+  buyerVatVerified?: boolean;
+  bookingCountry?: string | null;
   propertyNature?: PropertyNature;
   exemptFromBelgianReverseCharge?: boolean;
 }): VatDecision => {
   const supplierCountry = parseVatCountryCode(params.supplierCountry);
-  const buyerCountry = parseVatCountryCode(params.buyerCountry) || supplierCountry;
+  // Flowchart supplier place-of-supply: movable -> supplier country,
+  // immovable -> booking country. Callers that already resolved the country
+  // pass it as buyerCountry (platform) for backward compat; prefer the
+  // flowchart result when booking/supplier context is available.
+  const flowCountry = flowchartPlaceOfSupplyCountry({
+    leg: "supplier",
+    propertyNature: params.propertyNature || "movable",
+    bookingCountry: params.bookingCountry ?? params.buyerCountry,
+    supplierBusinessCountry: params.supplierCountry,
+  }).country;
+  const buyerCountry = flowCountry || parseVatCountryCode(params.buyerCountry) || supplierCountry;
   const propertyNature = params.propertyNature || "movable";
   const standardRate = buyerCountry ? getStandardVatRate(buyerCountry) : 0;
   const decision: VatDecision = {
@@ -337,36 +300,34 @@ export const resolveSupplierB2BInvoiceDecision = (params: {
     explanation: `Standard VAT rate ${standardRate}% applied to the supplier invoice.`,
   };
 
-  const supplierVatValid = Boolean(
-    params.supplierVatNumber && validateVATNumberFormat(params.supplierVatNumber),
-  );
-  const buyerVatValid = Boolean(
+  const buyerVatValid = params.buyerVatVerified ?? Boolean(
     params.buyerVatNumber && validateVATNumberFormat(params.buyerVatNumber),
   );
-  // The configured VAT-country exception table is authoritative for the
-  // platform buyer's place of supply, including cross-border supplier cases.
-  // Do this before the generic cross-border reverse-charge branch.
-  if (isB2BSameAsB2CCountry(buyerCountry)) return decision;
-  if (supplierCountry && buyerCountry && supplierCountry !== buyerCountry && supplierVatValid && buyerVatValid) {
-    return {
-      ...decision,
-      appliedRate: 0,
-      reverseCharge: true,
-      vatLabel: REVERSE_CHARGE_LABEL,
-      explanation: REVERSE_CHARGE_LABEL,
-    };
-  }
-
-  return applyB2BInvoiceRule(
-    decision,
-    "business",
-    params.buyerVatNumber,
-    buyerVatValid,
-    {
-      propertyNature,
-      exemptFromBelgianReverseCharge: params.exemptFromBelgianReverseCharge,
-    },
-  );
+  const rc = flowchartReverseCharge({
+    buyerType: "business",
+    buyerVatNumber: params.buyerVatNumber,
+    buyerVatVerified: buyerVatValid,
+    supplierCountry,
+    supplierVatNumber: params.supplierVatNumber,
+    buyerCountry,
+    propertyNature,
+    exemptFromBelgianReverseCharge: params.exemptFromBelgianReverseCharge,
+  });
+  const placeTrace = flowchartPlaceOfSupplyCountry({
+    leg: "supplier",
+    propertyNature,
+    bookingCountry: params.bookingCountry ?? params.buyerCountry,
+    supplierBusinessCountry: params.supplierCountry,
+  }).trace;
+  if (!rc.reverseCharge) return { ...decision, trace: [...placeTrace, ...rc.trace, { step: "rate", detail: `supplier standard ${standardRate}%` }] };
+  return {
+    ...decision,
+    appliedRate: 0,
+    reverseCharge: true,
+    vatLabel: REVERSE_CHARGE_LABEL,
+    explanation: REVERSE_CHARGE_LABEL,
+    trace: [...placeTrace, ...rc.trace, { step: "rate", detail: "supplier reverse-charge 0%" }],
+  };
 };
 
 const pushUniqueRate = (options: VatRateOption[], option: VatRateOption) => {
@@ -428,6 +389,106 @@ export const getVatRateOptionsFromConfig = async (params: {
   return options.sort((a, b) => a.rate - b.rate);
 };
 
+/**
+ * Quotation tier-only options (Standard/Reduced).
+ * The professional already determines the tier; service-rule eligibility is
+ * IGNORED. VAT country is resolved through the flowchart SSOT, then the
+ * corresponding country rate is returned. No custom % when country is known.
+ */
+export const getQuotationTierRateOptionsFromConfig = async (params: {
+  serviceConfigurationId?: string;
+  category?: string;
+  service?: string;
+  areaOfWork?: string;
+  country?: string;
+  bookingCountry?: string;
+  businessCountry?: string;
+  supplierBusinessCountry?: string | null;
+  customerType?: string;
+  vatNumber?: string | null;
+  isVatVerified?: boolean;
+  professionalAnswers?: Record<string, unknown>;
+  propertyNature?: PropertyNature;
+  exemptFromBelgianReverseCharge?: boolean;
+}): Promise<VatRateOption[]> => {
+  const query = params.serviceConfigurationId && /^[a-f\d]{24}$/i.test(params.serviceConfigurationId)
+    ? { _id: params.serviceConfigurationId }
+    : {
+        ...(params.category ? { category: params.category } : {}),
+        ...(params.service ? { service: params.service } : {}),
+        ...(params.areaOfWork ? { areaOfWork: params.areaOfWork } : {}),
+      };
+  const config = Object.keys(query).length > 0
+    ? await ServiceConfiguration.findOne(query).select("category service vatManagement")
+    : null;
+  const vat = config?.vatManagement;
+  const propertyNature =
+    params.propertyNature ??
+    resolvePropertyNature({
+      classification: vat?.enabled
+        ? resolveArticle47Classification(vat.article47Classification)
+        : normalizeArticle47Classification(vat?.article47Classification),
+      professionalAnswers: params.professionalAnswers,
+    });
+  const { country } = flowchartPlaceOfSupplyCountry({
+    leg: "customer",
+    customerType: params.customerType,
+    propertyNature,
+    bookingCountry: params.bookingCountry || params.country,
+    customerBusinessCountry: params.businessCountry,
+    supplierBusinessCountry: params.supplierBusinessCountry,
+  });
+  const resolvedCountry = country || parseVatCountryCode(params.country);
+  if (!resolvedCountry) return [];
+
+  // A quotation's customer-facing VAT tier is selected by the professional.
+  // The customer B2B reverse-charge check belongs to the separate
+  // professional/platform self-billing leg, which is resolved when the
+  // supplier invoice is generated.
+  const rules = [...(vat?.logicRules || [])]
+    .filter((r) => r.isActive !== false && parseVatCountryCode(r.country) === resolvedCountry)
+    .sort((a, b) => (a.priority || 0) - (b.priority || 0));
+  const firstRule = rules[0];
+  const standardRate = Number.isFinite(firstRule?.standardRate)
+    ? Number(firstRule.standardRate)
+    : getStandardVatRate(resolvedCountry);
+  const reducedRate = Number.isFinite(firstRule?.reducedRate)
+    ? Number(firstRule.reducedRate)
+    : undefined;
+
+  const options: VatRateOption[] = [];
+  const std = flowchartTierRateForCountry({
+    country: resolvedCountry,
+    tier: "standard",
+    standardRate,
+    fallbackStandardRate: getStandardVatRate(resolvedCountry),
+  });
+  pushUniqueRate(options, {
+    rate: std.rate,
+    country: resolvedCountry,
+    label: `${std.rate}% standard VAT`,
+    reverseCharge: false,
+    source: "standard",
+  });
+  if (Number.isFinite(reducedRate)) {
+    const red = flowchartTierRateForCountry({
+      country: resolvedCountry,
+      tier: "reduced",
+      standardRate,
+      reducedRate,
+      fallbackStandardRate: getStandardVatRate(resolvedCountry),
+    });
+    pushUniqueRate(options, {
+      rate: red.rate,
+      country: resolvedCountry,
+      label: `${red.rate}% reduced VAT`,
+      reverseCharge: false,
+      source: "reduced",
+    });
+  }
+  return options.sort((a, b) => a.rate - b.rate);
+};
+
 export const resolveVatDecisionFromConfig = async (params: {
   serviceConfigurationId?: string;
   category?: string;
@@ -470,6 +531,17 @@ export const resolveVatDecisionFromConfig = async (params: {
     params.exemptFromBelgianReverseCharge ?? Boolean(vat?.exemptFromBelgianReverseCharge);
   const b2bContext: B2BInvoiceContext = { propertyNature, exemptFromBelgianReverseCharge };
 
+  // Branch-for-branch SSOT trace (art47 -> place-of-supply -> RC -> rate).
+  const trace: VatDecisionTraceStep[] = [];
+  try {
+    trace.push(
+      ...flowchartPropertyNature({
+        classification: article47Classification,
+        professionalAnswers: params.professionalAnswers,
+      }).trace,
+    );
+  } catch { /* trace best-effort */ }
+
   const hasPlaceOfSupplyContext = [params.bookingCountry, params.businessCountry]
     .some((value) => value != null && String(value).trim() !== "");
   const country = hasPlaceOfSupplyContext
@@ -480,14 +552,29 @@ export const resolveVatDecisionFromConfig = async (params: {
         businessCountry: params.businessCountry,
       })
     : parseVatCountryCode(params.country);
+  try {
+    trace.push(
+      ...flowchartPlaceOfSupplyCountry({
+        leg: "customer",
+        customerType: params.customerType,
+        propertyNature,
+        bookingCountry: params.bookingCountry || params.country,
+        customerBusinessCountry: params.businessCountry,
+      }).trace,
+    );
+  } catch { /* trace best-effort */ }
 
   const fallbackRate = getStandardVatRate(country);
+  const withTrace = (decision: VatDecision, detail: string): VatDecision => ({
+    ...decision,
+    trace: [...trace, { step: "rate", detail }],
+  });
   if (
     !params.propertyNature &&
     article47Classification === "project_dependent" &&
     propertyNature === undefined
   ) {
-    return {
+    return withTrace({
       action: "rfq",
       country,
       standardRate: fallbackRate,
@@ -495,10 +582,10 @@ export const resolveVatDecisionFromConfig = async (params: {
       reverseCharge: false,
       exemptFromBelgianReverseCharge,
       explanation: "Article 47 property classification must be answered before VAT can be determined.",
-    };
+    }, "rfq: art47 unanswered");
   }
   if (!country) {
-    return {
+    return withTrace({
       action: "rfq",
       country,
       standardRate: 0,
@@ -507,7 +594,7 @@ export const resolveVatDecisionFromConfig = async (params: {
       propertyNature,
       exemptFromBelgianReverseCharge,
       explanation: "Customer country could not be matched to a VAT jurisdiction. VAT review is required before checkout.",
-    };
+    }, "rfq: unknown country");
   }
   const fallback: VatDecision = {
     action: "standard_rate",
@@ -520,8 +607,25 @@ export const resolveVatDecisionFromConfig = async (params: {
     explanation: `Standard VAT rate ${fallbackRate}% applied.`,
   };
 
-  const applyB2B = (decision: VatDecision) =>
-    applyB2BInvoiceRule(decision, params.customerType, params.vatNumber, params.isVatVerified, b2bContext);
+  const applyB2B = (decision: VatDecision): VatDecision => {
+    const out = applyB2BInvoiceRule(decision, params.customerType, params.vatNumber, params.isVatVerified, b2bContext);
+    let rcTrace: VatDecisionTraceStep[] = [];
+    try {
+      rcTrace = flowchartReverseCharge({
+        buyerType: params.customerType,
+        buyerVatNumber: params.vatNumber,
+        buyerVatVerified: params.isVatVerified,
+        buyerCountry: out.country,
+        propertyNature,
+        exemptFromBelgianReverseCharge,
+      }).trace;
+    } catch { /* best-effort */ }
+    const base = out.trace?.length ? out.trace : trace;
+    return {
+      ...out,
+      trace: [...base, ...rcTrace, { step: "rate", detail: out.reverseCharge ? "reverse-charge 0%" : `applied=${out.appliedRate}% action=${out.action}` }],
+    };
+  };
 
   if (config?.category === "Renovation" || params.category === "Renovation") {
     return applyB2B({

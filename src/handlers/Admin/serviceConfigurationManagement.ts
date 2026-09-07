@@ -139,11 +139,21 @@ const validateVatManagement = (vatManagement: any): string | null => {
       ...(Array.isArray(vatManagement.reducedVatQuestions) ? vatManagement.reducedVatQuestions : []),
       ...(Array.isArray(vatManagement.professionalVatQuestions) ? vatManagement.professionalVatQuestions : []),
     ];
+    // The auto-injected professional question is server-managed. Validate
+    // stored questions alone (allow exactly one auto instance when
+    // project_dependent) instead of pre-seeding the set, which falsely
+    // rejected re-saves after the first project_dependent persist.
     const fieldNames = new Set<string>();
-    if (article47Classification === 'project_dependent') {
-        fieldNames.add(ARTICLE_47_FIELD_NAME);
-    }
+    let autoCount = 0;
     for (const question of questions) {
+        const fname = String(question?.fieldName || '').trim();
+        if (article47Classification === 'project_dependent' && fname === ARTICLE_47_FIELD_NAME) {
+            autoCount += 1;
+            if (autoCount > 1) {
+                return `Duplicate VAT question field name "${fname}".`;
+            }
+            continue;
+        }
         const fieldName = String(question?.fieldName || '').trim();
         if (!fieldName || !String(question?.question || '').trim()) {
             return 'Every VAT question needs both a question text and a field name.';
@@ -155,6 +165,11 @@ const validateVatManagement = (vatManagement: any): string | null => {
         if (question.answerType === 'checkboxes' && (!Array.isArray(question.options) || question.options.length === 0)) {
             return `Checkbox question "${fieldName}" needs at least one option.`;
         }
+    }
+
+    // Rules may reference the server-managed Article 47 answer.
+    if (article47Classification === 'project_dependent') {
+        fieldNames.add(ARTICLE_47_FIELD_NAME);
     }
 
     const rules = Array.isArray(vatManagement.logicRules) ? vatManagement.logicRules : [];

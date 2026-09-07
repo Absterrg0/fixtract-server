@@ -3,12 +3,13 @@ import { randomUUID } from "node:crypto";
 import Booking from "../models/booking";
 import Payment from "../models/payment";
 import PlatformSettings from "../models/platformSettings";
-import { uploadBufferToS3 } from "../utils/s3Upload";
+import { presignS3Url, uploadBufferToS3 } from "../utils/s3Upload";
 import {
   REVERSE_CHARGE_LABEL,
   normalizeVatCountry,
   resolveSupplierB2BInvoiceDecision,
 } from "../utils/vatManagement";
+import { assertValidInvoiceUnit, mapUnitToUneceCode } from "../utils/invoiceUnits";
 import {
   calculateInvoiceSideTotals,
   calculateSupplierInvoiceNet,
@@ -417,6 +418,7 @@ const getSupplierVatContext = (booking: any, platform: UblPlatformParty) => {
     buyerCountry: platform.country,
     supplierVatNumber: booking.professional?.businessInfo?.vatNumber || booking.professional?.vatNumber,
     buyerVatNumber: platform.vatNumber,
+    bookingCountry: booking.vatDecision?.country || booking.location?.country,
     propertyNature: booking.vatDecision?.propertyNature || "movable",
     exemptFromBelgianReverseCharge: booking.vatDecision?.exemptFromBelgianReverseCharge,
   });
@@ -545,6 +547,11 @@ const getPricingLinesForUbl = (
       (sum: number, option: any) => sum + moneyNumber(option.bookedPrice),
       0
     );
+    const checkoutUnit = assertValidInvoiceUnit(
+      (booking.checkoutSnapshot as any)?.unit ||
+        (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
+      "service unit",
+    );
     const serviceLine: UblLine = {
       description: booking.rfqData?.serviceType || currentQuote?.description || booking.quote?.description || "Service",
       amount: Math.max(0, supplierNet - selectedOptions),
@@ -553,6 +560,7 @@ const getPricingLinesForUbl = (
       vatAmount: 0,
       quantity: booking.checkoutSnapshot?.pricingType === "unit" ? moneyNumber(booking.checkoutSnapshot.quantity) : undefined,
       unitPrice: booking.checkoutSnapshot?.pricingType === "unit" ? moneyNumber(booking.checkoutSnapshot.unitAmount) : undefined,
+      ...(booking.checkoutSnapshot?.pricingType === "unit" && checkoutUnit ? { unit: checkoutUnit } : {}),
     };
     const optionLines = (booking.selectedExtraOptions || []).map((option: any, index: number) => {
       const projectOption = booking.project?.extraOptions?.find((entry: any, entryIndex: number) =>
@@ -733,7 +741,7 @@ const buildUblCreditNoteXml = (
   const creditNoteLines = pricingLines.map((line: any, index: number) => `
     <cac:CreditNoteLine>
       <cbc:ID>${index + 1}</cbc:ID>
-      <cbc:CreditedQuantity unitCode="C62">${toMoney(Number(line.quantity || 1))}</cbc:CreditedQuantity>
+      <cbc:CreditedQuantity unitCode="${escapeXml(mapUnitToUneceCode(line.unit))}">${toMoney(Number(line.quantity || 1))}</cbc:CreditedQuantity>
       <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.price) * sign)}</cbc:LineExtensionAmount>
       <cac:Item>
         <cbc:Description>${escapeXml(line.description)}</cbc:Description>
@@ -802,7 +810,7 @@ const buildUblInvoiceXml = (
   const invoiceLines = pricingLines.map((line: any, index: number) => `
     <cac:InvoiceLine>
       <cbc:ID>${index + 1}</cbc:ID>
-      <cbc:InvoicedQuantity unitCode="${escapeXml(line.unit === "units" ? "C62" : "C62")}">${toMoney(Number(line.quantity || 1))}</cbc:InvoicedQuantity>
+      <cbc:InvoicedQuantity unitCode="${escapeXml(mapUnitToUneceCode(line.unit))}">${toMoney(Number(line.quantity || 1))}</cbc:InvoicedQuantity>
       <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.price) * sign)}</cbc:LineExtensionAmount>
       <cac:Item>
         <cbc:Description>${escapeXml(line.description)}</cbc:Description>
@@ -863,6 +871,7 @@ const notifyInvoiceReady = async (booking: any, update: InvoiceArtifactResult) =
   const bookingId = booking._id?.toString?.() || "";
   try {
     if (customerId && update.invoiceUrl) {
+      const invoiceUrl = (await presignS3Url(update.invoiceUrl)) || update.invoiceUrl;
       await notify({
         userId: customerId,
         eventKey: "customer.invoice_ready",
@@ -871,11 +880,12 @@ const notifyInvoiceReady = async (booking: any, update: InvoiceArtifactResult) =
         context: {
           bookingId,
           invoiceNumber: update.invoiceNumber,
-          invoiceUrl: update.invoiceUrl,
+          invoiceUrl,
         },
       });
     }
     if (professionalId && update.supplierInvoiceUrl) {
+      const supplierInvoiceUrl = (await presignS3Url(update.supplierInvoiceUrl)) || update.supplierInvoiceUrl;
       await notify({
         userId: professionalId,
         eventKey: "professional.invoice_ready",
@@ -884,7 +894,7 @@ const notifyInvoiceReady = async (booking: any, update: InvoiceArtifactResult) =
         context: {
           bookingId,
           invoiceNumber: update.supplierInvoiceNumber,
-          invoiceUrl: update.supplierInvoiceUrl,
+          invoiceUrl: supplierInvoiceUrl,
         },
       });
     }
@@ -1808,12 +1818,13 @@ const notifyManualArtifactReady = async (
     ? booking.customer?._id?.toString?.()
     : booking.professional?._id?.toString?.();
   if (!recipientId) return;
+  const invoiceUrl = (await presignS3Url(url)) || url;
   await notify({
     userId: recipientId,
     eventKey,
     entityType: "booking",
     entityId: bookingId,
-    context: { bookingId, invoiceNumber: number, invoiceUrl: url },
+    context: { bookingId, invoiceNumber: number, invoiceUrl },
   });
 };
 

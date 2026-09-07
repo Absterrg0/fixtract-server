@@ -61,16 +61,169 @@ const RETRY_BASE_DELAY_MS = 500;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const isBelgianB2BBooking = (booking: any, side: "customer" | "supplier"): boolean => {
-  const party = side === "supplier" ? booking.professional || {} : booking.customer || {};
-  if (side === "supplier" && !party.businessInfo?.vatNumber && !party.vatNumber) return false;
-  if (side === "customer" && party.customerType !== "business") return false;
-  if (side === "customer" && !party.vatNumber) return false;
+  // Legacy BE-only gate, kept for backward-compat callers. New flow uses
+  // resolvePeppolRecipient per actual recipient (any country with VAT).
+  return resolvePeppolRecipient(booking, side).eligible;
+};
+
+/**
+ * Peppol recipient discovery (per actual recipient, not both-parties-BE).
+ *
+ * How Peppol works (short version for operators):
+ * - Peppol is a delivery network, not an email. Each business has a
+ *   participant ID (usually derived from its VAT number) registered in the
+ *   SMP directory.
+ * - Fixtract builds a UBL invoice, posts it into Odoo (account.move), attaches
+ *   the UBL XML, posts the move, then triggers Odoo's EDI send
+ *   (button_process_edi_web_services). Odoo looks up the recipient participant
+ *   and delivers via its Peppol access point.
+ * - Delivery status is read back from Odoo's account.edi.document
+ *   (sent/done/delivered = sent, error/cancelled = failed, otherwise queued).
+ * - Customer invoices (FIX): recipient = customer (business + VAT required).
+ * - Supplier self-bills (SUP): recipient = professional (VAT required).
+ *   No requirement that the other party is Belgian B2B.
+ */
+/**
+ * ISO 6523 participant schemes used for Peppol discovery.
+ * BE uses 0208 (CBE enterprise number, 10 digits). Other EU VAT numbers use
+ * the generic 9945 scheme with the normalized VAT ID; Odoo resolves the
+ * actual SMP endpoint during EDI send. Unknown/unsupported countries are
+ * rejected (never silently treated as deliverable).
+ */
+export const PEPPOL_SCHEME_BY_COUNTRY: Record<string, string> = {
+  BE: "0208",
+  NL: "0106",
+  DE: "0204",
+  FR: "0204",
+};
+
+export const toPeppolParticipantId = (
+  vatNumber?: string | null,
+  country?: string | null,
+): { participantId: string; scheme: string } | { error: string } => {
+  const normalizedVat = String(vatNumber || "").replace(/[\s.]/g, "").toUpperCase();
+  const normalizedCountry = parseVatCountryCode(country);
+  if (!normalizedVat || !normalizedCountry) return { error: "VAT number and country are required for Peppol participant discovery" };
+  if (normalizedCountry === "BE") {
+    const digits = normalizedVat.replace(/^BE/, "");
+    if (!/^\d{10}$/.test(digits)) return { error: `Invalid BE participant VAT "${normalizedVat}" (expected BE + 10 digits)` };
+    return { participantId: `0208:${digits}`, scheme: "0208" };
+  }
+  const scheme = PEPPOL_SCHEME_BY_COUNTRY[normalizedCountry];
+  if (!scheme) return { error: `No Peppol participant scheme for country ${normalizedCountry}` };
+  return { participantId: `${scheme}:${normalizedVat}`, scheme };
+};
+
+export const resolvePeppolRecipient = (
+  booking: any,
+  side: "customer" | "supplier",
+): {
+  eligible: boolean;
+  skipReason?: string;
+  vatNumber?: string;
+  country?: string;
+  name?: string;
+  participantId?: string;
+  trace: Array<{ step: string; detail: string }>;
+} => {
+  const trace: Array<{ step: string; detail: string }> = [];
+  if (side === "supplier") {
+    const professional = booking.professional || {};
+    const vatNumber =
+      professional.businessInfo?.vatNumber || professional.vatNumber;
+    const country = parseVatCountryCode(
+      professional.businessInfo?.country || professional.location?.country,
+    );
+    const name =
+      professional.businessInfo?.companyName ||
+      professional.businessInfo?.name ||
+      professional.name;
+    trace.push({ step: "discovery", detail: `supplier recipient vat=${vatNumber || "(missing)"} country=${country || "(missing)"}` });
+    if (!vatNumber) {
+      return { eligible: false, skipReason: "Professional has no VAT number for Peppol delivery", trace };
+    }
+    if (!country) {
+      return { eligible: false, skipReason: "Professional country is unknown for Peppol delivery", trace };
+    }
+    const participant = toPeppolParticipantId(vatNumber, country);
+    if ("error" in participant) {
+      trace.push({ step: "discovery", detail: `supplier participant discovery failed: ${participant.error}` });
+      return { eligible: false, skipReason: participant.error, trace };
+    }
+    trace.push({ step: "discovery", detail: `supplier participant ${participant.participantId} (scheme ${participant.scheme})` });
+    return { eligible: true, vatNumber, country, name, participantId: participant.participantId, trace };
+  }
+  const customer = booking.customer || {};
+  const vatNumber = customer.vatNumber;
   const country = parseVatCountryCode(
-    side === "supplier"
-      ? party.businessInfo?.country || party.location?.country
-      : booking.vatDecision?.country || party.companyAddress?.country || party.location?.country
+    customer.companyAddress?.country || customer.location?.country || booking.vatDecision?.country,
   );
-  return country === "BE";
+  const name = customer.businessName || customer.name;
+  trace.push({
+    step: "discovery",
+    detail: `customer recipient type=${customer.customerType || "(unknown)"} vat=${vatNumber || "(missing)"} country=${country || "(missing)"}`,
+  });
+  if (customer.customerType !== "business") {
+    return { eligible: false, skipReason: "Peppol delivery requires a business customer", trace };
+  }
+  if (!vatNumber) {
+    return { eligible: false, skipReason: "Customer has no VAT number for Peppol delivery", trace };
+  }
+  if (!country) {
+    return { eligible: false, skipReason: "Customer country is unknown for Peppol delivery", trace };
+  }
+  const participant = toPeppolParticipantId(vatNumber, country);
+  if ("error" in participant) {
+    trace.push({ step: "discovery", detail: `customer participant discovery failed: ${participant.error}` });
+    return { eligible: false, skipReason: participant.error, trace };
+  }
+  trace.push({ step: "discovery", detail: `customer participant ${participant.participantId} (scheme ${participant.scheme})` });
+  return { eligible: true, vatNumber, country, name, participantId: participant.participantId, trace };
+};
+
+/**
+ * Odoo tax coverage: the engine can produce any standard rate in
+ * STANDARD_RATES for active countries, any reduced rate configured in service
+ * logic rules, plus 0% reverse charge. All must have Odoo tax mappings or
+ * dispatch fails fast with the missing rates (instead of posting then failing).
+ */
+export const getRequiredOdooVatRates = async (): Promise<{ rates: number[]; reverseChargeRequired: boolean }> => {
+  const { getStandardVatRate } = await import("../utils/vatManagement");
+  void getStandardVatRate;
+  const { default: ServiceConfiguration } = await import("../models/serviceConfiguration");
+  const configs = await ServiceConfiguration.find({ isActive: { $ne: false } })
+    .select("activeCountries vatManagement.logicRules")
+    .lean();
+  const rates = new Set<number>();
+  const countries = new Set<string>();
+  for (const config of configs as any[]) {
+    for (const country of config.activeCountries || []) {
+      const parsed = parseVatCountryCode(country);
+      if (parsed) countries.add(parsed);
+    }
+    for (const rule of config.vatManagement?.logicRules || []) {
+      if (rule.isActive === false) continue;
+      if (Number.isFinite(Number(rule.standardRate))) rates.add(Number(rule.standardRate));
+      if (Number.isFinite(Number(rule.reducedRate))) rates.add(Number(rule.reducedRate));
+    }
+  }
+  // Always cover BE/NL standard + reduced outcomes the engine can produce.
+  for (const country of ["BE", "NL", ...countries]) {
+    const { getStandardVatRate: std } = await import("../utils/vatCountries");
+    const rate = std(country);
+    if (rate > 0) rates.add(rate);
+  }
+  rates.add(6);
+  rates.add(21);
+  return { rates: [...rates].sort((a, b) => a - b), reverseChargeRequired: true };
+};
+
+export const validateOdooTaxCoverage = (
+  config: { taxIdsByRate: Record<string, number>; reverseChargeTaxId?: number },
+  requiredRates: number[],
+): { ok: boolean; missingRates: number[]; missingReverseCharge: boolean } => {
+  const missingRates = requiredRates.filter((rate) => rate > 0 && !config.taxIdsByRate[String(rate)]);
+  return { ok: missingRates.length === 0 && Boolean(config.reverseChargeTaxId), missingRates, missingReverseCharge: !config.reverseChargeTaxId };
 };
 
 const normalizeOdooId = (value: unknown, label: string): number => {
@@ -442,6 +595,20 @@ const dispatchToOdoo = async (
   }
 
   const reverseCharge = Boolean(payload.reverseCharge ?? booking.payment?.reverseCharge);
+  try {
+    const required = await getRequiredOdooVatRates();
+    const coverage = validateOdooTaxCoverage(config, required.rates);
+    if (!coverage.ok) {
+      const parts: string[] = [];
+      if (coverage.missingRates.length) parts.push(`Missing Odoo tax mapping for VAT rates ${coverage.missingRates.join(", ")}`);
+      if (coverage.missingReverseCharge) parts.push("Odoo reverse-charge tax could not be resolved from the Odoo company chart");
+      console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] tax-coverage: FAIL ${parts.join("; ")}`);
+      return { status: "failed", provider: "odoo", reference, reason: parts.join("; "), attempts: 0 };
+    }
+    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] tax-coverage: OK rates [${required.rates.join(", ")}]`);
+  } catch (coverageError: any) {
+    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] tax-coverage check skipped: ${coverageError?.message || coverageError}`);
+  }
   const lines = getOdooInvoiceLinesForPayload(booking, payload);
   const lineWithoutTax = findMissingTaxMapping(config, lines, reverseCharge);
   if (lineWithoutTax) {
@@ -457,8 +624,10 @@ const dispatchToOdoo = async (
   }
 
   try {
+    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: creating/finding Odoo move`);
     const existingMove = await findExistingOdooMove(config, payload);
     const partnerId = existingMove ? undefined : await ensureOdooPartner(config, booking, payload);
+    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: move=${existingMove?.id || "new"} partner=${partnerId || "existing"}`);
     const moveId = existingMove?.id || await (async () => {
       const moveVals = await buildOdooMoveVals(config, booking, payload, partnerId as number);
       const { value: moveIdRaw } = await odooCallOnce<unknown>(config, "account.move", "create", { vals_list: moveVals });
@@ -483,8 +652,10 @@ const dispatchToOdoo = async (
     }
 
     try {
+      console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: triggering Odoo EDI send for move ${moveId}`);
       await odooCallWithRetries(config, "account.move", "button_process_edi_web_services", { ids: [moveId] });
       const ediDocuments = await readOdooEdiDeliveryState(config, moveId);
+      console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] delivery:`, JSON.stringify(ediDocuments || []));
       const failedDocument = ediDocuments?.find((document) =>
         ["error", "cancelled", "canceled"].includes(String(document.state || "").toLowerCase()) ||
         ["error"].includes(String(document.blocking_level || "").toLowerCase()) ||
@@ -550,10 +721,10 @@ export async function maybeDispatchPeppolInvoice(params: {
   lineItems?: PeppolDispatchPayload["lineItems"];
 }): Promise<PeppolDispatchResult> {
   const side = params.side || "customer";
-  if (!isBelgianB2BBooking(params.booking, side)) {
-    return { status: "skipped", reason: side === "supplier"
-      ? "Supplier Peppol dispatch is limited to Belgian B2B professionals"
-      : "Peppol dispatch is limited to Belgian B2B customers" };
+  const recipient = resolvePeppolRecipient(params.booking, side);
+  console.log(`[PEPPOL][${params.invoiceNumber}][${side}] discovery:`, recipient.trace.map((t) => t.detail).join(" | "));
+  if (!recipient.eligible) {
+    return { status: "skipped", reason: recipient.skipReason || "Peppol recipient not eligible" };
   }
 
   const settings = await PlatformSettings.getCurrentConfig();
@@ -584,19 +755,9 @@ export async function maybeDispatchPeppolInvoice(params: {
     invoiceNumber: params.invoiceNumber,
     peppolParticipantId: eInvoicing.peppolParticipantId,
     supplierParticipantId: eInvoicing.peppolParticipantId,
-    customerVatNumber: side === "supplier"
-      ? params.booking.professional?.businessInfo?.vatNumber || params.booking.professional?.vatNumber
-      : params.booking.customer?.vatNumber,
-    customerName: side === "supplier"
-      ? params.booking.professional?.businessInfo?.companyName || params.booking.professional?.businessInfo?.name || params.booking.professional?.name
-      : params.booking.customer?.businessName || params.booking.customer?.name,
-    recipientCountry: side === "supplier"
-      ? params.booking.professional?.businessInfo?.country || params.booking.professional?.location?.country
-      : params.booking.customer?.companyAddress?.country
-        || params.booking.customer?.location?.country
-        // Keep this in sync with isBelgianB2BBooking, which also accepts the
-        // VAT decision country as the customer's country.
-        || params.booking.vatDecision?.country,
+    customerVatNumber: recipient.vatNumber,
+    customerName: recipient.name,
+    recipientCountry: recipient.country,
     netAmount: params.netAmount,
     vatRate: params.vatRate,
     reverseCharge: params.reverseCharge,

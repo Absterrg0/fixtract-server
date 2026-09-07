@@ -40,6 +40,7 @@ export interface IPricing {
   amount?: number;
   priceRange?: { min: number; max: number };
   minOrderQuantity?: number; // Unit pricing: minimum order quantity
+  unit?: string; // Real service unit for unit pricing (m², hour, room...). Persisted from service config.
 }
 
 export interface IIncludedItem {
@@ -345,6 +346,7 @@ const PricingSchema = new Schema<IPricing>({
     max: { type: Number, min: 0 },
   },
   minOrderQuantity: { type: Number, min: 1 }, // Unit pricing: minimum order quantity
+  unit: { type: String, maxlength: 50 },
 });
 
 // Included Item Schema

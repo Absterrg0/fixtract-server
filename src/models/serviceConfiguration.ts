@@ -266,6 +266,12 @@ const ServiceConfigurationSchema = new Schema<IServiceConfiguration>({
 
 function validatePricingOptionsArray(pricingOptions: any): Error | null {
     if (!Array.isArray(pricingOptions)) return null;
+    // Lazy require to avoid model/util import cycles at load time.
+    let isKnown: ((unit?: string | null) => boolean) | undefined;
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        isKnown = require("../utils/invoiceUnits").isKnownInvoiceUnit;
+    } catch { isKnown = undefined; }
     for (let i = 0; i < pricingOptions.length; i++) {
         const opt = pricingOptions[i];
         if (!opt || typeof opt !== 'object') continue;
@@ -276,6 +282,9 @@ function validatePricingOptionsArray(pricingOptions: any): Error | null {
         }
         if (pricingType === 'fixed_price' && unit) {
             return new Error(`pricingOptions[${i}].unit: Unit must be empty for fixed_price pricing type`);
+        }
+        if (unit && isKnown && !isKnown(unit)) {
+            return new Error(`pricingOptions[${i}].unit: Unknown unit "${unit}". Use a validated UNECE unit.`);
         }
     }
     return null;

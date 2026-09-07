@@ -714,10 +714,8 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
     'customer',
     (ctx) => ({
       title: ctx.invoiceNumber ? `Invoice ${String(ctx.invoiceNumber)} is ready` : 'Your invoice is ready',
-      body: ctx.invoiceUrl
-        ? `Your invoice is ready. Download it here: ${ctx.invoiceUrl}`
-        : 'Your invoice is ready on the booking page.',
-      clickUrl: String(ctx.invoiceUrl || frontend(`/bookings/${ctx.bookingId || ''}`)),
+      body: 'Your invoice is ready on the booking page.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
     }),
     'booking',
   ),
@@ -1007,10 +1005,8 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
     'professional',
     (ctx) => ({
       title: ctx.invoiceNumber ? `Self-bill ${String(ctx.invoiceNumber)} is ready` : 'Your self-bill invoice is ready',
-      body: ctx.invoiceUrl
-        ? `The supplier self-bill is ready. Download it here: ${ctx.invoiceUrl}`
-        : 'The supplier self-bill is ready on the booking page.',
-      clickUrl: String(ctx.invoiceUrl || frontend(`/bookings/${ctx.bookingId || ''}`)),
+      body: 'The supplier self-bill is ready on the booking page.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
     }),
     'booking',
   ),
