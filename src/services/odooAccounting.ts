@@ -281,6 +281,16 @@ const discoverExpenseAccount = async (
   return pickExpenseAccount(accounts);
 };
 
+/**
+ * Matches Odoo 0%-rate sales taxes usable for reverse charge.
+ * Belgian charts name the domestic co-contractor tax "0% Cocont"
+ * (abbreviation of co-contractant), not "co-contractor", so both
+ * spellings plus intra/reverse must match. Sorted by id ascending,
+ * the domestic Cocont tax wins over intra-EU variants.
+ */
+export const matchesReverseChargeTaxName = (name?: string | null): boolean =>
+  /ic|intra|reverse|co-?contractor|cocont|co-?contract/i.test(String(name || ""));
+
 const discoverSaleTaxes = async (
   credentials: OdooCredentials,
   companyId: number
@@ -320,7 +330,7 @@ const discoverSaleTaxes = async (
   );
   const reverseChargeTaxId = [...reverseTaxes]
     .sort((left, right) => left.id - right.id)
-    .find((tax) => /ic|intra|reverse|co-contractor/i.test(String(tax.name || "")))?.id;
+    .find((tax) => matchesReverseChargeTaxName(tax.name))?.id;
 
   const taxIdsByRate = [...taxes].sort((left, right) => left.id - right.id).reduce<Record<string, number>>((mapping, tax) => {
     const rate = Number(tax.amount);
