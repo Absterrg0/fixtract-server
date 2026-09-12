@@ -265,7 +265,7 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
         user.set('notificationPreferences.promotions.email', true);
         user.set('marketingConsentAt', new Date());
         await user.save();
-        await enablePromotionalEmail(user);
+        await enablePromotionalEmail(user, 'signup');
       } catch (e) {
         console.error('Error recording marketing opt-in during signup:', e);
       }

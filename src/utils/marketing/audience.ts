@@ -89,7 +89,10 @@ export function subscriberProfileForUser(
  * Brevo contact remains outside campaign audiences until provider
  * reconciliation succeeds (or the daily retry does).
  */
-export async function enablePromotionalEmail(user: any): Promise<void> {
+export async function enablePromotionalEmail(
+  user: any,
+  source: 'user_sync' | 'signup' = 'user_sync',
+): Promise<void> {
   const email = normalizeEmail(user?.email);
   if (!email) return;
   const now = new Date();
@@ -108,7 +111,7 @@ export async function enablePromotionalEmail(user: any): Promise<void> {
       { $or: [{ userId: user._id }, { email }, { emailNormalized: email }] },
       {
         $set: consentFields,
-        $setOnInsert: { unsubscribeToken: generateUnsubscribeToken(), source: 'user_sync' },
+        $setOnInsert: { unsubscribeToken: generateUnsubscribeToken(), source },
       },
       { upsert: true },
     );
@@ -263,6 +266,7 @@ export async function syncSubscribersFromUsers(): Promise<{
       };
       const unset: Record<string, 1> = {};
       if (!profile.name) unset.name = 1;
+      if (!profile.firstName) unset.firstName = 1;
       if (!profile.region) unset.region = 1;
 
       if (existing) {

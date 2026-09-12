@@ -58,7 +58,7 @@ export const validateVAT = async (req: Request, res: Response, next: NextFunctio
       data: {
         vatNumber: formattedVAT,
         valid: validationResult.valid,
-        transient: validationResult.transient === true,
+        viesUnavailable: validationResult.transient === true,
         companyName: validationResult.companyName,
         companyAddress: validationResult.companyAddress,
         parsedAddress: cleanedAddress,
