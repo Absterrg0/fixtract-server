@@ -11,6 +11,7 @@ import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../util
 import { generateReferralCode, validateReferralCode, createReferral } from "../../utils/referralSystem";
 import { sendIdExpiredEmail } from "../../utils/emailService";
 import { permissionsForLevels, permissionsForRole, resolveAdminRole } from "../../utils/adminRbac/rolePermissions";
+import { enablePromotionalEmail } from "../../utils/marketing/audience";
 
 function adminAccessFields(user: { role?: string; adminRole?: string; adminPermissionLevels?: any; timeZone?: string }) {
   if (user.role !== 'admin') return {};
@@ -55,7 +56,9 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       companyName,
       vatNumber,
       // Referral
-      referralCode
+      referralCode,
+      // Marketing
+      marketingOptIn
     } = req.body;
 
     // Comprehensive validation
@@ -253,6 +256,18 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
         await createReferral(referralValidation.referrer._id, user._id, referralCode, ipAddress);
       } catch (e) {
         console.error('Error creating referral record during signup:', e);
+      }
+    }
+
+    // Explicit marketing opt-in (unchecked by default on every signup form).
+    if (marketingOptIn === true) {
+      try {
+        user.set('notificationPreferences.promotions.email', true);
+        user.set('marketingConsentAt', new Date());
+        await user.save();
+        await enablePromotionalEmail(user);
+      } catch (e) {
+        console.error('Error recording marketing opt-in during signup:', e);
       }
     }
 
