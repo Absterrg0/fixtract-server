@@ -11,7 +11,6 @@ import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../util
 import { generateReferralCode, validateReferralCode, createReferral } from "../../utils/referralSystem";
 import { sendIdExpiredEmail } from "../../utils/emailService";
 import { permissionsForLevels, permissionsForRole, resolveAdminRole } from "../../utils/adminRbac/rolePermissions";
-import { enablePromotionalEmail } from "../../utils/marketing/audience";
 
 function adminAccessFields(user: { role?: string; adminRole?: string; adminPermissionLevels?: any; timeZone?: string }) {
   if (user.role !== 'admin') return {};
@@ -260,14 +259,14 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
     }
 
     // Explicit marketing opt-in (unchecked by default on every signup form).
+    // Enrollment is deferred until the address owner verifies their email
+    // (see verifyEmailOTP) so a third party cannot subscribe an address.
     if (marketingOptIn === true) {
       try {
-        user.set('notificationPreferences.promotions.email', true);
-        user.set('marketingConsentAt', new Date());
+        user.set('marketingOptInPending', true);
         await user.save();
-        await enablePromotionalEmail(user, 'signup');
       } catch (e) {
-        console.error('Error recording marketing opt-in during signup:', e);
+        console.error('Error recording pending marketing opt-in during signup:', e);
       }
     }
 
