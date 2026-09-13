@@ -120,18 +120,6 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
       });
     }
 
-    // Check for existing phone
-    const existingPhone = await User.findOne({
-      phone: phone.trim()
-    });
-
-    if (existingPhone) {
-      return res.status(409).json({
-        success: false,
-        msg: "An account with this phone number already exists"
-      });
-    }
-
     // Hash password
     const saltRounds = 12; // Increased for better security
     const hashedPassword = await bcrypt.hash(password, saltRounds);

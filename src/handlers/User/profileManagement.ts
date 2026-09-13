@@ -835,30 +835,9 @@ export const updatePhone = async (req: Request, res: Response, next: NextFunctio
       });
     }
 
-    // Check uniqueness
-    const existingUser = await User.findOne({ phone: normalizedPhone, _id: { $ne: user._id } });
-    if (existingUser) {
-      return res.status(409).json({
-        success: false,
-        msg: "This phone number is already in use by another account"
-      });
-    }
-
     user.phone = normalizedPhone;
     user.isPhoneVerified = false;
-
-    try {
-      await user.save();
-    } catch (error: any) {
-      // Handle concurrent duplicate key error
-      if (error.code === 11000) {
-        return res.status(409).json({
-          success: false,
-          msg: "This phone number is already in use"
-        });
-      }
-      throw error;
-    }
+    await user.save();
 
     console.log(`📱 Phone: Updated phone for userId=${String(user._id)}`);
 

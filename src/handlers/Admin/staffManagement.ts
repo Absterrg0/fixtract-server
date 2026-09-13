@@ -60,14 +60,14 @@ async function renewSuperAdminGuard(claimId: string): Promise<boolean> {
 }
 
 /**
- * User.phone is required + unique. When invite omits a real phone we store a
+ * User.phone is required. When invite omits a real phone we store a
  * synthetic placeholder so the row can be created — never mark it verified.
  */
 function resolveInvitePhone(phone: unknown): { value: string; isPlaceholder: boolean } {
   if (typeof phone === 'string' && phone.trim()) {
     return { value: phone.trim(), isPlaceholder: false };
   }
-  // Collision-resistant placeholder (unique index); not a real phone, stays unverified
+  // Placeholder is not a real phone and stays unverified
   return { value: `+1999${crypto.randomBytes(6).toString('hex')}`, isPlaceholder: true };
 }
 
@@ -282,20 +282,6 @@ export const inviteStaff = async (req: Request, res: Response) => {
         });
       }
 
-      if (!resolvedPhone.isPlaceholder && resolvedPhone.value !== existing.phone) {
-        const existingPhone = await User.findOne({
-          phone: resolvedPhone.value,
-          _id: { $ne: existing._id },
-        }).select('_id');
-        if (existingPhone) {
-          return res.status(409).json({
-            success: false,
-            msg: 'A user with this phone number already exists',
-            field: 'phone',
-          });
-        }
-      }
-
       const { staff, inviteUrl, sent, error } = await regeneratePendingInvite(existing, admin, {
         name: trimmedName,
         adminRole: role,
@@ -313,17 +299,6 @@ export const inviteStaff = async (req: Request, res: Response) => {
           ? 'Invite resent — a fresh link was emailed'
           : 'Invite link regenerated — copy it below (email could not be sent)',
       });
-    }
-
-    if (!resolvedPhone.isPlaceholder) {
-      const existingPhone = await User.findOne({ phone: resolvedPhone.value }).select('_id');
-      if (existingPhone) {
-        return res.status(409).json({
-          success: false,
-          msg: 'A user with this phone number already exists',
-          field: 'phone',
-        });
-      }
     }
 
     const { inviteTokenHash, inviteTokenExpires, inviteUrl } = createInviteCredentials();

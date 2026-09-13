@@ -2,18 +2,36 @@ import { Request,Response,NextFunction } from "express";
 import User from "../../../../models/user";
 import twilio from 'twilio'
 
-// Validate Twilio configuration
-const accountSid = process.env.TWILIO_ACCOUNT_SID;
-const authToken = process.env.TWILIO_AUTH_TOKEN;
-const verifyServiceSid = process.env.TWILIO_VERIFY_SERVICE_SID;
+function twilioConfig() {
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
+    const verifyServiceSid = process.env.TWILIO_VERIFY_SERVICE_SID;
+    return { accountSid, authToken, verifyServiceSid };
+}
 
-if (!accountSid || !authToken || !verifyServiceSid) {
-  console.error("Missing Twilio configuration. Please set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_VERIFY_SERVICE_SID environment variables.");
+function resolveAccountPhone(user: { phone?: string } | undefined, phone: unknown): { error: { status: number; msg: string } } | { phone: string } {
+    if (!user) {
+        return { error: { status: 401, msg: "Authentication required" } };
+    }
+
+    const requestedPhone = typeof phone === 'string' ? phone.trim() : '';
+    const targetPhone = requestedPhone || user.phone;
+
+    if (!targetPhone) {
+        return { error: { status: 400, msg: "Phone number is required" } };
+    }
+
+    if (requestedPhone && requestedPhone !== user.phone) {
+        return { error: { status: 400, msg: "Phone number does not match this account" } };
+    }
+
+    return { phone: targetPhone };
 }
 
 export const VerifyPhone = async (req:Request,res:Response,next:NextFunction)=>{
     try{
         const {phone} = req.body;
+        const { accountSid, authToken, verifyServiceSid } = twilioConfig();
         
         // Check if Twilio is properly configured
         if (!accountSid || !authToken || !verifyServiceSid) {
@@ -23,27 +41,19 @@ export const VerifyPhone = async (req:Request,res:Response,next:NextFunction)=>{
             });
         }
 
-        if(!phone){
-            return res.status(400).json({
+        const resolved = resolveAccountPhone(req.user, phone);
+        if ('error' in resolved) {
+            return res.status(resolved.error.status).json({
                 success: false,
-                msg:"Phone number is required"
+                msg: resolved.error.msg
             });
         }
 
         const twilioClient = twilio(accountSid, authToken);
 
-        const user = await User.findOne({phone});
-
-        if(!user){
-            return res.status(404).json({
-                success: false,
-                msg:"User not found"
-            });
-        }
-
-        const service = await twilioClient.verify.v2.services(verifyServiceSid).verifications.create({
+        await twilioClient.verify.v2.services(verifyServiceSid).verifications.create({
             channel:"sms",
-            to:phone
+            to:resolved.phone
         });
 
 
@@ -63,6 +73,7 @@ export const VerifyPhone = async (req:Request,res:Response,next:NextFunction)=>{
 export const VerifyPhoneCheck = async(req:Request,res:Response,next:NextFunction)=>{
     try{
         const {phone,otp} = req.body;
+        const { accountSid, authToken, verifyServiceSid } = twilioConfig();
         
         // Check if Twilio is properly configured
         if (!accountSid || !authToken || !verifyServiceSid) {
@@ -72,10 +83,18 @@ export const VerifyPhoneCheck = async(req:Request,res:Response,next:NextFunction
             });
         }
 
-        if(!phone || !otp){
+        if(!otp){
             return res.status(400).json({
                 success: false,
                 msg:"Phone number and OTP are required"
+            });
+        }
+
+        const resolved = resolveAccountPhone(req.user, phone);
+        if ('error' in resolved) {
+            return res.status(resolved.error.status).json({
+                success: false,
+                msg: resolved.error.msg
             });
         }
 
@@ -83,11 +102,11 @@ export const VerifyPhoneCheck = async(req:Request,res:Response,next:NextFunction
 
         const service = await twilioClient.verify.v2.services(verifyServiceSid).verificationChecks.create({
             code:otp,
-            to:phone
+            to:resolved.phone
         });
         
         if(service.status==="approved"){
-            await User.findOneAndUpdate({phone},{isPhoneVerified:true});
+            await User.findByIdAndUpdate(req.user!._id,{isPhoneVerified:true});
             return res.status(200).json({
                 success: true,
                 msg:"Phone number verified successfully"
