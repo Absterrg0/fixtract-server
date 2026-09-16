@@ -56,8 +56,24 @@ describe("invoice PDF artifacts", () => {
     expect(pdf.toString("latin1")).toContain("/Type /Page");
     const renderedText = extractPdfStreamText(pdf);
     const encodedText = concatenatePdfHexText(renderedText);
-    expect(encodedText).toContain(Buffer.from("Reverse Charge").toString("latin1"));
+    expect(encodedText).toContain(Buffer.from("VAT (Reverse charge)").toString("latin1"));
     expect(encodedText).toContain(Buffer.from("Page 1 of 1").toString("latin1"));
+  });
+
+  it("renders line-item quantity units in the Qty column", async () => {
+    const pdf = await generateInvoicePDF({
+      invoiceNumber: "FIX-2026-000002",
+      invoiceDate: new Date("2026-08-20T00:00:00.000Z"),
+      bookingNumber: "BK-3",
+      customer: { name: "Customer", email: "customer@example.com", country: "BE" },
+      professional: { name: "Professional", country: "BE" },
+      payment: { netAmount: 100, vatAmount: 21, vatRate: 21, totalWithVat: 121, currency: "EUR" },
+      serviceDescription: "Service",
+      lineItems: [{ description: "Plastering", amount: 100, vatRate: 21, quantity: 50, unitPrice: 2, unit: "m²" }],
+    });
+
+    const encodedText = concatenatePdfHexText(extractPdfStreamText(pdf));
+    expect(encodedText).toContain(Buffer.from("50 m").toString("latin1"));
   });
 
   it("renders the self-billing party label", async () => {

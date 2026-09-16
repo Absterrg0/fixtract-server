@@ -9,7 +9,7 @@ import {
   normalizeVatCountry,
   resolveSupplierB2BInvoiceDecision,
 } from "../utils/vatManagement";
-import { assertValidInvoiceUnit, mapUnitToUneceCode } from "../utils/invoiceUnits";
+import { mapUnitToUneceCode, resolveInvoiceServiceUnit, tryNormalizeInvoiceUnit } from "../utils/invoiceUnits";
 import {
   calculateInvoiceSideTotals,
   calculateSupplierInvoiceNet,
@@ -397,9 +397,18 @@ const getExtraCostLinesForUbl = (
     ? getCustomerExtraCostNet(booking.payment, rawTotal)
     : rawTotal;
   const scale = rawTotal > 0 ? targetTotal / rawTotal : 1;
+  const fallbackUnit = resolveInvoiceServiceUnit({
+    checkoutUnit: (booking.checkoutSnapshot as any)?.unit,
+    subprojectUnit: (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
+    pricingType:
+      (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.type ||
+      booking.checkoutSnapshot?.pricingType,
+    pricingOptions: (booking as any).__serviceConfigPricingOptions,
+  });
   return (booking.extraCosts || []).map((cost: any) => {
     const price = Math.round(moneyNumber(cost.amount) * scale * 100) / 100;
     const lineVatRate = reverseCharge ? 0 : vatRate;
+    const unit = tryNormalizeInvoiceUnit(cost.unit) || fallbackUnit;
     return {
       description: `Extra cost: ${cost.name}${cost.justification ? ` - ${cost.justification}` : ""}`,
       amount: price,
@@ -408,6 +417,7 @@ const getExtraCostLinesForUbl = (
       vatAmount: reverseCharge ? 0 : Math.round(price * lineVatRate) / 100,
       quantity: Number.isFinite(Number(cost.actualUnits)) ? Number(cost.actualUnits) : undefined,
       unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) * scale : undefined,
+      ...(unit ? { unit } : {}),
     };
   });
 };
@@ -536,6 +546,26 @@ const getPricingLinesForUbl = (
     }
   }
 
+  if (!options.selfBilling && baseLines.length > 0 && booking.checkoutSnapshot?.pricingType === "unit") {
+    const quantity = moneyNumber(booking.checkoutSnapshot.quantity);
+    if (quantity > 0) {
+      const unit = resolveInvoiceServiceUnit({
+        checkoutUnit: (booking.checkoutSnapshot as any)?.unit,
+        subprojectUnit: (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
+        pricingType:
+          (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.type ||
+          booking.checkoutSnapshot?.pricingType,
+        pricingOptions: (booking as any).__serviceConfigPricingOptions,
+      });
+      baseLines[0] = {
+        ...baseLines[0],
+        quantity: baseLines[0].quantity ?? quantity,
+        unitPrice: baseLines[0].unitPrice ?? moneyNumber(booking.checkoutSnapshot.unitAmount),
+        ...(unit && !baseLines[0].unit ? { unit } : {}),
+      };
+    }
+  }
+
   if (options.selfBilling) {
     const supplierNet = calculateSupplierInvoiceNet({
       quoteAmount: currentQuote?.totalAmount ?? booking.quote?.amount,
@@ -547,11 +577,14 @@ const getPricingLinesForUbl = (
       (sum: number, option: any) => sum + moneyNumber(option.bookedPrice),
       0
     );
-    const checkoutUnit = assertValidInvoiceUnit(
-      (booking.checkoutSnapshot as any)?.unit ||
-        (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
-      "service unit",
-    );
+    const checkoutUnit = resolveInvoiceServiceUnit({
+      checkoutUnit: (booking.checkoutSnapshot as any)?.unit,
+      subprojectUnit: (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
+      pricingType:
+        (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.type ||
+        booking.checkoutSnapshot?.pricingType,
+      pricingOptions: (booking as any).__serviceConfigPricingOptions,
+    });
     const serviceLine: UblLine = {
       description: booking.rfqData?.serviceType || currentQuote?.description || booking.quote?.description || "Service",
       amount: Math.max(0, supplierNet - selectedOptions),
@@ -850,7 +883,7 @@ const loadBookingForInvoice = async (bookingId: string) =>
   Booking.findById(bookingId)
     .populate("customer")
     .populate("professional")
-    .populate("project", "title extraOptions subprojects");
+    .populate("project", "title extraOptions subprojects category service serviceConfigurationId");
 
 const getPlatformParty = async (): Promise<UblPlatformParty> => {
   const settings = await PlatformSettings.getCurrentConfig();
@@ -865,7 +898,11 @@ const getPlatformParty = async (): Promise<UblPlatformParty> => {
   };
 };
 
-const notifyInvoiceReady = async (booking: any, update: InvoiceArtifactResult) => {
+const notifyInvoiceReady = async (
+  booking: any,
+  update: InvoiceArtifactResult,
+  attachments?: { customerInvoicePdf?: Buffer; supplierInvoicePdf?: Buffer },
+) => {
   const customerId = booking.customer?._id?.toString?.() || booking.customer?.toString?.();
   const professionalId = booking.professional?._id?.toString?.() || booking.professional?.toString?.();
   const bookingId = booking._id?.toString?.() || "";
@@ -881,6 +918,9 @@ const notifyInvoiceReady = async (booking: any, update: InvoiceArtifactResult) =
           bookingId,
           invoiceNumber: update.invoiceNumber,
           invoiceUrl,
+          ...(attachments?.customerInvoicePdf
+            ? { invoiceAttachmentContent: attachments.customerInvoicePdf.toString("base64") }
+            : {}),
         },
       });
     }
@@ -895,6 +935,9 @@ const notifyInvoiceReady = async (booking: any, update: InvoiceArtifactResult) =
           bookingId,
           invoiceNumber: update.supplierInvoiceNumber,
           invoiceUrl: supplierInvoiceUrl,
+          ...(attachments?.supplierInvoicePdf
+            ? { invoiceAttachmentContent: attachments.supplierInvoicePdf.toString("base64") }
+            : {}),
         },
       });
     }
@@ -1379,7 +1422,10 @@ export async function ensureBookingInvoiceArtifacts(
       });
     }
 
-    await notifyInvoiceReady(booking, update);
+    await notifyInvoiceReady(booking, update, {
+      customerInvoicePdf: customerInvoice.pdfBuffer,
+      supplierInvoicePdf: supplierInvoice.pdfBuffer,
+    });
     return update;
   } catch (error) {
     await clearInvoiceGenerationClaim(bookingId);
@@ -1811,6 +1857,7 @@ const notifyManualArtifactReady = async (
   input: ManualInvoiceCorrectionInput,
   number: string,
   url: string,
+  pdfBuffer?: Buffer,
 ) => {
   const bookingId = booking._id?.toString?.() || "";
   const eventKey = input.side === "customer" ? "customer.invoice_ready" : "professional.invoice_ready";
@@ -1824,7 +1871,12 @@ const notifyManualArtifactReady = async (
     eventKey,
     entityType: "booking",
     entityId: bookingId,
-    context: { bookingId, invoiceNumber: number, invoiceUrl },
+    context: {
+      bookingId,
+      invoiceNumber: number,
+      invoiceUrl,
+      ...(pdfBuffer ? { invoiceAttachmentContent: pdfBuffer.toString("base64") } : {}),
+    },
   });
 };
 
@@ -1992,7 +2044,7 @@ export async function createManualInvoiceArtifact(
   await Booking.updateOne({ _id: booking._id }, bookingUpdate);
   await persistPaymentArtifactUpdate(booking._id, paymentId, fields, historyEntry);
   try {
-    await notifyManualArtifactReady(booking, input, generated.invoiceNumber, artifactUrl);
+    await notifyManualArtifactReady(booking, input, generated.invoiceNumber, artifactUrl, generated.pdfBuffer);
   } catch (notifyError) {
     // The artifact and history entry are already persisted; a notification
     // failure must not make the admin endpoint report the operation as failed.

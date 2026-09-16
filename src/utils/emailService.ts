@@ -9,6 +9,8 @@ interface SendEmailMeta {
   relatedUser?: string | mongoose.Types.ObjectId;
   attachmentUrl?: string;
   attachmentName?: string;
+  /** Base64-encoded attachment content. Takes precedence over attachmentUrl. */
+  attachmentContent?: string;
 }
 
 // Initialize Brevo API with proper configuration
@@ -1444,10 +1446,14 @@ const sendEmail = async (
       name: 'Fixtract Team',
       email: process.env.FROM_EMAIL || 'noreply@fixtract.com',
     };
-    if (meta.attachmentUrl) {
+    if (meta.attachmentContent || meta.attachmentUrl) {
+      // Prefer direct base64 content: the provider does not have to fetch a
+      // (possibly private/expired) URL, which otherwise fails the whole send.
       sendSmtpEmail.attachment = [{
-        url: meta.attachmentUrl,
         name: meta.attachmentName || 'invoice.pdf',
+        ...(meta.attachmentContent
+          ? { content: meta.attachmentContent }
+          : { url: meta.attachmentUrl as string }),
       }];
     }
     await emailAPI.sendTransacEmail(sendSmtpEmail);
@@ -1535,6 +1541,7 @@ export const sendNotificationEmail = async (params: {
   relatedBooking?: string;
   attachmentUrl?: string;
   attachmentName?: string;
+  attachmentContent?: string;
 }): Promise<boolean> => {
   const {
     to,
@@ -1548,6 +1555,7 @@ export const sendNotificationEmail = async (params: {
     relatedBooking,
     attachmentUrl,
     attachmentName,
+    attachmentContent,
   } = params;
 
   const content = `
@@ -1567,6 +1575,7 @@ export const sendNotificationEmail = async (params: {
     relatedBooking,
     attachmentUrl,
     attachmentName,
+    attachmentContent,
   });
 };
 

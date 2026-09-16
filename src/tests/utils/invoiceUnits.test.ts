@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { assertValidInvoiceUnit, formatVatAnswerWithUnit, isKnownInvoiceUnit, mapUnitToUneceCode, normalizeUnitLabel } from "../../utils/invoiceUnits";
+import {
+  assertValidInvoiceUnit,
+  formatVatAnswerWithUnit,
+  isKnownInvoiceUnit,
+  mapUnitToUneceCode,
+  normalizeUnitLabel,
+  resolveInvoiceServiceUnit,
+  tryNormalizeInvoiceUnit,
+} from "../../utils/invoiceUnits";
 
 describe("invoiceUnits", () => {
   it("normalizes common unit labels", () => {
@@ -25,5 +33,35 @@ describe("invoiceUnits", () => {
     const config = { reducedVatQuestions: [{ fieldName: "building_age", unit: "years" }], professionalVatQuestions: [] };
     expect(formatVatAnswerWithUnit("building_age", 10, config)).toBe("- building_age: 10 years");
     expect(formatVatAnswerWithUnit("private_housing", true, config)).toBe("- private_housing: true");
+  });
+
+  it("tryNormalizeInvoiceUnit never throws on malformed historical data", () => {
+    expect(tryNormalizeInvoiceUnit("m2")).toBe("m²");
+    expect(tryNormalizeInvoiceUnit("forfait")).toBeUndefined();
+    expect(tryNormalizeInvoiceUnit(undefined)).toBeUndefined();
+  });
+
+  it("resolves the service unit from checkout, subproject, then service config", () => {
+    expect(resolveInvoiceServiceUnit({ checkoutUnit: "m2", subprojectUnit: "hour" })).toBe("m²");
+    expect(resolveInvoiceServiceUnit({ subprojectUnit: "hour" })).toBe("hour");
+    expect(
+      resolveInvoiceServiceUnit({
+        pricingType: "unit",
+        pricingOptions: [{ pricingType: "price_per_unit", unit: "room" }],
+      }),
+    ).toBe("room");
+    expect(
+      resolveInvoiceServiceUnit({
+        pricingType: "fixed",
+        pricingOptions: [{ pricingType: "price_per_unit", unit: "room" }],
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveInvoiceServiceUnit({
+        checkoutUnit: "nonsense",
+        pricingType: "unit",
+        pricingOptions: [{ pricingType: "price_per_unit", unit: "m³" }],
+      }),
+    ).toBe("m³");
   });
 });
