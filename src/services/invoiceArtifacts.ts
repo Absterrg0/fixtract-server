@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import Booking from "../models/booking";
 import Payment from "../models/payment";
 import PlatformSettings from "../models/platformSettings";
+import ServiceConfiguration from "../models/serviceConfiguration";
 import { presignS3Url, uploadBufferToS3 } from "../utils/s3Upload";
 import {
   REVERSE_CHARGE_LABEL,
@@ -408,6 +409,8 @@ const getExtraCostLinesForUbl = (
   return (booking.extraCosts || []).map((cost: any) => {
     const price = Math.round(moneyNumber(cost.amount) * scale * 100) / 100;
     const lineVatRate = reverseCharge ? 0 : vatRate;
+    const units = Number(cost.actualUnits);
+    const hasPositiveUnits = Number.isFinite(units) && units > 0;
     const unit = tryNormalizeInvoiceUnit(cost.unit) || fallbackUnit;
     return {
       description: `Extra cost: ${cost.name}${cost.justification ? ` - ${cost.justification}` : ""}`,
@@ -415,9 +418,11 @@ const getExtraCostLinesForUbl = (
       price,
       vatRate: lineVatRate,
       vatAmount: reverseCharge ? 0 : Math.round(price * lineVatRate) / 100,
-      quantity: Number.isFinite(Number(cost.actualUnits)) ? Number(cost.actualUnits) : undefined,
+      quantity: Number.isFinite(units) ? units : undefined,
       unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) * scale : undefined,
-      ...(unit ? { unit } : {}),
+      // Only attach a unit when there is a positive quantity, otherwise the UBL
+      // serializer would turn a fixed-price extra cost into "1 <unit>".
+      ...(hasPositiveUnits && unit ? { unit } : {}),
     };
   });
 };
@@ -879,11 +884,39 @@ const buildUblInvoiceXml = (
 </Invoice>`;
 };
 
-const loadBookingForInvoice = async (bookingId: string) =>
-  Booking.findById(bookingId)
+/**
+ * Attach the service configuration's pricing options to a booking so unit
+ * resolution works on paths that never call generateBookingInvoice (Peppol
+ * retries, supplier-only generation). Without this the UBL builder falls back
+ * to C62 for unit-priced services.
+ */
+const hydrateServiceConfigPricingOptions = async (booking: any) => {
+  if (!booking || Array.isArray(booking.__serviceConfigPricingOptions)) return booking;
+  try {
+    const configId = booking.project?.serviceConfigurationId || booking.serviceConfigurationId;
+    const category = booking.project?.category;
+    const service = booking.project?.service;
+    const config = configId
+      ? await ServiceConfiguration.findById(configId).select("pricingOptions").lean()
+      : category && service
+        ? await ServiceConfiguration.findOne({ category, service }).select("pricingOptions").lean()
+        : null;
+    if (Array.isArray((config as any)?.pricingOptions)) {
+      booking.__serviceConfigPricingOptions = (config as any).pricingOptions;
+    }
+  } catch {
+    // best-effort; callers fall back to C62 when the config is unavailable
+  }
+  return booking;
+};
+
+const loadBookingForInvoice = async (bookingId: string) => {
+  const booking = await Booking.findById(bookingId)
     .populate("customer")
     .populate("professional")
     .populate("project", "title extraOptions subprojects category service serviceConfigurationId");
+  return hydrateServiceConfigPricingOptions(booking);
+};
 
 const getPlatformParty = async (): Promise<UblPlatformParty> => {
   const settings = await PlatformSettings.getCurrentConfig();
