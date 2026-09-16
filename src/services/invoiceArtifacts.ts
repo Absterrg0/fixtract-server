@@ -3,13 +3,14 @@ import { randomUUID } from "node:crypto";
 import Booking from "../models/booking";
 import Payment from "../models/payment";
 import PlatformSettings from "../models/platformSettings";
+import ServiceConfiguration from "../models/serviceConfiguration";
 import { presignS3Url, uploadBufferToS3 } from "../utils/s3Upload";
 import {
   REVERSE_CHARGE_LABEL,
   normalizeVatCountry,
   resolveSupplierB2BInvoiceDecision,
 } from "../utils/vatManagement";
-import { assertValidInvoiceUnit, mapUnitToUneceCode } from "../utils/invoiceUnits";
+import { mapUnitToUneceCode, resolveInvoiceServiceUnit, tryNormalizeInvoiceUnit } from "../utils/invoiceUnits";
 import {
   calculateInvoiceSideTotals,
   calculateSupplierInvoiceNet,
@@ -397,17 +398,31 @@ const getExtraCostLinesForUbl = (
     ? getCustomerExtraCostNet(booking.payment, rawTotal)
     : rawTotal;
   const scale = rawTotal > 0 ? targetTotal / rawTotal : 1;
+  const fallbackUnit = resolveInvoiceServiceUnit({
+    checkoutUnit: (booking.checkoutSnapshot as any)?.unit,
+    subprojectUnit: (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
+    pricingType:
+      (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.type ||
+      booking.checkoutSnapshot?.pricingType,
+    pricingOptions: (booking as any).__serviceConfigPricingOptions,
+  });
   return (booking.extraCosts || []).map((cost: any) => {
     const price = Math.round(moneyNumber(cost.amount) * scale * 100) / 100;
     const lineVatRate = reverseCharge ? 0 : vatRate;
+    const units = Number(cost.actualUnits);
+    const hasPositiveUnits = Number.isFinite(units) && units > 0;
+    const unit = tryNormalizeInvoiceUnit(cost.unit) || fallbackUnit;
     return {
       description: `Extra cost: ${cost.name}${cost.justification ? ` - ${cost.justification}` : ""}`,
       amount: price,
       price,
       vatRate: lineVatRate,
       vatAmount: reverseCharge ? 0 : Math.round(price * lineVatRate) / 100,
-      quantity: Number.isFinite(Number(cost.actualUnits)) ? Number(cost.actualUnits) : undefined,
+      quantity: Number.isFinite(units) ? units : undefined,
       unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) * scale : undefined,
+      // Only attach a unit when there is a positive quantity, otherwise the UBL
+      // serializer would turn a fixed-price extra cost into "1 <unit>".
+      ...(hasPositiveUnits && unit ? { unit } : {}),
     };
   });
 };
@@ -536,6 +551,26 @@ const getPricingLinesForUbl = (
     }
   }
 
+  if (!options.selfBilling && baseLines.length > 0 && booking.checkoutSnapshot?.pricingType === "unit") {
+    const quantity = moneyNumber(booking.checkoutSnapshot.quantity);
+    if (quantity > 0) {
+      const unit = resolveInvoiceServiceUnit({
+        checkoutUnit: (booking.checkoutSnapshot as any)?.unit,
+        subprojectUnit: (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
+        pricingType:
+          (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.type ||
+          booking.checkoutSnapshot?.pricingType,
+        pricingOptions: (booking as any).__serviceConfigPricingOptions,
+      });
+      baseLines[0] = {
+        ...baseLines[0],
+        quantity: baseLines[0].quantity ?? quantity,
+        unitPrice: baseLines[0].unitPrice ?? moneyNumber(booking.checkoutSnapshot.unitAmount),
+        ...(unit && !baseLines[0].unit ? { unit } : {}),
+      };
+    }
+  }
+
   if (options.selfBilling) {
     const supplierNet = calculateSupplierInvoiceNet({
       quoteAmount: currentQuote?.totalAmount ?? booking.quote?.amount,
@@ -547,11 +582,14 @@ const getPricingLinesForUbl = (
       (sum: number, option: any) => sum + moneyNumber(option.bookedPrice),
       0
     );
-    const checkoutUnit = assertValidInvoiceUnit(
-      (booking.checkoutSnapshot as any)?.unit ||
-        (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
-      "service unit",
-    );
+    const checkoutUnit = resolveInvoiceServiceUnit({
+      checkoutUnit: (booking.checkoutSnapshot as any)?.unit,
+      subprojectUnit: (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
+      pricingType:
+        (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.type ||
+        booking.checkoutSnapshot?.pricingType,
+      pricingOptions: (booking as any).__serviceConfigPricingOptions,
+    });
     const serviceLine: UblLine = {
       description: booking.rfqData?.serviceType || currentQuote?.description || booking.quote?.description || "Service",
       amount: Math.max(0, supplierNet - selectedOptions),
@@ -846,11 +884,39 @@ const buildUblInvoiceXml = (
 </Invoice>`;
 };
 
-const loadBookingForInvoice = async (bookingId: string) =>
-  Booking.findById(bookingId)
+/**
+ * Attach the service configuration's pricing options to a booking so unit
+ * resolution works on paths that never call generateBookingInvoice (Peppol
+ * retries, supplier-only generation). Without this the UBL builder falls back
+ * to C62 for unit-priced services.
+ */
+const hydrateServiceConfigPricingOptions = async (booking: any) => {
+  if (!booking || Array.isArray(booking.__serviceConfigPricingOptions)) return booking;
+  try {
+    const configId = booking.project?.serviceConfigurationId || booking.serviceConfigurationId;
+    const category = booking.project?.category;
+    const service = booking.project?.service;
+    const config = configId
+      ? await ServiceConfiguration.findById(configId).select("pricingOptions").lean()
+      : category && service
+        ? await ServiceConfiguration.findOne({ category, service }).select("pricingOptions").lean()
+        : null;
+    if (Array.isArray((config as any)?.pricingOptions)) {
+      booking.__serviceConfigPricingOptions = (config as any).pricingOptions;
+    }
+  } catch {
+    // best-effort; callers fall back to C62 when the config is unavailable
+  }
+  return booking;
+};
+
+const loadBookingForInvoice = async (bookingId: string) => {
+  const booking = await Booking.findById(bookingId)
     .populate("customer")
     .populate("professional")
-    .populate("project", "title extraOptions subprojects");
+    .populate("project", "title extraOptions subprojects category service serviceConfigurationId");
+  return hydrateServiceConfigPricingOptions(booking);
+};
 
 const getPlatformParty = async (): Promise<UblPlatformParty> => {
   const settings = await PlatformSettings.getCurrentConfig();
@@ -865,7 +931,11 @@ const getPlatformParty = async (): Promise<UblPlatformParty> => {
   };
 };
 
-const notifyInvoiceReady = async (booking: any, update: InvoiceArtifactResult) => {
+const notifyInvoiceReady = async (
+  booking: any,
+  update: InvoiceArtifactResult,
+  attachments?: { customerInvoicePdf?: Buffer; supplierInvoicePdf?: Buffer },
+) => {
   const customerId = booking.customer?._id?.toString?.() || booking.customer?.toString?.();
   const professionalId = booking.professional?._id?.toString?.() || booking.professional?.toString?.();
   const bookingId = booking._id?.toString?.() || "";
@@ -881,6 +951,9 @@ const notifyInvoiceReady = async (booking: any, update: InvoiceArtifactResult) =
           bookingId,
           invoiceNumber: update.invoiceNumber,
           invoiceUrl,
+          ...(attachments?.customerInvoicePdf
+            ? { invoiceAttachmentContent: attachments.customerInvoicePdf.toString("base64") }
+            : {}),
         },
       });
     }
@@ -895,6 +968,9 @@ const notifyInvoiceReady = async (booking: any, update: InvoiceArtifactResult) =
           bookingId,
           invoiceNumber: update.supplierInvoiceNumber,
           invoiceUrl: supplierInvoiceUrl,
+          ...(attachments?.supplierInvoicePdf
+            ? { invoiceAttachmentContent: attachments.supplierInvoicePdf.toString("base64") }
+            : {}),
         },
       });
     }
@@ -1379,7 +1455,10 @@ export async function ensureBookingInvoiceArtifacts(
       });
     }
 
-    await notifyInvoiceReady(booking, update);
+    await notifyInvoiceReady(booking, update, {
+      customerInvoicePdf: customerInvoice.pdfBuffer,
+      supplierInvoicePdf: supplierInvoice.pdfBuffer,
+    });
     return update;
   } catch (error) {
     await clearInvoiceGenerationClaim(bookingId);
@@ -1811,6 +1890,7 @@ const notifyManualArtifactReady = async (
   input: ManualInvoiceCorrectionInput,
   number: string,
   url: string,
+  pdfBuffer?: Buffer,
 ) => {
   const bookingId = booking._id?.toString?.() || "";
   const eventKey = input.side === "customer" ? "customer.invoice_ready" : "professional.invoice_ready";
@@ -1824,7 +1904,12 @@ const notifyManualArtifactReady = async (
     eventKey,
     entityType: "booking",
     entityId: bookingId,
-    context: { bookingId, invoiceNumber: number, invoiceUrl },
+    context: {
+      bookingId,
+      invoiceNumber: number,
+      invoiceUrl,
+      ...(pdfBuffer ? { invoiceAttachmentContent: pdfBuffer.toString("base64") } : {}),
+    },
   });
 };
 
@@ -1992,7 +2077,7 @@ export async function createManualInvoiceArtifact(
   await Booking.updateOne({ _id: booking._id }, bookingUpdate);
   await persistPaymentArtifactUpdate(booking._id, paymentId, fields, historyEntry);
   try {
-    await notifyManualArtifactReady(booking, input, generated.invoiceNumber, artifactUrl);
+    await notifyManualArtifactReady(booking, input, generated.invoiceNumber, artifactUrl, generated.pdfBuffer);
   } catch (notifyError) {
     // The artifact and history entry are already persisted; a notification
     // failure must not make the admin endpoint report the operation as failed.

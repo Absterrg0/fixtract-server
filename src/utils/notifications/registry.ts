@@ -95,6 +95,10 @@ export interface NotifyContext {
   counterpartyName?: string;
   chatMirrorLines?: ChatMirrorLine[];
   discountCode?: string;
+  invoiceNumber?: string;
+  invoiceUrl?: string;
+  /** Base64-encoded invoice PDF, so invoice_ready emails attach it directly. */
+  invoiceAttachmentContent?: string;
   [key: string]: unknown;
 }
 
@@ -173,6 +177,8 @@ const def = (
               : undefined,
           attachmentUrl: typeof ctx.invoiceUrl === 'string' ? ctx.invoiceUrl : undefined,
           attachmentName: ctx.invoiceNumber ? `${String(ctx.invoiceNumber)}.pdf` : 'invoice.pdf',
+          attachmentContent:
+            typeof ctx.invoiceAttachmentContent === 'string' ? ctx.invoiceAttachmentContent : undefined,
         }),
     };
   };

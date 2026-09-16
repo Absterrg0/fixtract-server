@@ -76,6 +76,44 @@ export function assertValidInvoiceUnit(unit?: string | null, context = "invoice 
 }
 
 /**
+ * Best-effort unit normalization for rendering an already-issued document.
+ * Unlike assertValidInvoiceUnit it never throws: malformed historical data
+ * degrades to "no unit" instead of blocking invoice generation.
+ */
+export function tryNormalizeInvoiceUnit(unit?: string | null): string | undefined {
+  try {
+    return assertValidInvoiceUnit(unit);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve the real service unit for a booking line.
+ * Priority: checkout snapshot unit -> selected subproject pricing unit ->
+ * service-config pricing option unit matching the pricing type.
+ * Never throws so a bad legacy value cannot block an invoice.
+ */
+export function resolveInvoiceServiceUnit(params: {
+  checkoutUnit?: string | null;
+  subprojectUnit?: string | null;
+  pricingType?: string | null;
+  pricingOptions?: Array<{ pricingType?: string; unit?: string }> | null;
+}): string | undefined {
+  const direct =
+    tryNormalizeInvoiceUnit(params.checkoutUnit) ||
+    tryNormalizeInvoiceUnit(params.subprojectUnit);
+  if (direct) return direct;
+  if (params.pricingType === "unit") {
+    const match = (params.pricingOptions || []).find(
+      (option) => option?.pricingType === "price_per_unit" && tryNormalizeInvoiceUnit(option?.unit),
+    );
+    return tryNormalizeInvoiceUnit(match?.unit);
+  }
+  return undefined;
+}
+
+/**
  * UNECE Recommendation 20 unit codes for Peppol/UBL.
  * - undefined/empty (fixed-price, qty 1, no unit) -> C62 explicitly (documented
  *   service-unit default, not a silent unknown mapping).

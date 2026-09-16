@@ -19,9 +19,9 @@ import {
   getCustomerExtraCostNet,
 } from "../utils/invoiceAccounting";
 import {
-  assertValidInvoiceUnit,
   formatVatAnswerWithUnit,
-  mapUnitToUneceCode,
+  resolveInvoiceServiceUnit,
+  tryNormalizeInvoiceUnit,
 } from "../utils/invoiceUnits";
 import ServiceConfiguration from "../models/serviceConfiguration";
 
@@ -485,7 +485,7 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
       // VAT
       if (data.payment.reverseCharge) {
         doc
-          .text("Reverse Charge", 50, rowY)
+          .text("VAT (Reverse charge)", 50, rowY)
           .text(formatCurrency(0, data.payment.currency), 450, rowY, {
             align: "right",
           });
@@ -608,17 +608,26 @@ export async function generateBookingInvoice(
     booking.vatDecision?.country || booking.location?.country || customer.companyAddress?.country || customer.location?.country,
   );
   const settings = await PlatformSettings.getCurrentConfig();
-  // Load VAT question units for answer rendering (best-effort, never blocks).
+  // Load VAT question units (for answer rendering) and pricing options (unit
+  // fallback) from the service configuration. Best-effort, never blocks.
   try {
     const configId = (booking as any)?.project?.serviceConfigurationId || (booking as any)?.serviceConfigurationId;
+    const projectCategory = (booking as any)?.project?.category;
+    const projectService = (booking as any)?.project?.service;
+    const configSelect = "vatManagement.reducedVatQuestions vatManagement.professionalVatQuestions pricingOptions";
     const config = configId
-      ? await ServiceConfiguration.findById(configId).select("vatManagement.reducedVatQuestions vatManagement.professionalVatQuestions").lean()
-      : await ServiceConfiguration.findOne({
-          category: (booking as any)?.project?.category,
-          service: (booking as any)?.project?.service,
-        }).select("vatManagement.reducedVatQuestions vatManagement.professionalVatQuestions").lean();
+      ? await ServiceConfiguration.findById(configId).select(configSelect).lean()
+      : projectCategory && projectService
+        ? await ServiceConfiguration.findOne({
+            category: projectCategory,
+            service: projectService,
+          }).select(configSelect).lean()
+        : null;
     if (config?.vatManagement) {
       (booking as any).__vatQuestionConfig = config.vatManagement;
+    }
+    if (Array.isArray((config as any)?.pricingOptions)) {
+      (booking as any).__serviceConfigPricingOptions = (config as any).pricingOptions;
     }
   } catch {
     // ignore, answers render without units
@@ -649,13 +658,23 @@ export async function generateBookingInvoice(
   const checkoutUnitPrice = booking.checkoutSnapshot?.pricingType === "unit"
     ? Number(booking.checkoutSnapshot.unitAmount)
     : undefined;
-  // Real service unit from the project pricing (m², hour...). Unknown units
-  // throw instead of silently becoming "units"/C62.
-  const checkoutUnit = assertValidInvoiceUnit(
-    (booking.checkoutSnapshot as any)?.unit ||
-      (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
-    "service unit",
-  );
+  // Real service unit from the project pricing (m², hour...), falling back to
+  // the service configuration's pricing option. Unknown/malformed values are
+  // skipped rather than aborting invoice generation.
+  const selectedSubprojectForUnit =
+    typeof booking.selectedSubprojectIndex === "number" &&
+    Array.isArray(booking.project?.subprojects) &&
+    booking.selectedSubprojectIndex >= 0 &&
+    booking.selectedSubprojectIndex < booking.project.subprojects.length
+      ? booking.project.subprojects[booking.selectedSubprojectIndex]
+      : undefined;
+  const checkoutUnit = resolveInvoiceServiceUnit({
+    checkoutUnit: (booking.checkoutSnapshot as any)?.unit,
+    subprojectUnit: (selectedSubprojectForUnit as any)?.pricing?.unit,
+    pricingType:
+      (selectedSubprojectForUnit as any)?.pricing?.type || booking.checkoutSnapshot?.pricingType,
+    pricingOptions: (booking as any).__serviceConfigPricingOptions,
+  });
   const manualLines = (booking as any).__manualInvoiceLines as ManualInvoiceLine[] | undefined;
   const quoteLines = manualLines?.length
     ? manualLines.map((line) => ({
@@ -721,7 +740,7 @@ export async function generateBookingInvoice(
   const customerExtraCostNet = getCustomerExtraCostNet(booking.payment, rawExtraCostTotal);
   const extraCostScale = rawExtraCostTotal > 0 ? customerExtraCostNet / rawExtraCostTotal : 1;
   const extraCostLines = manualLines?.length ? [] : (booking.extraCosts || []).map((cost) => {
-    const costUnit = assertValidInvoiceUnit((cost as any).unit, "extra-cost unit") || checkoutUnit;
+    const costUnit = tryNormalizeInvoiceUnit((cost as any).unit) || checkoutUnit;
     const unitDetail =
       cost.type === "unit_adjustment" &&
       Number.isFinite(cost.actualUnits) &&
@@ -821,7 +840,7 @@ export async function generateBookingInvoice(
     };
   });
   const supplierExtraCostLines = (booking.extraCosts || []).map((cost) => {
-    const supplierCostUnit = assertValidInvoiceUnit((cost as any).unit, "extra-cost unit") || checkoutUnit;
+    const supplierCostUnit = tryNormalizeInvoiceUnit((cost as any).unit) || checkoutUnit;
     return {
       description: `Extra cost: ${cost.name}${cost.justification ? ` - ${cost.justification}` : ""}`,
       amount: (Number(cost.amount) || 0) * sign,

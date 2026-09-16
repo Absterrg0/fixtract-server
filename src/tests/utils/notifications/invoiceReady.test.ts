@@ -37,4 +37,22 @@ describe("invoice_ready notification + email/PDF end-to-end contract", () => {
       }),
     );
   });
+
+  it("attaches the invoice PDF as base64 content when provided", async () => {
+    vi.mocked(sendNotificationEmail).mockClear();
+    const def: any = getEventDef("customer.invoice_ready");
+    const built = def.build({
+      bookingId: "bk1",
+      invoiceNumber: "FIX-2026-000009",
+      invoiceUrl: "https://s3/FIX.pdf",
+      invoiceAttachmentContent: "JVBERi0xLjQK",
+    });
+    await built.sendEmail!({ email: "c@example.com", name: "C", userId: "u1" });
+    expect(sendNotificationEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachmentContent: "JVBERi0xLjQK",
+        attachmentName: "FIX-2026-000009.pdf",
+      }),
+    );
+  });
 });
