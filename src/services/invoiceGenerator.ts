@@ -11,7 +11,7 @@ import { getVATExplanation, isEUCountry } from "../utils/vat";
 import { formatCurrency } from "../utils/payment";
 import {
   parseVatCountryCode,
-  resolveSupplierB2BInvoiceDecision,
+  resolveSupplierInvoiceVatDecision,
 } from "../utils/vatManagement";
 import {
   calculateInvoiceSideTotals,
@@ -155,6 +155,9 @@ export interface InvoiceBooking {
     title?: string;
     category?: string;
     service?: string;
+    serviceConfigurationId?: string;
+    areaOfWork?: string;
+    vatProfessionalAnswers?: Array<{ fieldName?: string; value?: unknown }>;
     extraOptions?: Array<{ name?: string; _id?: string }>;
     subprojects?: Array<{
       title?: string;
@@ -416,40 +419,51 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
         doc.text("Prepared and sent on behalf of the supplier.", 320, 230, { width: 230 });
       }
 
-      // Service description
+      // Service description — render as flowing text so long descriptions
+      // paginate naturally instead of overflowing a fixed-height coordinate.
       doc.fontSize(12).text("SERVICE DESCRIPTION:", 50, 280);
-      const descriptionStartY = 300;
       const descriptionWidth = 500;
       doc.fontSize(10);
-      const descriptionHeight = doc.heightOfString(data.serviceDescription, {
-        width: descriptionWidth,
-      });
-      doc.text(data.serviceDescription, 50, descriptionStartY, { width: descriptionWidth });
+      doc.text(data.serviceDescription || " ", 50, 300, { width: descriptionWidth });
 
       const dateLines = [
         data.actualStartDate ? `Actual start date: ${new Date(data.actualStartDate).toLocaleDateString("en-GB")}` : undefined,
         data.actualEndDate ? `Actual end date: ${new Date(data.actualEndDate).toLocaleDateString("en-GB")}` : undefined,
       ].filter(Boolean);
+
+      // Bottom of the usable content area. The footer/thank-you block is drawn
+      // in the page loop, so content must stop above it.
+      const contentBottom = () => doc.page.height - doc.page.margins.bottom - 60;
+      const contentTop = () => doc.page.margins.top;
+      const ensureSpace = (needed: number) => {
+        if (doc.y + needed > contentBottom()) {
+          doc.addPage();
+          doc.y = contentTop();
+        }
+      };
+
       if (dateLines.length > 0) {
-        doc.text(dateLines.join("\n"), 50, descriptionStartY + descriptionHeight + 8, { width: descriptionWidth });
+        ensureSpace(28);
+        doc.text(dateLines.join("\n"), 50, doc.y + 6, { width: descriptionWidth });
       }
 
-      // Invoice table (always rendered below the variable-height description)
-      const tableTop = Math.max(360, descriptionStartY + descriptionHeight + (dateLines.length > 0 ? 45 : 20));
+      // Invoice table (flows below the variable-height description).
+      ensureSpace(46);
+      let rowY = doc.y + 12;
 
       doc
         .font("Helvetica-Bold")
         .fontSize(10)
-        .text("Description", 50, tableTop)
-        .text("Qty", 360, tableTop, { align: "right", width: 35 })
-        .text("Unit price", 395, tableTop, { align: "right", width: 70 })
-        .text("Amount", 475, tableTop, { align: "right", width: 75 });
+        .text("Description", 50, rowY, { width: 300 })
+        .text("Qty", 360, rowY, { align: "right", width: 35 })
+        .text("Unit price", 395, rowY, { align: "right", width: 70 })
+        .text("Amount", 475, rowY, { align: "right", width: 75 });
       doc.font("Helvetica");
 
       // Line
-      doc.moveTo(50, tableTop + 20).lineTo(550, tableTop + 20).stroke();
+      doc.moveTo(50, rowY + 18).lineTo(550, rowY + 18).stroke();
+      doc.y = rowY + 24;
 
-      let rowY = tableTop + 30;
       const lineItems = data.lineItems?.length
         ? data.lineItems
         : [{ description: "Service Amount", amount: data.payment.netAmount, vatRate: data.payment.vatRate }];
@@ -464,93 +478,96 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
         if (data.documentType === "credit_note" && item.unitPrice == null && Number.isFinite(unitPrice)) {
           unitPrice = Math.abs(unitPrice);
         }
+        const descriptionText = `${item.description}${vatSuffix}`;
+        const rowHeight = Math.max(
+          20,
+          doc.heightOfString(descriptionText, { width: 300 }) + 6,
+        );
+        ensureSpace(rowHeight);
+        const y = doc.y;
         doc
-          .text(`${item.description}${vatSuffix}`, 50, rowY, { width: 300 })
-          .text(Number.isFinite(quantity) && quantity > 0 ? `${quantity}${item.unit ? ` ${item.unit}` : ""}` : "", 360, rowY, { align: "right", width: 35 })
-          .text(Number.isFinite(unitPrice) ? formatCurrency(unitPrice, data.payment.currency) : "", 395, rowY, { align: "right", width: 70 })
-          .text(formatCurrency(item.amount, data.payment.currency), 475, rowY, { align: "right", width: 75 });
-        rowY += 20;
+          .text(descriptionText, 50, y, { width: 300 })
+          .text(Number.isFinite(quantity) && quantity > 0 ? `${quantity}${item.unit ? ` ${item.unit}` : ""}` : "", 360, y, { align: "right", width: 35 })
+          .text(Number.isFinite(unitPrice) ? formatCurrency(unitPrice, data.payment.currency) : "", 395, y, { align: "right", width: 70 })
+          .text(formatCurrency(item.amount, data.payment.currency), 475, y, { align: "right", width: 75 });
+        doc.y = y + rowHeight;
       }
 
+      rowY = doc.y;
       for (const discount of data.discounts || []) {
+        ensureSpace(20);
+        rowY = doc.y;
         const discountAmountLabel = discount.amount < 0
           ? formatCurrency(Math.abs(discount.amount), data.payment.currency)
           : `-${formatCurrency(Math.abs(discount.amount), data.payment.currency)}`;
         doc
           .text(discount.label, 50, rowY)
           .text(discountAmountLabel, 450, rowY, { align: "right" });
-        rowY += 20;
+        doc.y = rowY + 20;
       }
 
       // VAT
       if (data.payment.reverseCharge) {
+        ensureSpace(20);
+        rowY = doc.y;
         doc
           .text("VAT (Reverse charge)", 50, rowY)
-          .text(formatCurrency(0, data.payment.currency), 450, rowY, {
-            align: "right",
-          });
-        rowY += 20;
+          .text(formatCurrency(0, data.payment.currency), 450, rowY, { align: "right" });
+        doc.y = rowY + 20;
       } else if (data.payment.vatAmount !== 0) {
+        ensureSpace(20);
+        rowY = doc.y;
         doc
           .text(`VAT (${data.payment.vatRate}%)`, 50, rowY)
-          .text(formatCurrency(data.payment.vatAmount, data.payment.currency), 450, rowY, {
-            align: "right",
-          });
-        rowY += 20;
+          .text(formatCurrency(data.payment.vatAmount, data.payment.currency), 450, rowY, { align: "right" });
+        doc.y = rowY + 20;
       }
 
-      // Total line
-      doc.moveTo(50, rowY).lineTo(550, rowY).stroke();
-
       // Total
+      ensureSpace(40);
+      rowY = doc.y;
+      doc.moveTo(50, rowY).lineTo(550, rowY).stroke();
       doc
         .font("Helvetica-Bold")
         .fontSize(12)
         .text("TOTAL", 50, rowY + 10)
-        .text(formatCurrency(data.payment.totalWithVat, data.payment.currency), 450, rowY + 10, {
-          align: "right",
-        });
+        .text(formatCurrency(data.payment.totalWithVat, data.payment.currency), 450, rowY + 10, { align: "right" });
       doc.font("Helvetica");
+      doc.y = rowY + 28;
 
       // VAT explanation
       if (data.vatExplanation) {
-        doc.fontSize(9).text(data.vatExplanation, 50, rowY + 50, {
-          width: 500,
-          align: "left",
-        });
+        ensureSpace(24);
+        doc.fontSize(9).text(data.vatExplanation, 50, doc.y + 8, { width: 500, align: "left" });
+        doc.fontSize(10);
       }
 
-      // Footer: platform info lives here (not in the header).
-      // Keep it anchored to the page bottom so a long description does
-      // not create a blank page containing only a misnumbered footer.
-      const footerY = doc.page.height - doc.page.margins.bottom - 60;
+      // Footer + page numbers: drawn on every buffered page, anchored inside
+      // the bottom margin. Drawing them at a y below page.maxY() (as before)
+      // makes PDFKit append a blank page just to hold the page number.
+      const footerY = doc.page.height - doc.page.margins.bottom - 52;
+      const pageNumberY = doc.page.height - doc.page.margins.bottom - 12;
       const platformLine = [issuer.name || "Fixtract", issuer.street, [issuer.postalCode, issuer.city].filter(Boolean).join(" "), issuer.country].filter(Boolean).join(" · ");
       const platformVatLine = issuer.vatNumber ? `VAT: ${issuer.vatNumber}` : undefined;
-
-      doc
-        .fontSize(8)
-        .text("Thank you for using Fixtract!", 50, footerY, {
-          align: "center",
-          width: 500,
-        })
-        .text("This invoice was generated automatically by the Fixtract platform.", 50, footerY + 12, {
-          align: "center",
-          width: 500,
-        });
-      if (platformLine) {
-        doc.text(platformLine, 50, footerY + 24, { align: "center", width: 500 });
-      }
-      if (platformVatLine) {
-        doc.text(platformVatLine, 50, footerY + 34, { align: "center", width: 500 });
-      }
 
       const pageRange = doc.bufferedPageRange();
       for (let pageIndex = pageRange.start; pageIndex < pageRange.start + pageRange.count; pageIndex += 1) {
         doc.switchToPage(pageIndex);
         doc
           .fontSize(8)
+          .fillColor("#000000")
+          .text("Thank you for using Fixtract!", 50, footerY, { align: "center", width: 500 })
+          .text("This invoice was generated automatically by the Fixtract platform.", 50, footerY + 10, { align: "center", width: 500 });
+        if (platformLine) {
+          doc.text(platformLine, 50, footerY + 20, { align: "center", width: 500 });
+        }
+        if (platformVatLine) {
+          doc.text(platformVatLine, 50, footerY + 30, { align: "center", width: 500 });
+        }
+        doc
+          .fontSize(8)
           .fillColor("#666666")
-          .text(`Page ${pageIndex - pageRange.start + 1} of ${pageRange.count}`, 50, doc.page.height - 35, {
+          .text(`Page ${pageIndex - pageRange.start + 1} of ${pageRange.count}`, 50, pageNumberY, {
             align: "center",
             width: 500,
           })
@@ -614,7 +631,7 @@ export async function generateBookingInvoice(
     const configId = (booking as any)?.project?.serviceConfigurationId || (booking as any)?.serviceConfigurationId;
     const projectCategory = (booking as any)?.project?.category;
     const projectService = (booking as any)?.project?.service;
-    const configSelect = "vatManagement.reducedVatQuestions vatManagement.professionalVatQuestions pricingOptions";
+    const configSelect = "vatManagement vatManagement.reducedVatQuestions vatManagement.professionalVatQuestions pricingOptions";
     const config = configId
       ? await ServiceConfiguration.findById(configId).select(configSelect).lean()
       : projectCategory && projectService
@@ -792,15 +809,40 @@ export async function generateBookingInvoice(
     professional.businessInfo?.country || (professional as any)?.location?.country,
   );
   const supplierVatCountry = parseVatCountryCode(issuer.country);
-  const supplierVatDecision = resolveSupplierB2BInvoiceDecision({
-    supplierCountry,
-    buyerCountry: supplierVatCountry,
-    supplierVatNumber: (professional as any)?.businessInfo?.vatNumber || professional.vatNumber,
-    buyerVatNumber: issuer.vatNumber,
-    bookingCountry: booking.vatDecision?.country || (booking as any)?.location?.country,
-    propertyNature: booking.vatDecision?.propertyNature || "movable",
-    exemptFromBelgianReverseCharge: booking.vatDecision?.exemptFromBelgianReverseCharge,
-  });
+  const professionalVatAnswers = ((booking.project as any)?.vatProfessionalAnswers || []).reduce(
+    (acc: Record<string, unknown>, answer: { fieldName?: string; value?: unknown }) => {
+      if (answer?.fieldName) acc[String(answer.fieldName)] = answer.value;
+      return acc;
+    },
+    {},
+  );
+  const customerVatAnswers = (booking.vatDecision?.answers || []).reduce(
+    (acc: Record<string, unknown>, answer: { fieldName?: string; value?: unknown }) => {
+      if (answer?.fieldName) acc[String(answer.fieldName)] = answer.value;
+      return acc;
+    },
+    {},
+  );
+  // Self-bill VAT must follow the same configured rate as the customer leg
+  // (e.g. 6% reduced for eligible renovations), not the bare country standard.
+  // Reuse the decision cached by loadBookingForInvoice so the PDF and UBL agree.
+  const supplierVatDecision = (booking as any).__supplierVatDecision
+    || await resolveSupplierInvoiceVatDecision({
+      serviceConfigurationId: (booking.project as any)?.serviceConfigurationId,
+      category: (booking.project as any)?.category,
+      service: (booking.project as any)?.service,
+      areaOfWork: (booking.project as any)?.areaOfWork,
+      supplierCountry,
+      buyerCountry: supplierVatCountry,
+      supplierVatNumber: (professional as any)?.businessInfo?.vatNumber || professional.vatNumber,
+      buyerVatNumber: issuer.vatNumber,
+      buyerVatVerified: true,
+      bookingCountry: booking.vatDecision?.country || (booking as any)?.location?.country,
+      propertyNature: booking.vatDecision?.propertyNature,
+      exemptFromBelgianReverseCharge: booking.vatDecision?.exemptFromBelgianReverseCharge,
+      answers: customerVatAnswers,
+      professionalAnswers: professionalVatAnswers,
+    });
   const supplierReverseCharge = manualLines?.length && selfBilling
     ? Boolean(booking.payment.reverseCharge)
     : Boolean(supplierVatDecision.reverseCharge);

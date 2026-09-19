@@ -92,6 +92,47 @@ describe("invoice PDF artifacts", () => {
     expect(encodedText).toContain(Buffer.from("SUPPLIER").toString("latin1"));
   });
 
+  it("paginates long descriptions without creating a page that only holds the page number", async () => {
+    const longDescription = Array.from(
+      { length: 60 },
+      (_, index) => `Scope line ${index + 1}: detailed description of the work.`,
+    ).join("\n");
+    const pdf = await generateInvoicePDF({
+      invoiceNumber: "FIX-2026-000003",
+      invoiceDate: new Date("2026-08-20T00:00:00.000Z"),
+      bookingNumber: "BK-LONG",
+      customer: { name: "Customer", email: "customer@example.com", country: "BE" },
+      professional: { name: "Professional", country: "BE" },
+      payment: { netAmount: 100, vatAmount: 21, vatRate: 21, totalWithVat: 121, currency: "EUR" },
+      serviceDescription: longDescription,
+      lineItems: [{ description: "Service", amount: 100, vatRate: 21, quantity: 2, unitPrice: 50 }],
+    });
+
+    const encodedText = concatenatePdfHexText(extractPdfStreamText(pdf));
+    expect(encodedText).toContain(Buffer.from("Page 1 of 2").toString("latin1"));
+    expect(encodedText).toContain(Buffer.from("Page 2 of 2").toString("latin1"));
+    // The footer must be present on every page, not only the last one.
+    const footerOccurrences = encodedText.split("Thank you for using Fixtract!").length - 1;
+    expect(footerOccurrences).toBe(2);
+  });
+
+  it("keeps a short invoice on a single page", async () => {
+    const pdf = await generateInvoicePDF({
+      invoiceNumber: "FIX-2026-000004",
+      invoiceDate: new Date("2026-08-20T00:00:00.000Z"),
+      bookingNumber: "BK-SHORT",
+      customer: { name: "Customer", email: "customer@example.com", country: "BE" },
+      professional: { name: "Professional", country: "BE" },
+      payment: { netAmount: 100, vatAmount: 21, vatRate: 21, totalWithVat: 121, currency: "EUR" },
+      serviceDescription: "Short service",
+      lineItems: [{ description: "Service", amount: 100, vatRate: 21, quantity: 1, unitPrice: 100 }],
+    });
+
+    const encodedText = concatenatePdfHexText(extractPdfStreamText(pdf));
+    expect(encodedText).toContain(Buffer.from("Page 1 of 1").toString("latin1"));
+    expect(encodedText).not.toContain(Buffer.from("Page 2 of").toString("latin1"));
+  });
+
   it("applies manual party overrides to hydrated bookings without losing fields", () => {
     const booking = {
       toObject: () => ({
