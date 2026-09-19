@@ -30,9 +30,12 @@ const concatenatePdfHexText = (streamText: string): string =>
     .map((match) => Buffer.from(match[1], "hex").toString("latin1"))
     .join("");
 
-const PDF_PAGE_HEIGHT = 841.89;
 // Mirrors invoiceGenerator: 50pt page margin + 60pt reserved footer band.
-const PDF_FOOTER_BAND_TOP = PDF_PAGE_HEIGHT - (50 + 60);
+// PDFKit flips the page (`1 0 0 -1 0 <height> cm`), so a text-matrix y is
+// measured from the PDF bottom edge; the band starts this many points above it.
+const PDF_CONTENT_MARGIN = 50;
+const PDF_FOOTER_BAND = 60;
+const PDF_FOOTER_BAND_TOP_FROM_BOTTOM = PDF_CONTENT_MARGIN + PDF_FOOTER_BAND;
 const PDF_FOOTER_PATTERNS = [
   /^Page \d+ of \d+$/,
   /^Thank you for using Fixtract!$/,
@@ -73,10 +76,10 @@ const extractPdfPageTextStreams = (pdf: Buffer): string[] => {
   return parts;
 };
 
-/** Text baselines measured as distance from the top edge of the page. */
-const extractTextPositions = (pageStream: string): Array<{ top: number; text: string }> =>
+/** Text baselines measured from the PDF bottom edge (the native `Tm` y). */
+const extractTextPositions = (pageStream: string): Array<{ yFromBottom: number; text: string }> =>
   [...pageStream.matchAll(/1 0 0 1 ([\d.]+) ([\d.]+) Tm([\s\S]*?)ET/g)].map((match) => ({
-    top: PDF_PAGE_HEIGHT - Number(match[2]),
+    yFromBottom: Number(match[2]),
     text: concatenatePdfHexText(match[3]),
   }));
 
@@ -169,13 +172,13 @@ describe("invoice PDF artifacts", () => {
       // Footer/page number is present on each page, inside the reserved band.
       const pageNumber = items.find((item) => /^Page \d+ of \d+$/.test(item.text));
       expect(pageNumber).toBeDefined();
-      expect(pageNumber!.top).toBeGreaterThanOrEqual(PDF_FOOTER_BAND_TOP);
+      expect(pageNumber!.yFromBottom).toBeLessThanOrEqual(PDF_FOOTER_BAND_TOP_FROM_BOTTOM);
 
       // No description/table content may extend into the footer band.
       const contentItems = items.filter((item) => item.text && !isFooterText(item.text));
       expect(contentItems.length).toBeGreaterThan(0);
       for (const item of contentItems) {
-        expect(item.top).toBeLessThanOrEqual(PDF_FOOTER_BAND_TOP);
+        expect(item.yFromBottom).toBeGreaterThanOrEqual(PDF_FOOTER_BAND_TOP_FROM_BOTTOM);
       }
     }
 
