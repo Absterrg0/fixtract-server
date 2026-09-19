@@ -175,6 +175,33 @@ describe("supplier self-bill honors the service configuration rate", () => {
     expect(decision.appliedRate).toBe(21);
   });
 
+  it("uses the configured standard rate when no reduced-rate rule matches", async () => {
+    mockConfig({
+      ...reducedConfig,
+      vatManagement: {
+        ...reducedConfig.vatManagement,
+        logicRules: [
+          {
+            country: "BE",
+            standardRate: 20,
+            reducedRate: 6,
+            conditions: [{ fieldName: "building_age", operator: "greater_than_or_equal", value: 100 }],
+            action: "reduced_rate",
+            priority: 1,
+            isActive: true,
+          },
+        ],
+      },
+    });
+    const decision = await resolveSupplierInvoiceVatDecision({
+      ...baseParams,
+      professionalAnswers: { building_age: 12, private_housing: true },
+    });
+    expect(decision.action).toBe("standard_rate");
+    expect(decision.standardRate).toBe(20);
+    expect(decision.appliedRate).toBe(20);
+  });
+
   it("still applies reverse charge for immovable work regardless of the configured rate", async () => {
     mockConfig({
       ...reducedConfig,

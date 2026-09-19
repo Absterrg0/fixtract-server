@@ -417,6 +417,12 @@ export const resolveSupplierInvoiceVatDecision = async (params: {
     const rules = [...(vat.logicRules || [])]
       .filter((rule) => rule.isActive !== false && normalizeVatCountry(rule.country) === country)
       .sort((a, b) => (a.priority || 0) - (b.priority || 0));
+    // The configuration's standard rate overrides the static country rate even
+    // when no reduced-rate rule matches.
+    if (Number.isFinite(rules[0]?.standardRate)) {
+      standardRate = Number(rules[0].standardRate);
+      appliedRate = standardRate;
+    }
     for (const rule of rules) {
       if (!evaluateVatRule(rule, combinedAnswers)) continue;
       if (Number.isFinite(rule.standardRate)) standardRate = Number(rule.standardRate);

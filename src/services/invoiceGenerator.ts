@@ -852,6 +852,9 @@ export async function generateBookingInvoice(
       answers: customerVatAnswers,
       professionalAnswers: professionalVatAnswers,
     });
+  // Cache so the UBL builder (which resolves the supplier VAT synchronously)
+  // uses the exact same decision as the PDF.
+  (booking as any).__supplierVatDecision = supplierVatDecision;
   const supplierReverseCharge = manualLines?.length && selfBilling
     ? Boolean(booking.payment.reverseCharge)
     : Boolean(supplierVatDecision.reverseCharge);
