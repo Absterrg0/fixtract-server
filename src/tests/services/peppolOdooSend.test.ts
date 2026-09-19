@@ -86,6 +86,14 @@ describe("triggerOdooEdiSend", () => {
 describe("readOdooEdiDeliveryState", () => {
   beforeEach(() => odooJson2CallMock.mockReset());
 
+  it("keeps processing queued even when Odoo marks the move peppol_is_sent", async () => {
+    dispatchMock({
+      "account.edi.document.search_read": () => { throw new Error("model does not exist"); },
+      "account.move.read": () => [{ peppol_is_sent: true, peppol_move_state: "processing" }],
+    });
+    expect(await readOdooEdiDeliveryState(config, 100)).toEqual([{ state: "processing" }]);
+  });
+
   it("reads the modern move-level Peppol state when account.edi.document is gone", async () => {
     dispatchMock({
       "account.edi.document.search_read": () => {

@@ -343,8 +343,15 @@ const getOdooInvoiceLinesForPayload = (booking: any, payload: PeppolDispatchPayl
   return getOdooInvoiceLines(booking, payload.documentType);
 };
 
+type OdooTaxConfig = Pick<OdooAccountingConfig, "taxIdsByRate" | "reverseChargeTaxId">;
+
+const getTaxConfigForSide = (config: OdooAccountingConfig, side: "customer" | "supplier"): OdooTaxConfig =>
+  side === "supplier"
+    ? { taxIdsByRate: config.purchaseTaxIdsByRate || {}, reverseChargeTaxId: config.purchaseReverseChargeTaxId }
+    : config;
+
 const getTaxIdsForLine = (
-  config: OdooAccountingConfig,
+  config: OdooTaxConfig,
   line: OdooInvoiceLine,
   reverseCharge: boolean
 ): number[] => {
@@ -360,7 +367,7 @@ const getTaxIdsForLine = (
 };
 
 const findMissingTaxMapping = (
-  config: OdooAccountingConfig,
+  config: OdooTaxConfig,
   lines: OdooInvoiceLine[],
   reverseCharge: boolean
 ): OdooInvoiceLine | undefined =>
@@ -479,6 +486,8 @@ const buildOdooMoveVals = async (
   payload: PeppolDispatchPayload,
   partnerId: number
 ) => {
+  const journalId = payload.side === "supplier" ? config.selfBillingJournalId : config.salesJournalId;
+  const taxConfig = getTaxConfigForSide(config, payload.side);
   const currency = booking.payment?.currency || "EUR";
   const currencyId = currency === "EUR" ? undefined : await findOdooCurrencyId(config, currency);
   const reverseCharge = payload.reverseCharge ?? Boolean(booking.payment?.reverseCharge);
@@ -491,7 +500,7 @@ const buildOdooMoveVals = async (
       price_unit: priceUnit,
       account_id: payload.side === "supplier" ? config.expenseAccountId : config.incomeAccountId,
     };
-    const taxIds = getTaxIdsForLine(config, line, reverseCharge);
+    const taxIds = getTaxIdsForLine(taxConfig, line, reverseCharge);
     if (taxIds.length > 0) {
       lineVals.tax_ids = [[6, 0, taxIds]];
     }
@@ -512,7 +521,7 @@ const buildOdooMoveVals = async (
       payload.ublUrl ? `Fixtract UBL: ${payload.ublUrl}` : undefined,
       payload.peppolParticipantId ? `Peppol participant: ${payload.peppolParticipantId}` : undefined,
     ].filter(Boolean).join("\n"),
-    ...(config.salesJournalId ? { journal_id: config.salesJournalId } : {}),
+    ...(journalId ? { journal_id: journalId } : {}),
     ...(currencyId ? { currency_id: currencyId } : {}),
     invoice_line_ids: invoiceLineIds,
   };
@@ -589,7 +598,8 @@ const readOdooMovePeppolState = async (
     const move = value[0];
     if (!move) return undefined;
     const rawState = typeof move.peppol_move_state === "string" ? move.peppol_move_state.toLowerCase() : "";
-    if (move.peppol_is_sent || rawState === "done" || rawState === "sent") {
+    // peppol_is_sent also includes processing, which is not confirmed delivery.
+    if (rawState === "done" || rawState === "sent") {
       return [{ state: "sent" }];
     }
     if (rawState) {
@@ -640,6 +650,42 @@ export const triggerOdooEdiSend = async (
   }
 };
 
+const odooDeliveryResult = (
+  config: OdooAccountingConfig,
+  moveId: number,
+  ediDocuments: Awaited<ReturnType<typeof readOdooEdiDeliveryState>>,
+): PeppolDispatchResult => {
+  const failedDocument = ediDocuments?.find((document) =>
+    ["error", "cancelled", "canceled"].includes(String(document.state || "").toLowerCase()) ||
+    ["error"].includes(String(document.blocking_level || "").toLowerCase()) ||
+    Boolean(document.error || document.error_message),
+  );
+  if (failedDocument) {
+    return {
+      status: "failed",
+      provider: "odoo",
+      reference: `odoo-account.move-${moveId}`,
+      reason: failedDocument.error_message || failedDocument.error || "Odoo reported a Peppol EDI delivery error",
+      response: { moveId, companyId: config.companyId, ediDocuments },
+      attempts: 1,
+    };
+  }
+  const delivered = ediDocuments?.some((document) =>
+    ["sent", "done", "delivered"].includes(String(document.state || "").toLowerCase()),
+  );
+  return {
+    status: delivered ? "sent" : "queued",
+    provider: "odoo",
+    reference: `odoo-account.move-${moveId}`,
+    reason: delivered
+      ? "Odoo confirms the Peppol EDI document was sent"
+      : "Invoice posted in Odoo; Peppol send requested and delivery status is still pending",
+    dispatchedAt: new Date(),
+    response: { moveId, companyId: config.companyId, ediDocuments },
+    attempts: 1,
+  };
+};
+
 const dispatchToOdoo = async (
   booking: any,
   payload: PeppolDispatchPayload,
@@ -658,10 +704,18 @@ const dispatchToOdoo = async (
     };
   }
 
+  if (payload.side === "supplier" && !config.selfBillingJournalId) {
+    return {
+      status: "failed", provider: "odoo", reference, attempts: 0,
+      reason: "Odoo self-billing purchase journal is missing. Create an active Purchase journal with Self Billing enabled for the configured company.",
+    };
+  }
+
   const reverseCharge = Boolean(payload.reverseCharge ?? booking.payment?.reverseCharge);
+  const taxConfig = getTaxConfigForSide(config, payload.side);
   try {
     const required = await getRequiredOdooVatRates();
-    const coverage = validateOdooTaxCoverage(config, required.rates);
+    const coverage = validateOdooTaxCoverage(taxConfig, required.rates);
     if (!coverage.ok) {
       const parts: string[] = [];
       if (coverage.missingRates.length) parts.push(`Missing Odoo tax mapping for VAT rates ${coverage.missingRates.join(", ")}`);
@@ -674,7 +728,7 @@ const dispatchToOdoo = async (
     console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] tax-coverage check skipped: ${coverageError?.message || coverageError}`);
   }
   const lines = getOdooInvoiceLinesForPayload(booking, payload);
-  const lineWithoutTax = findMissingTaxMapping(config, lines, reverseCharge);
+  const lineWithoutTax = findMissingTaxMapping(taxConfig, lines, reverseCharge);
   if (lineWithoutTax) {
     return {
       status: "failed",
@@ -690,6 +744,14 @@ const dispatchToOdoo = async (
   try {
     console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: creating/finding Odoo move`);
     const existingMove = await findExistingOdooMove(config, payload);
+    if (existingMove?.state === "posted") {
+      const documents = await readOdooEdiDeliveryState(config, existingMove.id);
+      if (documents?.some((document) =>
+        ["sent", "done", "delivered", "processing", "to_send"].includes(String(document.state || "").toLowerCase())
+      )) {
+        return odooDeliveryResult(config, existingMove.id, documents);
+      }
+    }
     const partnerId = existingMove ? undefined : await ensureOdooPartner(config, booking, payload);
     console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: move=${existingMove?.id || "new"} partner=${partnerId || "existing"}`);
     const moveId = existingMove?.id || await (async () => {
@@ -704,7 +766,7 @@ const dispatchToOdoo = async (
         await odooCallWithRetries(config, "account.move", "action_post", { ids: [moveId] });
       } catch (postError: any) {
         return {
-          status: "queued",
+          status: "failed",
           provider: "odoo",
           reference: `odoo-account.move-${moveId}`,
           reason: postError?.message || "Invoice created in Odoo but could not be posted for Peppol send",
@@ -721,41 +783,13 @@ const dispatchToOdoo = async (
       console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: EDI send triggered via ${sendMode}`);
       const ediDocuments = await readOdooEdiDeliveryState(config, moveId);
       console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] delivery:`, JSON.stringify(ediDocuments || []));
-      const failedDocument = ediDocuments?.find((document) =>
-        ["error", "cancelled", "canceled"].includes(String(document.state || "").toLowerCase()) ||
-        ["error"].includes(String(document.blocking_level || "").toLowerCase()) ||
-        Boolean(document.error || document.error_message),
-      );
-      if (failedDocument) {
-        return {
-          status: "failed",
-          provider: "odoo",
-          reference: `odoo-account.move-${moveId}`,
-          reason: failedDocument.error_message || failedDocument.error || "Odoo reported a Peppol EDI delivery error",
-          response: { moveId, companyId: config.companyId, ediDocuments },
-          attempts: 1,
-        };
-      }
-      const delivered = ediDocuments?.some((document) =>
-        ["sent", "done", "delivered"].includes(String(document.state || "").toLowerCase()),
-      );
+      return odooDeliveryResult(config, moveId, ediDocuments);
+    } catch (sendError: any) {
       return {
-        status: delivered ? "sent" : "queued",
+        status: "failed",
         provider: "odoo",
         reference: `odoo-account.move-${moveId}`,
-        reason: delivered
-          ? "Odoo confirms the Peppol EDI document was sent"
-          : "Invoice posted in Odoo; Peppol send requested and delivery status is still pending",
-        dispatchedAt: new Date(),
-        response: { moveId, companyId: config.companyId, ediDocuments },
-        attempts: 1,
-      };
-    } catch {
-      return {
-        status: "queued",
-        provider: "odoo",
-        reference: `odoo-account.move-${moveId}`,
-        reason: "Invoice posted in Odoo; Peppol send pending in Odoo",
+        reason: sendError?.message || "Odoo could not request the Peppol send",
         dispatchedAt: new Date(),
         response: { moveId, companyId: config.companyId },
         attempts: 1,
