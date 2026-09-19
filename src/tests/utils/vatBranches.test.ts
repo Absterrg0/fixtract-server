@@ -188,4 +188,22 @@ describe("supplier self-bill honors the service configuration rate", () => {
     expect(decision.appliedRate).toBe(0);
     expect(decision.vatLabel).toBe("Reverse Charge");
   });
+
+  it("does not resolve a config from a partial natural key", async () => {
+    mockConfig(reducedConfig);
+    findOneMock.mockClear();
+    const decision = await resolveSupplierInvoiceVatDecision({
+      // category without service and no serviceConfigurationId
+      category: "Cleaning",
+      supplierCountry: "BE",
+      buyerCountry: "BE",
+      supplierVatNumber: "BE0123456789",
+      buyerVatNumber: "BE1002103337",
+      buyerVatVerified: true,
+      professionalAnswers: { building_age: 12, private_housing: true },
+    });
+    expect(findOneMock).not.toHaveBeenCalled();
+    expect(decision.action).toBe("standard_rate");
+    expect(decision.appliedRate).toBe(21);
+  });
 });

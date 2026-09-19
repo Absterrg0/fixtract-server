@@ -357,13 +357,22 @@ export const resolveSupplierInvoiceVatDecision = async (params: {
   answers?: Record<string, unknown>;
   professionalAnswers?: Record<string, unknown>;
 }): Promise<VatDecision> => {
-  const query = params.serviceConfigurationId && /^[a-f\d]{24}$/i.test(params.serviceConfigurationId)
+  const hasValidConfigId = Boolean(
+    params.serviceConfigurationId && /^[a-f\d]{24}$/i.test(params.serviceConfigurationId),
+  );
+  // Only key by the natural identity when the full minimum key is present;
+  // a partial key (e.g. category alone) could match an unrelated config and
+  // apply the wrong VAT rate.
+  const hasNaturalKey = Boolean(params.category && params.service);
+  const query: Record<string, unknown> = hasValidConfigId
     ? { _id: params.serviceConfigurationId }
-    : {
-        ...(params.category ? { category: params.category } : {}),
-        ...(params.service ? { service: params.service } : {}),
-        ...(params.areaOfWork ? { areaOfWork: params.areaOfWork } : {}),
-      };
+    : hasNaturalKey
+      ? {
+          category: params.category,
+          service: params.service,
+          ...(params.areaOfWork ? { areaOfWork: params.areaOfWork } : {}),
+        }
+      : {};
   const config = Object.keys(query).length > 0
     ? await ServiceConfiguration.findOne(query).select("category service vatManagement")
     : null;
