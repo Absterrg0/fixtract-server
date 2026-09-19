@@ -552,12 +552,12 @@ const ensureUblAttachmentOnOdooMove = async (
   });
 };
 
-const readOdooEdiDeliveryState = async (
+export const readOdooEdiDeliveryState = async (
   config: OdooAccountingConfig,
   moveId: number,
 ): Promise<Array<{ state?: string; blocking_level?: string; error?: string; error_message?: string }> | undefined> => {
   try {
-    const { value } = await odooCallWithRetries<Array<{ state?: string; blocking_level?: string; error?: string; error_message?: string }>>(
+    const { value } = await odooCallOnce<Array<{ state?: string; blocking_level?: string; error?: string; error_message?: string }>>(
       config,
       "account.edi.document",
       "search_read",
@@ -569,10 +569,74 @@ const readOdooEdiDeliveryState = async (
     );
     return value;
   } catch {
-    // Older Odoo installations may not expose the EDI document model to the
-    // API key. In that case the send request is still accepted, but delivery
-    // must remain queued rather than being reported as sent.
+    // Odoo 17+ removed account.edi.document; delivery state now lives on the
+    // move itself (`peppol_is_sent` / `peppol_move_state`).
+    return readOdooMovePeppolState(config, moveId);
+  }
+};
+
+const readOdooMovePeppolState = async (
+  config: OdooAccountingConfig,
+  moveId: number,
+): Promise<Array<{ state?: string; error_message?: string }> | undefined> => {
+  try {
+    const { value } = await odooCallWithRetries<Array<{ peppol_is_sent?: boolean; peppol_move_state?: string | false }>>(
+      config,
+      "account.move",
+      "read",
+      { ids: [moveId], fields: ["peppol_is_sent", "peppol_move_state"] },
+    );
+    const move = value[0];
+    if (!move) return undefined;
+    const rawState = typeof move.peppol_move_state === "string" ? move.peppol_move_state.toLowerCase() : "";
+    if (move.peppol_is_sent || rawState === "done" || rawState === "sent") {
+      return [{ state: "sent" }];
+    }
+    if (rawState) {
+      return [{ state: rawState }];
+    }
+    return [];
+  } catch {
     return undefined;
+  }
+};
+
+const isMissingOdooMethodError = (error: unknown): boolean =>
+  /does not exist|doesn't exist|no such method|method .*not found|invalid method/i.test(
+    String((error as any)?.message ?? error ?? ""),
+  );
+
+/**
+ * Trigger the Peppol/EDI send for a move.
+ * - Odoo <= 16 exposes `button_process_edi_web_services` on account.move.
+ * - Odoo 17+ moved sending to the account.move.send wizard; calling the legacy
+ *   method there throws "The method ... does not exist", which previously made
+ *   Fixtract silently report every dispatch as "queued" and never send.
+ */
+export const triggerOdooEdiSend = async (
+  config: OdooAccountingConfig,
+  moveId: number,
+): Promise<"legacy" | "peppol-wizard"> => {
+  try {
+    await odooCallOnce(config, "account.move", "button_process_edi_web_services", { ids: [moveId] });
+    return "legacy";
+  } catch (legacyError) {
+    if (!isMissingOdooMethodError(legacyError)) throw legacyError;
+
+    const { value: created } = await odooCallOnce<unknown>(config, "account.move.send.wizard", "create", {
+      vals_list: [{ move_id: moveId, sending_methods: ["peppol"], extra_edis: ["peppol"] }],
+    });
+    const wizardId = normalizeOdooId(created, "send wizard");
+    try {
+      await odooCallWithRetries(config, "account.move.send.wizard", "action_send_and_print", { ids: [wizardId] });
+    } finally {
+      try {
+        await odooCallOnce(config, "account.move.send.wizard", "unlink", { ids: [wizardId] });
+      } catch {
+        // The wizard may already be consumed by action_send_and_print.
+      }
+    }
+    return "peppol-wizard";
   }
 };
 
@@ -653,7 +717,8 @@ const dispatchToOdoo = async (
 
     try {
       console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: triggering Odoo EDI send for move ${moveId}`);
-      await odooCallWithRetries(config, "account.move", "button_process_edi_web_services", { ids: [moveId] });
+      const sendMode = await triggerOdooEdiSend(config, moveId);
+      console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: EDI send triggered via ${sendMode}`);
       const ediDocuments = await readOdooEdiDeliveryState(config, moveId);
       console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] delivery:`, JSON.stringify(ediDocuments || []));
       const failedDocument = ediDocuments?.find((document) =>
