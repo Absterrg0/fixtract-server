@@ -347,7 +347,16 @@ export async function generateCreditNoteNumber(prefix?: "FIX" | "SUP"): Promise<
 export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     try {
-      const doc = new PDFDocument({ size: "A4", margin: 50, bufferPages: true });
+      // Reserve a footer band below the normal content margin so flowing text
+      // (long service descriptions) can never run into the thank-you/page-number
+      // block. Footer content is drawn into this band in the page loop below.
+      const CONTENT_MARGIN = 50;
+      const FOOTER_BAND = 60;
+      const doc = new PDFDocument({
+        size: "A4",
+        margins: { top: CONTENT_MARGIN, left: CONTENT_MARGIN, right: CONTENT_MARGIN, bottom: CONTENT_MARGIN + FOOTER_BAND },
+        bufferPages: true,
+      });
       const buffers: Buffer[] = [];
       const invoiceDate =
         data.invoiceDate instanceof Date ? data.invoiceDate : new Date(data.invoiceDate);
@@ -431,9 +440,9 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
         data.actualEndDate ? `Actual end date: ${new Date(data.actualEndDate).toLocaleDateString("en-GB")}` : undefined,
       ].filter(Boolean);
 
-      // Bottom of the usable content area. The footer/thank-you block is drawn
-      // in the page loop, so content must stop above it.
-      const contentBottom = () => doc.page.height - doc.page.margins.bottom - 60;
+      // Bottom of the usable content area. The document's bottom margin already
+      // reserves the footer band, so content simply stops at maxY/page bottom.
+      const contentBottom = () => doc.page.height - doc.page.margins.bottom;
       const contentTop = () => doc.page.margins.top;
       const ensureSpace = (needed: number) => {
         if (doc.y + needed > contentBottom()) {
@@ -542,17 +551,17 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
         doc.fontSize(10);
       }
 
-      // Footer + page numbers: drawn on every buffered page, anchored inside
-      // the bottom margin. Drawing them at a y below page.maxY() (as before)
-      // makes PDFKit append a blank page just to hold the page number.
-      const footerY = doc.page.height - doc.page.margins.bottom - 52;
-      const pageNumberY = doc.page.height - doc.page.margins.bottom - 12;
+      // Footer + page numbers: drawn on every buffered page, inside the reserved
+      // footer band. Lower the bottom margin only while drawing the footer so
+      // PDFKit does not append a blank page for text below the content margin.
       const platformLine = [issuer.name || "Fixtract", issuer.street, [issuer.postalCode, issuer.city].filter(Boolean).join(" "), issuer.country].filter(Boolean).join(" · ");
       const platformVatLine = issuer.vatNumber ? `VAT: ${issuer.vatNumber}` : undefined;
-
       const pageRange = doc.bufferedPageRange();
       for (let pageIndex = pageRange.start; pageIndex < pageRange.start + pageRange.count; pageIndex += 1) {
         doc.switchToPage(pageIndex);
+        doc.page.margins.bottom = CONTENT_MARGIN;
+        const footerY = doc.page.height - CONTENT_MARGIN - 52;
+        const pageNumberY = doc.page.height - CONTENT_MARGIN - 12;
         doc
           .fontSize(8)
           .fillColor("#000000")

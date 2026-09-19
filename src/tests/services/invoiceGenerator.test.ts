@@ -30,6 +30,56 @@ const concatenatePdfHexText = (streamText: string): string =>
     .map((match) => Buffer.from(match[1], "hex").toString("latin1"))
     .join("");
 
+const PDF_PAGE_HEIGHT = 841.89;
+// Mirrors invoiceGenerator: 50pt page margin + 60pt reserved footer band.
+const PDF_FOOTER_BAND_TOP = PDF_PAGE_HEIGHT - (50 + 60);
+const PDF_FOOTER_PATTERNS = [
+  /^Page \d+ of \d+$/,
+  /^Thank you for using Fixtract!$/,
+  /^This invoice was generated automatically/,
+  /^Fixtract$/,
+  /^VAT:/,
+];
+const isFooterText = (text: string): boolean =>
+  PDF_FOOTER_PATTERNS.some((pattern) => pattern.test(text));
+
+/** One text-bearing content stream per page, in page order. */
+const extractPdfPageTextStreams = (pdf: Buffer): string[] => {
+  const marker = Buffer.from("stream");
+  const endMarker = Buffer.from("endstream");
+  const parts: string[] = [];
+  let offset = 0;
+  while (true) {
+    const streamOffset = pdf.indexOf(marker, offset);
+    if (streamOffset < 0) break;
+    let contentStart = streamOffset + marker.length;
+    if (pdf[contentStart] === 13) contentStart += 1;
+    if (pdf[contentStart] === 10) contentStart += 1;
+    const endOffset = pdf.indexOf(endMarker, contentStart);
+    if (endOffset < 0) break;
+    try {
+      const text = inflateSync(pdf.subarray(contentStart, endOffset)).toString("latin1");
+      const printable = [...text].filter((char) => {
+        const code = char.charCodeAt(0);
+        return code === 9 || code === 10 || code === 13 || (code >= 32 && code < 127);
+      }).length / text.length;
+      // Invoice page content is the only highly printable stream with text ops.
+      if (printable > 0.9 && text.includes("BT")) parts.push(text);
+    } catch {
+      // Non-flate streams (images/fonts) do not carry page text.
+    }
+    offset = endOffset + endMarker.length;
+  }
+  return parts;
+};
+
+/** Text baselines measured as distance from the top edge of the page. */
+const extractTextPositions = (pageStream: string): Array<{ top: number; text: string }> =>
+  [...pageStream.matchAll(/1 0 0 1 ([\d.]+) ([\d.]+) Tm([\s\S]*?)ET/g)].map((match) => ({
+    top: PDF_PAGE_HEIGHT - Number(match[2]),
+    text: concatenatePdfHexText(match[3]),
+  }));
+
 describe("invoice PDF artifacts", () => {
   it("renders a valid PDF with units, VAT, and page metadata inputs", async () => {
     const pdf = await generateInvoicePDF({
@@ -92,7 +142,7 @@ describe("invoice PDF artifacts", () => {
     expect(encodedText).toContain(Buffer.from("SUPPLIER").toString("latin1"));
   });
 
-  it("paginates long descriptions without creating a page that only holds the page number", async () => {
+  it("keeps flowing content out of the reserved footer band on every page", async () => {
     const longDescription = Array.from(
       { length: 60 },
       (_, index) => `Scope line ${index + 1}: detailed description of the work.`,
@@ -111,9 +161,26 @@ describe("invoice PDF artifacts", () => {
     const encodedText = concatenatePdfHexText(extractPdfStreamText(pdf));
     expect(encodedText).toContain(Buffer.from("Page 1 of 2").toString("latin1"));
     expect(encodedText).toContain(Buffer.from("Page 2 of 2").toString("latin1"));
-    // The footer must be present on every page, not only the last one.
-    const footerOccurrences = encodedText.split("Thank you for using Fixtract!").length - 1;
-    expect(footerOccurrences).toBe(2);
+
+    const pages = extractPdfPageTextStreams(pdf).map(extractTextPositions);
+    expect(pages).toHaveLength(2);
+
+    for (const items of pages) {
+      // Footer/page number is present on each page, inside the reserved band.
+      const pageNumber = items.find((item) => /^Page \d+ of \d+$/.test(item.text));
+      expect(pageNumber).toBeDefined();
+      expect(pageNumber!.top).toBeGreaterThanOrEqual(PDF_FOOTER_BAND_TOP);
+
+      // No description/table content may extend into the footer band.
+      const contentItems = items.filter((item) => item.text && !isFooterText(item.text));
+      expect(contentItems.length).toBeGreaterThan(0);
+      for (const item of contentItems) {
+        expect(item.top).toBeLessThanOrEqual(PDF_FOOTER_BAND_TOP);
+      }
+    }
+
+    // The description actually flowed onto page 2 instead of being clipped.
+    expect(pages[1].some((item) => /^Scope line \d+:/.test(item.text))).toBe(true);
   });
 
   it("keeps a short invoice on a single page", async () => {
