@@ -953,7 +953,7 @@ const hydrateSupplierVatDecision = async (booking: any) => {
       {},
     );
     booking.__supplierVatDecision = await resolveSupplierInvoiceVatDecision({
-      serviceConfigurationId: booking.project?.serviceConfigurationId,
+      serviceConfigurationId: booking.project?.serviceConfigurationId || booking.serviceConfigurationId,
       category: booking.project?.category,
       service: booking.project?.service,
       areaOfWork: booking.project?.areaOfWork,

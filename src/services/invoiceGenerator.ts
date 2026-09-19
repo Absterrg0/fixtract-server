@@ -134,6 +134,7 @@ export type ManualInvoiceOverride = {
 export interface InvoiceBooking {
   _id: { toString(): string } | string;
   bookingNumber?: string;
+  serviceConfigurationId?: string;
   location?: {
     address?: string;
     city?: string;
@@ -837,7 +838,7 @@ export async function generateBookingInvoice(
   // Reuse the decision cached by loadBookingForInvoice so the PDF and UBL agree.
   const supplierVatDecision = (booking as any).__supplierVatDecision
     || await resolveSupplierInvoiceVatDecision({
-      serviceConfigurationId: (booking.project as any)?.serviceConfigurationId,
+      serviceConfigurationId: (booking.project as any)?.serviceConfigurationId || booking.serviceConfigurationId,
       category: (booking.project as any)?.category,
       service: (booking.project as any)?.service,
       areaOfWork: (booking.project as any)?.areaOfWork,

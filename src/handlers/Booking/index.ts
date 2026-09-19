@@ -559,6 +559,13 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       bookingData.customerBlocks = customerBlocks;
     }
 
+    // Persist the resolved config so the invoice layer can re-evaluate the
+    // configured VAT rules at billing time (professional bookings have no
+    // project to read it from).
+    if (configIdForVat) {
+      bookingData.serviceConfigurationId = configIdForVat;
+    }
+
     // Validate professional or project exists
     if (bookingType === 'professional') {
       const professional = await User.findById(professionalId);
