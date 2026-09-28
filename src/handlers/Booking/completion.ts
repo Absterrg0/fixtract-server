@@ -500,8 +500,8 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
           vatAmount: storedVat,
           vatRate: booking.payment?.vatRate ?? 0,
           loyaltyDiscount: {
-            level: (booking.customer as any)?.loyaltyLevel || 'Bronze',
-            percentage: 0,
+            level: booking.payment?.extraCostLoyaltyTier || (booking.customer as any)?.loyaltyLevel || 'Bronze',
+            percentage: booking.payment?.extraCostLoyaltyPercentage ?? 0,
             amount: storedDiscount ?? 0,
           },
           subtotalInclCommission: roundToTwo(
@@ -572,6 +572,10 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     booking.set('payment.extraCostPlatformFee', platformFeeAmount);
     booking.set('payment.extraCostNetAmount', extraCostTotal);
     booking.set('payment.extraCostCustomerDiscount', cappedLoyalty);
+    // Persist the terms actually applied so a reused PaymentIntent keeps
+    // reporting the same tier and percentage even if the customer levels up.
+    booking.set('payment.extraCostLoyaltyTier', loyalty.tier);
+    booking.set('payment.extraCostLoyaltyPercentage', loyalty.percentage);
     booking.set('payment.extraCostPlatformCommission', platformCommissionAmount);
     booking.set('payment.extraCostProfessionalPayout', extraCostTotal);
     booking.set('payment.extraCostStatus', 'pending');
@@ -590,6 +594,8 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
               extraCostPlatformFee: platformFeeAmount,
               extraCostNetAmount: extraCostTotal,
               extraCostCustomerDiscount: cappedLoyalty,
+              extraCostLoyaltyTier: loyalty.tier,
+              extraCostLoyaltyPercentage: loyalty.percentage,
               extraCostPlatformCommission: platformCommissionAmount,
               extraCostProfessionalPayout: extraCostTotal,
               extraCostStatus: 'pending',

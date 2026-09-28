@@ -220,7 +220,6 @@ export interface InvoiceBooking {
       codeDiscountAmount?: number;
       codeLabel?: string;
       totalDiscount?: number;
-      originalAmount?: number;
     };
   };
   actualStartDate?: Date;
