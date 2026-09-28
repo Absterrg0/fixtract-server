@@ -484,11 +484,31 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
     const existingExtraCostPiId = booking.payment?.extraCostStripePaymentIntentId;
     const existingExtraCostSecret = booking.payment?.extraCostClientSecret;
     if (existingExtraCostPiId && existingExtraCostSecret) {
+      const storedCustomerCharge = booking.payment?.extraCostAmount;
+      const storedCustomerNet = booking.payment?.extraCostCustomerNetAmount;
+      const storedVat = booking.payment?.extraCostVatAmount;
+      const storedDiscount = booking.payment?.extraCostCustomerDiscount;
+      // Amounts are stored VAT-inclusive so the checkout UI can show the same
+      // breakdown and amount that the PaymentIntent will actually charge.
       return res.json({
         success: true,
         data: {
           clientSecret: existingExtraCostSecret,
           extraCostTotal,
+          customerChargeAmount: storedCustomerCharge,
+          customerNetChargeAmount: storedCustomerNet,
+          vatAmount: storedVat,
+          vatRate: booking.payment?.vatRate ?? 0,
+          loyaltyDiscount: {
+            level: (booking.customer as any)?.loyaltyLevel || 'Bronze',
+            percentage: 0,
+            amount: storedDiscount ?? 0,
+          },
+          subtotalInclCommission: roundToTwo(
+            (booking.payment?.extraCostNetAmount ?? extraCostTotal)
+            + (booking.payment?.extraCostPlatformCommission ?? 0)
+            + (storedDiscount ?? 0),
+          ),
         }
       });
     }
