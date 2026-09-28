@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { inflateSync } from "node:zlib";
-import { applyManualInvoicePartyOverrides, generateInvoicePDF } from "../../services/invoiceGenerator";
+import {
+  applyManualInvoicePartyOverrides,
+  formatInvoiceServiceAddress,
+  generateInvoicePDF,
+  scaleLineItemsToTotal,
+} from "../../services/invoiceGenerator";
 
 const extractPdfStreamText = (pdf: Buffer): string => {
   const marker = Buffer.from("stream");
@@ -82,6 +87,38 @@ const extractTextPositions = (pageStream: string): Array<{ yFromBottom: number; 
     yFromBottom: Number(match[2]),
     text: concatenatePdfHexText(match[3]),
   }));
+
+describe("customer invoice pre-discount display", () => {
+  it("scales lines so full prices minus the discount lines equal the charged net", () => {
+    const lines = [
+      { description: "Service", amount: 273.79, unitPrice: 10.95 },
+      { description: "Option", amount: 54.76 },
+    ];
+    const scaled = scaleLineItemsToTotal(lines, 335.26);
+    expect(scaled.reduce((sum, line) => sum + line.amount, 0)).toBeCloseTo(335.26, 2);
+    expect(scaled[0].unitPrice).toBeCloseTo(10.95 * (335.26 / 328.55), 2);
+    expect(scaled[1]).toMatchObject({ description: "Option" });
+  });
+
+  it("keeps lines untouched without a discount and never invents lines", () => {
+    const lines = [{ description: "Service", amount: 100 }];
+    expect(scaleLineItemsToTotal(lines, 100)).toEqual(lines);
+    expect(scaleLineItemsToTotal([], 100)).toEqual([]);
+  });
+
+  it("builds a one-line service address from the booking location", () => {
+    expect(formatInvoiceServiceAddress({
+      location: { address: "Rue de la Loi 1", postalCode: "1000", city: "Brussels", country: "BE" },
+    } as any)).toBe("Rue de la Loi 1, 1000 Brussels, BE");
+  });
+
+  it("falls back to the customer address for legacy bookings without a service location", () => {
+    expect(formatInvoiceServiceAddress({
+      customer: { companyAddress: { address: "Main Street 2", postalCode: "2000", city: "Antwerp", country: "BE" } },
+    } as any)).toBe("Main Street 2, 2000 Antwerp, BE");
+    expect(formatInvoiceServiceAddress({ customer: {} } as any)).toBeUndefined();
+  });
+});
 
 describe("invoice PDF artifacts", () => {
   it("renders a valid PDF with units, VAT, and page metadata inputs", async () => {
