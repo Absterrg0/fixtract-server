@@ -636,6 +636,9 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
         clientSecret: paymentIntent.client_secret,
         extraCostTotal,
         customerChargeAmount,
+        customerNetChargeAmount,
+        vatAmount,
+        vatRate: booking.payment?.vatRate ?? 0,
         subtotalInclCommission,
         loyaltyDiscount: loyalty,
       }
