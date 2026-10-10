@@ -98,24 +98,50 @@ const assertOdooResponse = (parsed: unknown): void => {
   }
 };
 
+/**
+ * Thrown when Odoo does not answer in time. The request may still complete
+ * on the Odoo side, so callers that trigger side effects must re-read state
+ * instead of treating this as a failure.
+ */
+export class OdooTimeoutError extends Error {
+  constructor(model: string, method: string, timeoutMs: number) {
+    super(`Odoo did not answer ${model}.${method} within ${Math.round(timeoutMs / 1000)}s`);
+    this.name = "OdooTimeoutError";
+  }
+}
+
 export const odooJson2Call = async <T>(
   credentials: OdooCredentials,
   model: string,
   method: string,
   body: Record<string, unknown>,
-  companyId?: number
+  companyId?: number,
+  options: { timeoutMs?: number } = {}
 ): Promise<T> => {
-  const response = await fetch(buildJson2Endpoint(credentials.baseUrl, model, method), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `bearer ${credentials.apiKey}`,
-      "User-Agent": "fixtract-server odoo-accounting",
-    },
-    body: JSON.stringify(withCompanyContext(companyId, body)),
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  const text = await response.text();
+  const timeoutMs = options.timeoutMs ?? FETCH_TIMEOUT_MS;
+  let response: Response;
+  let text: string;
+  try {
+    response = await fetch(buildJson2Endpoint(credentials.baseUrl, model, method), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `bearer ${credentials.apiKey}`,
+        "User-Agent": "fixtract-server odoo-accounting",
+      },
+      body: JSON.stringify(withCompanyContext(companyId, body)),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await response.text();
+  } catch (error) {
+    // AbortSignal.timeout rejects with a bare "The operation was aborted due
+    // to timeout", which says nothing about which Odoo call was slow.
+    const name = (error as { name?: string } | null)?.name;
+    if (name === "TimeoutError" || name === "AbortError") {
+      throw new OdooTimeoutError(model, method, timeoutMs);
+    }
+    throw error;
+  }
   let parsed: unknown = text;
   try {
     parsed = text ? JSON.parse(text) : undefined;

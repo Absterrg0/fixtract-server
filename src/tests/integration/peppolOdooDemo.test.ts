@@ -19,6 +19,20 @@ describe.skipIf(!demoCompanyId)("live Odoo Peppol demo", () => {
   let config: OdooAccountingConfig;
   const call = <T>(model: string, method: string, body: Record<string, unknown>) =>
     odooJson2Call<T>(config, model, method, body, config.companyId);
+  // Odoo's demo proxy advances one processing document per status request,
+  // including documents left behind by earlier runs, so poll until ours are done.
+  const driveDemoStatusUntilDone = async (moveIds: number[]) => {
+    const crons = await call<any[]>("ir.cron", "search_read", {
+      domain: [["code", "ilike", "_cron_peppol_get_message_status"]], fields: ["id"],
+    });
+    expect(crons).toHaveLength(1);
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const states = await call<any[]>("account.move", "read", { ids: moveIds, fields: ["peppol_move_state"] });
+      if (states.every((move) => move.peppol_move_state === "done")) return;
+      await call("ir.cron", "method_direct_trigger", { ids: [crons[0].id] });
+    }
+    throw new Error(`Demo Peppol status never reached done for moves ${moveIds.join(", ")}`);
+  };
 
   beforeAll(async () => {
     process.env.ODOO_COMPANY_ID = String(demoCompanyId);
@@ -73,16 +87,7 @@ describe.skipIf(!demoCompanyId)("live Odoo Peppol demo", () => {
         documents.push({ params, moveId, reference: result.reference, name: move.name });
       }
     }
-    const crons = await call<any[]>("ir.cron", "search_read", {
-      domain: [["code", "ilike", "_cron_peppol_get_message_status"]], fields: ["id"],
-    });
-    expect(crons).toHaveLength(1);
-    // Odoo's demo proxy returns one document per status request.
-    for (let attempt = 0; attempt < documents.length + 2; attempt++) {
-      const states = await call<any[]>("account.move", "read", { ids: documents.map((d) => d.moveId), fields: ["peppol_move_state"] });
-      if (states.every((move) => move.peppol_move_state === "done")) break;
-      await call("ir.cron", "method_direct_trigger", { ids: [crons[0].id] });
-    }
+    await driveDemoStatusUntilDone(documents.map((d) => d.moveId));
     for (const document of documents) {
       expect(await readOdooEdiDeliveryState(config, document.moveId)).toEqual([{ state: "sent" }]);
       expect(await maybeDispatchPeppolInvoice(document.params)).toMatchObject({ status: "sent", reference: document.reference });
@@ -93,4 +98,94 @@ describe.skipIf(!demoCompanyId)("live Odoo Peppol demo", () => {
       console.log(`DEMO VERIFIED ${document.params.side} ${document.params.documentType}: ${document.name} (move ${document.moveId})`);
     }
   }, 180_000);
+
+  // Mirrors BK-2026-000096: a BE business customer and a professional with a
+  // Dutch VAT number registered at a Belgian address (reverse-charge self-bill).
+  // The customer VAT is new to Odoo on the first run, which exercises partner
+  // creation with Odoo's synchronous VIES check.
+  it("delivers a BE customer invoice and an NL-VAT reverse-charge self-bill within the Odoo timeouts", async () => {
+    const timings: Array<{ call: string; ms: number }> = [];
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", async (url: any, init?: any) => {
+      const started = Date.now();
+      try {
+        return await realFetch(url, init);
+      } finally {
+        timings.push({ call: String(url).split("/json/2/")[1] || String(url), ms: Date.now() - started });
+      }
+    });
+    try {
+      const booking = {
+        bookingNumber: "BK-DEMO-NL-SUPPLIER-TEST-ONLY", payment: { currency: "EUR" },
+        customer: {
+          customerType: "business", name: "Peppol Demo BE Customer - TEST ONLY", vatNumber: "BE0123457046",
+          companyAddress: { country: "BE" },
+        },
+        professional: {
+          name: "Peppol Demo NL Supplier - TEST ONLY",
+          businessInfo: { companyName: "Peppol Demo NL Supplier - TEST ONLY", vatNumber: "NL999999904B01", country: "BE" },
+        },
+      };
+      const run = Date.now();
+      const dispatched: Array<{ params: any; moveId: number; reference?: string }> = [];
+      const cases = [
+        {
+          side: "customer" as const, reverseCharge: false,
+          lineItems: [
+            { description: "Peppol demo project - no real transaction", price: 300.01, vatRate: 21 },
+            { description: "Peppol demo added costs - no real transaction", price: 19.18, vatRate: 21 },
+          ],
+        },
+        {
+          side: "supplier" as const, reverseCharge: true,
+          lineItems: [{ description: "Peppol demo self-bill - no real transaction", price: 320.01, vatRate: 0 }],
+        },
+      ];
+      for (const testCase of cases) {
+        const params = {
+          booking, side: testCase.side, documentType: "invoice" as const,
+          invoiceNumber: `DEMO-${run}-BK96-${testCase.side}`,
+          ublXml: '<?xml version="1.0"?><Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"><!-- Demo fixture --></Invoice>',
+          invoiceUblUrl: "", reverseCharge: testCase.reverseCharge, lineItems: testCase.lineItems,
+        };
+        const result = await maybeDispatchPeppolInvoice(params);
+        expect(result.status, result.reason).toMatch(/^(queued|sent)$/);
+        const moveId = Number(result.reference?.replace("odoo-account.move-", ""));
+        const [move] = await call<any[]>("account.move", "read", {
+          ids: [moveId], fields: ["name", "journal_id", "partner_id", "peppol_message_uuid", "invoice_line_ids"],
+        });
+        expect(move.peppol_message_uuid).toMatch(/^demo_/);
+        const [partner] = await call<any[]>("res.partner", "read", {
+          ids: [move.partner_id[0]], fields: ["peppol_eas", "peppol_endpoint"],
+        });
+        const lines = await call<any[]>("account.move.line", "read", { ids: move.invoice_line_ids, fields: ["tax_ids"] });
+        if (testCase.side === "supplier") {
+          expect(move.journal_id[0]).toBe(config.selfBillingJournalId);
+          expect(partner).toMatchObject({ peppol_eas: "9944", peppol_endpoint: "NL999999904B01" });
+          expect(lines.every((line) => line.tax_ids.includes(config.purchaseReverseChargeTaxId))).toBe(true);
+        } else {
+          expect(move.journal_id[0]).toBe(config.salesJournalId);
+          expect(partner.peppol_eas).toMatch(/^(0208|9925)$/);
+          expect(lines.every((line) => line.tax_ids.includes(config.taxIdsByRate["21"]))).toBe(true);
+        }
+        // Re-running invoice generation must not create or send a second move.
+        expect((await maybeDispatchPeppolInvoice(params)).reference).toBe(result.reference);
+        const count = await call<number>("account.move", "search_count", {
+          domain: [["company_id", "=", demoCompanyId], ["ref", "=", params.invoiceNumber]],
+        });
+        expect(count).toBe(1);
+        dispatched.push({ params, moveId, reference: result.reference });
+        console.log(`DEMO DISPATCHED BK96 ${testCase.side}: ${move.name} (move ${moveId}) -> ${result.status}`);
+      }
+      await driveDemoStatusUntilDone(dispatched.map((d) => d.moveId));
+      for (const document of dispatched) {
+        expect(await maybeDispatchPeppolInvoice(document.params)).toMatchObject({ status: "sent", reference: document.reference });
+        console.log(`DEMO VERIFIED BK96 ${document.params.side}: move ${document.moveId} sent`);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+      const slowest = [...timings].sort((a, b) => b.ms - a.ms).slice(0, 8);
+      console.log("SLOWEST ODOO CALLS:", slowest.map((t) => `${t.call} ${t.ms}ms`).join(" | "));
+    }
+  }, 300_000);
 });

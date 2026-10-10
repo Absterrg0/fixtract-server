@@ -42,3 +42,29 @@ describe("Odoo journal discovery", () => {
     expect((await discoverOdooAccountingConfig()).companyId).toBe(2);
   });
 });
+
+describe("odooJson2Call timeouts", () => {
+  it("names the slow Odoo call instead of the bare fetch abort message", async () => {
+    vi.resetModules();
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    }));
+    const { odooJson2Call } = await import("../../services/odooAccounting");
+    const call = odooJson2Call({ baseUrl: "https://odoo.example", apiKey: "k" }, "account.move.send.wizard", "action_send_and_print", {}, 1, { timeoutMs: 120_000 });
+    await expect(call).rejects.toMatchObject({
+      name: "OdooTimeoutError",
+      message: "Odoo did not answer account.move.send.wizard.action_send_and_print within 120s",
+    });
+  });
+
+  it("passes the per-call timeout to fetch", async () => {
+    vi.resetModules();
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("true", { status: 200 })));
+    const { odooJson2Call } = await import("../../services/odooAccounting");
+    await odooJson2Call({ baseUrl: "https://odoo.example", apiKey: "k" }, "account.move", "action_post", {}, 1, { timeoutMs: 45_000 });
+    await odooJson2Call({ baseUrl: "https://odoo.example", apiKey: "k" }, "account.move", "read", {}, 1);
+    expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([45_000, 15_000]);
+    timeout.mockRestore();
+  });
+});
