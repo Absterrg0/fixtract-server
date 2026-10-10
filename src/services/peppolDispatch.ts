@@ -944,13 +944,13 @@ const dispatchToOdoo = async (
         return odooDeliveryResult(config, existingMove.id, documents);
       }
     }
-    const partnerId = existingMove
-      ? (Array.isArray(existingMove.partner_id) ? existingMove.partner_id[0] : undefined)
-      : await ensureOdooPartner(config, booking, payload);
-    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: move=${existingMove?.id || "new"} partner=${partnerId || "unknown"}`);
-    const verification = partnerId
-      ? await verifyOdooPeppolPartner(config, partnerId, payload.recipientParticipantId, { selfBilling: payload.side === "supplier" })
-      : undefined;
+    // A retried move without a readable partner still gets a verified recipient.
+    const existingPartnerId = Array.isArray(existingMove?.partner_id) ? existingMove.partner_id[0] : undefined;
+    const partnerId = existingPartnerId ?? await ensureOdooPartner(config, booking, payload);
+    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: move=${existingMove?.id || "new"} partner=${partnerId}`);
+    const verification = await verifyOdooPeppolPartner(
+      config, partnerId, payload.recipientParticipantId, { selfBilling: payload.side === "supplier" },
+    );
     console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] recipient-check:`, JSON.stringify(verification || "unavailable"));
     if (verification && verification.state !== "valid") {
       // A recipient that is not on Peppol is not a dispatch error: the PDF
@@ -965,7 +965,7 @@ const dispatchToOdoo = async (
       };
     }
     const moveId = existingMove?.id || await (async () => {
-      const moveVals = await buildOdooMoveVals(config, booking, payload, partnerId as number);
+      const moveVals = await buildOdooMoveVals(config, booking, payload, partnerId);
       const { value: moveIdRaw } = await odooCallOnce<unknown>(config, "account.move", "create", { vals_list: moveVals });
       return normalizeOdooId(moveIdRaw, "invoice");
     })();

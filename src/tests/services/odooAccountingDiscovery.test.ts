@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe("Odoo journal discovery", () => {
   it("discovers only an active self-billing purchase journal in the selected company", async () => {
@@ -65,6 +69,5 @@ describe("odooJson2Call timeouts", () => {
     await odooJson2Call({ baseUrl: "https://odoo.example", apiKey: "k" }, "account.move", "action_post", {}, 1, { timeoutMs: 45_000 });
     await odooJson2Call({ baseUrl: "https://odoo.example", apiKey: "k" }, "account.move", "read", {}, 1);
     expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([45_000, 15_000]);
-    timeout.mockRestore();
   });
 });

@@ -229,6 +229,18 @@ describe("Peppol Odoo dispatch", () => {
       expect(partner.invoice_edi_format).toBe("nlcius");
     });
 
+    it("verifies the booking's partner when a retried move has none", async () => {
+      partnerState({ peppol_eas: "0208", peppol_endpoint: "1002103337", peppol_verification_state: "not_valid" }, () => false);
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "search_read") return [{ id: 70, state: "draft", partner_id: false }];
+        return normal(...args);
+      });
+      expect(await dispatch("customer")).toMatchObject({ status: "skipped", reference: "odoo-account.move-70" });
+      expect(calls("res.partner", "search_read")).toHaveLength(1);
+      expect(calls("account.move", "button_process_edi_web_services")).toHaveLength(0);
+    });
+
     it("leaves a partner that Odoo already verified untouched", async () => {
       partnerState({ peppol_eas: "0106", peppol_endpoint: "12345678", peppol_verification_state: "valid" }, () => true);
       expect(await dispatch("customer")).toMatchObject({ status: "sent" });
