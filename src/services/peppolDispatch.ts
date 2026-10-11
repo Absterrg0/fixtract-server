@@ -32,6 +32,7 @@ type PeppolDispatchPayload = {
   customerVatNumber?: string;
   customerName?: string;
   recipientCountry?: string;
+  recipientParticipantId?: string;
   netAmount?: number;
   vatRate?: number;
   reverseCharge?: boolean;
@@ -57,6 +58,11 @@ type OdooInvoiceLine = {
 
 const MAX_DISPATCH_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 500;
+// Odoo's send renders the invoice PDF, builds the UBL and calls the Peppol
+// access point in one request, which regularly exceeds the 15s default.
+const ODOO_SEND_TIMEOUT_MS = 120_000;
+// Peppol participant lookups (SMP/DNS through Odoo's proxy) and posting.
+const ODOO_SLOW_CALL_TIMEOUT_MS = 45_000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -84,34 +90,67 @@ const isBelgianB2BBooking = (booking: any, side: "customer" | "supplier"): boole
  *   No requirement that the other party is Belgian B2B.
  */
 /**
- * ISO 6523 participant schemes used for Peppol discovery.
- * BE uses 0208 (CBE enterprise number, 10 digits). Other EU VAT numbers use
- * the generic 9945 scheme with the normalized VAT ID; Odoo resolves the
- * actual SMP endpoint during EDI send. Unknown/unsupported countries are
- * rejected (never silently treated as deliverable).
+ * ISO 6523 participant schemes used for Peppol discovery, matching the
+ * VAT-based schemes Odoo offers on res.partner.peppol_eas.
+ * BE uses 0208 (CBE enterprise number, 10 digits); Odoo also tries the
+ * Belgian 9925 VAT form when 0208 is not registered. Every other country
+ * uses its VAT scheme with the full VAT number (country prefix included).
+ * Schemes that need a registry number we do not store (NL KvK 0106,
+ * DE Leitweg 0204, FR SIRET 0009) are deliberately not used here.
+ * Unknown/unsupported countries are rejected (never silently treated as
+ * deliverable).
  */
 export const PEPPOL_SCHEME_BY_COUNTRY: Record<string, string> = {
+  AT: "9915",
   BE: "0208",
-  NL: "0106",
-  DE: "0204",
-  FR: "0204",
+  BG: "9926",
+  CY: "9928",
+  CZ: "9929",
+  DE: "9930",
+  EE: "9931",
+  ES: "9920",
+  FR: "9957",
+  GR: "9933",
+  HR: "9934",
+  IE: "9935",
+  IT: "0211",
+  LT: "9937",
+  LU: "9938",
+  LV: "9939",
+  MT: "9943",
+  NL: "9944",
+  PL: "9945",
+  PT: "9946",
+  RO: "9947",
+  SI: "9949",
+  SK: "9950",
 };
+
+const vatPrefixForCountry = (country: string): string => (country === "GR" ? "EL" : country);
 
 export const toPeppolParticipantId = (
   vatNumber?: string | null,
   country?: string | null,
 ): { participantId: string; scheme: string } | { error: string } => {
-  const normalizedVat = String(vatNumber || "").replace(/[\s.]/g, "").toUpperCase();
-  const normalizedCountry = parseVatCountryCode(country);
+  const normalizedVat = String(vatNumber || "").replace(/[\s.\-]/g, "").toUpperCase();
+  // Like Odoo's _deduce_country_code, the VAT prefix identifies the legal
+  // entity and wins over the address: a Dutch company working from a Belgian
+  // address is still addressed with its NL VAT on Peppol.
+  const vatPrefix = /^[A-Z]{2}/.exec(normalizedVat)?.[0];
+  const prefixCountry = vatPrefix ? parseVatCountryCode(vatPrefix) : "";
+  const normalizedCountry = prefixCountry || parseVatCountryCode(country);
   if (!normalizedVat || !normalizedCountry) return { error: "VAT number and country are required for Peppol participant discovery" };
   if (normalizedCountry === "BE") {
-    const digits = normalizedVat.replace(/^BE/, "");
+    let digits = normalizedVat.replace(/^BE/, "");
+    // Pre-2007 Belgian numbers have 9 digits; the CBE number prefixes a 0.
+    if (/^\d{9}$/.test(digits)) digits = `0${digits}`;
     if (!/^\d{10}$/.test(digits)) return { error: `Invalid BE participant VAT "${normalizedVat}" (expected BE + 10 digits)` };
     return { participantId: `0208:${digits}`, scheme: "0208" };
   }
   const scheme = PEPPOL_SCHEME_BY_COUNTRY[normalizedCountry];
   if (!scheme) return { error: `No Peppol participant scheme for country ${normalizedCountry}` };
-  return { participantId: `${scheme}:${normalizedVat}`, scheme };
+  const endpoint = prefixCountry ? normalizedVat : `${vatPrefixForCountry(normalizedCountry)}${normalizedVat}`;
+  return { participantId: `${scheme}:${endpoint}`, scheme };
 };
 
 export const resolvePeppolRecipient = (
@@ -229,17 +268,22 @@ const odooCallOnce = async <T>(
   config: OdooAccountingConfig,
   model: string,
   method: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  timeoutMs?: number
 ): Promise<{ value: T; attempts: number }> => ({
   value: await odooJson2Call<T>(
     { baseUrl: config.baseUrl, apiKey: config.apiKey },
     model,
     method,
     body,
-    config.companyId
+    config.companyId,
+    { timeoutMs }
   ),
   attempts: 1,
 });
+
+const isOdooTimeout = (error: unknown): boolean =>
+  (error as { name?: string } | null)?.name === "OdooTimeoutError";
 
 const odooCallWithRetries = async <T>(
   config: OdooAccountingConfig,
@@ -351,8 +395,8 @@ const getTaxIdsForLine = (
 const findExistingOdooMove = async (
   config: OdooAccountingConfig,
   payload: PeppolDispatchPayload
-): Promise<{ id: number; name?: string; state?: string } | undefined> => {
-  const { value } = await odooCallWithRetries<Array<{ id: number; name?: string; state?: string }>>(
+): Promise<{ id: number; name?: string; state?: string; partner_id?: [number, string] | false } | undefined> => {
+  const { value } = await odooCallWithRetries<Array<{ id: number; name?: string; state?: string; partner_id?: [number, string] | false }>>(
     config,
     "account.move",
     "search_read",
@@ -365,7 +409,7 @@ const findExistingOdooMove = async (
         ["ref", "=", payload.invoiceNumber],
         ["payment_reference", "=", payload.invoiceNumber],
       ],
-      fields: ["id", "name", "state"],
+      fields: ["id", "name", "state", "partner_id"],
       limit: 1,
     }
   );
@@ -387,13 +431,17 @@ const ensureOdooPartner = async (
       ? [["email", "=", email]]
       : [["name", "=", payload.customerName || customer.name || "Customer"]];
 
-  const { value: partners } = await odooCallWithRetries<Array<{ id: number }>>(
-    config,
-    "res.partner",
-    "search_read",
-    { domain, fields: ["id"], limit: 1 }
-  );
-  if (partners[0]?.id) return partners[0].id;
+  const findPartner = async () => {
+    const { value: partners } = await odooCallWithRetries<Array<{ id: number }>>(
+      config,
+      "res.partner",
+      "search_read",
+      { domain, fields: ["id"], limit: 1 }
+    );
+    return partners[0]?.id;
+  };
+  const existingPartnerId = await findPartner();
+  if (existingPartnerId) return existingPartnerId;
 
   const countryCode = normalizeVatCountry(
     payload.recipientCountry || businessInfo.country || customer.companyAddress?.country || customer.location?.country
@@ -415,13 +463,141 @@ const ensureOdooPartner = async (
     partnerVals.country_id = countryId;
   }
 
-  const { value: partnerIdRaw } = await odooCallOnce<unknown>(
-    config,
-    "res.partner",
-    "create",
-    { vals_list: partnerVals }
-  );
-  return normalizeOdooId(partnerIdRaw, "partner");
+  try {
+    // A new VAT number makes Odoo run a synchronous VIES check (up to 20s on
+    // its side) whenever any company has VIES enabled.
+    const { value: partnerIdRaw } = await odooCallOnce<unknown>(
+      config,
+      "res.partner",
+      "create",
+      { vals_list: partnerVals },
+      ODOO_SLOW_CALL_TIMEOUT_MS
+    );
+    return normalizeOdooId(partnerIdRaw, "partner");
+  } catch (error) {
+    // Odoo finishes the create after we stop waiting; reuse it instead of
+    // failing (and creating a duplicate on the next attempt).
+    if (isOdooTimeout(error)) {
+      const createdPartnerId = await findPartner();
+      if (createdPartnerId) return createdPartnerId;
+    }
+    throw error;
+  }
+};
+
+type OdooPeppolPartner = {
+  peppol_eas?: string | false;
+  peppol_endpoint?: string | false;
+  peppol_verification_state?: string | false;
+  invoice_edi_format?: string | false;
+};
+
+// The only Odoo e-invoice format that can carry a self-bill (UBL 389/261).
+// Odoo otherwise suggests a national format by country (NLCIUS for Dutch VAT
+// numbers, XRechnung for Leitweg IDs) and then refuses to send the self-bill
+// with "You can only generate sales documents".
+const SELF_BILLING_EDI_FORMAT = "ubl_bis3";
+
+export type OdooPeppolVerification = { state: string; participantIds: string[] };
+
+const participantCandidates = (participantId?: string): string[] => {
+  if (!participantId) return [];
+  const [scheme, endpoint] = participantId.split(":");
+  // Odoo retries Belgian recipients under the 9925 VAT form when 0208 is unknown.
+  return scheme === "0208" ? [participantId, `9925:BE${endpoint}`] : [participantId];
+};
+
+/**
+ * Ask Odoo whether the recipient can actually receive on Peppol before
+ * creating or sending anything. Odoo only derives an endpoint from VAT for
+ * some countries (none for NL), and its send wizard refuses unregistered
+ * recipients with a bare "Partner doesn't have a valid configuration".
+ * The partner's own Peppol identity is checked first; the participant we
+ * resolved from the VAT number is written only when that is not reachable.
+ * Returns undefined when the Odoo database has no Peppol partner fields.
+ */
+export const verifyOdooPeppolPartner = async (
+  config: OdooAccountingConfig,
+  partnerId: number,
+  participantId?: string,
+  options: { selfBilling?: boolean } = {},
+): Promise<OdooPeppolVerification | undefined> => {
+  const readPartner = async () => {
+    const { value } = await odooCallOnce<OdooPeppolPartner[]>(config, "res.partner", "read", {
+      ids: [partnerId],
+      fields: ["peppol_eas", "peppol_endpoint", "peppol_verification_state", "invoice_edi_format"],
+    });
+    return value[0];
+  };
+  const checkEndpoint = async () => {
+    await odooCallOnce(
+      config, "res.partner", "button_account_peppol_check_partner_endpoint", { ids: [partnerId] }, ODOO_SLOW_CALL_TIMEOUT_MS,
+    );
+    return readPartner();
+  };
+  const identity = (partner?: OdooPeppolPartner) =>
+    partner?.peppol_eas && partner.peppol_endpoint ? `${partner.peppol_eas}:${partner.peppol_endpoint}` : undefined;
+
+  let partner: OdooPeppolPartner | undefined;
+  try {
+    partner = await readPartner();
+  } catch {
+    return undefined;
+  }
+  if (!partner) return undefined;
+
+  if (options.selfBilling && partner.invoice_edi_format !== SELF_BILLING_EDI_FORMAT) {
+    // Verification is format-specific, so the earlier result no longer applies.
+    await odooCallOnce(config, "res.partner", "write", {
+      ids: [partnerId],
+      vals: { invoice_edi_format: SELF_BILLING_EDI_FORMAT },
+    });
+    partner = { ...partner, invoice_edi_format: SELF_BILLING_EDI_FORMAT, peppol_verification_state: "not_verified" };
+  }
+
+  const tried: string[] = [];
+  const current = identity(partner);
+  if (current) {
+    if (partner.peppol_verification_state !== "valid") partner = await checkEndpoint();
+    tried.push(current);
+    if (partner?.peppol_verification_state === "valid") return { state: "valid", participantIds: tried };
+  }
+
+  for (const candidate of participantCandidates(participantId)) {
+    if (tried.some((id) => id.toLowerCase() === candidate.toLowerCase())) continue;
+    const [peppolEas, peppolEndpoint] = candidate.split(":");
+    await odooCallOnce(config, "res.partner", "write", {
+      ids: [partnerId],
+      vals: { peppol_eas: peppolEas, peppol_endpoint: peppolEndpoint },
+    });
+    partner = await checkEndpoint();
+    tried.push(candidate);
+    if (partner?.peppol_verification_state === "valid") return { state: "valid", participantIds: tried };
+  }
+
+  return { state: String(partner?.peppol_verification_state || "not_verified"), participantIds: tried };
+};
+
+const describePeppolVerification = (verification: OdooPeppolVerification): string => {
+  const ids = verification.participantIds.join(" / ") || "(no Peppol endpoint)";
+  if (verification.state === "not_valid_format") {
+    return `Recipient ${ids} is on Peppol but does not accept this document type (Peppol BIS 3 invoice or self-bill)`;
+  }
+  if (verification.state === "not_valid") {
+    return `Recipient ${ids} is not registered on the Peppol network, so the invoice cannot be delivered via Peppol`;
+  }
+  return `Odoo could not verify recipient ${ids} on Peppol (Peppol endpoint missing or invalid)`;
+};
+
+const readOdooMoveState = async (config: OdooAccountingConfig, moveId: number): Promise<string | undefined> => {
+  try {
+    const { value } = await odooCallWithRetries<Array<{ state?: string }>>(
+      config, "account.move", "read", { ids: [moveId], fields: ["state"] },
+    );
+    return value[0]?.state;
+  } catch {
+    return undefined;
+  }
 };
 
 const findOdooCountryId = async (config: OdooAccountingConfig, countryCode: string): Promise<number | undefined> => {
@@ -574,10 +750,50 @@ const readOdooMovePeppolState = async (
     if (rawState === "done" || rawState === "sent") {
       return [{ state: "sent" }];
     }
+    if (rawState === "error") {
+      const errorMessage = await readLatestOdooMoveMessage(config, moveId);
+      return [errorMessage ? { state: rawState, error_message: errorMessage } : { state: rawState }];
+    }
     if (rawState) {
       return [{ state: rawState }];
     }
     return [];
+  } catch {
+    return undefined;
+  }
+};
+
+const htmlToText = (html: string): string =>
+  html
+    .replace(/<\s*(br|\/p|\/li|\/div)\s*\/?>/gi, " ")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+
+/**
+ * Odoo 17+ only flags peppol_move_state = 'error'; the reason (proxy
+ * rejection, SMP lookup failure, receiver error...) is posted to the move's
+ * chatter. Without it the admin only ever saw a generic delivery error.
+ */
+const readLatestOdooMoveMessage = async (
+  config: OdooAccountingConfig,
+  moveId: number,
+): Promise<string | undefined> => {
+  try {
+    const { value } = await odooCallOnce<Array<{ body?: string | false }>>(config, "mail.message", "search_read", {
+      domain: [["model", "=", "account.move"], ["res_id", "=", moveId], ["body", "!=", false]],
+      fields: ["body"],
+      order: "id desc",
+      limit: 1,
+    });
+    const text = htmlToText(String(value[0]?.body || ""));
+    return text ? text.slice(0, 500) : undefined;
   } catch {
     return undefined;
   }
@@ -600,17 +816,28 @@ export const triggerOdooEdiSend = async (
   moveId: number,
 ): Promise<"legacy" | "peppol-wizard"> => {
   try {
-    await odooCallOnce(config, "account.move", "button_process_edi_web_services", { ids: [moveId] });
+    await odooCallOnce(config, "account.move", "button_process_edi_web_services", { ids: [moveId] }, ODOO_SEND_TIMEOUT_MS);
     return "legacy";
   } catch (legacyError) {
     if (!isMissingOdooMethodError(legacyError)) throw legacyError;
 
+    // Creating the wizard computes its Peppol checkbox, which looks the
+    // recipient up on the network.
     const { value: created } = await odooCallOnce<unknown>(config, "account.move.send.wizard", "create", {
       vals_list: [{ move_id: moveId, sending_methods: ["peppol"], extra_edis: ["peppol"] }],
-    });
+    }, ODOO_SLOW_CALL_TIMEOUT_MS);
     const wizardId = normalizeOdooId(created, "send wizard");
     try {
-      await odooCallWithRetries(config, "account.move.send.wizard", "action_send_and_print", { ids: [wizardId] });
+      // Sending is not idempotent: a retry after a rejected send would hit the
+      // Peppol proxy again, so the wizard runs exactly once.
+      const { value: action } = await odooCallOnce<{ res_model?: string } | boolean | null>(
+        config, "account.move.send.wizard", "action_send_and_print", { ids: [wizardId] }, ODOO_SEND_TIMEOUT_MS,
+      );
+      // Odoo returns its registration form instead of sending when the
+      // company itself cannot send on Peppol yet.
+      if (action && typeof action === "object" && action.res_model === "peppol.registration") {
+        throw new Error("The Odoo company is not registered as a Peppol sender. Complete the Peppol registration in Odoo (Accounting > Settings > Peppol).");
+      }
     } finally {
       try {
         await odooCallOnce(config, "account.move.send.wizard", "unlink", { ids: [wizardId] });
@@ -637,7 +864,7 @@ const odooDeliveryResult = (
       status: "failed",
       provider: "odoo",
       reference: `odoo-account.move-${moveId}`,
-      reason: failedDocument.error_message || failedDocument.error || "Odoo reported a Peppol EDI delivery error",
+      reason: htmlToText(String(failedDocument.error_message || failedDocument.error || "")) || "Odoo reported a Peppol EDI delivery error",
       response: { moveId, companyId: config.companyId, ediDocuments },
       attempts: 1,
     };
@@ -690,8 +917,17 @@ const dispatchToOdoo = async (
   const coverage = validateOdooTaxCoverage(taxConfig, requiredRates, reverseCharge);
   if (!coverage.ok) {
     const parts: string[] = [];
-    if (coverage.missingRates.length) parts.push(`Missing Odoo tax mapping for VAT rates ${coverage.missingRates.join(", ")}`);
-    if (coverage.missingReverseCharge) parts.push("Odoo reverse-charge tax could not be resolved from the Odoo company chart");
+    // Odoo only maps active taxes; the Belgian chart ships service and
+    // co-contractor taxes but companies often archive them.
+    const taxKind = payload.side === "supplier" ? "purchase" : "sales";
+    if (coverage.missingRates.length) {
+      parts.push(`Missing active Odoo ${taxKind} tax for VAT rates ${coverage.missingRates.join(", ")}`);
+    }
+    if (coverage.missingReverseCharge) {
+      parts.push(payload.side === "supplier"
+        ? "No active Odoo reverse-charge purchase tax: activate \"0% S.Cocont\" in Odoo (Accounting > Configuration > Taxes, filter Archived)"
+        : "No active Odoo reverse-charge sales tax: activate \"0% Cocont\" in Odoo (Accounting > Configuration > Taxes, filter Archived)");
+    }
     console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] tax-coverage: FAIL ${parts.join("; ")}`);
     return { status: "failed", provider: "odoo", reference, reason: parts.join("; "), attempts: 0 };
   }
@@ -708,10 +944,28 @@ const dispatchToOdoo = async (
         return odooDeliveryResult(config, existingMove.id, documents);
       }
     }
-    const partnerId = existingMove ? undefined : await ensureOdooPartner(config, booking, payload);
-    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: move=${existingMove?.id || "new"} partner=${partnerId || "existing"}`);
+    // A retried move without a readable partner still gets a verified recipient.
+    const existingPartnerId = Array.isArray(existingMove?.partner_id) ? existingMove.partner_id[0] : undefined;
+    const partnerId = existingPartnerId ?? await ensureOdooPartner(config, booking, payload);
+    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: move=${existingMove?.id || "new"} partner=${partnerId}`);
+    const verification = await verifyOdooPeppolPartner(
+      config, partnerId, payload.recipientParticipantId, { selfBilling: payload.side === "supplier" },
+    );
+    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] recipient-check:`, JSON.stringify(verification || "unavailable"));
+    if (verification && verification.state !== "valid") {
+      // A recipient that is not on Peppol is not a dispatch error: the PDF
+      // invoice is still the delivery channel. Missing identities are.
+      return {
+        status: verification.state === "not_verified" ? "failed" : "skipped",
+        provider: "odoo",
+        reference: existingMove ? `odoo-account.move-${existingMove.id}` : reference,
+        reason: describePeppolVerification(verification),
+        response: { partnerId, companyId: config.companyId, verification },
+        attempts: 0,
+      };
+    }
     const moveId = existingMove?.id || await (async () => {
-      const moveVals = await buildOdooMoveVals(config, booking, payload, partnerId as number);
+      const moveVals = await buildOdooMoveVals(config, booking, payload, partnerId);
       const { value: moveIdRaw } = await odooCallOnce<unknown>(config, "account.move", "create", { vals_list: moveVals });
       return normalizeOdooId(moveIdRaw, "invoice");
     })();
@@ -719,17 +973,22 @@ const dispatchToOdoo = async (
 
     if (existingMove?.state !== "posted") {
       try {
-        await odooCallWithRetries(config, "account.move", "action_post", { ids: [moveId] });
+        // Posting is not repeatable ("already posted"), so it runs once and a
+        // slow or dropped answer is checked against the move itself.
+        await odooCallOnce(config, "account.move", "action_post", { ids: [moveId] }, ODOO_SLOW_CALL_TIMEOUT_MS);
       } catch (postError: any) {
-        return {
-          status: "failed",
-          provider: "odoo",
-          reference: `odoo-account.move-${moveId}`,
-          reason: postError?.message || "Invoice created in Odoo but could not be posted for Peppol send",
-          dispatchedAt: new Date(),
-          response: { moveId, companyId: config.companyId },
-          attempts: 1,
-        };
+        if (await readOdooMoveState(config, moveId) !== "posted") {
+          return {
+            status: "failed",
+            provider: "odoo",
+            reference: `odoo-account.move-${moveId}`,
+            reason: htmlToText(String(postError?.message || "")) || "Invoice created in Odoo but could not be posted for Peppol send",
+            dispatchedAt: new Date(),
+            response: { moveId, companyId: config.companyId },
+            attempts: 1,
+          };
+        }
+        console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: move ${moveId} posted despite: ${postError?.message}`);
       }
     }
 
@@ -741,11 +1000,23 @@ const dispatchToOdoo = async (
       console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] delivery:`, JSON.stringify(ediDocuments || []));
       return odooDeliveryResult(config, moveId, ediDocuments);
     } catch (sendError: any) {
+      if (isOdooTimeout(sendError)) {
+        // Odoo keeps processing after we stop waiting, so the send has most
+        // likely gone out. Report what the move says instead of "failed";
+        // re-running invoice generation refreshes it without sending twice.
+        const ediDocuments = await readOdooEdiDeliveryState(config, moveId);
+        console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] delivery after timeout:`, JSON.stringify(ediDocuments || []));
+        const result = odooDeliveryResult(config, moveId, ediDocuments);
+        if (result.status === "queued") {
+          result.reason = `${sendError.message}; Odoo is still processing the Peppol send. Generate the invoice again later to refresh the status.`;
+        }
+        return result;
+      }
       return {
         status: "failed",
         provider: "odoo",
         reference: `odoo-account.move-${moveId}`,
-        reason: sendError?.message || "Odoo could not request the Peppol send",
+        reason: htmlToText(String(sendError?.message || "")) || "Odoo could not request the Peppol send",
         dispatchedAt: new Date(),
         response: { moveId, companyId: config.companyId },
         attempts: 1,
@@ -756,7 +1027,7 @@ const dispatchToOdoo = async (
       status: "failed",
       provider: "odoo",
       reference,
-      reason: error?.message || "Odoo invoice sync failed",
+      reason: htmlToText(String(error?.message || "")) || "Odoo invoice sync failed",
       response: error,
       attempts: MAX_DISPATCH_ATTEMPTS,
     };
@@ -813,6 +1084,7 @@ export async function maybeDispatchPeppolInvoice(params: {
     customerVatNumber: recipient.vatNumber,
     customerName: recipient.name,
     recipientCountry: recipient.country,
+    recipientParticipantId: recipient.participantId,
     netAmount: params.netAmount,
     vatRate: params.vatRate,
     reverseCharge: params.reverseCharge,

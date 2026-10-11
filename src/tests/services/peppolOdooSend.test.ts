@@ -73,6 +73,34 @@ describe("triggerOdooEdiSend", () => {
     });
   });
 
+  it("sends once and reports Odoo's refusal instead of retrying", async () => {
+    dispatchMock({
+      "account.move.button_process_edi_web_services": () => {
+        throw new Error("The method 'account.move.button_process_edi_web_services' does not exist");
+      },
+      "account.move.send.wizard.create": () => 505,
+      "account.move.send.wizard.action_send_and_print": () => {
+        throw new Error("Partner doesn't have a valid configuration for Peppol.");
+      },
+      "account.move.send.wizard.unlink": () => true,
+    });
+    await expect(triggerOdooEdiSend(config, 100)).rejects.toThrow(/valid configuration for Peppol/);
+    const sends = odooJson2CallMock.mock.calls.filter((c) => c[2] === "action_send_and_print");
+    expect(sends).toHaveLength(1);
+  });
+
+  it("fails when Odoo answers with the Peppol registration form instead of sending", async () => {
+    dispatchMock({
+      "account.move.button_process_edi_web_services": () => {
+        throw new Error("The method 'account.move.button_process_edi_web_services' does not exist");
+      },
+      "account.move.send.wizard.create": () => 505,
+      "account.move.send.wizard.action_send_and_print": () => ({ type: "ir.actions.act_window", res_model: "peppol.registration" }),
+      "account.move.send.wizard.unlink": () => true,
+    });
+    await expect(triggerOdooEdiSend(config, 100)).rejects.toThrow(/not registered as a Peppol sender/);
+  });
+
   it("does not swallow unrelated legacy errors", async () => {
     dispatchMock({
       "account.move.button_process_edi_web_services": () => {
@@ -117,5 +145,22 @@ describe("readOdooEdiDeliveryState", () => {
 
     const state = await readOdooEdiDeliveryState(config, 100);
     expect(state).toEqual([{ state: "error" }]);
+  });
+
+  it("attaches the reason Odoo posted to the move's chatter for an error state", async () => {
+    dispatchMock({
+      "account.edi.document.search_read": () => {
+        throw new Error("the model 'account.edi.document' does not exist");
+      },
+      "account.move.read": () => [{ peppol_is_sent: false, peppol_move_state: "error" }],
+      "mail.message.search_read": () => [{
+        body: "<p>Peppol Error [code=207] : <strong></strong>The Peppol Participant cannot receive this document type.</p>",
+      }],
+    });
+
+    expect(await readOdooEdiDeliveryState(config, 100)).toEqual([{
+      state: "error",
+      error_message: "Peppol Error [code=207] : The Peppol Participant cannot receive this document type.",
+    }]);
   });
 });
