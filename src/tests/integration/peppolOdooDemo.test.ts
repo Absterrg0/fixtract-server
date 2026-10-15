@@ -14,6 +14,8 @@ import { discoverOdooAccountingConfig, odooJson2Call, type OdooAccountingConfig 
 import { maybeDispatchPeppolInvoice, readOdooEdiDeliveryState } from "../../services/peppolDispatch";
 
 const demoCompanyId = Number(process.env.ODOO_PEPPOL_DEMO_COMPANY_ID);
+// Stands in for the Fixtract PDF; Odoo stores and embeds it without parsing it.
+const fixtractPdf = Buffer.from("%PDF-1.4\n% Fixtract demo invoice - TEST ONLY\n%%EOF\n");
 
 describe.skipIf(!demoCompanyId)("live Odoo Peppol demo", () => {
   let config: OdooAccountingConfig;
@@ -52,8 +54,9 @@ describe.skipIf(!demoCompanyId)("live Odoo Peppol demo", () => {
   }, 60_000);
 
   it("delivers customer invoices, self-bills, and both credit notes, then refreshes without duplicates", async () => {
+    // Paid at checkout and paid out to the professional, so both sides are prepaid.
     const booking = {
-      bookingNumber: "PEPPOL-DEMO-TEST-ONLY", payment: { currency: "EUR" },
+      bookingNumber: "PEPPOL-DEMO-TEST-ONLY", payment: { currency: "EUR", status: "completed", transferStatus: "succeeded" },
       customer: { customerType: "business", name: "Peppol Demo Customer - TEST ONLY", vatNumber: "BE0123456749", companyAddress: { country: "BE" } },
       professional: { name: "Peppol Demo Supplier - TEST ONLY", businessInfo: { vatNumber: "BE0123456848", country: "BE" } },
     };
@@ -61,19 +64,30 @@ describe.skipIf(!demoCompanyId)("live Odoo Peppol demo", () => {
     const documents = [];
     for (const side of ["customer", "supplier"] as const) {
       for (const documentType of ["invoice", "credit_note"] as const) {
+        // Platform-style numbers (FIX-/SUP-, CN for credit notes) that Odoo must keep.
+        const prefix = `${side === "supplier" ? "SUP" : "FIX"}${documentType === "credit_note" ? "-CN" : ""}`;
         const params = {
-          booking, side, documentType, invoiceNumber: `DEMO-${run}-${side}-${documentType}`,
+          booking, side, documentType,
+          invoiceNumber: `${prefix}-${new Date().getUTCFullYear()}-9${String(run).slice(-7)}`,
           ublXml: '<?xml version="1.0"?><Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"><!-- Demo fixture; Odoo generates the outbound XML. --></Invoice>',
-          invoiceUblUrl: "", reverseCharge: false,
-          lineItems: [{ description: "Peppol demo service - no real transaction", price: 1, vatRate: 21 }],
+          invoiceUblUrl: "", reverseCharge: false, invoicePdf: fixtractPdf, totalWithVat: 1.21 + 6.05,
+          lineItems: [
+            { description: "Peppol demo service - no real transaction", price: 1, vatRate: 21 },
+            // A unit adjustment whose catalogue unit price no longer matches the charged amount.
+            { description: "Peppol demo extra units - no real transaction", price: 5, vatRate: 21, quantity: 3, unitPrice: 2 },
+          ],
         };
         const result = await maybeDispatchPeppolInvoice(params);
         expect(result.status, result.reason).toMatch(/^(queued|sent)$/);
         const moveId = Number(result.reference?.replace("odoo-account.move-", ""));
         const [move] = await call<any[]>("account.move", "read", {
-          ids: [moveId], fields: ["name", "journal_id", "company_id", "ubl_cii_xml_id", "peppol_message_uuid", "invoice_line_ids"],
+          ids: [moveId],
+          fields: ["name", "journal_id", "company_id", "ubl_cii_xml_id", "invoice_pdf_report_id", "peppol_message_uuid", "invoice_line_ids", "amount_untaxed"],
         });
         expect(move.company_id[0]).toBe(demoCompanyId);
+        expect(move.name).toBe(params.invoiceNumber);
+        expect(move.amount_untaxed).toBe(6);
+        expect(move.invoice_pdf_report_id[1]).toBe(`${params.invoiceNumber}.pdf`);
         expect(move.journal_id[0]).toBe(side === "supplier" ? config.selfBillingJournalId : config.salesJournalId);
         expect(move.peppol_message_uuid).toMatch(/^demo_/);
         expect(move.ubl_cii_xml_id[0]).toBeGreaterThan(0);
@@ -81,6 +95,13 @@ describe.skipIf(!demoCompanyId)("live Odoo Peppol demo", () => {
         const xml = Buffer.from(attachment.datas, "base64").toString("utf8");
         const typeCode = side === "supplier" ? (documentType === "invoice" ? "389" : "261") : (documentType === "invoice" ? "380" : "381");
         expect(xml).toContain(`>${typeCode}</cbc:${documentType === "invoice" ? "Invoice" : "CreditNote"}TypeCode>`);
+        expect(xml).toContain(`<cbc:ID>${params.invoiceNumber}</cbc:ID>`);
+        expect(xml).toContain(`filename="${params.invoiceNumber}.pdf">${fixtractPdf.toString("base64")}<`);
+        expect(xml.match(/mimeCode="application\/pdf"/g)).toHaveLength(1);
+        if (documentType === "invoice") {
+          expect(xml).toMatch(/<cbc:PrepaidAmount currencyID="EUR">7\.26<\/cbc:PrepaidAmount>/);
+          expect(xml).toMatch(/<cbc:PayableAmount currencyID="EUR">0\.00<\/cbc:PayableAmount>/);
+        }
         const lines = await call<any[]>("account.move.line", "read", { ids: move.invoice_line_ids, fields: ["tax_ids"] });
         const taxes = await call<any[]>("account.tax", "read", { ids: lines.flatMap((line) => line.tax_ids), fields: ["type_tax_use"] });
         expect(taxes.every((tax) => tax.type_tax_use === (side === "supplier" ? "purchase" : "sale"))).toBe(true);
@@ -144,7 +165,7 @@ describe.skipIf(!demoCompanyId)("live Odoo Peppol demo", () => {
       for (const testCase of cases) {
         const params = {
           booking, side: testCase.side, documentType: "invoice" as const,
-          invoiceNumber: `DEMO-${run}-BK96-${testCase.side}`,
+          invoiceNumber: `${testCase.side === "supplier" ? "SUP" : "FIX"}-${new Date().getUTCFullYear()}-8${String(run).slice(-7)}`,
           ublXml: '<?xml version="1.0"?><Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"><!-- Demo fixture --></Invoice>',
           invoiceUblUrl: "", reverseCharge: testCase.reverseCharge, lineItems: testCase.lineItems,
         };

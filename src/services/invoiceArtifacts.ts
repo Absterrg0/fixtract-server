@@ -13,6 +13,8 @@ import {
   type VatDecision,
 } from "../utils/vatManagement";
 import { mapUnitToUneceCode, resolveInvoiceServiceUnit, tryNormalizeInvoiceUnit } from "../utils/invoiceUnits";
+import { getExtraCostQuantity, reconcileUnitPrice } from "../utils/invoiceLineQuantity";
+import { isInvoiceSettled } from "../utils/invoiceSettlement";
 import {
   calculateInvoiceSideTotals,
   calculateSupplierInvoiceNet,
@@ -351,6 +353,20 @@ const toMoney = (value: unknown): string => {
   return (Number.isFinite(amount) ? amount : 0).toFixed(2);
 };
 
+// Unit prices keep up to 6 decimals so quantity × price still equals the
+// two-decimal line amount (5 × 16.428 = 82.14, whereas 5 × 16.43 = 82.15).
+const toUnitPrice = (value: unknown): string => {
+  const amount = Number(value);
+  const fixed = (Number.isFinite(amount) ? amount : 0).toFixed(6).replace(/0+$/, "");
+  const [whole, decimals = ""] = fixed.split(".");
+  return `${whole}.${decimals.padEnd(2, "0")}`;
+};
+
+// Quantities need the same headroom as the unit prices: a measured-unit
+// adjustment of 32.125 − 30 is 2.125 m², and a two-decimal quantity with a
+// six-decimal price no longer multiplies back to the line amount.
+const toQuantity = (value: unknown): string => toUnitPrice(value);
+
 const getCurrentQuote = (booking: any) => {
   const versions = Array.isArray(booking.quoteVersions) ? booking.quoteVersions : [];
   return versions.find((quote: any) => quote.version === booking.currentQuoteVersion) || versions[versions.length - 1];
@@ -411,8 +427,8 @@ const getExtraCostLinesForUbl = (
   return (booking.extraCosts || []).map((cost: any) => {
     const price = Math.round(moneyNumber(cost.amount) * scale * 100) / 100;
     const lineVatRate = reverseCharge ? 0 : vatRate;
-    const units = Number(cost.actualUnits);
-    const hasPositiveUnits = Number.isFinite(units) && units > 0;
+    const units = getExtraCostQuantity(cost);
+    const hasUnits = units != null;
     const unit = tryNormalizeInvoiceUnit(cost.unit) || fallbackUnit;
     return {
       description: `Extra cost: ${cost.name}${cost.justification ? ` - ${cost.justification}` : ""}`,
@@ -420,11 +436,11 @@ const getExtraCostLinesForUbl = (
       price,
       vatRate: lineVatRate,
       vatAmount: reverseCharge ? 0 : Math.round(price * lineVatRate) / 100,
-      quantity: Number.isFinite(units) ? units : undefined,
+      quantity: units,
       unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) * scale : undefined,
-      // Only attach a unit when there is a positive quantity, otherwise the UBL
+      // Only attach a unit when there is a quantity, otherwise the UBL
       // serializer would turn a fixed-price extra cost into "1 <unit>".
-      ...(hasPositiveUnits && unit ? { unit } : {}),
+      ...(hasUnits && unit ? { unit } : {}),
     };
   });
 };
@@ -444,7 +460,18 @@ const getSupplierVatContext = (booking: any, platform: UblPlatformParty): VatDec
   });
 };
 
+const withConsistentUnitPrices = <T extends { lines: UblLine[] }>(pricing: T): T => ({
+  ...pricing,
+  lines: pricing.lines.map((line) => ({ ...line, unitPrice: reconcileUnitPrice(line.price, line.quantity, line.unitPrice) })),
+});
+
 const getPricingLinesForUbl = (
+  booking: any,
+  options: { selfBilling: boolean; platform: UblPlatformParty }
+): { lines: UblLine[]; totals: ReturnType<typeof calculateInvoiceSideTotals> } =>
+  withConsistentUnitPrices(getRawPricingLinesForUbl(booking, options));
+
+const getRawPricingLinesForUbl = (
   booking: any,
   options: { selfBilling: boolean; platform: UblPlatformParty }
 ): { lines: UblLine[]; totals: ReturnType<typeof calculateInvoiceSideTotals> } => {
@@ -684,7 +711,7 @@ const buildUblPartiesAndTotals = (
   sign: number,
   pricingLines: any[],
   reverseCharge: boolean,
-  options?: { selfBilling?: boolean; platform?: UblPlatformParty },
+  options?: { selfBilling?: boolean; platform?: UblPlatformParty; settled?: boolean },
   totals?: ReturnType<typeof calculateInvoiceSideTotals>
 ) => {
   const customer = booking.customer || {};
@@ -758,13 +785,14 @@ const buildUblPartiesAndTotals = (
     <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${toMoney(Number(totals?.netAmount ?? booking.payment?.netAmount ?? booking.payment?.amount) * sign)}</cbc:LineExtensionAmount>
     <cbc:TaxExclusiveAmount currencyID="${escapeXml(currency)}">${toMoney(Number(totals?.netAmount ?? booking.payment?.netAmount ?? booking.payment?.amount) * sign)}</cbc:TaxExclusiveAmount>
     <cbc:TaxInclusiveAmount currencyID="${escapeXml(currency)}">${toMoney(Number(totals?.totalWithVat ?? booking.payment?.totalWithVat) * sign)}</cbc:TaxInclusiveAmount>
-    <cbc:PayableAmount currencyID="${escapeXml(currency)}">${toMoney(Number(totals?.totalWithVat ?? booking.payment?.totalWithVat) * sign)}</cbc:PayableAmount>
+    ${options?.settled ? `<cbc:PrepaidAmount currencyID="${escapeXml(currency)}">${toMoney(Number(totals?.totalWithVat ?? booking.payment?.totalWithVat) * sign)}</cbc:PrepaidAmount>` : ""}
+    <cbc:PayableAmount currencyID="${escapeXml(currency)}">${options?.settled ? toMoney(0) : toMoney(Number(totals?.totalWithVat ?? booking.payment?.totalWithVat) * sign)}</cbc:PayableAmount>
   </cac:LegalMonetaryTotal>`,
     taxCategoryId,
   };
 };
 
-const buildUblCreditNoteXml = (
+export const buildUblCreditNoteXml = (
   booking: any,
   creditNoteNumber: string,
   issuedAt: Date,
@@ -784,7 +812,7 @@ const buildUblCreditNoteXml = (
   const creditNoteLines = pricingLines.map((line: any, index: number) => `
     <cac:CreditNoteLine>
       <cbc:ID>${index + 1}</cbc:ID>
-      <cbc:CreditedQuantity unitCode="${escapeXml(mapUnitToUneceCode(line.unit))}">${toMoney(Number(line.quantity || 1))}</cbc:CreditedQuantity>
+      <cbc:CreditedQuantity unitCode="${escapeXml(mapUnitToUneceCode(line.unit))}">${toQuantity(Number(line.quantity || 1))}</cbc:CreditedQuantity>
       <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.price) * sign)}</cbc:LineExtensionAmount>
       <cac:Item>
         <cbc:Description>${escapeXml(line.description)}</cbc:Description>
@@ -795,7 +823,7 @@ const buildUblCreditNoteXml = (
         </cac:ClassifiedTaxCategory>
       </cac:Item>
       <cac:Price>
-        <cbc:PriceAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.unitPrice ?? line.price) * sign)}</cbc:PriceAmount>
+        <cbc:PriceAmount currencyID="${escapeXml(currency)}">${toUnitPrice(Number(line.unitPrice ?? line.price) * sign)}</cbc:PriceAmount>
       </cac:Price>
     </cac:CreditNoteLine>`).join("");
 
@@ -820,7 +848,7 @@ const buildUblCreditNoteXml = (
 </CreditNote>`;
 };
 
-const buildUblInvoiceXml = (
+export const buildUblInvoiceXml = (
   booking: any,
   invoiceNumber: string,
   issuedAt: Date,
@@ -849,11 +877,13 @@ const buildUblInvoiceXml = (
   const parties = buildUblPartiesAndTotals(booking, currency, sign, pricingLines, reverseCharge, {
     selfBilling,
     platform: options?.platform,
+    // Paid through Stripe: nothing is left to transfer.
+    settled: isInvoiceSettled(booking, selfBilling ? "supplier" : "customer"),
   }, pricing.totals);
   const invoiceLines = pricingLines.map((line: any, index: number) => `
     <cac:InvoiceLine>
       <cbc:ID>${index + 1}</cbc:ID>
-      <cbc:InvoicedQuantity unitCode="${escapeXml(mapUnitToUneceCode(line.unit))}">${toMoney(Number(line.quantity || 1))}</cbc:InvoicedQuantity>
+      <cbc:InvoicedQuantity unitCode="${escapeXml(mapUnitToUneceCode(line.unit))}">${toQuantity(Number(line.quantity || 1))}</cbc:InvoicedQuantity>
       <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.price) * sign)}</cbc:LineExtensionAmount>
       <cac:Item>
         <cbc:Description>${escapeXml(line.description)}</cbc:Description>
@@ -864,7 +894,7 @@ const buildUblInvoiceXml = (
         </cac:ClassifiedTaxCategory>
       </cac:Item>
       <cac:Price>
-        <cbc:PriceAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.unitPrice ?? line.price) * sign)}</cbc:PriceAmount>
+        <cbc:PriceAmount currencyID="${escapeXml(currency)}">${toUnitPrice(Number(line.unitPrice ?? line.price) * sign)}</cbc:PriceAmount>
       </cac:Price>
     </cac:InvoiceLine>`).join("");
 
@@ -1105,7 +1135,10 @@ const retryPeppolForExistingArtifacts = async (
         invoiceNumber: existing.payment.invoiceNumber,
         ublXml: customerUblXml,
         invoiceUblUrl: existing.payment.invoiceUblUrl,
+        invoicePdfUrl: existing.payment.invoiceUrl,
+        issueDate: existing.payment.invoiceGeneratedAt,
         netAmount: customerPricing.totals.netAmount,
+        totalWithVat: customerPricing.totals.totalWithVat,
         vatRate: customerPricing.totals.vatRate,
         reverseCharge: customerPricing.totals.reverseCharge,
         lineItems: getPeppolLineItems(customerPricing),
@@ -1141,7 +1174,10 @@ const retryPeppolForExistingArtifacts = async (
         invoiceNumber: existing.payment.supplierInvoiceNumber,
         ublXml: supplierUblXml,
         invoiceUblUrl: existing.payment.supplierInvoiceUblUrl,
+        invoicePdfUrl: existing.payment.supplierInvoiceUrl,
+        issueDate: existing.payment.supplierInvoiceGeneratedAt,
         netAmount: supplierPricing.totals.netAmount,
+        totalWithVat: supplierPricing.totals.totalWithVat,
         vatRate: supplierPricing.totals.vatRate,
         reverseCharge: supplierPricing.totals.reverseCharge,
         lineItems: getPeppolLineItems(supplierPricing),
@@ -1273,7 +1309,10 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
       invoiceNumber: supplierInvoice.invoiceNumber,
       ublXml: supplierUblXml,
       invoiceUblUrl: supplierInvoiceUblUrl,
+      invoicePdf: supplierInvoice.pdfBuffer,
+      issueDate: generatedAt,
       netAmount: supplierPricing.totals.netAmount,
+      totalWithVat: supplierPricing.totals.totalWithVat,
       vatRate: supplierPricing.totals.vatRate,
       reverseCharge: supplierPricing.totals.reverseCharge,
       lineItems: getPeppolLineItems(supplierPricing),
@@ -1441,7 +1480,10 @@ export async function ensureBookingInvoiceArtifacts(
         invoiceNumber: customerInvoice.invoiceNumber,
         ublXml: customerUblXml,
         invoiceUblUrl,
+        invoicePdf: customerInvoice.pdfBuffer,
+        issueDate: generatedAt,
         netAmount: customerPricing.totals.netAmount,
+        totalWithVat: customerPricing.totals.totalWithVat,
         vatRate: customerPricing.totals.vatRate,
         reverseCharge: customerPricing.totals.reverseCharge,
         lineItems: getPeppolLineItems(customerPricing),
@@ -1492,7 +1534,10 @@ export async function ensureBookingInvoiceArtifacts(
         invoiceNumber: supplierInvoice.invoiceNumber,
         ublXml: supplierUblXml,
         invoiceUblUrl: supplierInvoiceUblUrl,
+        invoicePdf: supplierInvoice.pdfBuffer,
+        issueDate: generatedAt,
         netAmount: supplierPricing.totals.netAmount,
+        totalWithVat: supplierPricing.totals.totalWithVat,
         vatRate: supplierPricing.totals.vatRate,
         reverseCharge: supplierPricing.totals.reverseCharge,
         lineItems: getPeppolLineItems(supplierPricing),
@@ -1591,8 +1636,11 @@ const retryPeppolForExistingCreditArtifacts = async (
         invoiceNumber: existing.payment.creditNoteNumber,
         ublXml: customerUblXml,
         invoiceUblUrl: existing.payment.creditNoteUblUrl,
+        invoicePdfUrl: existing.payment.creditNoteUrl,
+        issueDate: existing.payment.creditNoteGeneratedAt,
         documentType: "credit_note",
         netAmount: customerPricing.totals.netAmount,
+        totalWithVat: customerPricing.totals.totalWithVat,
         vatRate: customerPricing.totals.vatRate,
         reverseCharge: customerPricing.totals.reverseCharge,
         lineItems: getPeppolLineItems(customerPricing),
@@ -1627,8 +1675,11 @@ const retryPeppolForExistingCreditArtifacts = async (
         invoiceNumber: existing.payment.supplierCreditNoteNumber,
         ublXml: supplierUblXml,
         invoiceUblUrl: existing.payment.supplierCreditNoteUblUrl,
+        invoicePdfUrl: existing.payment.supplierCreditNoteUrl,
+        issueDate: existing.payment.supplierCreditNoteGeneratedAt,
         documentType: "credit_note",
         netAmount: supplierPricing.totals.netAmount,
+        totalWithVat: supplierPricing.totals.totalWithVat,
         vatRate: supplierPricing.totals.vatRate,
         reverseCharge: supplierPricing.totals.reverseCharge,
         lineItems: getPeppolLineItems(supplierPricing),
@@ -1823,8 +1874,11 @@ export async function ensureCreditInvoiceArtifacts(
           invoiceNumber: creditNoteNumber!,
           ublXml: customerUblXml,
           invoiceUblUrl: creditNoteUblUrl!,
+          invoicePdfUrl: creditNoteUrl,
+          issueDate: generatedAt,
           documentType: "credit_note",
           netAmount: customerPricing.totals.netAmount,
+          totalWithVat: customerPricing.totals.totalWithVat,
           vatRate: customerPricing.totals.vatRate,
           reverseCharge: customerPricing.totals.reverseCharge,
           lineItems: getPeppolLineItems(customerPricing),
@@ -1875,8 +1929,11 @@ export async function ensureCreditInvoiceArtifacts(
           invoiceNumber: supplierCreditNoteNumber!,
           ublXml: supplierUblXml,
           invoiceUblUrl: supplierCreditNoteUblUrl!,
+          invoicePdfUrl: supplierCreditNoteUrl,
+          issueDate: generatedAt,
           documentType: "credit_note",
           netAmount: supplierPricing.totals.netAmount,
+          totalWithVat: supplierPricing.totals.totalWithVat,
           vatRate: supplierPricing.totals.vatRate,
           reverseCharge: supplierPricing.totals.reverseCharge,
           lineItems: getPeppolLineItems(supplierPricing),
@@ -2051,8 +2108,11 @@ export async function createManualInvoiceArtifact(
       invoiceNumber: generated.invoiceNumber,
       ublXml,
       invoiceUblUrl: ublUrl,
+      invoicePdf: generated.pdfBuffer,
+      issueDate: generatedAt,
       documentType: input.documentType,
       netAmount: pricing.totals.netAmount,
+      totalWithVat: pricing.totals.totalWithVat,
       vatRate: pricing.totals.vatRate,
       reverseCharge: pricing.totals.reverseCharge,
       lineItems: getPeppolLineItems(pricing),

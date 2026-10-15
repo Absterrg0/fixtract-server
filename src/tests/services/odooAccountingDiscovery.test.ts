@@ -32,6 +32,11 @@ describe("Odoo journal discovery", () => {
         data = { is_self_billing: { type: "boolean" } };
       } else if (url.endsWith("account.journal/search_read")) {
         data = body.domain[0][2] === "sale" ? [{ id: 30 }] : [{ id: 40 }];
+      } else if (url.endsWith("res.users/context_get")) {
+        // The pinned company is checked against the companies the API user can access.
+        data = { uid: 7 };
+      } else if (url.endsWith("res.users/read")) {
+        data = [{ company_ids: [1, 2] }];
       } else throw new Error(`Unexpected ${url}`);
       return new Response(JSON.stringify(data), { status: 200 });
     }));
@@ -44,6 +49,90 @@ describe("Odoo journal discovery", () => {
     });
     vi.stubEnv("ODOO_COMPANY_ID", "2");
     expect((await discoverOdooAccountingConfig()).companyId).toBe(2);
+  });
+});
+
+describe("Odoo company override validation", () => {
+  it("rejects a pinned company the API user cannot access, naming the accessible ones", async () => {
+    vi.resetModules();
+    vi.stubEnv("ODOO_API_URL", "https://odoo.example");
+    vi.stubEnv("ODOO_API_KEY", "test-key");
+    vi.stubEnv("ODOO_COMPANY_ID", "9");
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.endsWith("res.users/context_get")) return new Response(JSON.stringify({ uid: 7 }), { status: 200 });
+      if (url.endsWith("res.users/read")) return new Response(JSON.stringify([{ company_ids: [2, 3] }]), { status: 200 });
+      throw new Error(`Unexpected ${url}`);
+    }));
+    const { discoverOdooAccountingConfig } = await import("../../services/odooAccounting");
+    await expect(discoverOdooAccountingConfig()).rejects.toThrow(
+      "Odoo company 9 is not accessible by the Odoo API user (accessible: 2, 3). Set ODOO_COMPANY_ID and the admin e-invoicing company setting to an accessible company."
+    );
+  });
+
+  it("keeps the pinned company when the API user's company list cannot be read", async () => {
+    vi.resetModules();
+    vi.stubEnv("ODOO_API_URL", "https://odoo.example");
+    vi.stubEnv("ODOO_API_KEY", "test-key");
+    vi.stubEnv("ODOO_COMPANY_ID", "2");
+    vi.stubGlobal("fetch", vi.fn(async (url: string, options: any) => {
+      const body = options?.body ? JSON.parse(options.body) : {};
+      if (url.endsWith("res.users/context_get")) return new Response(JSON.stringify({ message: "Access denied" }), { status: 403 });
+      if (url.endsWith("account.account/search_read")) {
+        return new Response(JSON.stringify(body.domain[0][2] === "income" ? [{ id: 10, code: "700100" }] : [{ id: 20, name: "Subcontracting" }]), { status: 200 });
+      }
+      if (url.endsWith("account.tax/search_read")) {
+        return new Response(JSON.stringify([{ id: 51, name: "21%", amount: 21 }]), { status: 200 });
+      }
+      if (url.endsWith("account.journal/fields_get")) return new Response(JSON.stringify({}), { status: 200 });
+      if (url.endsWith("account.journal/search_read")) {
+        return new Response(JSON.stringify(body.domain[0][2] === "sale" ? [{ id: 30 }] : [{ id: 40 }]), { status: 200 });
+      }
+      throw new Error(`Unexpected ${url}`);
+    }));
+    const { discoverOdooAccountingConfig } = await import("../../services/odooAccounting");
+    expect((await discoverOdooAccountingConfig()).companyId).toBe(2);
+  });
+});
+
+describe("listOdooCompanies", () => {
+  it("still lists the companies when res.company.fields_get fails", async () => {
+    vi.resetModules();
+    vi.stubEnv("ODOO_API_URL", "https://odoo.example");
+    vi.stubEnv("ODOO_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.endsWith("res.users/context_get")) return new Response(JSON.stringify({ uid: 7 }), { status: 200 });
+      if (url.endsWith("res.users/read")) return new Response(JSON.stringify([{ company_ids: [2] }]), { status: 200 });
+      if (url.endsWith("res.company/fields_get")) return new Response(JSON.stringify({ message: "Access denied" }), { status: 403 });
+      if (url.endsWith("res.company/read")) return new Response(JSON.stringify([{ id: 2, name: "Fixtract", vat: "BE1002103337" }]), { status: 200 });
+      throw new Error(`Unexpected ${url}`);
+    }));
+    const { listOdooCompanies } = await import("../../services/odooAccounting");
+    expect(await listOdooCompanies()).toEqual([{ id: 2, name: "Fixtract", vat: "BE1002103337" }]);
+  });
+
+  it("reports Peppol readiness when the fields are available", async () => {
+    vi.resetModules();
+    vi.stubEnv("ODOO_API_URL", "https://odoo.example");
+    vi.stubEnv("ODOO_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.endsWith("res.users/context_get")) return new Response(JSON.stringify({ uid: 7 }), { status: 200 });
+      if (url.endsWith("res.users/read")) return new Response(JSON.stringify([{ company_ids: [2, 3] }]), { status: 200 });
+      if (url.endsWith("res.company/fields_get")) {
+        return new Response(JSON.stringify({ peppol_can_send: { type: "boolean" }, account_peppol_proxy_state: { type: "selection" } }), { status: 200 });
+      }
+      if (url.endsWith("res.company/read")) {
+        return new Response(JSON.stringify([
+          { id: 2, name: "Fixtract", vat: "BE1002103337", peppol_can_send: false, account_peppol_proxy_state: "not_registered" },
+          { id: 3, name: "Demo", peppol_can_send: true, account_peppol_proxy_state: "receiver" },
+        ]), { status: 200 });
+      }
+      throw new Error(`Unexpected ${url}`);
+    }));
+    const { listOdooCompanies } = await import("../../services/odooAccounting");
+    expect(await listOdooCompanies()).toEqual([
+      { id: 2, name: "Fixtract", vat: "BE1002103337", peppolCanSend: false, peppolState: "not_registered" },
+      { id: 3, name: "Demo", peppolCanSend: true, peppolState: "receiver" },
+    ]);
   });
 });
 

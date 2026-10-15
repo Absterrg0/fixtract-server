@@ -17,6 +17,8 @@ export interface IPlatformSettings extends Omit<Document, '_id'> {
     peppolEnabled?: boolean;
     provider?: 'odoo' | 'manual';
     peppolParticipantId?: string;
+    /** Odoo company (res.company id) the Fixtract invoices are booked and sent from. */
+    odooCompanyId?: number;
   };
   lastModifiedBy: mongoose.Types.ObjectId;
   lastModified: Date;
@@ -54,6 +56,7 @@ const platformSettingsSchema = new Schema<IPlatformSettings>({
     peppolEnabled: { type: Boolean, default: false },
     provider: { type: String, enum: ['odoo', 'manual'], default: 'manual' },
     peppolParticipantId: { type: String, trim: true },
+    odooCompanyId: { type: Number, min: 1 },
   },
   lastModifiedBy: {
     type: mongoose.Schema.Types.ObjectId,

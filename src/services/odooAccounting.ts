@@ -67,10 +67,7 @@ const withCompanyContext = (
   };
 };
 
-const resolveOdooCompanyIds = async (credentials: OdooCredentials): Promise<number[]> => {
-  const overrideCompanyId = toPositiveInteger(process.env.ODOO_COMPANY_ID);
-  if (overrideCompanyId) return [overrideCompanyId];
-
+const readApiUserCompanyIds = async (credentials: OdooCredentials): Promise<number[]> => {
   const context = await odooJson2Call<{ uid?: number }>(credentials, "res.users", "context_get", {});
   const uid = toPositiveInteger(context.uid);
   if (!uid) {
@@ -83,7 +80,31 @@ const resolveOdooCompanyIds = async (credentials: OdooCredentials): Promise<numb
     "read",
     { ids: [uid], fields: ["company_ids"] }
   );
-  const companyIds = users[0]?.company_ids?.filter((id) => Number.isInteger(id) && id > 0) || [];
+  return users[0]?.company_ids?.filter((id) => Number.isInteger(id) && id > 0) || [];
+};
+
+const resolveOdooCompanyIds = async (credentials: OdooCredentials, companyId?: number): Promise<number[]> => {
+  // The admin e-invoicing setting wins over the server default.
+  const overrideCompanyId = toPositiveInteger(companyId) ?? toPositiveInteger(process.env.ODOO_COMPANY_ID);
+  if (overrideCompanyId) {
+    // A pinned company the API user cannot reach would otherwise surface as an
+    // opaque access error deep inside discovery. When the company list itself
+    // cannot be read, keep the pin: the discovery calls report the real error.
+    let accessibleCompanyIds: number[] = [];
+    try {
+      accessibleCompanyIds = await readApiUserCompanyIds(credentials);
+    } catch {
+      accessibleCompanyIds = [];
+    }
+    if (accessibleCompanyIds.length && !accessibleCompanyIds.includes(overrideCompanyId)) {
+      throw new Error(
+        `Odoo company ${overrideCompanyId} is not accessible by the Odoo API user (accessible: ${accessibleCompanyIds.join(", ")}). Set ODOO_COMPANY_ID and the admin e-invoicing company setting to an accessible company.`
+      );
+    }
+    return [overrideCompanyId];
+  }
+
+  const companyIds = await readApiUserCompanyIds(credentials);
   if (!companyIds.length) {
     throw new Error("The Odoo API user has no accessible companies");
   }
@@ -226,9 +247,10 @@ const pickSaleTax = (
 };
 
 const discoverIncomeAccount = async (
-  credentials: OdooCredentials
+  credentials: OdooCredentials,
+  preferredCompanyId?: number,
 ): Promise<{ accountId: number; companyId: number }> => {
-  const companyIds = await resolveOdooCompanyIds(credentials);
+  const companyIds = await resolveOdooCompanyIds(credentials, preferredCompanyId);
   const mergedAccounts: Array<{ id: number; code?: string | false; name?: string; company_ids?: number[] }> = [];
 
   for (const companyId of companyIds) {
@@ -450,18 +472,20 @@ const discoverSelfBillingJournal = async (
   return journals[0]?.id;
 };
 
-export const discoverOdooAccountingConfig = async (): Promise<OdooAccountingConfig> => {
+export const discoverOdooAccountingConfig = async (
+  options: { companyId?: number } = {},
+): Promise<OdooAccountingConfig> => {
   const credentials = getOdooCredentials();
   if (!credentials) {
     throw new Error("ODOO_API_URL and ODOO_API_KEY must be set");
   }
 
-  const cacheKey = `${credentials.baseUrl}:${credentials.apiKey}:${process.env.ODOO_COMPANY_ID || ""}`;
+  const cacheKey = `${credentials.baseUrl}:${credentials.apiKey}:${options.companyId || process.env.ODOO_COMPANY_ID || ""}`;
   if (discoveryCache && discoveryCache.key === cacheKey && discoveryCache.expiresAt > Date.now()) {
     return discoveryCache.config;
   }
 
-  const { accountId: incomeAccountId, companyId } = await discoverIncomeAccount(credentials);
+  const { accountId: incomeAccountId, companyId } = await discoverIncomeAccount(credentials, options.companyId);
   const expenseAccountId = await discoverExpenseAccount(credentials, companyId);
   const { taxIdsByRate, defaultTaxId, reverseChargeTaxId } = await discoverSaleTaxes(credentials, companyId);
   const salesJournalId = await discoverSalesJournal(credentials, companyId);
@@ -490,6 +514,43 @@ export const discoverOdooAccountingConfig = async (): Promise<OdooAccountingConf
   };
 
   return config;
+};
+
+export type OdooCompanySummary = {
+  id: number;
+  name: string;
+  vat?: string;
+  peppolCanSend?: boolean;
+  peppolState?: string;
+};
+
+/** Companies the Odoo API user can post into, with their Peppol readiness. */
+export const listOdooCompanies = async (): Promise<OdooCompanySummary[]> => {
+  const credentials = getOdooCredentials();
+  if (!credentials) {
+    throw new Error("ODOO_API_URL and ODOO_API_KEY must be set");
+  }
+  const ids = await readApiUserCompanyIds(credentials);
+  if (!ids.length) return [];
+  // Peppol readiness is optional: when the fields cannot be listed the
+  // company list must still come back, so the admin can choose a company.
+  let fields: Record<string, unknown> = {};
+  try {
+    fields = await odooJson2Call<Record<string, unknown>>(credentials, "res.company", "fields_get", { attributes: ["type"] });
+  } catch (error) {
+    console.error("Odoo res.company.fields_get failed; listing companies without Peppol readiness:", error);
+  }
+  const peppolFields = ["peppol_can_send", "account_peppol_proxy_state"].filter((field) => field in fields);
+  const companies = await odooJson2Call<Array<Record<string, any>>>(
+    credentials, "res.company", "read", { ids, fields: ["name", "vat", ...peppolFields] },
+  );
+  return companies.map((company) => ({
+    id: company.id,
+    name: String(company.name || `Company ${company.id}`),
+    ...(company.vat ? { vat: String(company.vat) } : {}),
+    ...(typeof company.peppol_can_send === "boolean" ? { peppolCanSend: company.peppol_can_send } : {}),
+    ...(company.account_peppol_proxy_state ? { peppolState: String(company.account_peppol_proxy_state) } : {}),
+  }));
 };
 
 export const resolveOdooAccountingConfig = async (): Promise<OdooAccountingConfig | null> => {
