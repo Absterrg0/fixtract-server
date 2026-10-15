@@ -216,7 +216,20 @@ describe("Peppol Odoo dispatch", () => {
       expect(await dispatch("customer")).toMatchObject({ status: "sent" });
       expect(callsOf("account.move", "unlink")[0][3]).toEqual({ ids: [69] });
       expect(callsOf("account.move", "create")).toHaveLength(1);
-      expect(callsOf("account.move", "action_post")[0][3]).toEqual({ ids: [70] });
+      expect(callsOf("account.move", "action_post")[0][3]).toMatchObject({ ids: [70] });
+    });
+
+    it("keeps the Odoo number when the draft rename is refused", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "search_read") return [{ id: 69, name: "INV/2026/00001", state: "draft" }];
+        if (args[1] === "account.move" && args[2] === "write") throw new Error("You are not allowed to modify 'Invoice Number'.");
+        return normal(...args);
+      });
+      expect(await dispatch("customer")).toMatchObject({ status: "sent" });
+      expect(callsOf("account.move", "write")[0][3]).toEqual({ ids: [69], vals: { name: "TEST-1" } });
+      expect(callsOf("account.move", "create")).toHaveLength(0);
+      expect(callsOf("account.move", "action_post")[0][3]).toMatchObject({ ids: [69] });
     });
 
     it("fails without posting when Odoo does not return the totals of a new move", async () => {
@@ -231,32 +244,44 @@ describe("Peppol Odoo dispatch", () => {
       expect(callsOf("account.move", "action_post")).toHaveLength(0);
     });
 
-    it("falls back to the Odoo sequence when Odoo refuses the platform number", async () => {
+    it("posts under the Odoo sequence when Odoo refuses the platform number at posting", async () => {
+      let posts = 0;
       const normal = mocks.call.getMockImplementation()!;
       mocks.call.mockImplementation(async (...args) => {
-        if (args[1] === "account.move" && args[2] === "create" && args[3].vals_list.name) {
-          throw new Error("De factuurdatum past niet bij het volgnummer");
+        if (args[1] === "account.move" && args[2] === "action_post" && posts++ === 0) {
+          throw new Error("The Date (13-10-2026) you've entered isn't aligned with the existing sequence number (TEST-1). Clear the sequence number to proceed.");
         }
+        if (args[1] === "account.move" && args[2] === "write") return true;
         return normal(...args);
       });
       expect(await dispatch("customer")).toMatchObject({ status: "sent" });
-      const creates = callsOf("account.move", "create");
-      expect(creates).toHaveLength(2);
-      expect(creates[1][3].vals_list.name).toBeUndefined();
-      expect(creates[1][3].vals_list.ref).toBe("TEST-1");
+      expect(callsOf("account.move", "action_post")).toHaveLength(2);
+      expect(callsOf("account.move", "action_post")[0][3]).toMatchObject({ ids: [70], context: { lang: "en_US" } });
+      expect(callsOf("account.move", "write")[0][3]).toEqual({ ids: [70], vals: { name: false } });
+      expect(callsOf("account.move", "create")).toHaveLength(1);
     });
 
-    it("reuses the move Odoo stored before a create error instead of creating a second one", async () => {
-      let searches = 0;
+    it("reports other create errors without creating a second move", async () => {
       const normal = mocks.call.getMockImplementation()!;
       mocks.call.mockImplementation(async (...args) => {
-        if (args[1] === "account.move" && args[2] === "search_read") return searches++ === 0 ? [] : [{ id: 71, name: "TEST-1", state: "draft" }];
-        if (args[1] === "account.move" && args[2] === "create") throw new Error("Connection reset by peer");
+        if (args[1] === "account.move" && args[2] === "create") throw new Error("Invalid tax on line 1");
         return normal(...args);
       });
-      expect(await dispatch("customer")).toMatchObject({ status: "sent" });
+      expect(await dispatch("customer")).toMatchObject({ status: "failed", reason: expect.stringMatching(/Invalid tax/) });
       expect(callsOf("account.move", "create")).toHaveLength(1);
-      expect(callsOf("account.move", "action_post")[0][3]).toEqual({ ids: [71] });
+      expect(callsOf("account.move", "action_post")).toHaveLength(0);
+    });
+
+    it("does not retry a post that Odoo refused for another reason", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "action_post") throw new Error("You need to add a line before posting.");
+        if (args[1] === "account.move" && args[2] === "read" && args[3].fields?.includes("state")) return [{ state: "draft" }];
+        return normal(...args);
+      });
+      expect(await dispatch("customer")).toMatchObject({ status: "failed", reason: expect.stringMatching(/add a line/) });
+      expect(callsOf("account.move", "action_post")).toHaveLength(1);
+      expect(callsOf("account.move", "write")).toHaveLength(0);
     });
 
     it("fails before creating anything when the Odoo company cannot send on Peppol", async () => {

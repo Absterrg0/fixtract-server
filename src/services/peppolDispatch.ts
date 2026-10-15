@@ -763,6 +763,34 @@ const checkOdooMoveTotals = async (
   };
 };
 
+// Odoo checks a move name against its invoice date only when posting. The
+// call asks for English so the message can be recognised.
+const ODOO_SEQUENCE_DATE_MISMATCH = /isn't aligned with the existing sequence number/i;
+
+/**
+ * Post the move under the platform number. If Odoo reads a different year in
+ * that number than in the invoice date, it refuses to post; the rejected post
+ * changed nothing, so clear the name and let the journal sequence number it
+ * rather than not delivering. The platform number stays on ref.
+ */
+const postOdooMove = async (
+  config: OdooAccountingConfig,
+  moveId: number,
+  payload: PeppolDispatchPayload,
+): Promise<void> => {
+  const post = () => odooCallOnce(
+    config, "account.move", "action_post", { ids: [moveId], context: { lang: "en_US" } }, ODOO_SLOW_CALL_TIMEOUT_MS,
+  );
+  try {
+    await post();
+  } catch (postError) {
+    if (isOdooTimeout(postError) || !ODOO_SEQUENCE_DATE_MISMATCH.test(String((postError as Error)?.message))) throw postError;
+    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: Odoo refused the platform number, using its sequence: ${(postError as Error).message}`);
+    await odooCallOnce(config, "account.move", "write", { ids: [moveId], vals: { name: false } });
+    await post();
+  }
+};
+
 /**
  * Store the Fixtract PDF as the move's invoice PDF. Odoo then neither renders
  * its own template nor shows it, and embeds this PDF in the Peppol UBL.
@@ -1282,28 +1310,21 @@ const dispatchToOdoo = async (
         await odooCallOnce(config, "account.move", "unlink", { ids: [reusableMoveId] });
         reusableMoveId = undefined;
       } else if (existingMove?.name !== payload.invoiceNumber) {
-        await odooCallOnce(config, "account.move", "write", { ids: [reusableMoveId], vals: { name: payload.invoiceNumber } });
+        // The platform number belongs on the draft, but Odoo only checks a
+        // name against the invoice date when posting; a refused rename must
+        // not block delivery. Keep the number Odoo already holds and let
+        // posting fall back to the journal sequence if it is rejected there.
+        try {
+          await odooCallOnce(config, "account.move", "write", { ids: [reusableMoveId], vals: { name: payload.invoiceNumber } });
+        } catch (renameError) {
+          console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: could not put the platform number on draft ${reusableMoveId}, keeping its Odoo number: ${(renameError as Error)?.message}`);
+        }
       }
     }
     const moveId = reusableMoveId || await (async () => {
       const moveVals = await buildOdooMoveVals(config, booking, payload, partnerId);
-      try {
-        const { value: moveIdRaw } = await odooCallOnce<unknown>(config, "account.move", "create", { vals_list: moveVals });
-        return normalizeOdooId(moveIdRaw, "invoice");
-      } catch (createError) {
-        if (isOdooTimeout(createError)) throw createError;
-        // Odoo may have stored the move before the error reached us (e.g. a
-        // dropped connection); a second create would duplicate it.
-        const createdMove = await findExistingOdooMove(config, payload);
-        if (createdMove) return createdMove.id;
-        // Odoo refuses a number whose year it reads differently from the
-        // invoice date; fall back to the journal sequence rather than not
-        // delivering. The platform number stays on ref/payment reference.
-        console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: Odoo refused the platform number, using its sequence: ${(createError as Error)?.message}`);
-        const { name: _platformNumber, ...sequencedVals } = moveVals;
-        const { value: moveIdRaw } = await odooCallOnce<unknown>(config, "account.move", "create", { vals_list: sequencedVals });
-        return normalizeOdooId(moveIdRaw, "invoice");
-      }
+      const { value: moveIdRaw } = await odooCallOnce<unknown>(config, "account.move", "create", { vals_list: moveVals });
+      return normalizeOdooId(moveIdRaw, "invoice");
     })();
     if (moveId !== existingMove?.id) {
       const totalsCheck = await checkOdooMoveTotals(config, moveId, expectedTotals);
@@ -1320,7 +1341,7 @@ const dispatchToOdoo = async (
       try {
         // Posting is not repeatable ("already posted"), so it runs once and a
         // slow or dropped answer is checked against the move itself.
-        await odooCallOnce(config, "account.move", "action_post", { ids: [moveId] }, ODOO_SLOW_CALL_TIMEOUT_MS);
+        await postOdooMove(config, moveId, payload);
       } catch (postError: any) {
         if (await readOdooMoveState(config, moveId) !== "posted") {
           return {
