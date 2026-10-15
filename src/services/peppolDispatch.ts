@@ -406,8 +406,8 @@ const getTaxIdsForLine = (
 const findExistingOdooMove = async (
   config: OdooAccountingConfig,
   payload: PeppolDispatchPayload
-): Promise<{ id: number; name?: string; state?: string; partner_id?: [number, string] | false } | undefined> => {
-  const { value } = await odooCallWithRetries<Array<{ id: number; name?: string; state?: string; partner_id?: [number, string] | false }>>(
+): Promise<{ id: number; name?: string; state?: string; partner_id?: [number, string] | false; invoice_date?: string | false } | undefined> => {
+  const { value } = await odooCallWithRetries<Array<{ id: number; name?: string; state?: string; partner_id?: [number, string] | false; invoice_date?: string | false }>>(
     config,
     "account.move",
     "search_read",
@@ -422,7 +422,7 @@ const findExistingOdooMove = async (
         ["ref", "=", payload.invoiceNumber],
         ["payment_reference", "=", payload.invoiceNumber],
       ],
-      fields: ["id", "name", "state", "partner_id"],
+      fields: ["id", "name", "state", "partner_id", "invoice_date"],
       limit: 1,
     }
   );
@@ -1322,15 +1322,21 @@ const dispatchToOdoo = async (
           };
         }
         reusableMoveId = undefined;
-      } else if (existingMove?.name !== payload.invoiceNumber) {
-        // The platform number belongs on the draft, but Odoo only checks a
-        // name against the invoice date when posting; a refused rename must
-        // not block delivery. Keep the number Odoo already holds and let
-        // posting fall back to the journal sequence if it is rejected there.
-        try {
-          await odooCallOnce(config, "account.move", "write", { ids: [reusableMoveId], vals: { name: payload.invoiceNumber } });
-        } catch (renameError) {
-          console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: could not put the platform number on draft ${reusableMoveId}, keeping its Odoo number: ${(renameError as Error)?.message}`);
+      } else {
+        // Keep the draft as the platform invoice says it is: the platform
+        // number and the Fixtract invoice date, not what an earlier run left.
+        // Odoo only checks the name against the date when posting, and a
+        // refused write must not block delivery, so failures only log.
+        const reusableVals: Record<string, unknown> = {};
+        if (existingMove?.name !== payload.invoiceNumber) reusableVals.name = payload.invoiceNumber;
+        const platformDate = (payload.issueDate || new Date()).toISOString().slice(0, 10);
+        if (String(existingMove?.invoice_date || "") !== platformDate) reusableVals.invoice_date = platformDate;
+        if (Object.keys(reusableVals).length > 0) {
+          try {
+            await odooCallOnce(config, "account.move", "write", { ids: [reusableMoveId], vals: reusableVals });
+          } catch (reuseWriteError) {
+            console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: could not put the platform number and date on draft ${reusableMoveId}, keeping its Odoo values: ${(reuseWriteError as Error)?.message}`);
+          }
         }
       }
     }

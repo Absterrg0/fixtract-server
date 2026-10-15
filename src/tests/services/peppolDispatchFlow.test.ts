@@ -227,7 +227,25 @@ describe("Peppol Odoo dispatch", () => {
         return normal(...args);
       });
       expect(await dispatch("customer")).toMatchObject({ status: "sent" });
-      expect(callsOf("account.move", "write")[0][3]).toEqual({ ids: [69], vals: { name: "TEST-1" } });
+      expect(callsOf("account.move", "write")[0][3]).toEqual({ ids: [69], vals: { name: "TEST-1", invoice_date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) } });
+      expect(callsOf("account.move", "create")).toHaveLength(0);
+      expect(callsOf("account.move", "action_post")[0][3]).toMatchObject({ ids: [69] });
+    });
+
+    it("puts the invoice date on a reused draft that carries another date", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "search_read") return [{ id: 69, name: "TEST-1", state: "draft", invoice_date: "2026-01-05" }];
+        if (args[1] === "account.move" && args[2] === "write") return true;
+        return normal(...args);
+      });
+      const result = await maybeDispatchPeppolInvoice({
+        booking, side: "customer", invoiceNumber: "TEST-1", ublXml: "<Invoice/>", invoiceUblUrl: "",
+        issueDate: new Date("2026-10-13T09:00:00Z"),
+        lineItems: [{ description: "Service", price: 100, vatRate: 21 }],
+      });
+      expect(result).toMatchObject({ status: "sent" });
+      expect(callsOf("account.move", "write")[0][3]).toEqual({ ids: [69], vals: { invoice_date: "2026-10-13" } });
       expect(callsOf("account.move", "create")).toHaveLength(0);
       expect(callsOf("account.move", "action_post")[0][3]).toMatchObject({ ids: [69] });
     });
