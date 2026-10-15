@@ -64,6 +64,7 @@ import {
   reprocessBacklink,
 } from "../../handlers/Admin/backlinkManagement";
 import {
+  getOdooCompanies,
   getPlatformSettings,
   updatePlatformSettings,
 } from "../../handlers/Admin/platformSettings";
@@ -306,6 +307,7 @@ adminRouter.route('/favorites/:id').delete(deleteFavorite);
 
 // Platform settings routes
 adminRouter.route('/platform-settings').get(getPlatformSettings).put(updatePlatformSettings);
+adminRouter.route('/platform-settings/odoo-companies').get(getOdooCompanies);
 
 // Site settings (social media links etc)
 adminRouter.route('/site-settings').get(getAdminSiteSettings).put(updateAdminSiteSettings);

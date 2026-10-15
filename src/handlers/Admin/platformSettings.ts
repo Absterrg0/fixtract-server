@@ -3,11 +3,13 @@ import PlatformSettings from "../../models/platformSettings";
 import connecToDatabase from "../../config/db";
 import { IUser } from "../../models/user";
 import { validateVATNumberFormat, normalizeVATNumberFormat } from "../../utils/vatValidation";
+import { listOdooCompanies } from "../../services/odooAccounting";
 
 const serializeEInvoicingSettings = (eInvoicing: any = {}) => ({
   peppolEnabled: eInvoicing.peppolEnabled === true,
   provider: eInvoicing.provider === 'odoo' ? 'odoo' : 'manual',
   peppolParticipantId: eInvoicing.peppolParticipantId || '',
+  odooCompanyId: Number.isInteger(eInvoicing.odooCompanyId) && eInvoicing.odooCompanyId > 0 ? eInvoicing.odooCompanyId : null,
 });
 
 // Get current platform settings
@@ -104,6 +106,19 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
       const peppolParticipantId = typeof eInvoicing.peppolParticipantId === 'string'
         ? eInvoicing.peppolParticipantId.trim()
         : config.eInvoicing?.peppolParticipantId;
+      // null/"" clears the choice and falls back to the server's ODOO_COMPANY_ID.
+      let odooCompanyId = config.eInvoicing?.odooCompanyId;
+      if (eInvoicing.odooCompanyId !== undefined) {
+        if (eInvoicing.odooCompanyId === null || eInvoicing.odooCompanyId === '') {
+          odooCompanyId = undefined;
+        } else {
+          const parsedCompanyId = Number(eInvoicing.odooCompanyId);
+          if (!Number.isInteger(parsedCompanyId) || parsedCompanyId <= 0) {
+            return res.status(400).json({ success: false, msg: 'odooCompanyId must be a positive Odoo company id' });
+          }
+          odooCompanyId = parsedCompanyId;
+        }
+      }
       const participantIdPattern = /^\d{4}:[^\s:]+$/;
       if (peppolEnabled && provider !== 'manual') {
         if (!peppolParticipantId || !participantIdPattern.test(peppolParticipantId)) {
@@ -123,6 +138,7 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
         peppolEnabled,
         provider,
         peppolParticipantId,
+        odooCompanyId,
       };
     }
     config.lastModifiedBy = adminUser._id as any;
@@ -147,6 +163,24 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
     return res.status(500).json({
       success: false,
       msg: "Failed to update platform settings"
+    });
+  }
+};
+
+// List the Odoo companies Fixtract can book and send invoices from
+export const getOdooCompanies = async (req: Request, res: Response) => {
+  const adminUser = req.admin as IUser | undefined;
+  if (!adminUser || adminUser.role !== 'admin') {
+    return res.status(403).json({ success: false, msg: "Admin access required" });
+  }
+  try {
+    const companies = await listOdooCompanies();
+    return res.status(200).json({ success: true, data: { companies } });
+  } catch (error: any) {
+    console.error('List Odoo companies error:', error);
+    return res.status(502).json({
+      success: false,
+      msg: error?.message || "Failed to load Odoo companies",
     });
   }
 };

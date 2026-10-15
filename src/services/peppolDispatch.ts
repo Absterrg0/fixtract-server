@@ -2,6 +2,8 @@ import { Buffer } from "buffer";
 import { PEPPOL_DISPATCH_STATUSES, type PeppolDispatchStatus } from "../constants/peppol";
 import PlatformSettings from "../models/platformSettings";
 import { parseVatCountryCode, normalizeVatCountry } from "../utils/vatManagement";
+import { reconcileUnitPrice } from "../utils/invoiceLineQuantity";
+import { isInvoiceSettled } from "../utils/invoiceSettlement";
 import {
   discoverOdooAccountingConfig,
   odooJson2Call,
@@ -46,6 +48,13 @@ type PeppolDispatchPayload = {
   }>;
   ublXml: string;
   ublUrl: string;
+  /** The Fixtract PDF; Odoo shows it and embeds it in the Peppol UBL instead of rendering its own. */
+  invoicePdf?: Buffer;
+  /** Platform invoice date, so the Odoo move and its number carry the same date. */
+  issueDate?: Date;
+  totalWithVat?: number;
+  /** Paid through Stripe: the Peppol UBL states the total as prepaid. */
+  settled?: boolean;
 };
 
 type OdooInvoiceLine = {
@@ -353,7 +362,9 @@ const getOdooInvoiceLinesForPayload = (booking: any, payload: PeppolDispatchPayl
   if (payload.lineItems?.length) {
     return payload.lineItems.map((line) => ({
       description: line.description || "Service",
-      price: Math.abs(Number(line.price || 0)),
+      // Credit note lines are unsigned (Odoo signs them from move_type), but an
+      // invoice keeps negative lines such as an extra cost for fewer units.
+      price: payload.documentType === "credit_note" ? Math.abs(Number(line.price || 0)) : Number(line.price || 0),
       vatRate: Number(line.vatRate ?? payload.vatRate ?? 0),
       quantity: Number.isFinite(Number(line.quantity)) && Number(line.quantity) > 0 ? Number(line.quantity) : undefined,
       unitPrice: Number.isFinite(Number(line.unitPrice)) ? Number(line.unitPrice) : undefined,
@@ -406,6 +417,8 @@ const findExistingOdooMove = async (
           ? (payload.documentType === "credit_note" ? "in_refund" : "in_invoice")
           : (payload.documentType === "credit_note" ? "out_refund" : "out_invoice")],
         "|",
+        "|",
+        ["name", "=", payload.invoiceNumber],
         ["ref", "=", payload.invoiceNumber],
         ["payment_reference", "=", payload.invoiceNumber],
       ],
@@ -640,8 +653,13 @@ const buildOdooMoveVals = async (
   const currencyId = currency === "EUR" ? undefined : await findOdooCurrencyId(config, currency);
   const reverseCharge = payload.reverseCharge ?? Boolean(booking.payment?.reverseCharge);
   const invoiceLineIds = getOdooInvoiceLinesForPayload(booking, payload).map((line) => {
-    const quantity = line.quantity && line.quantity > 0 ? line.quantity : 1;
-    const priceUnit = line.unitPrice ?? (quantity !== 1 ? line.price / quantity : line.price);
+    // Odoo recomputes the line as quantity × price_unit, so the unit price must
+    // multiply back to the charged amount; otherwise the quantity is dropped.
+    const reconciled = reconcileUnitPrice(line.price, line.quantity, line.unitPrice);
+    const hasQuantity = line.quantity != null && line.quantity !== 0 && reconciled != null
+      && Math.abs(Math.round(line.quantity * reconciled * 100) / 100 - line.price) < 0.005;
+    const quantity = hasQuantity ? line.quantity! : 1;
+    const priceUnit = hasQuantity ? reconciled! : line.price;
     const lineVals: Record<string, unknown> = {
       name: line.description,
       quantity,
@@ -660,15 +678,14 @@ const buildOdooMoveVals = async (
       ? (payload.documentType === "credit_note" ? "in_refund" : "in_invoice")
       : (payload.documentType === "credit_note" ? "out_refund" : "out_invoice"),
     partner_id: partnerId,
-    invoice_date: new Date().toISOString().slice(0, 10),
+    // The platform number replaces the journal sequence (PID7750-…, SELF…), so
+    // Odoo, its Peppol UBL and the Fixtract PDF all carry FIX-/SUP-.
+    name: payload.invoiceNumber,
+    invoice_date: (payload.issueDate || new Date()).toISOString().slice(0, 10),
     ref: payload.invoiceNumber,
     payment_reference: payload.invoiceNumber,
     invoice_origin: booking.bookingNumber || booking._id?.toString?.(),
-    narration: [
-      "Imported from Fixtract.",
-      payload.ublUrl ? `Fixtract UBL: ${payload.ublUrl}` : undefined,
-      payload.peppolParticipantId ? `Peppol participant: ${payload.peppolParticipantId}` : undefined,
-    ].filter(Boolean).join("\n"),
+    // No narration: Odoo sends it to the recipient as the UBL note.
     ...(journalId ? { journal_id: journalId } : {}),
     ...(currencyId ? { currency_id: currencyId } : {}),
     invoice_line_ids: invoiceLineIds,
@@ -707,6 +724,276 @@ const ensureUblAttachmentOnOdooMove = async (
       mimetype: "application/xml",
     },
   });
+};
+
+const roundMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+
+/**
+ * Compare the draft move Odoo computed with the Fixtract invoice before it is
+ * posted. A mismatch (e.g. a quantity Odoo multiplies differently) must never
+ * reach the books or the Peppol network.
+ */
+const checkOdooMoveTotals = async (
+  config: OdooAccountingConfig,
+  moveId: number,
+  expected: { untaxed: number; total?: number },
+): Promise<string | undefined> => {
+  let move: { amount_untaxed?: number; amount_total?: number } | undefined;
+  try {
+    const { value } = await odooCallWithRetries<Array<{ amount_untaxed?: number; amount_total?: number }>>(
+      config, "account.move", "read", { ids: [moveId], fields: ["amount_untaxed", "amount_total"] },
+    );
+    move = value[0];
+  } catch {
+    return undefined;
+  }
+  if (!move || typeof move.amount_untaxed !== "number") return undefined;
+  const untaxedDiff = Math.abs(roundMoney(move.amount_untaxed) - roundMoney(expected.untaxed));
+  // VAT may round per line in Odoo and per invoice in Fixtract.
+  const totalDiff = expected.total != null && typeof move.amount_total === "number"
+    ? Math.abs(roundMoney(move.amount_total) - roundMoney(expected.total))
+    : 0;
+  if (untaxedDiff < 0.005 && totalDiff <= 0.02) return undefined;
+  return `Odoo computed ${move.amount_untaxed.toFixed(2)} excl. VAT / ${Number(move.amount_total).toFixed(2)} incl. VAT, `
+    + `but the Fixtract invoice is ${expected.untaxed.toFixed(2)}${expected.total != null ? ` / ${expected.total.toFixed(2)}` : ""}; the move was not posted`;
+};
+
+/**
+ * Store the Fixtract PDF as the move's invoice PDF. Odoo then neither renders
+ * its own template nor shows it, and embeds this PDF in the Peppol UBL.
+ */
+const ensureInvoicePdfOnOdooMove = async (
+  config: OdooAccountingConfig,
+  moveId: number,
+  payload: PeppolDispatchPayload,
+): Promise<void> => {
+  if (!payload.invoicePdf?.length) return;
+  const { value } = await odooCallWithRetries<Array<{ invoice_pdf_report_id?: [number, string] | false }>>(
+    config, "account.move", "read", { ids: [moveId], fields: ["invoice_pdf_report_id"] },
+  );
+  const existingAttachmentId = Array.isArray(value[0]?.invoice_pdf_report_id)
+    ? value[0].invoice_pdf_report_id[0]
+    : undefined;
+  if (existingAttachmentId) {
+    await odooCallOnce(config, "ir.attachment", "write", {
+      ids: [existingAttachmentId],
+      vals: {
+        name: `${payload.invoiceNumber}.pdf`,
+        datas: payload.invoicePdf.toString("base64"),
+        mimetype: "application/pdf",
+      },
+    });
+    return;
+  }
+  await odooCallOnce(config, "ir.attachment", "create", {
+    vals_list: {
+      name: `${payload.invoiceNumber}.pdf`,
+      type: "binary",
+      datas: payload.invoicePdf.toString("base64"),
+      mimetype: "application/pdf",
+      res_model: "account.move",
+      res_id: moveId,
+      // The binary field behind account.move.invoice_pdf_report_id.
+      res_field: "invoice_pdf_report_file",
+    },
+  });
+};
+
+const xmlEscape = (value: string): string =>
+  value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+const ublPrefix = (xml: string, namespace: "CommonAggregateComponents-2" | "CommonBasicComponents-2"): string => {
+  const match = new RegExp(`xmlns:([\\w-]+)="urn:oasis:names:specification:ubl:schema:xsd:${namespace}"`).exec(xml);
+  return match ? `${match[1]}:` : namespace.startsWith("CommonAggregate") ? "cac:" : "cbc:";
+};
+
+/**
+ * Embed the Fixtract PDF in an Odoo-generated UBL as an
+ * AdditionalDocumentReference, placed where UBL 2.1 orders it (before the
+ * project/statement references, signature and supplier party).
+ */
+export const embedPdfInUbl = (xml: string, filename: string, pdf: Buffer): string => {
+  const cac = ublPrefix(xml, "CommonAggregateComponents-2");
+  const cbc = ublPrefix(xml, "CommonBasicComponents-2");
+  const name = xmlEscape(filename);
+  const binaryPattern = new RegExp(`(<${cbc}EmbeddedDocumentBinaryObject\\b)([^>]*\\bmimeCode=["']application/pdf["'][^>]*)>([\\s\\S]*?)<\\/${cbc}EmbeddedDocumentBinaryObject>`);
+  const binaryMatch = binaryPattern.exec(xml);
+  if (binaryMatch) {
+    const attrs = /\bfilename=(["']).*?\1/.test(binaryMatch[2])
+      ? binaryMatch[2].replace(/\bfilename=(["']).*?\1/, `filename="${name}"`)
+      : `${binaryMatch[2]} filename="${name}"`;
+    const replacement = `${binaryMatch[1]}${attrs}>${pdf.toString("base64")}</${cbc}EmbeddedDocumentBinaryObject>`;
+    const updated = xml.replace(binaryMatch[0], replacement);
+    const referencePattern = new RegExp(`(<${cac}AdditionalDocumentReference\\b[^>]*>)([\\s\\S]*?<\\/${cac}AdditionalDocumentReference>)`);
+    const reference = referencePattern.exec(updated);
+    if (reference && reference[2].includes(replacement)) {
+      const body = reference[2].replace(
+        new RegExp(`(<${cbc}ID\\b[^>]*>)[\\s\\S]*?(<\\/${cbc}ID>)`),
+        `$1${name}$2`,
+      );
+      return updated.replace(reference[0], `${reference[1]}${body}`);
+    }
+    return updated;
+  }
+  const anchor = new RegExp(`<(?:[\\w-]+:)?(?:ProjectReference|StatementDocumentReference|OriginatorDocumentReference|Signature|AccountingSupplierParty)[\\s/>]`).exec(xml);
+  if (!anchor) return xml;
+  const node = `<${cac}AdditionalDocumentReference><${cbc}ID>${name}</${cbc}ID><${cac}Attachment>`
+    + `<${cbc}EmbeddedDocumentBinaryObject mimeCode="application/pdf" filename="${name}">${pdf.toString("base64")}</${cbc}EmbeddedDocumentBinaryObject>`
+    + `</${cac}Attachment></${cac}AdditionalDocumentReference>`;
+  return `${xml.slice(0, anchor.index)}${node}${xml.slice(anchor.index)}`;
+};
+
+/** Keep the identifier received by the customer aligned with the Fixtract PDF. */
+export const setUblInvoiceNumber = (xml: string, invoiceNumber: string): string => {
+  const root = /<(?:[\w-]+:)?(?:Invoice|CreditNote)\b[^>]*>/.exec(xml);
+  if (!root) return xml;
+  const cbc = ublPrefix(xml, "CommonBasicComponents-2");
+  const bodyStart = root.index + root[0].length;
+  const body = xml.slice(bodyStart);
+  const idPattern = new RegExp(`<${cbc}ID\\b[^>]*>[\\s\\S]*?<\\/${cbc}ID>`);
+  const id = idPattern.exec(body);
+  if (!id) return xml;
+  const replacement = `<${cbc}ID>${xmlEscape(invoiceNumber)}</${cbc}ID>`;
+  return `${xml.slice(0, bodyStart)}${body.replace(id[0], replacement)}`;
+};
+
+/**
+ * State a paid invoice as fully prepaid (BR-CO-16: payable = total − prepaid
+ * + rounding). Odoo derives these from its own receivables, which stay open
+ * because Stripe payments are not booked as Odoo payments.
+ */
+export const markUblAsPrepaid = (xml: string): string => {
+  const totalMatch = /<((?:[\w-]+:)?)LegalMonetaryTotal>([\s\S]*?)<\/\1LegalMonetaryTotal>/.exec(xml);
+  if (!totalMatch) return xml;
+  const [block, prefixedCac, body] = totalMatch;
+  const amountOf = (tag: string) => {
+    const match = new RegExp(`<((?:[\\w-]+:)?)${tag}\\b([^>]*)>([^<]*)</\\1${tag}>`).exec(body);
+    return match ? { prefix: match[1], attrs: match[2], value: Number(match[3]) } : undefined;
+  };
+  const inclusive = amountOf("TaxInclusiveAmount");
+  if (!inclusive || !Number.isFinite(inclusive.value)) return xml;
+  const rounding = amountOf("PayableRoundingAmount")?.value || 0;
+  const prepaid = roundMoney(inclusive.value + rounding).toFixed(2);
+  const { prefix, attrs } = inclusive;
+  let patched = body;
+  if (amountOf("PrepaidAmount")) {
+    patched = patched.replace(new RegExp(`(<(?:[\\w-]+:)?PrepaidAmount\\b[^>]*>)[^<]*`), (_match, open) => `${open}${prepaid}`);
+  } else {
+    patched = patched.replace(
+      new RegExp(`<(?:[\\w-]+:)?(?:PayableRoundingAmount|PayableAmount)\\b`),
+      (tag) => `<${prefix}PrepaidAmount${attrs}>${prepaid}</${prefix}PrepaidAmount>${tag}`,
+    );
+  }
+  patched = patched.replace(new RegExp(`(<(?:[\\w-]+:)?PayableAmount\\b[^>]*>)[^<]*`), (_match, open) => `${open}0.00`);
+  return xml.replace(block, () => `<${prefixedCac}LegalMonetaryTotal>${patched}</${prefixedCac}LegalMonetaryTotal>`);
+};
+
+/**
+ * A document-only run builds the UBL in the partner's own e-invoice format,
+ * whereas a Peppol send falls back to the format Odoo suggests by country.
+ * Store that suggestion on a partner without one so both produce the same UBL.
+ */
+const pinPartnerPeppolEdiFormat = async (config: OdooAccountingConfig, moveId: number): Promise<void> => {
+  const { value: moves } = await odooCallWithRetries<Array<{ commercial_partner_id?: [number, string] | false }>>(
+    config, "account.move", "read", { ids: [moveId], fields: ["commercial_partner_id"] },
+  );
+  const partnerId = Array.isArray(moves[0]?.commercial_partner_id) ? moves[0].commercial_partner_id[0] : undefined;
+  if (!partnerId) return;
+  const { value: partners } = await odooCallWithRetries<Array<{ invoice_edi_format?: string | false }>>(
+    config, "res.partner", "read", { ids: [partnerId], fields: ["invoice_edi_format"] },
+  );
+  if (partners[0]?.invoice_edi_format) return;
+  const { value: created } = await odooCallOnce<unknown>(config, "account.move.send.wizard", "create", {
+    vals_list: [{ move_id: moveId, sending_methods: ["peppol"], extra_edis: ["peppol"] }],
+  }, ODOO_SLOW_CALL_TIMEOUT_MS);
+  const wizardId = normalizeOdooId(created, "send wizard");
+  try {
+    const { value: wizards } = await odooCallOnce<Array<{ invoice_edi_format?: string | false }>>(
+      config, "account.move.send.wizard", "read", { ids: [wizardId], fields: ["invoice_edi_format"] },
+    );
+    const suggested = wizards[0]?.invoice_edi_format;
+    if (suggested) {
+      await odooCallOnce(config, "res.partner", "write", { ids: [partnerId], vals: { invoice_edi_format: suggested } });
+    }
+  } finally {
+    await odooCallOnce(config, "account.move.send.wizard", "unlink", { ids: [wizardId] }).catch(() => undefined);
+  }
+};
+
+/**
+ * Odoo 17+: let Odoo build its validated Peppol UBL without sending it, then
+ * embed the Fixtract PDF and the paid status before the Peppol send, which
+ * transmits the stored UBL as-is.
+ */
+const prepareOdooPeppolUbl = async (
+  config: OdooAccountingConfig,
+  moveId: number,
+  payload: PeppolDispatchPayload,
+): Promise<void> => {
+  const readXmlAttachmentId = async () => {
+    const { value } = await odooCallWithRetries<Array<{ ubl_cii_xml_id?: [number, string] | false; peppol_is_sent?: boolean }>>(
+      config, "account.move", "read", { ids: [moveId], fields: ["ubl_cii_xml_id", "peppol_is_sent"] },
+    );
+    return value[0];
+  };
+  let move = await readXmlAttachmentId();
+  if (!move || move.peppol_is_sent) return;
+  if (!move.ubl_cii_xml_id) {
+    await pinPartnerPeppolEdiFormat(config, moveId);
+    // "manual" (download) generates the PDF/UBL documents without sending.
+    const { value: created } = await odooCallOnce<unknown>(config, "account.move.send.wizard", "create", {
+      vals_list: [{ move_id: moveId, sending_methods: ["manual"], extra_edis: [] }],
+    }, ODOO_SLOW_CALL_TIMEOUT_MS);
+    const wizardId = normalizeOdooId(created, "document wizard");
+    try {
+      await odooCallOnce(config, "account.move.send.wizard", "action_send_and_print", { ids: [wizardId] }, ODOO_SEND_TIMEOUT_MS);
+    } finally {
+      try {
+        await odooCallOnce(config, "account.move.send.wizard", "unlink", { ids: [wizardId] });
+      } catch {
+        // Consumed by action_send_and_print.
+      }
+    }
+    move = await readXmlAttachmentId();
+  }
+  const attachmentId = Array.isArray(move?.ubl_cii_xml_id) ? move.ubl_cii_xml_id[0] : undefined;
+  if (!attachmentId) {
+    const reason = await readLatestOdooMoveMessage(config, moveId);
+    throw new Error(`Odoo did not generate the Peppol UBL${reason ? `: ${reason}` : ""}`);
+  }
+  const { value: attachments } = await odooCallWithRetries<Array<{ datas?: string | false }>>(
+    config, "ir.attachment", "read", { ids: [attachmentId], fields: ["datas"] },
+  );
+  const original = Buffer.from(String(attachments[0]?.datas || ""), "base64").toString("utf8");
+  if (!original) throw new Error("Odoo generated an empty Peppol UBL");
+  let xml = original;
+  if (payload.invoicePdf?.length) xml = embedPdfInUbl(xml, `${payload.invoiceNumber}.pdf`, payload.invoicePdf);
+  xml = setUblInvoiceNumber(xml, payload.invoiceNumber);
+  if (payload.settled && payload.documentType === "invoice") xml = markUblAsPrepaid(xml);
+  if (xml === original) return;
+  await odooCallOnce(config, "ir.attachment", "write", {
+    ids: [attachmentId],
+    vals: { datas: Buffer.from(xml, "utf8").toString("base64") },
+  });
+};
+
+/**
+ * Whether the configured Odoo company may send on Peppol. Unknown on Odoo
+ * versions without the field, in which case the send itself reports it.
+ */
+const readOdooCompanyPeppolReadiness = async (
+  config: OdooAccountingConfig,
+): Promise<{ name?: string; canSend: boolean } | undefined> => {
+  try {
+    const { value } = await odooCallOnce<Array<{ name?: string; peppol_can_send?: boolean }>>(
+      config, "res.company", "read", { ids: [config.companyId], fields: ["name", "peppol_can_send"] },
+    );
+    const company = value[0];
+    if (!company || typeof company.peppol_can_send !== "boolean") return undefined;
+    return { name: company.name, canSend: company.peppol_can_send };
+  } catch {
+    return undefined;
+  }
 };
 
 export const readOdooEdiDeliveryState = async (
@@ -814,12 +1101,15 @@ const isMissingOdooMethodError = (error: unknown): boolean =>
 export const triggerOdooEdiSend = async (
   config: OdooAccountingConfig,
   moveId: number,
+  options: { beforePeppolSend?: () => Promise<void> } = {},
 ): Promise<"legacy" | "peppol-wizard"> => {
   try {
     await odooCallOnce(config, "account.move", "button_process_edi_web_services", { ids: [moveId] }, ODOO_SEND_TIMEOUT_MS);
     return "legacy";
   } catch (legacyError) {
     if (!isMissingOdooMethodError(legacyError)) throw legacyError;
+
+    await options.beforePeppolSend?.();
 
     // Creating the wizard computes its Peppol checkbox, which looks the
     // recipient up on the network.
@@ -888,11 +1178,12 @@ const odooDeliveryResult = (
 const dispatchToOdoo = async (
   booking: any,
   payload: PeppolDispatchPayload,
-  reference: string
+  reference: string,
+  odooCompanyId?: number,
 ): Promise<PeppolDispatchResult> => {
   let config: OdooAccountingConfig;
   try {
-    config = await discoverOdooAccountingConfig();
+    config = await discoverOdooAccountingConfig({ companyId: odooCompanyId });
   } catch (error: any) {
     return {
       status: "failed",
@@ -933,6 +1224,14 @@ const dispatchToOdoo = async (
   }
   console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] tax-coverage: OK rates [${requiredRates.join(", ")}]`);
 
+  const readiness = await readOdooCompanyPeppolReadiness(config);
+  if (readiness && !readiness.canSend) {
+    return {
+      status: "failed", provider: "odoo", reference, attempts: 0,
+      reason: `Odoo company "${readiness.name || config.companyId}" (id ${config.companyId}) is not registered to send on Peppol. Complete its Peppol registration in Odoo (Accounting > Settings > Peppol) or select another Odoo company in the admin e-invoicing settings.`,
+    };
+  }
+
   try {
     console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: creating/finding Odoo move`);
     const existingMove = await findExistingOdooMove(config, payload);
@@ -964,12 +1263,49 @@ const dispatchToOdoo = async (
         attempts: 0,
       };
     }
-    const moveId = existingMove?.id || await (async () => {
+    const expectedTotals = {
+      untaxed: roundMoney(lines.reduce((sum, line) => sum + line.price, 0)),
+      total: typeof payload.totalWithVat === "number"
+        ? (payload.documentType === "credit_note" ? Math.abs(payload.totalWithVat) : payload.totalWithVat)
+        : undefined,
+    };
+    let reusableMoveId = existingMove?.id;
+    if (reusableMoveId && existingMove?.state !== "posted") {
+      // A draft left by an earlier run may carry wrong amounts or an Odoo
+      // sequence number; rebuild it from the current invoice instead.
+      if (await checkOdooMoveTotals(config, reusableMoveId, expectedTotals)) {
+        await odooCallOnce(config, "account.move", "unlink", { ids: [reusableMoveId] });
+        reusableMoveId = undefined;
+      } else if (existingMove?.name !== payload.invoiceNumber) {
+        await odooCallOnce(config, "account.move", "write", { ids: [reusableMoveId], vals: { name: payload.invoiceNumber } });
+      }
+    }
+    const moveId = reusableMoveId || await (async () => {
       const moveVals = await buildOdooMoveVals(config, booking, payload, partnerId);
-      const { value: moveIdRaw } = await odooCallOnce<unknown>(config, "account.move", "create", { vals_list: moveVals });
-      return normalizeOdooId(moveIdRaw, "invoice");
+      try {
+        const { value: moveIdRaw } = await odooCallOnce<unknown>(config, "account.move", "create", { vals_list: moveVals });
+        return normalizeOdooId(moveIdRaw, "invoice");
+      } catch (createError) {
+        if (isOdooTimeout(createError)) throw createError;
+        // Odoo refuses a number whose year it reads differently from the
+        // invoice date; fall back to the journal sequence rather than not
+        // delivering. The platform number stays on ref/payment reference.
+        console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: Odoo refused the platform number, using its sequence: ${(createError as Error)?.message}`);
+        const { name: _platformNumber, ...sequencedVals } = moveVals;
+        const { value: moveIdRaw } = await odooCallOnce<unknown>(config, "account.move", "create", { vals_list: sequencedVals });
+        return normalizeOdooId(moveIdRaw, "invoice");
+      }
     })();
+    if (moveId !== existingMove?.id) {
+      const mismatch = await checkOdooMoveTotals(config, moveId, expectedTotals);
+      if (mismatch) {
+        console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] totals: FAIL ${mismatch}`);
+        await odooCallOnce(config, "account.move", "unlink", { ids: [moveId] }).catch(() => undefined);
+        return { status: "failed", provider: "odoo", reference, reason: mismatch, attempts: 1 };
+      }
+    }
     await ensureUblAttachmentOnOdooMove(config, moveId, payload);
+    await ensureInvoicePdfOnOdooMove(config, moveId, payload);
 
     if (existingMove?.state !== "posted") {
       try {
@@ -994,7 +1330,19 @@ const dispatchToOdoo = async (
 
     try {
       console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: triggering Odoo EDI send for move ${moveId}`);
-      const sendMode = await triggerOdooEdiSend(config, moveId);
+      const sendMode = await triggerOdooEdiSend(config, moveId, {
+        beforePeppolSend: async () => {
+          try {
+            await prepareOdooPeppolUbl(config, moveId, payload);
+          } catch (prepareError) {
+            // Nothing was sent yet, so a slow answer is a plain failure here.
+            if (isOdooTimeout(prepareError)) {
+              throw new Error(`${(prepareError as Error).message} while generating the Peppol UBL; nothing was sent. Generate the invoice again to retry.`);
+            }
+            throw prepareError;
+          }
+        },
+      });
       console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: EDI send triggered via ${sendMode}`);
       const ediDocuments = await readOdooEdiDeliveryState(config, moveId);
       console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] delivery:`, JSON.stringify(ediDocuments || []));
@@ -1034,6 +1382,23 @@ const dispatchToOdoo = async (
   }
 };
 
+const toPositiveOdooId = (value: unknown): number | undefined => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+};
+
+const loadInvoicePdf = async (url: string | undefined, invoiceNumber: string): Promise<Buffer | undefined> => {
+  if (!url) return undefined;
+  try {
+    const { downloadBufferFromS3 } = await import("../utils/s3Upload");
+    return (await downloadBufferFromS3(url)) || undefined;
+  } catch (error) {
+    // Odoo then falls back to its own PDF; the Peppol send still goes out.
+    console.error(`[PEPPOL][${invoiceNumber}] could not load the invoice PDF:`, error instanceof Error ? error.message : error);
+    return undefined;
+  }
+};
+
 export async function maybeDispatchPeppolInvoice(params: {
   booking: any;
   side?: "customer" | "supplier";
@@ -1045,6 +1410,11 @@ export async function maybeDispatchPeppolInvoice(params: {
   vatRate?: number;
   reverseCharge?: boolean;
   lineItems?: PeppolDispatchPayload["lineItems"];
+  totalWithVat?: number;
+  issueDate?: Date;
+  /** The Fixtract PDF, or its S3 URL when only the stored artifact is at hand. */
+  invoicePdf?: Buffer;
+  invoicePdfUrl?: string;
 }): Promise<PeppolDispatchResult> {
   const side = params.side || "customer";
   const recipient = resolvePeppolRecipient(params.booking, side);
@@ -1091,7 +1461,11 @@ export async function maybeDispatchPeppolInvoice(params: {
     lineItems: params.lineItems,
     ublXml: params.ublXml,
     ublUrl: params.invoiceUblUrl,
+    invoicePdf: params.invoicePdf ?? await loadInvoicePdf(params.invoicePdfUrl, params.invoiceNumber),
+    issueDate: params.issueDate,
+    totalWithVat: params.totalWithVat,
+    settled: isInvoiceSettled(params.booking, side),
   };
 
-  return dispatchToOdoo(params.booking, payload, reference);
+  return dispatchToOdoo(params.booking, payload, reference, toPositiveOdooId(eInvoicing.odooCompanyId));
 }

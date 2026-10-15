@@ -67,8 +67,9 @@ const withCompanyContext = (
   };
 };
 
-const resolveOdooCompanyIds = async (credentials: OdooCredentials): Promise<number[]> => {
-  const overrideCompanyId = toPositiveInteger(process.env.ODOO_COMPANY_ID);
+const resolveOdooCompanyIds = async (credentials: OdooCredentials, companyId?: number): Promise<number[]> => {
+  // The admin e-invoicing setting wins over the server default.
+  const overrideCompanyId = toPositiveInteger(companyId) ?? toPositiveInteger(process.env.ODOO_COMPANY_ID);
   if (overrideCompanyId) return [overrideCompanyId];
 
   const context = await odooJson2Call<{ uid?: number }>(credentials, "res.users", "context_get", {});
@@ -226,9 +227,10 @@ const pickSaleTax = (
 };
 
 const discoverIncomeAccount = async (
-  credentials: OdooCredentials
+  credentials: OdooCredentials,
+  preferredCompanyId?: number,
 ): Promise<{ accountId: number; companyId: number }> => {
-  const companyIds = await resolveOdooCompanyIds(credentials);
+  const companyIds = await resolveOdooCompanyIds(credentials, preferredCompanyId);
   const mergedAccounts: Array<{ id: number; code?: string | false; name?: string; company_ids?: number[] }> = [];
 
   for (const companyId of companyIds) {
@@ -450,18 +452,20 @@ const discoverSelfBillingJournal = async (
   return journals[0]?.id;
 };
 
-export const discoverOdooAccountingConfig = async (): Promise<OdooAccountingConfig> => {
+export const discoverOdooAccountingConfig = async (
+  options: { companyId?: number } = {},
+): Promise<OdooAccountingConfig> => {
   const credentials = getOdooCredentials();
   if (!credentials) {
     throw new Error("ODOO_API_URL and ODOO_API_KEY must be set");
   }
 
-  const cacheKey = `${credentials.baseUrl}:${credentials.apiKey}:${process.env.ODOO_COMPANY_ID || ""}`;
+  const cacheKey = `${credentials.baseUrl}:${credentials.apiKey}:${options.companyId || process.env.ODOO_COMPANY_ID || ""}`;
   if (discoveryCache && discoveryCache.key === cacheKey && discoveryCache.expiresAt > Date.now()) {
     return discoveryCache.config;
   }
 
-  const { accountId: incomeAccountId, companyId } = await discoverIncomeAccount(credentials);
+  const { accountId: incomeAccountId, companyId } = await discoverIncomeAccount(credentials, options.companyId);
   const expenseAccountId = await discoverExpenseAccount(credentials, companyId);
   const { taxIdsByRate, defaultTaxId, reverseChargeTaxId } = await discoverSaleTaxes(credentials, companyId);
   const salesJournalId = await discoverSalesJournal(credentials, companyId);
@@ -490,6 +494,42 @@ export const discoverOdooAccountingConfig = async (): Promise<OdooAccountingConf
   };
 
   return config;
+};
+
+export type OdooCompanySummary = {
+  id: number;
+  name: string;
+  vat?: string;
+  peppolCanSend?: boolean;
+  peppolState?: string;
+};
+
+/** Companies the Odoo API user can post into, with their Peppol readiness. */
+export const listOdooCompanies = async (): Promise<OdooCompanySummary[]> => {
+  const credentials = getOdooCredentials();
+  if (!credentials) {
+    throw new Error("ODOO_API_URL and ODOO_API_KEY must be set");
+  }
+  const context = await odooJson2Call<{ uid?: number }>(credentials, "res.users", "context_get", {});
+  const uid = toPositiveInteger(context.uid);
+  if (!uid) throw new Error("Could not resolve the Odoo API user context");
+  const users = await odooJson2Call<Array<{ company_ids?: number[] }>>(
+    credentials, "res.users", "read", { ids: [uid], fields: ["company_ids"] },
+  );
+  const ids = users[0]?.company_ids || [];
+  if (!ids.length) return [];
+  const fields = await odooJson2Call<Record<string, unknown>>(credentials, "res.company", "fields_get", { attributes: ["type"] });
+  const peppolFields = ["peppol_can_send", "account_peppol_proxy_state"].filter((field) => field in fields);
+  const companies = await odooJson2Call<Array<Record<string, any>>>(
+    credentials, "res.company", "read", { ids, fields: ["name", "vat", ...peppolFields] },
+  );
+  return companies.map((company) => ({
+    id: company.id,
+    name: String(company.name || `Company ${company.id}`),
+    ...(company.vat ? { vat: String(company.vat) } : {}),
+    ...(typeof company.peppol_can_send === "boolean" ? { peppolCanSend: company.peppol_can_send } : {}),
+    ...(company.account_peppol_proxy_state ? { peppolState: String(company.account_peppol_proxy_state) } : {}),
+  }));
 };
 
 export const resolveOdooAccountingConfig = async (): Promise<OdooAccountingConfig | null> => {

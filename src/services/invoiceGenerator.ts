@@ -23,6 +23,7 @@ import {
   resolveInvoiceServiceUnit,
   tryNormalizeInvoiceUnit,
 } from "../utils/invoiceUnits";
+import { getExtraCostQuantity, reconcileUnitPrice } from "../utils/invoiceLineQuantity";
 import ServiceConfiguration from "../models/serviceConfiguration";
 
 interface InvoiceData {
@@ -530,8 +531,9 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
             ? ` (${item.vatRate}% VAT)`
             : "";
         const quantity = Number(item.quantity);
-        let unitPrice = Number(item.unitPrice ?? (quantity > 0 ? item.amount / quantity : Number.NaN));
-        if (data.documentType === "credit_note" && item.unitPrice == null && Number.isFinite(unitPrice)) {
+        const hasQuantity = item.quantity != null && Number.isFinite(quantity) && quantity !== 0;
+        let unitPrice = Number(hasQuantity ? reconcileUnitPrice(item.amount, quantity, item.unitPrice) : item.unitPrice ?? Number.NaN);
+        if (data.documentType === "credit_note" && Number.isFinite(unitPrice)) {
           unitPrice = Math.abs(unitPrice);
         }
         const descriptionText = `${item.description}${vatSuffix}`;
@@ -543,7 +545,7 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
         const y = doc.y;
         doc
           .text(descriptionText, 50, y, { width: 300 })
-          .text(Number.isFinite(quantity) && quantity > 0 ? `${quantity}${item.unit ? ` ${item.unit}` : ""}` : "", 360, y, { align: "right", width: 35 })
+          .text(hasQuantity ? `${quantity}${item.unit ? ` ${item.unit}` : ""}` : "", 360, y, { align: "right", width: 35 })
           .text(Number.isFinite(unitPrice) ? formatCurrency(unitPrice, data.payment.currency) : "", 395, y, { align: "right", width: 70 })
           .text(formatCurrency(item.amount, data.payment.currency), 475, y, { align: "right", width: 75 });
         doc.y = y + rowHeight;
@@ -829,13 +831,14 @@ export async function generateBookingInvoice(
         : cost.type === "unit_adjustment" && Number.isFinite(cost.actualUnits)
           ? ` (${cost.actualUnits}${costUnit ? ` ${costUnit}` : ""})`
           : "";
+    const quantity = getExtraCostQuantity(cost);
     return {
       description: `Extra cost: ${cost.name}${unitDetail}${cost.justification ? ` - ${cost.justification}` : ""}`,
       amount: cost.amount * extraCostScale * sign,
       vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
-      quantity: Number.isFinite(Number(cost.actualUnits)) ? Number(cost.actualUnits) : undefined,
+      quantity,
       unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) * extraCostScale : undefined,
-      ...(Number.isFinite(Number(cost.actualUnits)) && costUnit ? { unit: costUnit } : {}),
+      ...(quantity != null && costUnit ? { unit: costUnit } : {}),
     };
   });
   // VAT is always charged on the discounted amount, matching the charged
@@ -962,13 +965,14 @@ export async function generateBookingInvoice(
   });
   const supplierExtraCostLines = (booking.extraCosts || []).map((cost) => {
     const supplierCostUnit = tryNormalizeInvoiceUnit((cost as any).unit) || checkoutUnit;
+    const quantity = getExtraCostQuantity(cost);
     return {
       description: `Extra cost: ${cost.name}${cost.justification ? ` - ${cost.justification}` : ""}`,
       amount: (Number(cost.amount) || 0) * sign,
       vatRate: supplierVatRate,
-      quantity: Number.isFinite(Number(cost.actualUnits)) ? Number(cost.actualUnits) : undefined,
+      quantity,
       unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) : undefined,
-      ...(Number.isFinite(Number(cost.actualUnits)) && supplierCostUnit ? { unit: supplierCostUnit } : {}),
+      ...(quantity != null && supplierCostUnit ? { unit: supplierCostUnit } : {}),
     };
   });
   const supplierLines = manualLines?.length

@@ -243,6 +243,24 @@ describe("invoice PDF artifacts", () => {
     expect(encodedText).toContain(Buffer.from("50 m").toString("latin1"));
   });
 
+  it("prints a unit price that multiplies back to the charged line amount", async () => {
+    const pdf = await generateInvoicePDF({
+      invoiceNumber: "FIX-2026-000015",
+      invoiceDate: new Date("2026-10-13T00:00:00.000Z"),
+      bookingNumber: "BK-2026-000100",
+      customer: { name: "Customer", email: "customer@example.com", country: "BE" },
+      professional: { name: "Professional", country: "BE" },
+      payment: { netAmount: 82.14, vatAmount: 4.93, vatRate: 6, totalWithVat: 87.07, currency: "EUR" },
+      serviceDescription: "Service",
+      // 5 extra m² charged 82.14 while the catalogue price was 15/m².
+      lineItems: [{ description: "Extra cost: Unit-based adjustment", amount: 82.14, vatRate: 6, quantity: 5, unitPrice: 15, unit: "m²" }],
+    });
+
+    const encodedText = concatenatePdfHexText(extractPdfStreamText(pdf));
+    expect(encodedText).toContain(Buffer.from("16.43").toString("latin1"));
+    expect(encodedText).not.toContain(Buffer.from("15.00").toString("latin1"));
+  });
+
   it("renders the self-billing party label", async () => {
     const pdf = await generateInvoicePDF({
       invoiceNumber: "SUP-2026-000001",

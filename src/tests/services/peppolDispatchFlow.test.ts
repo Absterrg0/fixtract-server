@@ -158,6 +158,172 @@ describe("Peppol Odoo dispatch", () => {
     });
   });
 
+  describe("platform invoice in Odoo", () => {
+    const callsOf = (model: string, method: string) =>
+      mocks.call.mock.calls.filter((call) => call[1] === model && call[2] === method);
+
+    it("books the move under the platform number and date with amounts that match the invoice", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "read") return [{ amount_untaxed: 559.88, amount_total: 593.47 }];
+        return normal(...args);
+      });
+      const result = await maybeDispatchPeppolInvoice({
+        booking, side: "customer", invoiceNumber: "FIX-2026-000015", ublXml: "<Invoice/>", invoiceUblUrl: "",
+        issueDate: new Date("2026-10-13T09:00:00Z"), totalWithVat: 593.47,
+        lineItems: [
+          { description: "Paint per m²", price: 477.74, vatRate: 6, quantity: 30, unitPrice: 15 },
+          { description: "Extra cost: 5 m² more", price: 82.14, vatRate: 6, quantity: 5, unitPrice: 16.427727 },
+        ],
+      });
+      expect(result.status).toBe("sent");
+      const vals = callsOf("account.move", "create")[0][3].vals_list;
+      expect(vals).toMatchObject({ name: "FIX-2026-000015", ref: "FIX-2026-000015", invoice_date: "2026-10-13" });
+      expect(vals.narration).toBeUndefined();
+      const lines = vals.invoice_line_ids.map((line: any) => line[2]);
+      expect(lines[0]).toMatchObject({ quantity: 30 });
+      expect(lines[0].price_unit).toBeCloseTo(15.924667, 6);
+      expect(lines[1]).toMatchObject({ quantity: 5 });
+      expect(Math.round(lines[1].quantity * lines[1].price_unit * 100) / 100).toBe(82.14);
+    });
+
+    it("removes the draft and reports the difference when Odoo totals differ from the invoice", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "read") return [{ amount_untaxed: 1116.38, amount_total: 1183.36 }];
+        if (args[1] === "account.move" && args[2] === "unlink") return true;
+        return normal(...args);
+      });
+      const result = await dispatch("customer");
+      expect(result.status).toBe("failed");
+      expect(result.reason).toMatch(/Odoo computed 1116\.38 excl\. VAT.*Fixtract invoice is 100\.00/);
+      expect(callsOf("account.move", "unlink")[0][3]).toEqual({ ids: [70] });
+      expect(callsOf("account.move", "action_post")).toHaveLength(0);
+    });
+
+    it("fails before creating anything when the Odoo company cannot send on Peppol", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "res.company" && args[2] === "read") return [{ name: "Fixtract", peppol_can_send: false }];
+        return normal(...args);
+      });
+      const result = await dispatch("customer");
+      expect(result).toMatchObject({ status: "failed", attempts: 0 });
+      expect(result.reason).toMatch(/"Fixtract" \(id 1\) is not registered to send on Peppol/);
+      expect(callsOf("account.move", "create")).toHaveLength(0);
+    });
+
+    it("uses the Odoo company chosen in the e-invoicing settings", async () => {
+      mocks.settings.mockResolvedValue({ eInvoicing: { peppolEnabled: true, provider: "odoo", odooCompanyId: 2 } });
+      await dispatch("customer");
+      expect(mocks.discover).toHaveBeenCalledWith({ companyId: 2 });
+    });
+
+    it("sends the Fixtract PDF and a prepaid UBL through the Odoo 17+ wizard", async () => {
+      const pdf = Buffer.from("%PDF-1.4 fixtract");
+      const odooXml = '<Invoice xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2"><cbc:ID>PID7750-2026-10</cbc:ID><cac:AccountingSupplierParty/><cac:LegalMonetaryTotal><cbc:TaxInclusiveAmount currencyID="EUR">121.00</cbc:TaxInclusiveAmount><cbc:PrepaidAmount currencyID="EUR">0.00</cbc:PrepaidAmount><cbc:PayableAmount currencyID="EUR">121.00</cbc:PayableAmount></cac:LegalMonetaryTotal></Invoice>';
+      const move: any = { ubl_cii_xml_id: false, invoice_pdf_report_id: false, peppol_is_sent: false, commercial_partner_id: [60, "Customer"] };
+      let storedXml = "";
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        const [, model, method, body] = args;
+        const key = `${model}.${method}`;
+        if (key === "account.move.button_process_edi_web_services") throw new Error("The method 'button_process_edi_web_services' does not exist");
+        if (key === "account.move.read") return [{ ...move }];
+        if (key === "res.partner.read") {
+          return [{ peppol_eas: "0208", peppol_endpoint: "1002103337", peppol_verification_state: "valid", invoice_edi_format: "ubl_bis3" }];
+        }
+        if (key === "account.move.send.wizard.create") return 90;
+        if (key === "account.move.send.wizard.action_send_and_print") {
+          if (!move.ubl_cii_xml_id) {
+            move.ubl_cii_xml_id = [95, "FIX_ubl_bis3.xml"];
+            storedXml = odooXml;
+          }
+          return true;
+        }
+        if (key === "account.move.send.wizard.unlink") return true;
+        if (key === "ir.attachment.create") return 91;
+        if (key === "ir.attachment.read") return [{ datas: Buffer.from(storedXml).toString("base64") }];
+        if (key === "ir.attachment.write") {
+          storedXml = Buffer.from(body.vals.datas, "base64").toString("utf8");
+          return true;
+        }
+        if (model === "account.edi.document") throw new Error("Model account.edi.document does not exist");
+        return normal(...args);
+      });
+      const result = await maybeDispatchPeppolInvoice({
+        booking: { ...booking, payment: { status: "completed" } }, side: "customer", invoiceNumber: "FIX-2026-000016",
+        ublXml: "<Invoice/>", invoiceUblUrl: "", invoicePdf: pdf,
+        lineItems: [{ description: "Service", price: 100, vatRate: 21 }],
+      });
+      expect(result.status, result.reason).toBe("queued");
+      const pdfAttachment = callsOf("ir.attachment", "create").find((call) => call[3].vals_list.res_field);
+      expect(pdfAttachment?.[3].vals_list).toMatchObject({
+        name: "FIX-2026-000016.pdf", res_field: "invoice_pdf_report_file", res_id: 70, datas: pdf.toString("base64"),
+      });
+      const wizards = callsOf("account.move.send.wizard", "create").map((call) => call[3].vals_list[0].sending_methods);
+      expect(wizards).toEqual([["manual"], ["peppol"]]);
+      expect(storedXml).toContain('<cbc:PayableAmount currencyID="EUR">0.00</cbc:PayableAmount>');
+      expect(storedXml).toContain('<cbc:PrepaidAmount currencyID="EUR">121.00</cbc:PrepaidAmount>');
+      expect(storedXml).toContain("<cbc:ID>FIX-2026-000016</cbc:ID>");
+      expect(storedXml).toContain('filename="FIX-2026-000016.pdf"');
+    });
+
+    it("replaces an earlier Odoo PDF on the move with the Fixtract PDF", async () => {
+      const pdf = Buffer.from("Fixtract invoice PDF");
+      const oldPdf = Buffer.from("Odoo invoice PDF");
+      const odooXml = '<Invoice xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2"><cbc:ID>PID7750-2026-10</cbc:ID><cac:AdditionalDocumentReference><cbc:ID>odoo.pdf</cbc:ID><cac:Attachment><cbc:EmbeddedDocumentBinaryObject mimeCode="application/pdf" filename="odoo.pdf">' + oldPdf.toString("base64") + '</cbc:EmbeddedDocumentBinaryObject></cac:Attachment></cac:AdditionalDocumentReference><cac:AccountingSupplierParty/><cac:LegalMonetaryTotal><cbc:TaxInclusiveAmount currencyID="EUR">121.00</cbc:TaxInclusiveAmount><cbc:PayableAmount currencyID="EUR">121.00</cbc:PayableAmount></cac:LegalMonetaryTotal></Invoice>';
+      const move: any = {
+        ubl_cii_xml_id: false, invoice_pdf_report_id: [96, "odoo.pdf"], peppol_is_sent: false,
+        commercial_partner_id: [60, "Customer"], amount_untaxed: 100, amount_total: 121,
+      };
+      let storedXml = "";
+      let storedPdf = "";
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        const [, model, method, body] = args;
+        const key = `${model}.${method}`;
+        if (key === "account.move.read") return [{ ...move }];
+        if (key === "res.partner.read") return [{
+          peppol_eas: "0208", peppol_endpoint: "1002103337", peppol_verification_state: "valid", invoice_edi_format: "ubl_bis3",
+        }];
+        if (key === "account.move.button_process_edi_web_services") throw new Error("The method 'button_process_edi_web_services' does not exist");
+        if (key === "ir.attachment.write" && body.ids[0] === 96) {
+          storedPdf = body.vals.datas;
+          return true;
+        }
+        if (key === "ir.attachment.read") return [{ datas: Buffer.from(storedXml).toString("base64") }];
+        if (key === "ir.attachment.write") {
+          storedXml = Buffer.from(body.vals.datas, "base64").toString("utf8");
+          return true;
+        }
+        if (key === "account.move.send.wizard.create") return 90;
+        if (key === "account.move.send.wizard.action_send_and_print") {
+          if (!move.ubl_cii_xml_id) {
+            move.ubl_cii_xml_id = [95, "PID7750-2026-10.xml"];
+            storedXml = odooXml;
+          }
+          return true;
+        }
+        if (key === "account.move.send.wizard.unlink") return true;
+        if (model === "account.edi.document") throw new Error("Model account.edi.document does not exist");
+        return normal(...args);
+      });
+
+      const result = await maybeDispatchPeppolInvoice({
+        booking: { ...booking, payment: { status: "completed" } }, side: "customer", invoiceNumber: "FIX-2026-000017",
+        ublXml: "<Invoice/>", invoiceUblUrl: "", invoicePdf: pdf, totalWithVat: 121,
+        lineItems: [{ description: "Service", price: 100, vatRate: 21 }],
+      });
+
+      expect(result.status, result.reason).toBe("queued");
+      expect(storedPdf).toBe(pdf.toString("base64"));
+      expect(storedXml).toContain(`filename="FIX-2026-000017.pdf">${pdf.toString("base64")}</cbc:EmbeddedDocumentBinaryObject>`);
+      expect(storedXml).not.toContain(oldPdf.toString("base64"));
+      expect(storedXml).toContain("<cbc:ID>FIX-2026-000017</cbc:ID>");
+    });
+  });
+
   describe("recipient verification", () => {
     const partnerState = (initial: Record<string, unknown>, isValid: (partner: any) => boolean) => {
       const partner: any = { ...initial };
