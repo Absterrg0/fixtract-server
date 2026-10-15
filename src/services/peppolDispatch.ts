@@ -363,10 +363,12 @@ const getOdooInvoiceLinesForPayload = (booking: any, payload: PeppolDispatchPayl
     return payload.lineItems.map((line) => ({
       description: line.description || "Service",
       // Credit note lines are unsigned (Odoo signs them from move_type), but an
-      // invoice keeps negative lines such as an extra cost for fewer units.
+      // invoice keeps negative lines such as an extra cost for fewer units --
+      // including their negative quantity, so Odoo shows the same units as the
+      // Fixtract PDF (mirrors the PDF's own `quantity !== 0` rule).
       price: payload.documentType === "credit_note" ? Math.abs(Number(line.price || 0)) : Number(line.price || 0),
       vatRate: Number(line.vatRate ?? payload.vatRate ?? 0),
-      quantity: Number.isFinite(Number(line.quantity)) && Number(line.quantity) > 0 ? Number(line.quantity) : undefined,
+      quantity: line.quantity != null && Number.isFinite(Number(line.quantity)) && Number(line.quantity) !== 0 ? Number(line.quantity) : undefined,
       unitPrice: Number.isFinite(Number(line.unitPrice)) ? Number(line.unitPrice) : undefined,
     }));
   }

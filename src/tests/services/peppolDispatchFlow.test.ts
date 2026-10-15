@@ -189,6 +189,28 @@ describe("Peppol Odoo dispatch", () => {
       expect(Math.round(lines[1].quantity * lines[1].price_unit * 100) / 100).toBe(82.14);
     });
 
+    it("keeps the negative quantity of an adjustment for fewer units, like the PDF does", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "read") return [{ amount_untaxed: 436.67, amount_total: 462.87 }];
+        return normal(...args);
+      });
+      const result = await maybeDispatchPeppolInvoice({
+        booking, side: "customer", invoiceNumber: "FIX-2026-000016", ublXml: "<Invoice/>", invoiceUblUrl: "",
+        issueDate: new Date("2026-10-13T09:00:00Z"), totalWithVat: 462.87,
+        lineItems: [
+          { description: "Paint per m²", price: 477.74, vatRate: 6, quantity: 30, unitPrice: 15 },
+          { description: "Extra cost: 2.5 m² fewer", price: -41.07, vatRate: 6, quantity: -2.5, unitPrice: 16.427727 },
+        ],
+      });
+      expect(result.status).toBe("sent");
+      const vals = callsOf("account.move", "create")[0][3].vals_list;
+      const lines = vals.invoice_line_ids.map((line: any) => line[2]);
+      expect(lines[1].quantity).toBe(-2.5);
+      expect(lines[1].price_unit).toBeCloseTo(16.427727, 6);
+      expect(Math.round(lines[1].quantity * lines[1].price_unit * 100) / 100).toBe(-41.07);
+    });
+
     it("removes the draft and reports the difference when Odoo totals differ from the invoice", async () => {
       const normal = mocks.call.getMockImplementation()!;
       mocks.call.mockImplementation(async (...args) => {
