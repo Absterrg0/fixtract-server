@@ -47,6 +47,48 @@ describe("Odoo journal discovery", () => {
   });
 });
 
+describe("listOdooCompanies", () => {
+  it("still lists the companies when res.company.fields_get fails", async () => {
+    vi.resetModules();
+    vi.stubEnv("ODOO_API_URL", "https://odoo.example");
+    vi.stubEnv("ODOO_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.endsWith("res.users/context_get")) return new Response(JSON.stringify({ uid: 7 }), { status: 200 });
+      if (url.endsWith("res.users/read")) return new Response(JSON.stringify([{ company_ids: [2] }]), { status: 200 });
+      if (url.endsWith("res.company/fields_get")) return new Response(JSON.stringify({ message: "Access denied" }), { status: 403 });
+      if (url.endsWith("res.company/read")) return new Response(JSON.stringify([{ id: 2, name: "Fixtract", vat: "BE1002103337" }]), { status: 200 });
+      throw new Error(`Unexpected ${url}`);
+    }));
+    const { listOdooCompanies } = await import("../../services/odooAccounting");
+    expect(await listOdooCompanies()).toEqual([{ id: 2, name: "Fixtract", vat: "BE1002103337" }]);
+  });
+
+  it("reports Peppol readiness when the fields are available", async () => {
+    vi.resetModules();
+    vi.stubEnv("ODOO_API_URL", "https://odoo.example");
+    vi.stubEnv("ODOO_API_KEY", "test-key");
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.endsWith("res.users/context_get")) return new Response(JSON.stringify({ uid: 7 }), { status: 200 });
+      if (url.endsWith("res.users/read")) return new Response(JSON.stringify([{ company_ids: [2, 3] }]), { status: 200 });
+      if (url.endsWith("res.company/fields_get")) {
+        return new Response(JSON.stringify({ peppol_can_send: { type: "boolean" }, account_peppol_proxy_state: { type: "selection" } }), { status: 200 });
+      }
+      if (url.endsWith("res.company/read")) {
+        return new Response(JSON.stringify([
+          { id: 2, name: "Fixtract", vat: "BE1002103337", peppol_can_send: false, account_peppol_proxy_state: "not_registered" },
+          { id: 3, name: "Demo", peppol_can_send: true, account_peppol_proxy_state: "receiver" },
+        ]), { status: 200 });
+      }
+      throw new Error(`Unexpected ${url}`);
+    }));
+    const { listOdooCompanies } = await import("../../services/odooAccounting");
+    expect(await listOdooCompanies()).toEqual([
+      { id: 2, name: "Fixtract", vat: "BE1002103337", peppolCanSend: false, peppolState: "not_registered" },
+      { id: 3, name: "Demo", peppolCanSend: true, peppolState: "receiver" },
+    ]);
+  });
+});
+
 describe("odooJson2Call timeouts", () => {
   it("names the slow Odoo call instead of the bare fetch abort message", async () => {
     vi.resetModules();

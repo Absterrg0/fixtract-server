@@ -232,6 +232,22 @@ describe("Peppol Odoo dispatch", () => {
       expect(callsOf("account.move", "action_post")[0][3]).toMatchObject({ ids: [69] });
     });
 
+    it("fails with the draft to fix when Odoo refuses to delete it", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "search_read") return [{ id: 69, name: "TEST-1", state: "draft" }];
+        if (args[1] === "account.move" && args[2] === "read") return [{ amount_untaxed: 1116.38, amount_total: 1183.36 }];
+        if (args[1] === "account.move" && args[2] === "unlink") throw new Error("You cannot delete an entry which has been posted once.");
+        return normal(...args);
+      });
+      const result = await dispatch("customer");
+      expect(result).toMatchObject({ status: "failed" });
+      expect(result.reason).toMatch(/Odoo computed 1116\.38 excl\. VAT/);
+      expect(result.reason).toMatch(/refused to delete that draft.*draft 69/s);
+      expect(callsOf("account.move", "create")).toHaveLength(0);
+      expect(callsOf("account.move", "action_post")).toHaveLength(0);
+    });
+
     it("fails without posting when Odoo does not return the totals of a new move", async () => {
       const normal = mocks.call.getMockImplementation()!;
       mocks.call.mockImplementation(async (...args) => {

@@ -1306,8 +1306,21 @@ const dispatchToOdoo = async (
     if (reusableMoveId && existingMove?.state !== "posted") {
       // A draft left by an earlier run may carry wrong or unreadable amounts,
       // or an Odoo sequence number; rebuild it from the current invoice instead.
-      if (!(await checkOdooMoveTotals(config, reusableMoveId, expectedTotals)).ok) {
-        await odooCallOnce(config, "account.move", "unlink", { ids: [reusableMoveId] });
+      const reuseCheck = await checkOdooMoveTotals(config, reusableMoveId, expectedTotals);
+      if (!reuseCheck.ok) {
+        try {
+          await odooCallOnce(config, "account.move", "unlink", { ids: [reusableMoveId] });
+        } catch (unlinkError) {
+          // Retrying would find the same draft and fail the same way, so the
+          // reason says what to fix instead of surfacing a bare delete error.
+          return {
+            status: "failed",
+            provider: "odoo",
+            reference,
+            reason: `${reuseCheck.reason}; Odoo then refused to delete that draft (${(unlinkError as Error)?.message}). Remove or fix draft ${reusableMoveId} in Odoo and generate the invoice again.`,
+            attempts: 1,
+          };
+        }
         reusableMoveId = undefined;
       } else if (existingMove?.name !== payload.invoiceNumber) {
         // The platform number belongs on the draft, but Odoo only checks a

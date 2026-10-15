@@ -518,7 +518,14 @@ export const listOdooCompanies = async (): Promise<OdooCompanySummary[]> => {
   );
   const ids = users[0]?.company_ids || [];
   if (!ids.length) return [];
-  const fields = await odooJson2Call<Record<string, unknown>>(credentials, "res.company", "fields_get", { attributes: ["type"] });
+  // Peppol readiness is optional: when the fields cannot be listed the
+  // company list must still come back, so the admin can choose a company.
+  let fields: Record<string, unknown> = {};
+  try {
+    fields = await odooJson2Call<Record<string, unknown>>(credentials, "res.company", "fields_get", { attributes: ["type"] });
+  } catch (error) {
+    console.error("Odoo res.company.fields_get failed; listing companies without Peppol readiness:", error);
+  }
   const peppolFields = ["peppol_can_send", "account_peppol_proxy_state"].filter((field) => field in fields);
   const companies = await odooJson2Call<Array<Record<string, any>>>(
     credentials, "res.company", "read", { ids, fields: ["name", "vat", ...peppolFields] },
