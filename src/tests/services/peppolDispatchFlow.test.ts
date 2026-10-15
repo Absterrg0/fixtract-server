@@ -36,6 +36,8 @@ beforeEach(() => {
       case "account.move.search_read": return [];
       case "res.partner.search_read": return [{ id: 60 }];
       case "account.move.create": return 70;
+      // Totals Odoo computed for the 100.00 excl. VAT test invoice.
+      case "account.move.read": return [{ amount_untaxed: 100, amount_total: 121 }];
       case "ir.attachment.search_read": return [{ id: 80 }];
       case "account.move.action_post": return true;
       case "account.move.button_process_edi_web_services": return true;
@@ -139,7 +141,7 @@ describe("Peppol Odoo dispatch", () => {
       const normal = mocks.call.getMockImplementation()!;
       mocks.call.mockImplementation(async (...args) => {
         if (args[2] === "action_post") throw timeoutError("account.move.action_post");
-        if (args[1] === "account.move" && args[2] === "read") return [{ state: "posted" }];
+        if (args[1] === "account.move" && args[2] === "read") return [{ state: "posted", amount_untaxed: 100 }];
         return normal(...args);
       });
       expect(await dispatch("customer")).toMatchObject({ status: "sent" });
@@ -150,7 +152,7 @@ describe("Peppol Odoo dispatch", () => {
       const normal = mocks.call.getMockImplementation()!;
       mocks.call.mockImplementation(async (...args) => {
         if (args[2] === "action_post") throw timeoutError("account.move.action_post");
-        if (args[1] === "account.move" && args[2] === "read") return [{ state: "draft" }];
+        if (args[1] === "account.move" && args[2] === "read") return [{ state: "draft", amount_untaxed: 100 }];
         return normal(...args);
       });
       expect(await dispatch("customer")).toMatchObject({ status: "failed", reason: expect.stringMatching(/action_post/) });
@@ -201,6 +203,62 @@ describe("Peppol Odoo dispatch", () => {
       expect(callsOf("account.move", "action_post")).toHaveLength(0);
     });
 
+    it("rebuilds an earlier draft whose totals Odoo does not return instead of posting it", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "search_read") return [{ id: 69, name: "TEST-1", state: "draft" }];
+        if (args[1] === "account.move" && args[2] === "read") {
+          return args[3].ids[0] === 69 ? [{}] : [{ amount_untaxed: 100, amount_total: 121 }];
+        }
+        if (args[1] === "account.move" && args[2] === "unlink") return true;
+        return normal(...args);
+      });
+      expect(await dispatch("customer")).toMatchObject({ status: "sent" });
+      expect(callsOf("account.move", "unlink")[0][3]).toEqual({ ids: [69] });
+      expect(callsOf("account.move", "create")).toHaveLength(1);
+      expect(callsOf("account.move", "action_post")[0][3]).toEqual({ ids: [70] });
+    });
+
+    it("fails without posting when Odoo does not return the totals of a new move", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "read") return [{}];
+        if (args[1] === "account.move" && args[2] === "unlink") return true;
+        return normal(...args);
+      });
+      const result = await dispatch("customer");
+      expect(result).toMatchObject({ status: "failed", reason: expect.stringMatching(/could not be checked/) });
+      expect(callsOf("account.move", "action_post")).toHaveLength(0);
+    });
+
+    it("falls back to the Odoo sequence when Odoo refuses the platform number", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "create" && args[3].vals_list.name) {
+          throw new Error("De factuurdatum past niet bij het volgnummer");
+        }
+        return normal(...args);
+      });
+      expect(await dispatch("customer")).toMatchObject({ status: "sent" });
+      const creates = callsOf("account.move", "create");
+      expect(creates).toHaveLength(2);
+      expect(creates[1][3].vals_list.name).toBeUndefined();
+      expect(creates[1][3].vals_list.ref).toBe("TEST-1");
+    });
+
+    it("reuses the move Odoo stored before a create error instead of creating a second one", async () => {
+      let searches = 0;
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "search_read") return searches++ === 0 ? [] : [{ id: 71, name: "TEST-1", state: "draft" }];
+        if (args[1] === "account.move" && args[2] === "create") throw new Error("Connection reset by peer");
+        return normal(...args);
+      });
+      expect(await dispatch("customer")).toMatchObject({ status: "sent" });
+      expect(callsOf("account.move", "create")).toHaveLength(1);
+      expect(callsOf("account.move", "action_post")[0][3]).toEqual({ ids: [71] });
+    });
+
     it("fails before creating anything when the Odoo company cannot send on Peppol", async () => {
       const normal = mocks.call.getMockImplementation()!;
       mocks.call.mockImplementation(async (...args) => {
@@ -222,7 +280,10 @@ describe("Peppol Odoo dispatch", () => {
     it("sends the Fixtract PDF and a prepaid UBL through the Odoo 17+ wizard", async () => {
       const pdf = Buffer.from("%PDF-1.4 fixtract");
       const odooXml = '<Invoice xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2"><cbc:ID>PID7750-2026-10</cbc:ID><cac:AccountingSupplierParty/><cac:LegalMonetaryTotal><cbc:TaxInclusiveAmount currencyID="EUR">121.00</cbc:TaxInclusiveAmount><cbc:PrepaidAmount currencyID="EUR">0.00</cbc:PrepaidAmount><cbc:PayableAmount currencyID="EUR">121.00</cbc:PayableAmount></cac:LegalMonetaryTotal></Invoice>';
-      const move: any = { ubl_cii_xml_id: false, invoice_pdf_report_id: false, peppol_is_sent: false, commercial_partner_id: [60, "Customer"] };
+      const move: any = {
+        ubl_cii_xml_id: false, invoice_pdf_report_id: false, peppol_is_sent: false,
+        commercial_partner_id: [60, "Customer"], amount_untaxed: 100, amount_total: 121,
+      };
       let storedXml = "";
       const normal = mocks.call.getMockImplementation()!;
       mocks.call.mockImplementation(async (...args) => {

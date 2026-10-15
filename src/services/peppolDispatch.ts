@@ -731,13 +731,15 @@ const roundMoney = (value: number): number => Math.round((value + Number.EPSILON
 /**
  * Compare the draft move Odoo computed with the Fixtract invoice before it is
  * posted. A mismatch (e.g. a quantity Odoo multiplies differently) must never
- * reach the books or the Peppol network.
+ * reach the books or the Peppol network, and neither may a move whose totals
+ * could not be read.
  */
 const checkOdooMoveTotals = async (
   config: OdooAccountingConfig,
   moveId: number,
   expected: { untaxed: number; total?: number },
-): Promise<string | undefined> => {
+): Promise<{ ok: true } | { ok: false; reason: string }> => {
+  const unverifiable = { ok: false as const, reason: "Odoo did not return the move totals, so they could not be checked; the move was not posted" };
   let move: { amount_untaxed?: number; amount_total?: number } | undefined;
   try {
     const { value } = await odooCallWithRetries<Array<{ amount_untaxed?: number; amount_total?: number }>>(
@@ -745,17 +747,20 @@ const checkOdooMoveTotals = async (
     );
     move = value[0];
   } catch {
-    return undefined;
+    return unverifiable;
   }
-  if (!move || typeof move.amount_untaxed !== "number") return undefined;
+  if (!move || typeof move.amount_untaxed !== "number") return unverifiable;
   const untaxedDiff = Math.abs(roundMoney(move.amount_untaxed) - roundMoney(expected.untaxed));
   // VAT may round per line in Odoo and per invoice in Fixtract.
   const totalDiff = expected.total != null && typeof move.amount_total === "number"
     ? Math.abs(roundMoney(move.amount_total) - roundMoney(expected.total))
     : 0;
-  if (untaxedDiff < 0.005 && totalDiff <= 0.02) return undefined;
-  return `Odoo computed ${move.amount_untaxed.toFixed(2)} excl. VAT / ${Number(move.amount_total).toFixed(2)} incl. VAT, `
-    + `but the Fixtract invoice is ${expected.untaxed.toFixed(2)}${expected.total != null ? ` / ${expected.total.toFixed(2)}` : ""}; the move was not posted`;
+  if (untaxedDiff < 0.005 && totalDiff <= 0.02) return { ok: true };
+  return {
+    ok: false,
+    reason: `Odoo computed ${move.amount_untaxed.toFixed(2)} excl. VAT / ${Number(move.amount_total).toFixed(2)} incl. VAT, `
+      + `but the Fixtract invoice is ${expected.untaxed.toFixed(2)}${expected.total != null ? ` / ${expected.total.toFixed(2)}` : ""}; the move was not posted`,
+  };
 };
 
 /**
@@ -1271,9 +1276,9 @@ const dispatchToOdoo = async (
     };
     let reusableMoveId = existingMove?.id;
     if (reusableMoveId && existingMove?.state !== "posted") {
-      // A draft left by an earlier run may carry wrong amounts or an Odoo
-      // sequence number; rebuild it from the current invoice instead.
-      if (await checkOdooMoveTotals(config, reusableMoveId, expectedTotals)) {
+      // A draft left by an earlier run may carry wrong or unreadable amounts,
+      // or an Odoo sequence number; rebuild it from the current invoice instead.
+      if (!(await checkOdooMoveTotals(config, reusableMoveId, expectedTotals)).ok) {
         await odooCallOnce(config, "account.move", "unlink", { ids: [reusableMoveId] });
         reusableMoveId = undefined;
       } else if (existingMove?.name !== payload.invoiceNumber) {
@@ -1287,6 +1292,10 @@ const dispatchToOdoo = async (
         return normalizeOdooId(moveIdRaw, "invoice");
       } catch (createError) {
         if (isOdooTimeout(createError)) throw createError;
+        // Odoo may have stored the move before the error reached us (e.g. a
+        // dropped connection); a second create would duplicate it.
+        const createdMove = await findExistingOdooMove(config, payload);
+        if (createdMove) return createdMove.id;
         // Odoo refuses a number whose year it reads differently from the
         // invoice date; fall back to the journal sequence rather than not
         // delivering. The platform number stays on ref/payment reference.
@@ -1297,11 +1306,11 @@ const dispatchToOdoo = async (
       }
     })();
     if (moveId !== existingMove?.id) {
-      const mismatch = await checkOdooMoveTotals(config, moveId, expectedTotals);
-      if (mismatch) {
-        console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] totals: FAIL ${mismatch}`);
+      const totalsCheck = await checkOdooMoveTotals(config, moveId, expectedTotals);
+      if (!totalsCheck.ok) {
+        console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] totals: FAIL ${totalsCheck.reason}`);
         await odooCallOnce(config, "account.move", "unlink", { ids: [moveId] }).catch(() => undefined);
-        return { status: "failed", provider: "odoo", reference, reason: mismatch, attempts: 1 };
+        return { status: "failed", provider: "odoo", reference, reason: totalsCheck.reason, attempts: 1 };
       }
     }
     await ensureUblAttachmentOnOdooMove(config, moveId, payload);
