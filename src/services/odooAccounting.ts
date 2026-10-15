@@ -67,11 +67,7 @@ const withCompanyContext = (
   };
 };
 
-const resolveOdooCompanyIds = async (credentials: OdooCredentials, companyId?: number): Promise<number[]> => {
-  // The admin e-invoicing setting wins over the server default.
-  const overrideCompanyId = toPositiveInteger(companyId) ?? toPositiveInteger(process.env.ODOO_COMPANY_ID);
-  if (overrideCompanyId) return [overrideCompanyId];
-
+const readApiUserCompanyIds = async (credentials: OdooCredentials): Promise<number[]> => {
   const context = await odooJson2Call<{ uid?: number }>(credentials, "res.users", "context_get", {});
   const uid = toPositiveInteger(context.uid);
   if (!uid) {
@@ -84,7 +80,31 @@ const resolveOdooCompanyIds = async (credentials: OdooCredentials, companyId?: n
     "read",
     { ids: [uid], fields: ["company_ids"] }
   );
-  const companyIds = users[0]?.company_ids?.filter((id) => Number.isInteger(id) && id > 0) || [];
+  return users[0]?.company_ids?.filter((id) => Number.isInteger(id) && id > 0) || [];
+};
+
+const resolveOdooCompanyIds = async (credentials: OdooCredentials, companyId?: number): Promise<number[]> => {
+  // The admin e-invoicing setting wins over the server default.
+  const overrideCompanyId = toPositiveInteger(companyId) ?? toPositiveInteger(process.env.ODOO_COMPANY_ID);
+  if (overrideCompanyId) {
+    // A pinned company the API user cannot reach would otherwise surface as an
+    // opaque access error deep inside discovery. When the company list itself
+    // cannot be read, keep the pin: the discovery calls report the real error.
+    let accessibleCompanyIds: number[] = [];
+    try {
+      accessibleCompanyIds = await readApiUserCompanyIds(credentials);
+    } catch {
+      accessibleCompanyIds = [];
+    }
+    if (accessibleCompanyIds.length && !accessibleCompanyIds.includes(overrideCompanyId)) {
+      throw new Error(
+        `Odoo company ${overrideCompanyId} is not accessible by the Odoo API user (accessible: ${accessibleCompanyIds.join(", ")}). Set ODOO_COMPANY_ID and the admin e-invoicing company setting to an accessible company.`
+      );
+    }
+    return [overrideCompanyId];
+  }
+
+  const companyIds = await readApiUserCompanyIds(credentials);
   if (!companyIds.length) {
     throw new Error("The Odoo API user has no accessible companies");
   }
@@ -510,13 +530,7 @@ export const listOdooCompanies = async (): Promise<OdooCompanySummary[]> => {
   if (!credentials) {
     throw new Error("ODOO_API_URL and ODOO_API_KEY must be set");
   }
-  const context = await odooJson2Call<{ uid?: number }>(credentials, "res.users", "context_get", {});
-  const uid = toPositiveInteger(context.uid);
-  if (!uid) throw new Error("Could not resolve the Odoo API user context");
-  const users = await odooJson2Call<Array<{ company_ids?: number[] }>>(
-    credentials, "res.users", "read", { ids: [uid], fields: ["company_ids"] },
-  );
-  const ids = users[0]?.company_ids || [];
+  const ids = await readApiUserCompanyIds(credentials);
   if (!ids.length) return [];
   // Peppol readiness is optional: when the fields cannot be listed the
   // company list must still come back, so the admin can choose a company.
