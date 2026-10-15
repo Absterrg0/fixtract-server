@@ -362,6 +362,11 @@ const toUnitPrice = (value: unknown): string => {
   return `${whole}.${decimals.padEnd(2, "0")}`;
 };
 
+// Quantities need the same headroom as the unit prices: a measured-unit
+// adjustment of 32.125 − 30 is 2.125 m², and a two-decimal quantity with a
+// six-decimal price no longer multiplies back to the line amount.
+const toQuantity = (value: unknown): string => toUnitPrice(value);
+
 const getCurrentQuote = (booking: any) => {
   const versions = Array.isArray(booking.quoteVersions) ? booking.quoteVersions : [];
   return versions.find((quote: any) => quote.version === booking.currentQuoteVersion) || versions[versions.length - 1];
@@ -787,7 +792,7 @@ const buildUblPartiesAndTotals = (
   };
 };
 
-const buildUblCreditNoteXml = (
+export const buildUblCreditNoteXml = (
   booking: any,
   creditNoteNumber: string,
   issuedAt: Date,
@@ -807,7 +812,7 @@ const buildUblCreditNoteXml = (
   const creditNoteLines = pricingLines.map((line: any, index: number) => `
     <cac:CreditNoteLine>
       <cbc:ID>${index + 1}</cbc:ID>
-      <cbc:CreditedQuantity unitCode="${escapeXml(mapUnitToUneceCode(line.unit))}">${toMoney(Number(line.quantity || 1))}</cbc:CreditedQuantity>
+      <cbc:CreditedQuantity unitCode="${escapeXml(mapUnitToUneceCode(line.unit))}">${toQuantity(Number(line.quantity || 1))}</cbc:CreditedQuantity>
       <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.price) * sign)}</cbc:LineExtensionAmount>
       <cac:Item>
         <cbc:Description>${escapeXml(line.description)}</cbc:Description>
@@ -843,7 +848,7 @@ const buildUblCreditNoteXml = (
 </CreditNote>`;
 };
 
-const buildUblInvoiceXml = (
+export const buildUblInvoiceXml = (
   booking: any,
   invoiceNumber: string,
   issuedAt: Date,
@@ -878,7 +883,7 @@ const buildUblInvoiceXml = (
   const invoiceLines = pricingLines.map((line: any, index: number) => `
     <cac:InvoiceLine>
       <cbc:ID>${index + 1}</cbc:ID>
-      <cbc:InvoicedQuantity unitCode="${escapeXml(mapUnitToUneceCode(line.unit))}">${toMoney(Number(line.quantity || 1))}</cbc:InvoicedQuantity>
+      <cbc:InvoicedQuantity unitCode="${escapeXml(mapUnitToUneceCode(line.unit))}">${toQuantity(Number(line.quantity || 1))}</cbc:InvoicedQuantity>
       <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${toMoney(Number(line.price) * sign)}</cbc:LineExtensionAmount>
       <cac:Item>
         <cbc:Description>${escapeXml(line.description)}</cbc:Description>
