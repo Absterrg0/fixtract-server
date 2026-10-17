@@ -25,7 +25,7 @@ import {
 } from "../utils/invoiceUnits";
 import { getExtraCostQuantity, reconcileUnitPrice } from "../utils/invoiceLineQuantity";
 import { commissionedExtraCostAmount, customerUnitPrice } from "../utils/customerPricing";
-import { getInvoicePrepaidAmount, isInvoiceSettled } from "../utils/invoiceSettlement";
+import { getInvoicePayment } from "../utils/invoiceSettlement";
 import ServiceConfiguration from "../models/serviceConfiguration";
 
 interface InvoiceData {
@@ -1188,11 +1188,8 @@ export async function generateBookingInvoice(
   // extra costs still open is partly paid. Corrections and credit notes
   // carry no payment state.
   if (!options?.creditNote && !manualLines?.length) {
-    const side = selfBilling ? "supplier" : "customer";
     const total = roundInvoiceMoney(invoiceData.payment.totalWithVat);
-    const paidAmount = isInvoiceSettled(booking, side)
-      ? total
-      : Math.min(total, roundInvoiceMoney(getInvoicePrepaidAmount(booking, side) ?? 0));
+    const { paidAmount } = getInvoicePayment(booking, selfBilling ? "supplier" : "customer", total);
     if (paidAmount > 0) {
       invoiceData.settlement = { paidAmount, dueAmount: roundInvoiceMoney(total - paidAmount) };
     }

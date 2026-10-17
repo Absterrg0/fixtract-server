@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getExtraCostQuantity, reconcileUnitPrice } from "../../utils/invoiceLineQuantity";
-import { getInvoicePrepaidAmount, isInvoiceSettled } from "../../utils/invoiceSettlement";
+import { getInvoicePayment, isInvoiceSettled } from "../../utils/invoiceSettlement";
 
 describe("extra cost quantity", () => {
   it("bills a unit adjustment on the extra units, not the total actual units", () => {
@@ -66,13 +66,21 @@ describe("invoice settlement", () => {
     expect(isInvoiceSettled({ extraCosts, payment: { status: "completed", extraCostStatus: "succeeded" } }, "customer")).toBe(true);
   });
 
-  it("counts the paid checkout as prepaid while extra costs are open", () => {
+  it("counts the paid checkout as paid while extra costs are open", () => {
     const booking = { extraCosts, payment: { status: "completed", amount: 492.82, totalWithVat: 596.31, extraCostStatus: "pending" } };
-    expect(getInvoicePrepaidAmount(booking, "customer")).toBe(596.31);
-    expect(getInvoicePrepaidAmount({ ...booking, milestonePayments: [{}] }, "customer")).toBeUndefined();
-    expect(getInvoicePrepaidAmount({ ...booking, payment: { ...booking.payment, status: "authorized" } }, "customer")).toBeUndefined();
-    expect(getInvoicePrepaidAmount({ ...booking, payment: { ...booking.payment, extraCostStatus: "succeeded" } }, "customer")).toBeUndefined();
-    expect(getInvoicePrepaidAmount(booking, "supplier")).toBeUndefined();
+    expect(getInvoicePayment(booking, "customer", 682.45)).toEqual({ paidAmount: 596.31, settled: false });
+    expect(getInvoicePayment({ ...booking, milestonePayments: [{}] }, "customer", 682.45)).toEqual({ paidAmount: 0, settled: false });
+    expect(getInvoicePayment({ ...booking, payment: { ...booking.payment, status: "authorized" } }, "customer", 682.45).paidAmount).toBe(0);
+    expect(getInvoicePayment({ ...booking, payment: { ...booking.payment, extraCostStatus: "succeeded" } }, "customer", 682.45))
+      .toEqual({ paidAmount: 682.45, settled: true });
+  });
+
+  it("counts a self-bill as paid by what was transferred, which carries no VAT", () => {
+    const paidOut = { payment: { transferStatus: "succeeded", professionalPayout: 450 } };
+    expect(getInvoicePayment(paidOut, "supplier", 450)).toEqual({ paidAmount: 450, settled: true });
+    // 21% VAT on the self-bill is not part of the payout.
+    expect(getInvoicePayment(paidOut, "supplier", 544.5)).toEqual({ paidAmount: 450, settled: false });
+    expect(getInvoicePayment({ payment: { transferStatus: "pending", professionalPayout: 450 } }, "supplier", 450).paidAmount).toBe(0);
   });
 
   it("settles a self-bill once the professional was paid out", () => {

@@ -15,7 +15,7 @@ import {
 import { mapUnitToUneceCode, resolveInvoiceServiceUnit, tryNormalizeInvoiceUnit } from "../utils/invoiceUnits";
 import { getExtraCostQuantity, reconcileUnitPrice } from "../utils/invoiceLineQuantity";
 import { commissionedExtraCostAmount, customerUnitPrice } from "../utils/customerPricing";
-import { isInvoiceSettled } from "../utils/invoiceSettlement";
+import { getInvoicePayment } from "../utils/invoiceSettlement";
 import {
   calculateInvoiceSideTotals,
   calculateSupplierInvoiceNet,
@@ -781,12 +781,14 @@ const buildUblPartiesAndTotals = (
   sign: number,
   pricingLines: any[],
   reverseCharge: boolean,
-  options?: { selfBilling?: boolean; platform?: UblPlatformParty; settled?: boolean },
+  options?: { selfBilling?: boolean; platform?: UblPlatformParty; paidAmount?: number },
   totals?: ReturnType<typeof calculateInvoiceSideTotals>
 ) => {
   const customer = booking.customer || {};
   const professional = booking.professional || {};
   const platform = options?.platform || {};
+  const invoiceTotal = Math.round(Number(totals?.totalWithVat ?? booking.payment?.totalWithVat) * 100) / 100;
+  const paidAmount = Math.min(invoiceTotal, Math.max(0, Number(options?.paidAmount) || 0));
   const taxCategoryId = reverseCharge ? "AE" : "S";
   const taxCategoryExtras = reverseCharge
     ? `<cbc:TaxExemptionReasonCode>VATEX-EU-IC</cbc:TaxExemptionReasonCode>
@@ -855,8 +857,8 @@ const buildUblPartiesAndTotals = (
     <cbc:LineExtensionAmount currencyID="${escapeXml(currency)}">${toMoney(Number(totals?.netAmount ?? booking.payment?.netAmount ?? booking.payment?.amount) * sign)}</cbc:LineExtensionAmount>
     <cbc:TaxExclusiveAmount currencyID="${escapeXml(currency)}">${toMoney(Number(totals?.netAmount ?? booking.payment?.netAmount ?? booking.payment?.amount) * sign)}</cbc:TaxExclusiveAmount>
     <cbc:TaxInclusiveAmount currencyID="${escapeXml(currency)}">${toMoney(Number(totals?.totalWithVat ?? booking.payment?.totalWithVat) * sign)}</cbc:TaxInclusiveAmount>
-    ${options?.settled ? `<cbc:PrepaidAmount currencyID="${escapeXml(currency)}">${toMoney(Number(totals?.totalWithVat ?? booking.payment?.totalWithVat) * sign)}</cbc:PrepaidAmount>` : ""}
-    <cbc:PayableAmount currencyID="${escapeXml(currency)}">${options?.settled ? toMoney(0) : toMoney(Number(totals?.totalWithVat ?? booking.payment?.totalWithVat) * sign)}</cbc:PayableAmount>
+    ${paidAmount > 0 ? `<cbc:PrepaidAmount currencyID="${escapeXml(currency)}">${toMoney(paidAmount * sign)}</cbc:PrepaidAmount>` : ""}
+    <cbc:PayableAmount currencyID="${escapeXml(currency)}">${toMoney((invoiceTotal - paidAmount) * sign)}</cbc:PayableAmount>
   </cac:LegalMonetaryTotal>`,
     taxCategoryId,
   };
@@ -947,8 +949,8 @@ export const buildUblInvoiceXml = (
   const parties = buildUblPartiesAndTotals(booking, currency, sign, pricingLines, reverseCharge, {
     selfBilling,
     platform: options?.platform,
-    // Paid through Stripe: nothing is left to transfer.
-    settled: isInvoiceSettled(booking, selfBilling ? "supplier" : "customer"),
+    // Paid through Stripe: only the rest is left to transfer.
+    paidAmount: getInvoicePayment(booking, selfBilling ? "supplier" : "customer", pricing.totals.totalWithVat).paidAmount,
   }, pricing.totals);
   const invoiceLines = pricingLines.map((line: any, index: number) => `
     <cac:InvoiceLine>

@@ -19,6 +19,8 @@ export interface IPlatformSettings extends Omit<Document, '_id'> {
     peppolParticipantId?: string;
     /** Odoo company (res.company id) the Fixtract invoices are booked and sent from. */
     odooCompanyId?: number;
+    /** Book Stripe payments against the Odoo invoices (journal "Stripe (Fixtract)"). */
+    odooRecordPayments?: boolean;
   };
   lastModifiedBy: mongoose.Types.ObjectId;
   lastModified: Date;
@@ -57,6 +59,7 @@ const platformSettingsSchema = new Schema<IPlatformSettings>({
     provider: { type: String, enum: ['odoo', 'manual'], default: 'manual' },
     peppolParticipantId: { type: String, trim: true },
     odooCompanyId: { type: Number, min: 1 },
+    odooRecordPayments: { type: Boolean, default: false },
   },
   lastModifiedBy: {
     type: mongoose.Schema.Types.ObjectId,

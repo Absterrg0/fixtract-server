@@ -4,8 +4,9 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 // node_modules/vitest/vitest.mjs run src/tests/integration/peppolOdooDemo.test.ts
 // Creates four synthetic documents in a preconfigured Odoo demo company.
 // Only application settings are fixtures; all Odoo calls and XML generation are real.
+const settings = vi.hoisted(() => ({ eInvoicing: { peppolEnabled: true, provider: "odoo", odooRecordPayments: false } }));
 vi.mock("../../models/platformSettings", () => ({
-  default: { getCurrentConfig: async () => ({ eInvoicing: { peppolEnabled: true, provider: "odoo" } }) },
+  default: { getCurrentConfig: async () => settings },
 }));
 vi.mock("../../models/serviceConfiguration", () => ({
   default: { find: () => ({ select: () => ({ lean: async () => [] }) }) },
@@ -56,7 +57,8 @@ describe.skipIf(!demoCompanyId)("live Odoo Peppol demo", () => {
   it("delivers customer invoices, self-bills, and both credit notes, then refreshes without duplicates", async () => {
     // Paid at checkout and paid out to the professional, so both sides are prepaid.
     const booking = {
-      bookingNumber: "PEPPOL-DEMO-TEST-ONLY", payment: { currency: "EUR", status: "completed", transferStatus: "succeeded" },
+      bookingNumber: "PEPPOL-DEMO-TEST-ONLY",
+      payment: { currency: "EUR", status: "completed", transferStatus: "succeeded", professionalPayout: 7.26 },
       customer: { customerType: "business", name: "Peppol Demo Customer - TEST ONLY", vatNumber: "BE0123456749", companyAddress: { country: "BE" } },
       professional: { name: "Peppol Demo Supplier - TEST ONLY", businessInfo: { vatNumber: "BE0123456848", country: "BE" } },
     };
@@ -117,6 +119,61 @@ describe.skipIf(!demoCompanyId)("live Odoo Peppol demo", () => {
       });
       expect(count).toBe(1);
       console.log(`DEMO VERIFIED ${document.params.side} ${document.params.documentType}: ${document.name} (move ${document.moveId})`);
+    }
+  }, 180_000);
+
+  it("states a partly paid invoice and books the Stripe payments in Odoo", async () => {
+    settings.eInvoicing.odooRecordPayments = true;
+    try {
+      // Checkout (6.00 + VAT = 7.26) paid, extra cost (1.21) still open; the professional is fully paid out.
+      const booking = {
+        bookingNumber: "PEPPOL-DEMO-PAYMENTS-TEST-ONLY",
+        extraCosts: [{ type: "condition", amount: 1 }],
+        payment: {
+          currency: "EUR", status: "completed", totalWithVat: 7.26, extraCostStatus: "pending",
+          transferStatus: "succeeded", professionalPayout: 6, extraCostTransferStatus: "succeeded", extraCostProfessionalPayout: 1,
+        },
+        customer: { customerType: "business", name: "Peppol Demo Customer - TEST ONLY", vatNumber: "BE0123456749", companyAddress: { country: "BE" } },
+        professional: { name: "Peppol Demo Supplier - TEST ONLY", businessInfo: { vatNumber: "BE0123456848", country: "BE" } },
+      };
+      const run = Date.now();
+      const expectations = {
+        customer: { total: 8.47, lines: [{ description: "Peppol demo service - no real transaction", price: 6, vatRate: 21 }, { description: "Peppol demo extra cost - no real transaction", price: 1, vatRate: 21 }], prepaid: "7.26", payable: "1.21", state: "partial", residual: 1.21 },
+        supplier: { total: 7, lines: [{ description: "Peppol demo self-bill - no real transaction", price: 7, vatRate: 0 }], prepaid: "7.00", payable: "0.00", state: "paid", residual: 0 },
+      };
+      for (const side of ["customer", "supplier"] as const) {
+        const expected = expectations[side];
+        const params = {
+          booking, side, documentType: "invoice" as const,
+          invoiceNumber: `${side === "supplier" ? "SUP" : "FIX"}-${new Date().getUTCFullYear()}-7${String(run).slice(-7)}`,
+          ublXml: '<?xml version="1.0"?><Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"><!-- Demo fixture --></Invoice>',
+          invoiceUblUrl: "", reverseCharge: side === "supplier", invoicePdf: fixtractPdf, totalWithVat: expected.total,
+          lineItems: expected.lines,
+        };
+        const result = await maybeDispatchPeppolInvoice(params);
+        expect(result.status, result.reason).toMatch(/^(queued|sent)$/);
+        expect(result.reason || "").not.toMatch(/not booked/);
+        const moveId = Number(result.reference?.replace("odoo-account.move-", ""));
+        const [move] = await call<any[]>("account.move", "read", {
+          ids: [moveId], fields: ["ubl_cii_xml_id", "payment_state", "amount_residual", "amount_total"],
+        });
+        expect(move.amount_total).toBe(expected.total);
+        expect(move.payment_state).toBe(expected.state);
+        expect(move.amount_residual).toBe(expected.residual);
+        const [attachment] = await call<any[]>("ir.attachment", "read", { ids: [move.ubl_cii_xml_id[0]], fields: ["datas"] });
+        const xml = Buffer.from(attachment.datas, "base64").toString("utf8");
+        expect(xml).toContain(`<cbc:PrepaidAmount currencyID="EUR">${expected.prepaid}</cbc:PrepaidAmount>`);
+        expect(xml).toContain(`<cbc:PayableAmount currencyID="EUR">${expected.payable}</cbc:PayableAmount>`);
+        // A second run books nothing more.
+        await maybeDispatchPeppolInvoice(params);
+        const payments = await call<number>("account.payment", "search_count", {
+          domain: [["company_id", "=", demoCompanyId], ["memo", "=", params.invoiceNumber]],
+        });
+        expect(payments).toBe(1);
+        console.log(`DEMO PAYMENT ${side}: ${params.invoiceNumber} (move ${moveId}) -> ${move.payment_state}, residual ${move.amount_residual}`);
+      }
+    } finally {
+      settings.eInvoicing.odooRecordPayments = false;
     }
   }, 180_000);
 

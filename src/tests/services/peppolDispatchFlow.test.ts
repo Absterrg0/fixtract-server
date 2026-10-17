@@ -573,4 +573,53 @@ describe("Peppol Odoo dispatch", () => {
       expect(calls("res.partner", "button_account_peppol_check_partner_endpoint")).toHaveLength(0);
     });
   });
+
+  describe("Stripe payment in Odoo", () => {
+    const paidBooking = { ...booking, payment: { status: "completed", totalWithVat: 121 } };
+    const odooWithMove = (residual: number) => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        const [, model, method] = args;
+        if (model === "account.move" && method === "read") {
+          return [{ state: "posted", amount_untaxed: 100, amount_total: 121, amount_residual: residual }];
+        }
+        if (model === "account.journal" && method === "search_read") {
+          return [{ id: 90, default_account_id: [5, "550004 Stripe (Fixtract)"], inbound_payment_method_line_ids: [1], outbound_payment_method_line_ids: [2] }];
+        }
+        if (model === "account.payment.method.line" && method === "read") return [{ id: 1, payment_account_id: false }, { id: 2, payment_account_id: [5, "x"] }];
+        if (model === "account.payment.method.line" && method === "write") return true;
+        if (model === "account.payment.register" && method === "create") return 91;
+        if (model === "account.payment.register" && method === "action_create_payments") return {};
+        return normal(...args);
+      });
+    };
+    const send = () => maybeDispatchPeppolInvoice({
+      booking: paidBooking, side: "customer", invoiceNumber: "FIX-2026-000020", ublXml: "<Invoice/>", invoiceUblUrl: "",
+      totalWithVat: 121, lineItems: [{ description: "Service", price: 100, vatRate: 21 }],
+    });
+    const calls = (model: string, method: string) =>
+      mocks.call.mock.calls.filter((call) => call[1] === model && call[2] === method);
+
+    it("books the Stripe payment in the Stripe journal when enabled", async () => {
+      mocks.settings.mockResolvedValue({ eInvoicing: { peppolEnabled: true, provider: "odoo", odooRecordPayments: true } });
+      odooWithMove(121);
+      expect(await send()).toMatchObject({ status: "sent" });
+      expect(calls("account.payment.method.line", "write")[0][3]).toMatchObject({ ids: [1], vals: { payment_account_id: 5 } });
+      expect(calls("account.payment.register", "create")[0][3]).toMatchObject({
+        vals_list: [{ journal_id: 90, amount: 121, communication: "FIX-2026-000020" }],
+        context: { active_model: "account.move", active_ids: [70] },
+      });
+      expect(calls("account.payment.register", "action_create_payments")).toHaveLength(1);
+    });
+
+    it("does not book a payment twice or when disabled", async () => {
+      mocks.settings.mockResolvedValue({ eInvoicing: { peppolEnabled: true, provider: "odoo", odooRecordPayments: true } });
+      odooWithMove(0);
+      await send();
+      mocks.settings.mockResolvedValue({ eInvoicing: { peppolEnabled: true, provider: "odoo" } });
+      odooWithMove(121);
+      await send();
+      expect(calls("account.payment.register", "create")).toHaveLength(0);
+    });
+  });
 });

@@ -3,7 +3,7 @@ import { PEPPOL_DISPATCH_STATUSES, type PeppolDispatchStatus } from "../constant
 import PlatformSettings from "../models/platformSettings";
 import { parseVatCountryCode, normalizeVatCountry } from "../utils/vatManagement";
 import { reconcileUnitPrice } from "../utils/invoiceLineQuantity";
-import { getInvoicePrepaidAmount, isInvoiceSettled } from "../utils/invoiceSettlement";
+import { getInvoicePayment } from "../utils/invoiceSettlement";
 import {
   discoverOdooAccountingConfig,
   odooJson2Call,
@@ -57,6 +57,8 @@ type PeppolDispatchPayload = {
   settled?: boolean;
   /** Paid so far when not settled (checkout paid, extra costs still open). */
   prepaidAmount?: number;
+  /** Book what Stripe already collected/paid out as an Odoo payment on the move. */
+  recordPayment?: boolean;
 };
 
 type OdooInvoiceLine = {
@@ -1183,6 +1185,105 @@ export const triggerOdooEdiSend = async (
   }
 };
 
+// A bank journal whose payment method lines post straight to the journal's
+// own account: Odoo then treats each payment as matched, so a fully paid
+// invoice reads "paid" instead of "in payment" awaiting a bank statement
+// (verified in Odoo 19, demo company 3).
+const STRIPE_JOURNAL_CODE = "FXSTR";
+const STRIPE_JOURNAL_NAME = "Stripe (Fixtract)";
+const stripeJournalByCompany = new Map<number, number>();
+
+const ensureOdooStripeJournal = async (config: OdooAccountingConfig): Promise<number> => {
+  const cached = stripeJournalByCompany.get(config.companyId);
+  if (cached) return cached;
+  type Journal = { id: number; default_account_id?: [number, string] | false; inbound_payment_method_line_ids?: number[]; outbound_payment_method_line_ids?: number[] };
+  const fields = ["id", "default_account_id", "inbound_payment_method_line_ids", "outbound_payment_method_line_ids"];
+  const find = async () => (await odooCallWithRetries<Journal[]>(config, "account.journal", "search_read", {
+    domain: [["company_id", "=", config.companyId], ["code", "=", STRIPE_JOURNAL_CODE]], fields, limit: 1,
+  })).value[0];
+  let journal = await find();
+  if (!journal) {
+    await odooCallOnce(config, "account.journal", "create", {
+      vals_list: [{ name: STRIPE_JOURNAL_NAME, code: STRIPE_JOURNAL_CODE, type: "bank", company_id: config.companyId }],
+    });
+    journal = await find();
+  }
+  const accountId = Array.isArray(journal?.default_account_id) ? journal.default_account_id[0] : undefined;
+  if (!journal || !accountId) throw new Error(`Odoo journal "${STRIPE_JOURNAL_NAME}" has no bank account`);
+  const lineIds = [...(journal.inbound_payment_method_line_ids || []), ...(journal.outbound_payment_method_line_ids || [])];
+  const { value: lines } = await odooCallWithRetries<Array<{ id: number; payment_account_id?: [number, string] | false }>>(
+    config, "account.payment.method.line", "read", { ids: lineIds, fields: ["payment_account_id"] },
+  );
+  const unmatched = lines.filter((line) => !Array.isArray(line.payment_account_id) || line.payment_account_id[0] !== accountId);
+  if (unmatched.length > 0) {
+    await odooCallOnce(config, "account.payment.method.line", "write", {
+      ids: unmatched.map((line) => line.id), vals: { payment_account_id: accountId },
+    });
+  }
+  stripeJournalByCompany.set(config.companyId, journal.id);
+  return journal.id;
+};
+
+/**
+ * Book what was paid through Stripe on the posted move, so Odoo shows the
+ * invoice paid (or partly paid) instead of fully open. Only the part not yet
+ * booked is registered, so re-runs never pay twice.
+ */
+const recordStripePaymentInOdoo = async (
+  config: OdooAccountingConfig,
+  moveId: number,
+  payload: PeppolDispatchPayload,
+): Promise<string | undefined> => {
+  if (!payload.recordPayment || payload.documentType !== "invoice") return undefined;
+  const paidAmount = payload.settled
+    ? Math.abs(Number(payload.totalWithVat))
+    : Number(payload.prepaidAmount);
+  if (!Number.isFinite(paidAmount) || paidAmount < 0.01) return undefined;
+  const { value } = await odooCallWithRetries<Array<{ state?: string; amount_total?: number; amount_residual?: number }>>(
+    config, "account.move", "read", { ids: [moveId], fields: ["state", "amount_total", "amount_residual"] },
+  );
+  const move = value[0];
+  if (move?.state !== "posted" || typeof move.amount_total !== "number" || typeof move.amount_residual !== "number") {
+    return undefined;
+  }
+  const alreadyBooked = roundMoney(move.amount_total - move.amount_residual);
+  const toBook = roundMoney(Math.min(paidAmount, move.amount_total) - alreadyBooked);
+  if (toBook < 0.01) return undefined;
+  const journalId = await ensureOdooStripeJournal(config);
+  const context = { active_model: "account.move", active_ids: [moveId] };
+  const { value: created } = await odooCallOnce<unknown>(config, "account.payment.register", "create", {
+    vals_list: [{
+      journal_id: journalId,
+      amount: toBook,
+      payment_date: new Date().toISOString().slice(0, 10),
+      communication: payload.invoiceNumber,
+    }],
+    context,
+  });
+  const wizardId = normalizeOdooId(created, "payment wizard");
+  await odooCallOnce(config, "account.payment.register", "action_create_payments", { ids: [wizardId], context }, ODOO_SLOW_CALL_TIMEOUT_MS);
+  return `${toBook.toFixed(2)} paid via Stripe booked in Odoo`;
+};
+
+/** Book the Stripe payment after the send; a failure only adds a note. */
+const withStripePaymentRecorded = async (
+  config: OdooAccountingConfig,
+  moveId: number,
+  payload: PeppolDispatchPayload,
+  result: PeppolDispatchResult,
+): Promise<PeppolDispatchResult> => {
+  if (!payload.recordPayment) return result;
+  try {
+    const note = await recordStripePaymentInOdoo(config, moveId, payload);
+    if (note) console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] payment: ${note}`);
+    return result;
+  } catch (paymentError) {
+    const message = (paymentError as Error)?.message || String(paymentError);
+    console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] payment: FAIL ${message}`);
+    return { ...result, reason: `${result.reason ? `${result.reason}; ` : ""}Stripe payment not booked in Odoo: ${message}` };
+  }
+};
+
 const odooDeliveryResult = (
   config: OdooAccountingConfig,
   moveId: number,
@@ -1284,7 +1385,7 @@ const dispatchToOdoo = async (
       if (documents?.some((document) =>
         ["sent", "done", "delivered", "processing", "to_send"].includes(String(document.state || "").toLowerCase())
       )) {
-        return odooDeliveryResult(config, existingMove.id, documents);
+        return withStripePaymentRecorded(config, existingMove.id, payload, odooDeliveryResult(config, existingMove.id, documents));
       }
     }
     // A retried move without a readable partner still gets a verified recipient.
@@ -1418,7 +1519,7 @@ const dispatchToOdoo = async (
       console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: EDI send triggered via ${sendMode}`);
       const ediDocuments = await readOdooEdiDeliveryState(config, moveId);
       console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] delivery:`, JSON.stringify(ediDocuments || []));
-      return odooDeliveryResult(config, moveId, ediDocuments);
+      return withStripePaymentRecorded(config, moveId, payload, odooDeliveryResult(config, moveId, ediDocuments));
     } catch (sendError: any) {
       if (isOdooTimeout(sendError)) {
         // Odoo keeps processing after we stop waiting, so the send has most
@@ -1430,9 +1531,10 @@ const dispatchToOdoo = async (
         if (result.status === "queued") {
           result.reason = `${sendError.message}; Odoo is still processing the Peppol send. Generate the invoice again later to refresh the status.`;
         }
-        return result;
+        return withStripePaymentRecorded(config, moveId, payload, result);
       }
-      return {
+      // The move is posted in the books either way, so its payment is too.
+      return withStripePaymentRecorded(config, moveId, payload, {
         status: "failed",
         provider: "odoo",
         reference: `odoo-account.move-${moveId}`,
@@ -1440,7 +1542,7 @@ const dispatchToOdoo = async (
         dispatchedAt: new Date(),
         response: { moveId, companyId: config.companyId },
         attempts: 1,
-      };
+      });
     }
   } catch (error: any) {
     return {
@@ -1536,8 +1638,11 @@ export async function maybeDispatchPeppolInvoice(params: {
     invoicePdf: params.invoicePdf ?? await loadInvoicePdf(params.invoicePdfUrl, params.invoiceNumber),
     issueDate: params.issueDate,
     totalWithVat: params.totalWithVat,
-    settled: isInvoiceSettled(params.booking, side),
-    prepaidAmount: getInvoicePrepaidAmount(params.booking, side),
+    ...(() => {
+      const { paidAmount, settled } = getInvoicePayment(params.booking, side, Number(params.totalWithVat) || 0);
+      return { settled, prepaidAmount: settled || paidAmount <= 0 ? undefined : paidAmount };
+    })(),
+    recordPayment: eInvoicing.odooRecordPayments === true,
   };
 
   return dispatchToOdoo(params.booking, payload, reference, toPositiveOdooId(eInvoicing.odooCompanyId));

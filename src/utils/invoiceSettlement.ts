@@ -23,18 +23,39 @@ export const isInvoiceSettled = (booking: any, side: "customer" | "supplier"): b
     || payment.extraCostPaymentSucceeded === true;
 };
 
+const money = (value: unknown): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.round(parsed * 100) / 100 : 0;
+};
+
 /**
- * What the customer already paid at checkout while extra costs are still
- * open, so the e-invoice asks only for the rest. That is the VAT-inclusive
- * charge (`payment.amount` excludes VAT). Milestone bookings charge in parts,
- * so one stored charge says nothing about the whole invoice. Self-bills are
- * only stated as paid once settled: a payout is not their VAT-inclusive total.
+ * What has already been paid on an invoice through Stripe, capped at its
+ * total, and whether that covers it. One rule for the PDF, the UBL and the
+ * Odoo payment.
+ * - Customer: the VAT-inclusive checkout charge, plus the extra-cost charge
+ *   once paid. Milestone bookings charge in parts, so they only count once
+ *   settled.
+ * - Supplier self-bill: what was transferred to the professional. A payout
+ *   carries no VAT, so a self-bill with VAT is not covered by it.
  */
-export const getInvoicePrepaidAmount = (booking: any, side: "customer" | "supplier"): number | undefined => {
-  if (side !== "customer" || isInvoiceSettled(booking, side)) return undefined;
-  if (Array.isArray(booking?.milestonePayments) && booking.milestonePayments.length > 0) return undefined;
+export const getInvoicePayment = (
+  booking: any,
+  side: "customer" | "supplier",
+  invoiceTotal: number,
+): { paidAmount: number; settled: boolean } => {
+  const total = Math.abs(money(invoiceTotal));
   const payment = booking?.payment || {};
-  if (!CAPTURED_PAYMENT_STATUSES.has(String(payment.status || ""))) return undefined;
-  const charged = Number(payment.totalWithVat);
-  return Number.isFinite(charged) && charged > 0 ? charged : undefined;
+  if (side === "supplier") {
+    if (payment.transferStatus !== "succeeded") return { paidAmount: 0, settled: false };
+    const paidOut = money(payment.professionalPayout)
+      + (payment.extraCostTransferStatus === "succeeded" ? money(payment.extraCostProfessionalPayout) : 0);
+    const paidAmount = Math.min(total, money(paidOut));
+    return { paidAmount, settled: isInvoiceSettled(booking, side) && paidAmount >= total - 0.005 };
+  }
+  if (isInvoiceSettled(booking, side)) return { paidAmount: total, settled: true };
+  if (Array.isArray(booking?.milestonePayments) && booking.milestonePayments.length > 0) {
+    return { paidAmount: 0, settled: false };
+  }
+  if (!CAPTURED_PAYMENT_STATUSES.has(String(payment.status || ""))) return { paidAmount: 0, settled: false };
+  return { paidAmount: Math.min(total, money(payment.totalWithVat)), settled: false };
 };
