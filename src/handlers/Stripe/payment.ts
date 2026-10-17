@@ -34,6 +34,7 @@ import PlatformSettings from '../../models/platformSettings';
 import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
+import { commissionedQuoteAmount } from '../../utils/customerPricing';
 import { auditLog } from '../../utils/auditLogger';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
 
@@ -380,7 +381,7 @@ export const createPaymentIntent = async (
       customer.location?.country
     );
 
-    let chargeAmount = +(booking.quote.amount * (1 + commissionPercent / 100)).toFixed(2);
+    let chargeAmount = commissionedQuoteAmount(booking.quote.amount, (booking as any).checkoutSnapshot, commissionPercent);
     let milestoneIndex: number | null = null;
     let milestoneOrder: number | null = null;
     if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
@@ -586,7 +587,12 @@ export const createPaymentIntent = async (
     }
 
     // Use hybrid discount absorption model
-    const discountedPayouts = calculateDiscountedPayouts(discountBreakdown, commissionPercent);
+    // A charge covering the whole booking pays the professional their own
+    // price; a milestone share is derived from what it charges.
+    const professionalBookingAmount = fullBookingAmount > 0 && chargeAmount >= fullBookingAmount
+      ? Number(booking.quote.amount || 0) + (quoteAmountIncludesSelectedExtras(booking) ? 0 : selectedExtraOptionsTotal)
+      : undefined;
+    const discountedPayouts = calculateDiscountedPayouts(discountBreakdown, commissionPercent, professionalBookingAmount);
     const platformCommission = discountedPayouts.platformCommission;
     const professionalPayout = discountedPayouts.professionalPayout;
     const stripeFee = calculateStripeFee(totalAmount, currency);

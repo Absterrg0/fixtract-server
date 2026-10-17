@@ -21,6 +21,7 @@ import {
   markMilestonesCompleted,
 } from '../bookingHelpers';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
+import { commissionedExtraCostTotal } from '../customerPricing';
 import User from '../../models/user';
 import { notifyAsync } from './notify';
 import { isEligibleForAutoAccept } from './autoAcceptEligibility';
@@ -180,8 +181,9 @@ export async function finalizeBookingCompletion(args: {
 
   if (extraCostTotal < 0 && finalizedBooking.payment?.stripePaymentIntentId) {
     const commissionPercent = await getPlatformCommissionPercent();
-    const refundAmount =
-      Math.round(Math.abs(extraCostTotal) * (1 + commissionPercent / 100) * 100) / 100;
+    const refundAmount = Math.abs(
+      commissionedExtraCostTotal((finalizedBooking as any).extraCosts, extraCostTotal, commissionPercent),
+    );
     const currency = (finalizedBooking.payment.currency || 'EUR').toLowerCase();
     await stripe.refunds.create(
       {

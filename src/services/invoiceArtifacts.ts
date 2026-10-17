@@ -14,6 +14,7 @@ import {
 } from "../utils/vatManagement";
 import { mapUnitToUneceCode, resolveInvoiceServiceUnit, tryNormalizeInvoiceUnit } from "../utils/invoiceUnits";
 import { getExtraCostQuantity, reconcileUnitPrice } from "../utils/invoiceLineQuantity";
+import { commissionedExtraCostAmount, customerUnitPrice } from "../utils/customerPricing";
 import { isInvoiceSettled } from "../utils/invoiceSettlement";
 import {
   calculateInvoiceSideTotals,
@@ -24,6 +25,7 @@ import {
 import {
   generateBookingInvoice,
   applyManualInvoicePartyOverrides,
+  scaleLineItemsToTotal,
   type ManualInvoiceLine,
   type ManualInvoiceOverride,
 } from "./invoiceGenerator";
@@ -411,13 +413,26 @@ const getExtraCostLinesForUbl = (
   booking: any,
   vatRate: number,
   reverseCharge: boolean,
-  customerSide: boolean
+  customerSide: boolean,
+  /** Lines at their price before the customer's loyalty discount, which then gets its own line. */
+  beforeCustomerDiscount = false,
 ): UblLine[] => {
   const rawTotal = (booking.extraCosts || []).reduce((sum: number, cost: any) => sum + moneyNumber(cost.amount), 0);
+  const customerDiscount = customerSide && beforeCustomerDiscount
+    ? Math.max(0, moneyNumber(booking.payment?.extraCostCustomerDiscount))
+    : 0;
   const targetTotal = customerSide
-    ? getCustomerExtraCostNet(booking.payment, rawTotal)
+    ? Math.round((getCustomerExtraCostNet(booking.payment, rawTotal) + customerDiscount) * 100) / 100
     : rawTotal;
   const scale = rawTotal > 0 ? targetTotal / rawTotal : 1;
+  // Charged per unit (see customerPricing): each line at its own customer
+  // price, so unit lines keep whole-cent unit prices.
+  const commissionPercent = Number(booking.__commissionPercent);
+  const perLine = customerSide && Number.isFinite(commissionPercent)
+    ? (booking.extraCosts || []).map((cost: any) => commissionedExtraCostAmount(cost, commissionPercent))
+    : [];
+  const chargedPerLine = perLine.length > 0
+    && Math.abs(Math.round(perLine.reduce((sum: number, amount: number) => sum + amount, 0) * 100) / 100 - targetTotal) < 0.005;
   const fallbackUnit = resolveInvoiceServiceUnit({
     checkoutUnit: (booking.checkoutSnapshot as any)?.unit,
     subprojectUnit: (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
@@ -426,8 +441,8 @@ const getExtraCostLinesForUbl = (
       booking.checkoutSnapshot?.pricingType,
     pricingOptions: (booking as any).__serviceConfigPricingOptions,
   });
-  return (booking.extraCosts || []).map((cost: any) => {
-    const price = Math.round(moneyNumber(cost.amount) * scale * 100) / 100;
+  return (booking.extraCosts || []).map((cost: any, index: number) => {
+    const price = chargedPerLine ? perLine[index] : Math.round(moneyNumber(cost.amount) * scale * 100) / 100;
     const lineVatRate = reverseCharge ? 0 : vatRate;
     const units = getExtraCostQuantity(cost);
     const hasUnits = units != null;
@@ -439,7 +454,9 @@ const getExtraCostLinesForUbl = (
       vatRate: lineVatRate,
       vatAmount: reverseCharge ? 0 : Math.round(price * lineVatRate) / 100,
       quantity: units,
-      unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) * scale : undefined,
+      unitPrice: Number.isFinite(Number(cost.unitPrice))
+        ? (chargedPerLine ? customerUnitPrice(Number(cost.unitPrice), commissionPercent) : Number(cost.unitPrice) * scale)
+        : undefined,
       // Only attach a unit when there is a quantity, otherwise the UBL
       // serializer would turn a fixed-price extra cost into "1 <unit>".
       ...(hasUnits && unit ? { unit } : {}),
@@ -663,9 +680,60 @@ const getRawPricingLinesForUbl = (
       vatAmount: 0,
     });
   }
-  const lines = [...baseLines, ...getExtraCostLinesForUbl(booking, vatRate, reverseCharge, true)];
+  const lines = withCustomerDiscountLines(booking, baseLines, vatRate, reverseCharge)
+    ?? [...baseLines, ...getExtraCostLinesForUbl(booking, vatRate, reverseCharge, true)];
   const totals = calculateInvoiceSideTotals({ lines, reverseCharge, vatRate, vatLabel: booking.payment?.vatLabel });
   return { lines: lines.map((line) => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * (line.vatRate ?? vatRate)) / 100 })), totals };
+};
+
+/**
+ * Customer lines at their full price with the discounts on their own lines,
+ * as on the Fixtract PDF. Folding a discount into the lines would make every
+ * unit price a fraction of a cent again (e.g. (492.90 - 24.65) / 30). Only
+ * when every line shares one VAT rate, so the VAT stays exactly the same.
+ */
+const withCustomerDiscountLines = (
+  booking: any,
+  baseLines: UblLine[],
+  vatRate: number,
+  reverseCharge: boolean,
+): UblLine[] | undefined => {
+  const discount = booking.payment?.discount || {};
+  const serviceDiscounts = [
+    { label: "Loyalty discount", amount: moneyNumber(discount.loyaltyAmount) },
+    { label: "Repeat buyer discount", amount: moneyNumber(discount.repeatBuyerAmount) },
+    { label: "Points discount", amount: moneyNumber(discount.pointsDiscountAmount) },
+    { label: `Discount code${discount.codeLabel ? ` (${discount.codeLabel})` : ""}`, amount: moneyNumber(discount.codeDiscountAmount) },
+  ].filter((entry) => entry.amount > 0);
+  const extraCostDiscount = Math.max(0, moneyNumber(booking.payment?.extraCostCustomerDiscount));
+  if (serviceDiscounts.length === 0 && extraCostDiscount === 0) return undefined;
+  const lineRate = reverseCharge ? 0 : vatRate;
+  if (baseLines.some((line) => (reverseCharge ? 0 : moneyNumber(line.vatRate ?? vatRate)) !== lineRate)) return undefined;
+
+  const serviceDiscountTotal = Math.round(serviceDiscounts.reduce((sum, entry) => sum + entry.amount, 0) * 100) / 100;
+  const baseNet = baseLines.reduce((sum, line) => sum + line.amount, 0);
+  const fullBaseLines = serviceDiscountTotal > 0
+    ? scaleLineItemsToTotal(baseLines, Math.round((baseNet + serviceDiscountTotal) * 100) / 100)
+        .map((line) => ({ ...line, price: line.amount }))
+    : baseLines;
+  const discountLines: UblLine[] = [
+    ...serviceDiscounts.map((entry) => ({
+      ...entry,
+      amount: entry.label === "Loyalty discount"
+        ? Math.round((entry.amount + extraCostDiscount) * 100) / 100
+        : entry.amount,
+    })),
+    ...(extraCostDiscount > 0 && !serviceDiscounts.some((entry) => entry.label === "Loyalty discount")
+      ? [{ label: "Loyalty discount", amount: extraCostDiscount }]
+      : []),
+  ].map((entry) => ({
+    description: entry.label,
+    amount: -entry.amount,
+    price: -entry.amount,
+    vatRate: lineRate,
+    vatAmount: 0,
+  }));
+  return [...fullBaseLines, ...getExtraCostLinesForUbl(booking, vatRate, reverseCharge, true, true), ...discountLines];
 };
 
 const getPeppolLineItems = (pricing: { lines: UblLine[] }) => pricing.lines.map((line) => ({
@@ -957,6 +1025,13 @@ const loadBookingForInvoice = async (bookingId: string) => {
     );
   await hydrateServiceConfigPricingOptions(booking);
   await hydrateSupplierVatDecision(booking);
+  if (booking) {
+    try {
+      (booking as any).__commissionPercent = (await PlatformSettings.getCurrentConfig()).commissionPercent;
+    } catch {
+      // Extra costs then keep their proportional split.
+    }
+  }
   return booking;
 };
 

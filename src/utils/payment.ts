@@ -5,6 +5,7 @@
 
 import { SupportedCurrency, IdempotencyKeyParams } from '../Types/stripe';
 import { createHash } from 'crypto';
+import { commissionedQuoteAmount } from './customerPricing';
 
 const ZERO_DECIMAL_CURRENCIES = new Set([
   'BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA',
@@ -35,6 +36,9 @@ type GrossBookingAmountInput = {
   };
   selectedExtraOptions?: Array<{ bookedPrice?: number } | number>;
   checkoutSnapshot?: {
+    pricingType?: string;
+    unitAmount?: number;
+    quantity?: number;
     baseSubtotal?: number;
     extraOptionsTotal?: number;
     totalAmount?: number;
@@ -95,7 +99,7 @@ export function computeGrossBookingAmount(
 ): number {
   const optionsTotal = sumSelectedExtraOptionPrices(booking.selectedExtraOptions);
   const quoteAmount = booking?.quote?.amount || 0;
-  const commissionedQuote = +(quoteAmount * (1 + commissionPercent / 100)).toFixed(2);
+  const commissionedQuote = commissionedQuoteAmount(quoteAmount, booking?.checkoutSnapshot, commissionPercent);
   if (quoteAmountIncludesSelectedExtras(booking) || optionsTotal <= 0) {
     return commissionedQuote;
   }

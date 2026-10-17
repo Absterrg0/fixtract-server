@@ -10,6 +10,14 @@ const toFiniteNumber = (value: unknown): number | undefined => {
 };
 
 /**
+ * Rounds a quantity x unit price product the way Odoo (float_round) does:
+ * half away from zero, after nudging out binary error, so -2.5 x 16.43 is
+ * -41.08 on both sides rather than -41.07 here and -41.08 in Odoo.
+ */
+export const roundLineAmount = (value: number): number =>
+  Math.sign(value) * Math.round(Math.abs(value) * 100 * (1 + 4 * Number.EPSILON)) / 100;
+
+/**
  * Billed quantity of an extra cost. A unit adjustment is charged on the
  * difference between the actual and the estimated units, so that difference
  * is the quantity; the total actual units (e.g. 35 m² instead of the extra
@@ -48,11 +56,11 @@ export const reconcileUnitPrice = (
   if (qty == null || qty === 0) return price;
   const multipliesBack = (candidate: number) => Math.abs(Math.round(qty * candidate * 100) / 100 - amount) < 0.005;
   const toCents = (value: number) => Math.round(value * 100) / 100;
-  // Not on a half cent (−2.5 × 16.43 = −41.075), which JS and Odoo round
-  // in opposite directions.
-  const clearlyMultipliesBack = (candidate: number) => Math.abs(qty * candidate - amount) < 0.004;
+  // A cent price must give the amount the way Odoo rounds the line: half away
+  // from zero (−2.5 × 16.43 = −41.08 there, −41.07 with Math.round).
+  const multipliesBackInOdoo = (candidate: number) => Math.abs(roundLineAmount(qty * candidate) - amount) < 0.005;
   const centCandidates = price != null ? [toCents(price), toCents(amount / qty)] : [toCents(amount / qty)];
-  const centPrice = centCandidates.find(clearlyMultipliesBack);
+  const centPrice = centCandidates.find(multipliesBackInOdoo);
   if (centPrice != null) return centPrice;
   if (price != null && multipliesBack(price)) return price;
   return Math.round((amount / qty) * 1e6) / 1e6;

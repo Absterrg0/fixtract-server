@@ -38,6 +38,7 @@ import { notify } from '../../utils/notifications/notify';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
 import { calculateExtraCostBreakdown } from '../../utils/extraCostAccounting';
+import { commissionedExtraCostTotal } from '../../utils/customerPricing';
 import { getTransferStatus } from '../../utils/paymentSafety';
 
 const ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
@@ -88,14 +89,16 @@ const computeExtraCostCustomerCharge = async (
   extraCostTotal: number,
   vatRate = 0,
   reverseCharge = false,
+  extraCosts?: any[],
 ) => {
   const commissionPercent = await getPlatformCommissionPercent();
-  const subtotalInclCommission = roundToTwo(extraCostTotal * (1 + commissionPercent / 100));
+  const subtotalInclCommission = commissionedExtraCostTotal(extraCosts, extraCostTotal, commissionPercent);
   const loyalty = await computeCustomerLoyaltyDiscount(customer, subtotalInclCommission);
   const breakdown = calculateExtraCostBreakdown({
     extraCostNetAmount: extraCostTotal,
     commissionPercent,
     customerDiscount: loyalty.amount,
+    customerSubtotal: subtotalInclCommission,
   });
   const appliedLoyalty = {
     ...loyalty,
@@ -394,6 +397,7 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
               extraCostTotal,
               updatedBooking.payment?.vatRate,
               updatedBooking.payment?.reverseCharge,
+              (updatedBooking as any).extraCosts,
             )).customerChargeAmount
           : extraCostTotal;
         await notify({
@@ -533,6 +537,7 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
         extraCostTotal,
         booking.payment?.vatRate,
         booking.payment?.reverseCharge,
+        (booking as any).extraCosts,
       );
     const applicationFeeAmount = convertToStripeAmount(Math.max(0, platformFeeAmount), currency);
 
@@ -834,7 +839,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
 
     if (extraCostTotal < 0 && finalizedBooking.payment?.stripePaymentIntentId) {
       const commissionPercent = await getPlatformCommissionPercent();
-      const refundAmount = Math.round(Math.abs(extraCostTotal) * (1 + commissionPercent / 100) * 100) / 100;
+      const refundAmount = Math.abs(commissionedExtraCostTotal((finalizedBooking as any).extraCosts, extraCostTotal, commissionPercent));
       const currency = (finalizedBooking.payment.currency || 'EUR').toLowerCase();
       await stripe.refunds.create({
         payment_intent: finalizedBooking.payment.stripePaymentIntentId,

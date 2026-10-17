@@ -52,3 +52,36 @@ describe("platform UBL quantities", () => {
     expect(xml).toMatch(/<cbc:CreditedQuantity[^>]*>30\.00<\/cbc:CreditedQuantity>/);
   });
 });
+
+describe("platform UBL unit prices in whole cents", () => {
+  // 30 m² at 15/m² with a 9.5155% commission: 16.43/m², 492.90 for the package.
+  const unitBooking = {
+    bookingNumber: "BK-2026-000103",
+    __commissionPercent: 9.5155,
+    checkoutSnapshot: { pricingType: "unit", unitAmount: 15, quantity: 30, unit: "m²", baseSubtotal: 450, totalAmount: 450 },
+    quote: { amount: 450, description: "Paint per m²" },
+    extraCosts: [
+      { type: "unit_adjustment", name: "Unit-based adjustment", estimatedUnits: 30, actualUnits: 31, unitPrice: 15, amount: 15 },
+      { type: "condition", name: "Premium Paint", amount: 50 },
+    ],
+    payment: {
+      currency: "EUR", vatRate: 21, reverseCharge: false,
+      netAmount: 468.25, amount: 468.25,
+      discount: { loyaltyAmount: 24.65 },
+      // 16.43 + 54.76 charged for the extra costs, after a 1.00 loyalty discount.
+      extraCostCustomerNetAmount: 70.19, extraCostCustomerDiscount: 1,
+    },
+    customer: { customerType: "business", name: "Test Customer BV", vatNumber: "BE0123456749", companyAddress: { country: "BE" } },
+    professional: { name: "Test Supplier", businessInfo: { vatNumber: "BE0123456848", country: "BE" } },
+  };
+
+  it("shows the package and extra costs at whole-cent unit prices and the discount on its own line", () => {
+    const xml = buildUblInvoiceXml(unitBooking, "FIX-2026-000018", new Date("2026-10-17T00:00:00Z"), { selfBilling: false, platform });
+    const prices = [...xml.matchAll(/<cbc:PriceAmount currencyID="EUR">([^<]+)<\/cbc:PriceAmount>/g)].map((match) => match[1]);
+    expect(prices).toEqual(["16.43", "16.43", "54.76", "-25.65"]);
+    expect(xml).toMatch(/<cbc:LineExtensionAmount currencyID="EUR">492\.90<\/cbc:LineExtensionAmount>/);
+    expect(xml).toContain("Loyalty discount");
+    // The total is still what was charged: 468.25 + 70.19 excl. VAT.
+    expect(xml).toMatch(/<cbc:TaxExclusiveAmount currencyID="EUR">538\.44<\/cbc:TaxExclusiveAmount>/);
+  });
+});

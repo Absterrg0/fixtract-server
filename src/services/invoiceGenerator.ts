@@ -24,6 +24,7 @@ import {
   tryNormalizeInvoiceUnit,
 } from "../utils/invoiceUnits";
 import { getExtraCostQuantity, reconcileUnitPrice } from "../utils/invoiceLineQuantity";
+import { commissionedExtraCostAmount, customerUnitPrice } from "../utils/customerPricing";
 import ServiceConfiguration from "../models/serviceConfiguration";
 
 interface InvoiceData {
@@ -821,7 +822,14 @@ export async function generateBookingInvoice(
     customerExtraCostNet + (customerExtraCostNet < 0 ? -extraCostLoyaltyDiscount : extraCostLoyaltyDiscount),
   );
   const extraCostScale = rawExtraCostTotal !== 0 ? extraCostDisplayNet / rawExtraCostTotal : 1;
-  const extraCostLines = manualLines?.length ? [] : (booking.extraCosts || []).map((cost) => {
+  // Extra costs charged per unit (see customerPricing) show each line at its
+  // own customer price, so a unit line keeps a whole-cent unit price even next
+  // to other extra costs. Earlier charges keep the proportional split.
+  const commissionPercent = Number(settings.commissionPercent) || 0;
+  const perLineExtraCosts = (booking.extraCosts || []).map((cost) => commissionedExtraCostAmount(cost as any, commissionPercent));
+  const extraCostsChargedPerLine = !manualLines?.length && perLineExtraCosts.length > 0
+    && Math.abs(roundInvoiceMoney(perLineExtraCosts.reduce((sum, amount) => sum + amount, 0)) - extraCostDisplayNet) < 0.005;
+  const extraCostLines = manualLines?.length ? [] : (booking.extraCosts || []).map((cost, index) => {
     const costUnit = tryNormalizeInvoiceUnit((cost as any).unit) || checkoutUnit;
     const unitDetail =
       cost.type === "unit_adjustment" &&
@@ -834,10 +842,12 @@ export async function generateBookingInvoice(
     const quantity = getExtraCostQuantity(cost);
     return {
       description: `Extra cost: ${cost.name}${unitDetail}${cost.justification ? ` - ${cost.justification}` : ""}`,
-      amount: cost.amount * extraCostScale * sign,
+      amount: (extraCostsChargedPerLine ? perLineExtraCosts[index] : cost.amount * extraCostScale) * sign,
       vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
       quantity,
-      unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) * extraCostScale : undefined,
+      unitPrice: Number.isFinite(Number(cost.unitPrice))
+        ? (extraCostsChargedPerLine ? customerUnitPrice(Number(cost.unitPrice), commissionPercent) : Number(cost.unitPrice) * extraCostScale)
+        : undefined,
       ...(quantity != null && costUnit ? { unit: costUnit } : {}),
     };
   });
