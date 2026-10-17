@@ -228,6 +228,26 @@ describe("Peppol Odoo dispatch", () => {
       expect(Math.round(lines[1].quantity * lines[1].price_unit * 100) / 100).toBe(-41.07);
     });
 
+    it("keeps a discount line negative on a credit note", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "read") return [{ amount_untaxed: 90, amount_total: 108.9 }];
+        return normal(...args);
+      });
+      const result = await maybeDispatchPeppolInvoice({
+        booking, side: "customer", documentType: "credit_note", invoiceNumber: "FIX-CN-2026-000003", ublXml: "<CreditNote/>",
+        invoiceUblUrl: "", totalWithVat: 108.9,
+        lineItems: [
+          { description: "Paint per m²", price: 100, vatRate: 21 },
+          { description: "Loyalty discount", price: -10, vatRate: 21 },
+        ],
+      });
+      expect(result.status).toBe("sent");
+      const vals = callsOf("account.move", "create")[0][3].vals_list;
+      expect(vals.move_type).toBe("out_refund");
+      expect(vals.invoice_line_ids.map((line: any) => line[2].price_unit)).toEqual([100, -10]);
+    });
+
     it("removes the draft and reports the difference when Odoo totals differ from the invoice", async () => {
       const normal = mocks.call.getMockImplementation()!;
       mocks.call.mockImplementation(async (...args) => {

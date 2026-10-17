@@ -364,15 +364,18 @@ const getOdooInvoiceLines = (booking: any, documentType: "invoice" | "credit_not
 
 const getOdooInvoiceLinesForPayload = (booking: any, payload: PeppolDispatchPayload): OdooInvoiceLine[] => {
   if (payload.lineItems?.length) {
+    // Odoo signs a credit note from its move_type, so a credit note whose lines
+    // arrive negated is flipped as a whole. Lines keep their sign relative to
+    // each other: a discount or an extra cost for fewer units stays negative
+    // -- including its negative quantity, so Odoo shows the same units as the
+    // Fixtract PDF (mirrors the PDF's own `quantity !== 0` rule).
+    const linesTotal = payload.lineItems.reduce((sum, line) => sum + Number(line.price || 0), 0);
+    const sign = payload.documentType === "credit_note" && linesTotal < 0 ? -1 : 1;
     return payload.lineItems.map((line) => ({
       description: line.description || "Service",
-      // Credit note lines are unsigned (Odoo signs them from move_type), but an
-      // invoice keeps negative lines such as an extra cost for fewer units --
-      // including their negative quantity, so Odoo shows the same units as the
-      // Fixtract PDF (mirrors the PDF's own `quantity !== 0` rule).
-      price: payload.documentType === "credit_note" ? Math.abs(Number(line.price || 0)) : Number(line.price || 0),
+      price: Number(line.price || 0) * sign,
       vatRate: Number(line.vatRate ?? payload.vatRate ?? 0),
-      quantity: line.quantity != null && Number.isFinite(Number(line.quantity)) && Number(line.quantity) !== 0 ? Number(line.quantity) : undefined,
+      quantity: line.quantity != null && Number.isFinite(Number(line.quantity)) && Number(line.quantity) !== 0 ? Number(line.quantity) * sign : undefined,
       unitPrice: Number.isFinite(Number(line.unitPrice)) ? Number(line.unitPrice) : undefined,
     }));
   }
