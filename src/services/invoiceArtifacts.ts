@@ -38,6 +38,8 @@ const SELF_BILLING_PROFILE_ID = "urn:fdc:peppol.eu:2017:poacc:selfbilling:01:1.0
 const COMMERCIAL_CUSTOMIZATION_ID =
   "urn:cen.eu:en16931:2017#compliant#urn:fdc:peppol.eu:2017:poacc:billing:3.0";
 const COMMERCIAL_PROFILE_ID = "urn:fdc:peppol.eu:2017:poacc:billing:01:1.0";
+const PEPPOL_DISPATCH_IN_PROGRESS =
+  "Peppol dispatch in progress; if this does not change, generate the invoice again to finish it";
 
 type InvoiceArtifactResult = {
   invoiceNumber: string;
@@ -1279,7 +1281,8 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
   update.supplierInvoiceUrl = supplierInvoiceUrl;
   update.supplierInvoiceUblUrl = supplierInvoiceUblUrl;
   update.supplierInvoiceGeneratedAt = generatedAt;
-  update.supplierPeppolDispatchStatus = "skipped";
+  update.supplierPeppolDispatchStatus = "queued";
+  update.supplierPeppolDispatchReason = PEPPOL_DISPATCH_IN_PROGRESS;
 
   await Booking.updateOne(
     { _id: booking._id },
@@ -1290,6 +1293,7 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
         "payment.supplierInvoiceUblUrl": update.supplierInvoiceUblUrl,
         "payment.supplierInvoiceGeneratedAt": update.supplierInvoiceGeneratedAt,
         "payment.supplierPeppolDispatchStatus": update.supplierPeppolDispatchStatus,
+        "payment.supplierPeppolDispatchReason": update.supplierPeppolDispatchReason,
       },
     }
   );
@@ -1299,6 +1303,7 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
     supplierInvoiceUblUrl: update.supplierInvoiceUblUrl,
     supplierInvoiceGeneratedAt: update.supplierInvoiceGeneratedAt,
     supplierPeppolDispatchStatus: update.supplierPeppolDispatchStatus,
+    supplierPeppolDispatchReason: update.supplierPeppolDispatchReason,
   });
 
   try {
@@ -1318,6 +1323,7 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
       lineItems: getPeppolLineItems(supplierPricing),
     });
     update.supplierPeppolDispatchStatus = supplierPeppolResult.status;
+    update.supplierPeppolDispatchReason = supplierPeppolResult.reason;
     update.supplierPeppolDispatchReference = supplierPeppolResult.reference;
     await Booking.updateOne(
       { _id: booking._id },
@@ -1342,6 +1348,7 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
       supplierPeppolError instanceof Error ? supplierPeppolError.message : supplierPeppolError,
     );
     update.supplierPeppolDispatchStatus = "failed";
+    update.supplierPeppolDispatchReason = supplierPeppolError instanceof Error ? supplierPeppolError.message : String(supplierPeppolError);
     await Booking.updateOne(
       { _id: booking._id },
       { $set: {
@@ -1449,8 +1456,12 @@ export async function ensureBookingInvoiceArtifacts(
       supplierInvoiceUrl,
       supplierInvoiceUblUrl,
       supplierInvoiceGeneratedAt: generatedAt,
-      peppolDispatchStatus: "skipped",
-      supplierPeppolDispatchStatus: "skipped",
+      // Stays like this only if the dispatch below never finished; "skipped"
+      // here used to read as a deliberate skip with no reason.
+      peppolDispatchStatus: "queued",
+      peppolDispatchReason: PEPPOL_DISPATCH_IN_PROGRESS,
+      supplierPeppolDispatchStatus: "queued",
+      supplierPeppolDispatchReason: PEPPOL_DISPATCH_IN_PROGRESS,
     };
 
     await Booking.updateOne(
@@ -1466,7 +1477,9 @@ export async function ensureBookingInvoiceArtifacts(
           "payment.supplierInvoiceUblUrl": update.supplierInvoiceUblUrl,
           "payment.supplierInvoiceGeneratedAt": update.supplierInvoiceGeneratedAt,
           "payment.peppolDispatchStatus": update.peppolDispatchStatus,
+          "payment.peppolDispatchReason": update.peppolDispatchReason,
           "payment.supplierPeppolDispatchStatus": update.supplierPeppolDispatchStatus,
+          "payment.supplierPeppolDispatchReason": update.supplierPeppolDispatchReason,
         },
       }
     );
@@ -1489,6 +1502,7 @@ export async function ensureBookingInvoiceArtifacts(
         lineItems: getPeppolLineItems(customerPricing),
       });
       update.peppolDispatchStatus = peppolResult.status;
+      update.peppolDispatchReason = peppolResult.reason;
       update.peppolDispatchReference = peppolResult.reference;
       await Booking.updateOne(
         { _id: booking._id },
@@ -1513,11 +1527,12 @@ export async function ensureBookingInvoiceArtifacts(
         peppolError instanceof Error ? peppolError.message : peppolError
       );
       update.peppolDispatchStatus = "failed";
+      update.peppolDispatchReason = peppolError instanceof Error ? peppolError.message : String(peppolError);
       await Booking.updateOne(
         { _id: booking._id },
         { $set: {
           "payment.peppolDispatchStatus": "failed",
-          "payment.peppolDispatchReason": peppolError instanceof Error ? peppolError.message : String(peppolError),
+          "payment.peppolDispatchReason": update.peppolDispatchReason,
         } }
       );
       await persistPaymentArtifactUpdate(booking._id, paymentId, {
@@ -1543,6 +1558,7 @@ export async function ensureBookingInvoiceArtifacts(
         lineItems: getPeppolLineItems(supplierPricing),
       });
       update.supplierPeppolDispatchStatus = supplierPeppolResult.status;
+      update.supplierPeppolDispatchReason = supplierPeppolResult.reason;
       update.supplierPeppolDispatchReference = supplierPeppolResult.reference;
       await Booking.updateOne(
         { _id: booking._id },
@@ -1567,6 +1583,7 @@ export async function ensureBookingInvoiceArtifacts(
         supplierPeppolError instanceof Error ? supplierPeppolError.message : supplierPeppolError,
       );
       update.supplierPeppolDispatchStatus = "failed";
+      update.supplierPeppolDispatchReason = supplierPeppolError instanceof Error ? supplierPeppolError.message : String(supplierPeppolError);
       await Booking.updateOne(
         { _id: booking._id },
         { $set: {

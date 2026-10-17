@@ -1344,10 +1344,22 @@ const dispatchToOdoo = async (
     }
     const moveId = reusableMoveId || await (async () => {
       const moveVals = await buildOdooMoveVals(config, booking, payload, partnerId);
-      const { value: moveIdRaw } = await odooCallOnce<unknown>(config, "account.move", "create", { vals_list: moveVals });
-      return normalizeOdooId(moveIdRaw, "invoice");
+      try {
+        const { value: moveIdRaw } = await odooCallOnce<unknown>(
+          config, "account.move", "create", { vals_list: moveVals }, ODOO_SLOW_CALL_TIMEOUT_MS,
+        );
+        return normalizeOdooId(moveIdRaw, "invoice");
+      } catch (createError) {
+        // Odoo finishes the create after we stop waiting; carry on with that
+        // draft instead of leaving it unposted and unsent.
+        if (isOdooTimeout(createError)) {
+          const createdMove = await findExistingOdooMove(config, payload);
+          if (createdMove?.id) return createdMove.id;
+        }
+        throw createError;
+      }
     })();
-    if (moveId !== existingMove?.id) {
+    if (moveId !== reusableMoveId) {
       const totalsCheck = await checkOdooMoveTotals(config, moveId, expectedTotals);
       if (!totalsCheck.ok) {
         console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] totals: FAIL ${totalsCheck.reason}`);

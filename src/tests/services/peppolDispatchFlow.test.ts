@@ -137,6 +137,23 @@ describe("Peppol Odoo dispatch", () => {
       expect(create?.[3].vals_list).toMatchObject({ partner_id: 61 });
     });
 
+    it("posts and sends the draft Odoo created after account.move.create timed out", async () => {
+      let moveSearches = 0;
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "search_read") {
+          return moveSearches++ === 0 ? [] : [{ id: 71, name: "TEST-1", state: "draft" }];
+        }
+        if (args[1] === "account.move" && args[2] === "create") throw timeoutError("account.move.create");
+        return normal(...args);
+      });
+      expect(await dispatch("customer")).toMatchObject({ status: "sent" });
+      const moveCalls = mocks.call.mock.calls.filter((call) => call[1] === "account.move");
+      expect(moveCalls.filter((call) => call[2] === "create")).toHaveLength(1);
+      expect(moveCalls.find((call) => call[2] === "action_post")?.[3]).toMatchObject({ ids: [71] });
+      expect(moveCalls.find((call) => call[2] === "button_process_edi_web_services")?.[3]).toMatchObject({ ids: [71] });
+    });
+
     it("continues when action_post timed out but Odoo posted the move", async () => {
       const normal = mocks.call.getMockImplementation()!;
       mocks.call.mockImplementation(async (...args) => {
