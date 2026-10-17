@@ -34,6 +34,7 @@ import { recordProfessionalView } from "../../handlers/Public/profileView";
 import { recordServiceView } from "../../handlers/Public/serviceView";
 import {
   runNotificationRemindersCron,
+  runPeppolRetryCron,
   runKpiMonthlyReportCron,
   runMarketingCampaignsCron,
 } from "../../handlers/Public/cron";
@@ -135,6 +136,8 @@ publicRouter.route("/marketing/languages").get(schedulingRateLimiter, getMarketi
 // Cron entrypoints (secured via CRON_SECRET bearer token)
 publicRouter.route("/cron/notification-reminders").get(runNotificationRemindersCron);
 publicRouter.route("/cron/notification-reminders").post(runNotificationRemindersCron);
+publicRouter.route("/cron/peppol-retry").get(runPeppolRetryCron);
+publicRouter.route("/cron/peppol-retry").post(runPeppolRetryCron);
 publicRouter.route("/cron/kpi-monthly-report").get(runKpiMonthlyReportCron);
 publicRouter.route("/cron/kpi-monthly-report").post(runKpiMonthlyReportCron);
 // Manual entrypoint — not a separate Vercel cron (Hobby limit = 1; piggybacked daily)

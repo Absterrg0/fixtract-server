@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import User from '../../models/user';
 import CronJobLock from '../../models/cronJobLock';
 import { runNotificationReminders } from '../../utils/notifications/runNotificationReminders';
+import { retryStuckPeppolDispatches } from '../../utils/retryPeppolDispatches';
 import { hasPermission, resolveAdminRole } from '../../utils/adminRbac/rolePermissions';
 import {
   syncPendingBrevoResubscribes,
@@ -282,6 +283,19 @@ async function maybeRunKpiMonthly(opts?: { force?: boolean }): Promise<
  * KPI + marketing are attempted even if reminders fail so they are not blocked.
  * Secured via Authorization: Bearer ${CRON_SECRET}.
  */
+export const runPeppolRetryCron = async (req: Request, res: Response) => {
+  if (!isAuthorizedCron(req)) {
+    return res.status(401).json({ success: false, msg: 'Unauthorized' });
+  }
+  try {
+    const result = await retryStuckPeppolDispatches();
+    return res.json({ success: true, data: result });
+  } catch (error: unknown) {
+    console.error('[Cron] Peppol retry failed:', error);
+    return res.status(500).json({ success: false, msg: error instanceof Error ? error.message : 'Peppol retry failed' });
+  }
+};
+
 export const runNotificationRemindersCron = async (req: Request, res: Response) => {
   if (!isAuthorizedCron(req)) {
     return res.status(401).json({ success: false, msg: 'Unauthorized' });
