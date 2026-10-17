@@ -22,3 +22,19 @@ export const isInvoiceSettled = (booking: any, side: "customer" | "supplier"): b
     || payment.extraCostStatus === "succeeded"
     || payment.extraCostPaymentSucceeded === true;
 };
+
+/**
+ * What the customer already paid at checkout while extra costs are still
+ * open, so the e-invoice asks only for the rest. That is the VAT-inclusive
+ * charge (`payment.amount` excludes VAT). Milestone bookings charge in parts,
+ * so one stored charge says nothing about the whole invoice. Self-bills are
+ * only stated as paid once settled: a payout is not their VAT-inclusive total.
+ */
+export const getInvoicePrepaidAmount = (booking: any, side: "customer" | "supplier"): number | undefined => {
+  if (side !== "customer" || isInvoiceSettled(booking, side)) return undefined;
+  if (Array.isArray(booking?.milestonePayments) && booking.milestonePayments.length > 0) return undefined;
+  const payment = booking?.payment || {};
+  if (!CAPTURED_PAYMENT_STATUSES.has(String(payment.status || ""))) return undefined;
+  const charged = Number(payment.totalWithVat);
+  return Number.isFinite(charged) && charged > 0 ? charged : undefined;
+};

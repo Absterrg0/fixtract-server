@@ -3,7 +3,7 @@ import { PEPPOL_DISPATCH_STATUSES, type PeppolDispatchStatus } from "../constant
 import PlatformSettings from "../models/platformSettings";
 import { parseVatCountryCode, normalizeVatCountry } from "../utils/vatManagement";
 import { reconcileUnitPrice } from "../utils/invoiceLineQuantity";
-import { isInvoiceSettled } from "../utils/invoiceSettlement";
+import { getInvoicePrepaidAmount, isInvoiceSettled } from "../utils/invoiceSettlement";
 import {
   discoverOdooAccountingConfig,
   odooJson2Call,
@@ -55,6 +55,8 @@ type PeppolDispatchPayload = {
   totalWithVat?: number;
   /** Paid through Stripe: the Peppol UBL states the total as prepaid. */
   settled?: boolean;
+  /** Paid so far when not settled (checkout paid, extra costs still open). */
+  prepaidAmount?: number;
 };
 
 type OdooInvoiceLine = {
@@ -893,11 +895,12 @@ export const setUblInvoiceNumber = (xml: string, invoiceNumber: string): string 
 };
 
 /**
- * State a paid invoice as fully prepaid (BR-CO-16: payable = total − prepaid
+ * State a paid invoice as prepaid (BR-CO-16: payable = total − prepaid
  * + rounding). Odoo derives these from its own receivables, which stay open
- * because Stripe payments are not booked as Odoo payments.
+ * because Stripe payments are not booked as Odoo payments. Without an amount
+ * the whole invoice is prepaid; with one, only the rest stays payable.
  */
-export const markUblAsPrepaid = (xml: string): string => {
+export const markUblAsPrepaid = (xml: string, prepaidAmount?: number): string => {
   const totalMatch = /<((?:[\w-]+:)?)LegalMonetaryTotal>([\s\S]*?)<\/\1LegalMonetaryTotal>/.exec(xml);
   if (!totalMatch) return xml;
   const [block, prefixedCac, body] = totalMatch;
@@ -908,7 +911,10 @@ export const markUblAsPrepaid = (xml: string): string => {
   const inclusive = amountOf("TaxInclusiveAmount");
   if (!inclusive || !Number.isFinite(inclusive.value)) return xml;
   const rounding = amountOf("PayableRoundingAmount")?.value || 0;
-  const prepaid = roundMoney(inclusive.value + rounding).toFixed(2);
+  const due = roundMoney(inclusive.value + rounding);
+  const prepaidValue = prepaidAmount == null ? due : Math.min(roundMoney(prepaidAmount), due);
+  const prepaid = prepaidValue.toFixed(2);
+  const payable = roundMoney(due - prepaidValue).toFixed(2);
   const { prefix, attrs } = inclusive;
   let patched = body;
   if (amountOf("PrepaidAmount")) {
@@ -919,7 +925,7 @@ export const markUblAsPrepaid = (xml: string): string => {
       (tag) => `<${prefix}PrepaidAmount${attrs}>${prepaid}</${prefix}PrepaidAmount>${tag}`,
     );
   }
-  patched = patched.replace(new RegExp(`(<(?:[\\w-]+:)?PayableAmount\\b[^>]*>)[^<]*`), (_match, open) => `${open}0.00`);
+  patched = patched.replace(new RegExp(`(<(?:[\\w-]+:)?PayableAmount\\b[^>]*>)[^<]*`), (_match, open) => `${open}${payable}`);
   return xml.replace(block, () => `<${prefixedCac}LegalMonetaryTotal>${patched}</${prefixedCac}LegalMonetaryTotal>`);
 };
 
@@ -1004,7 +1010,10 @@ const prepareOdooPeppolUbl = async (
   let xml = original;
   if (payload.invoicePdf?.length) xml = embedPdfInUbl(xml, `${payload.invoiceNumber}.pdf`, payload.invoicePdf);
   xml = setUblInvoiceNumber(xml, payload.invoiceNumber);
-  if (payload.settled && payload.documentType === "invoice") xml = markUblAsPrepaid(xml);
+  if (payload.documentType === "invoice") {
+    if (payload.settled) xml = markUblAsPrepaid(xml);
+    else if (payload.prepaidAmount) xml = markUblAsPrepaid(xml, payload.prepaidAmount);
+  }
   if (xml === original) return;
   await odooCallOnce(config, "ir.attachment", "write", {
     ids: [attachmentId],
@@ -1528,6 +1537,7 @@ export async function maybeDispatchPeppolInvoice(params: {
     issueDate: params.issueDate,
     totalWithVat: params.totalWithVat,
     settled: isInvoiceSettled(params.booking, side),
+    prepaidAmount: getInvoicePrepaidAmount(params.booking, side),
   };
 
   return dispatchToOdoo(params.booking, payload, reference, toPositiveOdooId(eInvoicing.odooCompanyId));

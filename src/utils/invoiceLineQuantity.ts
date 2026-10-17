@@ -35,6 +35,8 @@ export const getExtraCostQuantity = (cost: {
  * charged and wins: a unit price taken from the professional's catalogue, or
  * one scaled before commission/discount adjustments, no longer matches it, and
  * Odoo and UBL receivers recompute the line as quantity × unit price.
+ * A whole-cent price is preferred whenever one multiplies back; only an
+ * amount no cent price reaches (e.g. 492.82 for 30 units) keeps more decimals.
  */
 export const reconcileUnitPrice = (
   amount: number,
@@ -44,6 +46,14 @@ export const reconcileUnitPrice = (
   const price = toFiniteNumber(unitPrice);
   const qty = toFiniteNumber(quantity);
   if (qty == null || qty === 0) return price;
-  if (price != null && Math.abs(Math.round(qty * price * 100) / 100 - amount) < 0.005) return price;
+  const multipliesBack = (candidate: number) => Math.abs(Math.round(qty * candidate * 100) / 100 - amount) < 0.005;
+  const toCents = (value: number) => Math.round(value * 100) / 100;
+  // Not on a half cent (−2.5 × 16.43 = −41.075), which JS and Odoo round
+  // in opposite directions.
+  const clearlyMultipliesBack = (candidate: number) => Math.abs(qty * candidate - amount) < 0.004;
+  const centCandidates = price != null ? [toCents(price), toCents(amount / qty)] : [toCents(amount / qty)];
+  const centPrice = centCandidates.find(clearlyMultipliesBack);
+  if (centPrice != null) return centPrice;
+  if (price != null && multipliesBack(price)) return price;
   return Math.round((amount / qty) * 1e6) / 1e6;
 };

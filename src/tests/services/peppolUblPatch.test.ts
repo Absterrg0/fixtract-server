@@ -34,6 +34,14 @@ describe("Odoo UBL patching", () => {
     expect(xml).toContain('<cbc:TaxInclusiveAmount currencyID="EUR">690.37</cbc:TaxInclusiveAmount>');
   });
 
+  it("leaves only the unpaid extra costs payable when the checkout was paid", () => {
+    // 690.37 invoiced, 604.23 paid at checkout, 86.14 extra costs still open.
+    const xml = markUblAsPrepaid(odooUbl, 604.23);
+    expect(xml).toContain('<cbc:PrepaidAmount currencyID="EUR">604.23</cbc:PrepaidAmount>');
+    expect(xml).toContain('<cbc:PayableAmount currencyID="EUR">86.14</cbc:PayableAmount>');
+    expect(markUblAsPrepaid(odooUbl, 900)).toContain('<cbc:PayableAmount currencyID="EUR">0.00</cbc:PayableAmount>');
+  });
+
   it("adds a missing PrepaidAmount before the payable amounts and counts rounding", () => {
     const withoutPrepaid = odooUbl
       .replace(/\s*<cbc:PrepaidAmount[^\n]*/, "")
