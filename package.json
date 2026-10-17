@@ -51,6 +51,7 @@
     "@aws-sdk/client-s3": "^3.879.0",
     "@aws-sdk/s3-request-presigner": "^3.879.0",
     "@getbrevo/brevo": "^3.0.1",
+    "@vercel/functions": "^3.10.1",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",

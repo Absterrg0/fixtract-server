@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
+import { waitUntil } from '@vercel/functions';
 import Booking, { BookingStatus, ExtraCostType } from '../../models/booking';
 import User from '../../models/user';
 import PlatformSettings from '../../models/platformSettings';
@@ -876,12 +877,15 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       console.error('Error awarding booking completion points:', e);
     }
 
-    void ensureBookingInvoiceArtifacts(finalizedBooking._id.toString()).catch((invoiceError: unknown) => {
+    // The Odoo Peppol send takes well over the time Vercel keeps running
+    // work it was not told about once the response is out; unfinished, it
+    // left drafts in Odoo that were never posted or sent.
+    waitUntil(ensureBookingInvoiceArtifacts(finalizedBooking._id.toString()).catch((invoiceError: unknown) => {
       console.error(
         'Failed to generate booking invoice artifacts:',
         invoiceError instanceof Error ? invoiceError.message : invoiceError
       );
-    });
+    }));
 
     try {
       const [customerUser, professionalUser] = await Promise.all([
