@@ -25,6 +25,7 @@ import {
 } from "../utils/invoiceUnits";
 import { getExtraCostQuantity, reconcileUnitPrice } from "../utils/invoiceLineQuantity";
 import { commissionedExtraCostAmount, customerUnitPrice } from "../utils/customerPricing";
+import { getInvoicePrepaidAmount, isInvoiceSettled } from "../utils/invoiceSettlement";
 import ServiceConfiguration from "../models/serviceConfiguration";
 
 interface InvoiceData {
@@ -94,6 +95,9 @@ interface InvoiceData {
 
   // VAT explanation
   vatExplanation?: string;
+
+  /** What was already paid through Fixtract, so the invoice does not read as payable. */
+  settlement?: { paidAmount: number; dueAmount: number };
 }
 
 export type ManualInvoiceLine = {
@@ -593,6 +597,22 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
         .text(formatCurrency(data.payment.totalWithVat, data.payment.currency), 450, rowY + 10, { align: "right" });
       doc.font("Helvetica");
       doc.y = rowY + 28;
+
+      if (data.settlement) {
+        ensureSpace(44);
+        rowY = doc.y;
+        doc
+          .fontSize(10)
+          .fillColor("#15803d")
+          .text(data.settlement.dueAmount > 0 ? "Paid via Fixtract" : "PAID via Fixtract", 50, rowY)
+          .text(formatCurrency(data.settlement.paidAmount, data.payment.currency), 450, rowY, { align: "right" })
+          .fillColor("#000000")
+          .font("Helvetica-Bold")
+          .text("Amount due", 50, rowY + 16)
+          .text(formatCurrency(data.settlement.dueAmount, data.payment.currency), 450, rowY + 16, { align: "right" })
+          .font("Helvetica");
+        doc.y = rowY + 36;
+      }
 
       // VAT explanation
       if (data.vatExplanation) {
@@ -1163,6 +1183,20 @@ export async function generateBookingInvoice(
       selfBilling ? supplierVatCountry : customerCountry
     ),
   };
+
+  // Same rule as the Peppol UBL: settled is fully paid; a paid checkout with
+  // extra costs still open is partly paid. Corrections and credit notes
+  // carry no payment state.
+  if (!options?.creditNote && !manualLines?.length) {
+    const side = selfBilling ? "supplier" : "customer";
+    const total = roundInvoiceMoney(invoiceData.payment.totalWithVat);
+    const paidAmount = isInvoiceSettled(booking, side)
+      ? total
+      : Math.min(total, roundInvoiceMoney(getInvoicePrepaidAmount(booking, side) ?? 0));
+    if (paidAmount > 0) {
+      invoiceData.settlement = { paidAmount, dueAmount: roundInvoiceMoney(total - paidAmount) };
+    }
+  }
 
   const pdfBuffer = await generateInvoicePDF(invoiceData);
 
