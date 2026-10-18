@@ -10,6 +10,7 @@ const serializeEInvoicingSettings = (eInvoicing: any = {}) => ({
   provider: eInvoicing.provider === 'odoo' ? 'odoo' : 'manual',
   peppolParticipantId: eInvoicing.peppolParticipantId || '',
   odooCompanyId: Number.isInteger(eInvoicing.odooCompanyId) && eInvoicing.odooCompanyId > 0 ? eInvoicing.odooCompanyId : null,
+  odooRecordPayments: eInvoicing.odooRecordPayments === true,
 });
 
 // Get current platform settings
@@ -119,6 +120,9 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
           odooCompanyId = parsedCompanyId;
         }
       }
+      const odooRecordPayments = eInvoicing.odooRecordPayments !== undefined
+        ? eInvoicing.odooRecordPayments === true
+        : (config.eInvoicing?.odooRecordPayments ?? false);
       const participantIdPattern = /^\d{4}:[^\s:]+$/;
       if (peppolEnabled && provider !== 'manual') {
         if (!peppolParticipantId || !participantIdPattern.test(peppolParticipantId)) {
@@ -139,6 +143,7 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
         provider,
         peppolParticipantId,
         odooCompanyId,
+        odooRecordPayments,
       };
     }
     config.lastModifiedBy = adminUser._id as any;

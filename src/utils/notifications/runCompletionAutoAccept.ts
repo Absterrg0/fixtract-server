@@ -1,3 +1,4 @@
+import { waitUntil } from '@vercel/functions';
 import Booking, { BookingStatus } from '../../models/booking';
 import Payment from '../../models/payment';
 import { SYSTEM_USER_ID } from '../../constants/system';
@@ -20,6 +21,7 @@ import {
   markMilestonesCompleted,
 } from '../bookingHelpers';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
+import { commissionedExtraCostTotal } from '../customerPricing';
 import User from '../../models/user';
 import { notifyAsync } from './notify';
 import { isEligibleForAutoAccept } from './autoAcceptEligibility';
@@ -179,8 +181,9 @@ export async function finalizeBookingCompletion(args: {
 
   if (extraCostTotal < 0 && finalizedBooking.payment?.stripePaymentIntentId) {
     const commissionPercent = await getPlatformCommissionPercent();
-    const refundAmount =
-      Math.round(Math.abs(extraCostTotal) * (1 + commissionPercent / 100) * 100) / 100;
+    const refundAmount = Math.abs(
+      commissionedExtraCostTotal((finalizedBooking as any).extraCosts, extraCostTotal, commissionPercent),
+    );
     const currency = (finalizedBooking.payment.currency || 'EUR').toLowerCase();
     await stripe.refunds.create(
       {
@@ -226,12 +229,15 @@ export async function finalizeBookingCompletion(args: {
     console.error('Error awarding booking completion points:', e);
   }
 
-  void ensureBookingInvoiceArtifacts(finalizedBooking._id.toString()).catch((invoiceError: unknown) => {
+  // The Odoo Peppol send takes well over the time Vercel keeps running
+  // work it was not told about once the response is out; unfinished, it
+  // left drafts in Odoo that were never posted or sent.
+  waitUntil(ensureBookingInvoiceArtifacts(finalizedBooking._id.toString()).catch((invoiceError: unknown) => {
     console.error(
       'Failed to generate booking invoice artifacts:',
       invoiceError instanceof Error ? invoiceError.message : invoiceError,
     );
-  });
+  }));
 
   try {
     const [customerUser, professionalUser] = await Promise.all([

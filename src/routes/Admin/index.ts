@@ -92,6 +92,7 @@ import { runRfqDeadlineCheck } from "../../utils/rfqDeadlineCheck";
 import { runDisputeSlaCheck } from "../../utils/disputeSlaCheck";
 import { runRefundNegotiationSlaCheck } from "../../utils/refundNegotiationSlaCheck";
 import { runNotificationReminders } from "../../utils/notifications/runNotificationReminders";
+import { retryStuckPeppolDispatches } from "../../utils/retryPeppolDispatches";
 import { runCompletionAutoAccept } from "../../utils/notifications/runCompletionAutoAccept";
 import { expirePendingReferrals } from "../../utils/referralSystem";
 import {
@@ -421,6 +422,16 @@ adminRouter.route('/run-refund-sla-check').post(async (_req, res) => {
   } catch (error: any) {
     console.error('[Admin] Manual refund SLA check failed:', error);
     return res.status(500).json({ success: false, msg: 'Refund SLA check failed' });
+  }
+});
+
+adminRouter.route('/run-peppol-retry').post(async (_req, res) => {
+  try {
+    const result = await retryStuckPeppolDispatches();
+    return res.json({ success: true, data: result });
+  } catch (error: any) {
+    console.error('[Admin] Peppol retry failed:', error);
+    return res.status(500).json({ success: false, msg: 'Peppol retry failed' });
   }
 });
 

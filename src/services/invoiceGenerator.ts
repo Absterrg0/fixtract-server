@@ -24,6 +24,8 @@ import {
   tryNormalizeInvoiceUnit,
 } from "../utils/invoiceUnits";
 import { getExtraCostQuantity, reconcileUnitPrice } from "../utils/invoiceLineQuantity";
+import { commissionedExtraCostAmount, customerUnitPrice } from "../utils/customerPricing";
+import { getInvoicePayment } from "../utils/invoiceSettlement";
 import ServiceConfiguration from "../models/serviceConfiguration";
 
 interface InvoiceData {
@@ -93,6 +95,9 @@ interface InvoiceData {
 
   // VAT explanation
   vatExplanation?: string;
+
+  /** What was already paid through Fixtract, so the invoice does not read as payable. */
+  settlement?: { paidAmount: number; dueAmount: number };
 }
 
 export type ManualInvoiceLine = {
@@ -593,6 +598,22 @@ export async function generateInvoicePDF(data: InvoiceData): Promise<Buffer> {
       doc.font("Helvetica");
       doc.y = rowY + 28;
 
+      if (data.settlement) {
+        ensureSpace(44);
+        rowY = doc.y;
+        doc
+          .fontSize(10)
+          .fillColor("#15803d")
+          .text(data.settlement.dueAmount > 0 ? "Paid via Fixtract" : "PAID via Fixtract", 50, rowY)
+          .text(formatCurrency(data.settlement.paidAmount, data.payment.currency), 450, rowY, { align: "right" })
+          .fillColor("#000000")
+          .font("Helvetica-Bold")
+          .text("Amount due", 50, rowY + 16)
+          .text(formatCurrency(data.settlement.dueAmount, data.payment.currency), 450, rowY + 16, { align: "right" })
+          .font("Helvetica");
+        doc.y = rowY + 36;
+      }
+
       // VAT explanation
       if (data.vatExplanation) {
         ensureSpace(24);
@@ -821,7 +842,14 @@ export async function generateBookingInvoice(
     customerExtraCostNet + (customerExtraCostNet < 0 ? -extraCostLoyaltyDiscount : extraCostLoyaltyDiscount),
   );
   const extraCostScale = rawExtraCostTotal !== 0 ? extraCostDisplayNet / rawExtraCostTotal : 1;
-  const extraCostLines = manualLines?.length ? [] : (booking.extraCosts || []).map((cost) => {
+  // Extra costs charged per unit (see customerPricing) show each line at its
+  // own customer price, so a unit line keeps a whole-cent unit price even next
+  // to other extra costs. Earlier charges keep the proportional split.
+  const commissionPercent = Number(settings.commissionPercent) || 0;
+  const perLineExtraCosts = (booking.extraCosts || []).map((cost) => commissionedExtraCostAmount(cost as any, commissionPercent));
+  const extraCostsChargedPerLine = !manualLines?.length && perLineExtraCosts.length > 0
+    && Math.abs(roundInvoiceMoney(perLineExtraCosts.reduce((sum, amount) => sum + amount, 0)) - extraCostDisplayNet) < 0.005;
+  const extraCostLines = manualLines?.length ? [] : (booking.extraCosts || []).map((cost, index) => {
     const costUnit = tryNormalizeInvoiceUnit((cost as any).unit) || checkoutUnit;
     const unitDetail =
       cost.type === "unit_adjustment" &&
@@ -834,10 +862,12 @@ export async function generateBookingInvoice(
     const quantity = getExtraCostQuantity(cost);
     return {
       description: `Extra cost: ${cost.name}${unitDetail}${cost.justification ? ` - ${cost.justification}` : ""}`,
-      amount: cost.amount * extraCostScale * sign,
+      amount: (extraCostsChargedPerLine ? perLineExtraCosts[index] : cost.amount * extraCostScale) * sign,
       vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
       quantity,
-      unitPrice: Number.isFinite(Number(cost.unitPrice)) ? Number(cost.unitPrice) * extraCostScale : undefined,
+      unitPrice: Number.isFinite(Number(cost.unitPrice))
+        ? (extraCostsChargedPerLine ? customerUnitPrice(Number(cost.unitPrice), commissionPercent) : Number(cost.unitPrice) * extraCostScale)
+        : undefined,
       ...(quantity != null && costUnit ? { unit: costUnit } : {}),
     };
   });
@@ -1153,6 +1183,17 @@ export async function generateBookingInvoice(
       selfBilling ? supplierVatCountry : customerCountry
     ),
   };
+
+  // Same rule as the Peppol UBL: settled is fully paid; a paid checkout with
+  // extra costs still open is partly paid. Corrections and credit notes
+  // carry no payment state.
+  if (!options?.creditNote && !manualLines?.length) {
+    const total = roundInvoiceMoney(invoiceData.payment.totalWithVat);
+    const { paidAmount } = getInvoicePayment(booking, selfBilling ? "supplier" : "customer", total);
+    if (paidAmount > 0) {
+      invoiceData.settlement = { paidAmount, dueAmount: roundInvoiceMoney(total - paidAmount) };
+    }
+  }
 
   const pdfBuffer = await generateInvoicePDF(invoiceData);
 

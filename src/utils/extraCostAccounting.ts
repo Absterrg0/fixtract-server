@@ -17,13 +17,18 @@ export const calculateExtraCostBreakdown = ({
   extraCostNetAmount,
   commissionPercent,
   customerDiscount = 0,
+  customerSubtotal,
 }: {
   extraCostNetAmount: number;
   commissionPercent: number;
   customerDiscount?: number;
+  /** Commission-inclusive price when it was set per unit (see customerPricing). */
+  customerSubtotal?: number;
 }): ExtraCostBreakdown => {
   const net = Math.max(0, roundToTwo(extraCostNetAmount));
-  const commission = Math.max(0, roundToTwo(net * (commissionPercent / 100)));
+  const commission = Math.max(0, roundToTwo(
+    customerSubtotal != null ? customerSubtotal - net : net * (commissionPercent / 100),
+  ));
   const cappedDiscount = Math.max(0, Math.min(roundToTwo(customerDiscount), commission));
   const customerChargeAmount = roundToTwo(net + commission - cappedDiscount);
 

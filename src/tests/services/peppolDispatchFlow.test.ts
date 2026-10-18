@@ -137,6 +137,23 @@ describe("Peppol Odoo dispatch", () => {
       expect(create?.[3].vals_list).toMatchObject({ partner_id: 61 });
     });
 
+    it("posts and sends the draft Odoo created after account.move.create timed out", async () => {
+      let moveSearches = 0;
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "search_read") {
+          return moveSearches++ === 0 ? [] : [{ id: 71, name: "TEST-1", state: "draft" }];
+        }
+        if (args[1] === "account.move" && args[2] === "create") throw timeoutError("account.move.create");
+        return normal(...args);
+      });
+      expect(await dispatch("customer")).toMatchObject({ status: "sent" });
+      const moveCalls = mocks.call.mock.calls.filter((call) => call[1] === "account.move");
+      expect(moveCalls.filter((call) => call[2] === "create")).toHaveLength(1);
+      expect(moveCalls.find((call) => call[2] === "action_post")?.[3]).toMatchObject({ ids: [71] });
+      expect(moveCalls.find((call) => call[2] === "button_process_edi_web_services")?.[3]).toMatchObject({ ids: [71] });
+    });
+
     it("continues when action_post timed out but Odoo posted the move", async () => {
       const normal = mocks.call.getMockImplementation()!;
       mocks.call.mockImplementation(async (...args) => {
@@ -209,6 +226,49 @@ describe("Peppol Odoo dispatch", () => {
       expect(lines[1].quantity).toBe(-2.5);
       expect(lines[1].price_unit).toBeCloseTo(16.427727, 6);
       expect(Math.round(lines[1].quantity * lines[1].price_unit * 100) / 100).toBe(-41.07);
+    });
+
+    it("keeps the negative quantity when the product is a half-cent tie", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "read") return [{ amount_untaxed: 436.66, amount_total: 462.86 }];
+        return normal(...args);
+      });
+      const result = await maybeDispatchPeppolInvoice({
+        booking, side: "customer", invoiceNumber: "FIX-2026-000017", ublXml: "<Invoice/>", invoiceUblUrl: "",
+        issueDate: new Date("2026-10-13T09:00:00Z"), totalWithVat: 462.86,
+        lineItems: [
+          { description: "Paint per m²", price: 477.74, vatRate: 6, quantity: 30, unitPrice: 15 },
+          { description: "Extra cost: 2.5 m² fewer", price: -41.08, vatRate: 6, quantity: -2.5, unitPrice: 16.43 },
+        ],
+      });
+      expect(result.status).toBe("sent");
+      const vals = callsOf("account.move", "create")[0][3].vals_list;
+      const lines = vals.invoice_line_ids.map((line: any) => line[2]);
+      // -2.5 × 16.43 is -41.08 the way Odoo rounds; Math.round(-4107.5) gave -41.07
+      // and dropped the quantity, so Odoo showed 1 × -41.08 instead.
+      expect(lines[1].quantity).toBe(-2.5);
+      expect(lines[1].price_unit).toBeCloseTo(16.43, 6);
+    });
+
+    it("keeps a discount line negative on a credit note", async () => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.move" && args[2] === "read") return [{ amount_untaxed: 90, amount_total: 108.9 }];
+        return normal(...args);
+      });
+      const result = await maybeDispatchPeppolInvoice({
+        booking, side: "customer", documentType: "credit_note", invoiceNumber: "FIX-CN-2026-000003", ublXml: "<CreditNote/>",
+        invoiceUblUrl: "", totalWithVat: 108.9,
+        lineItems: [
+          { description: "Paint per m²", price: 100, vatRate: 21 },
+          { description: "Loyalty discount", price: -10, vatRate: 21 },
+        ],
+      });
+      expect(result.status).toBe("sent");
+      const vals = callsOf("account.move", "create")[0][3].vals_list;
+      expect(vals.move_type).toBe("out_refund");
+      expect(vals.invoice_line_ids.map((line: any) => line[2].price_unit)).toEqual([100, -10]);
     });
 
     it("removes the draft and reports the difference when Odoo totals differ from the invoice", async () => {
@@ -554,6 +614,55 @@ describe("Peppol Odoo dispatch", () => {
       expect(await dispatch("customer")).toMatchObject({ status: "sent" });
       expect(calls("res.partner", "write")).toHaveLength(0);
       expect(calls("res.partner", "button_account_peppol_check_partner_endpoint")).toHaveLength(0);
+    });
+  });
+
+  describe("Stripe payment in Odoo", () => {
+    const paidBooking = { ...booking, payment: { status: "completed", totalWithVat: 121 } };
+    const odooWithMove = (residual: number) => {
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        const [, model, method] = args;
+        if (model === "account.move" && method === "read") {
+          return [{ state: "posted", amount_untaxed: 100, amount_total: 121, amount_residual: residual }];
+        }
+        if (model === "account.journal" && method === "search_read") {
+          return [{ id: 90, default_account_id: [5, "550004 Stripe (Fixtract)"], inbound_payment_method_line_ids: [1], outbound_payment_method_line_ids: [2] }];
+        }
+        if (model === "account.payment.method.line" && method === "read") return [{ id: 1, payment_account_id: false }, { id: 2, payment_account_id: [5, "x"] }];
+        if (model === "account.payment.method.line" && method === "write") return true;
+        if (model === "account.payment.register" && method === "create") return 91;
+        if (model === "account.payment.register" && method === "action_create_payments") return {};
+        return normal(...args);
+      });
+    };
+    const send = () => maybeDispatchPeppolInvoice({
+      booking: paidBooking, side: "customer", invoiceNumber: "FIX-2026-000020", ublXml: "<Invoice/>", invoiceUblUrl: "",
+      totalWithVat: 121, lineItems: [{ description: "Service", price: 100, vatRate: 21 }],
+    });
+    const calls = (model: string, method: string) =>
+      mocks.call.mock.calls.filter((call) => call[1] === model && call[2] === method);
+
+    it("books the Stripe payment in the Stripe journal when enabled", async () => {
+      mocks.settings.mockResolvedValue({ eInvoicing: { peppolEnabled: true, provider: "odoo", odooRecordPayments: true } });
+      odooWithMove(121);
+      expect(await send()).toMatchObject({ status: "sent" });
+      expect(calls("account.payment.method.line", "write")[0][3]).toMatchObject({ ids: [1], vals: { payment_account_id: 5 } });
+      expect(calls("account.payment.register", "create")[0][3]).toMatchObject({
+        vals_list: [{ journal_id: 90, amount: 121, communication: "FIX-2026-000020" }],
+        context: { active_model: "account.move", active_ids: [70] },
+      });
+      expect(calls("account.payment.register", "action_create_payments")).toHaveLength(1);
+    });
+
+    it("does not book a payment twice or when disabled", async () => {
+      mocks.settings.mockResolvedValue({ eInvoicing: { peppolEnabled: true, provider: "odoo", odooRecordPayments: true } });
+      odooWithMove(0);
+      await send();
+      mocks.settings.mockResolvedValue({ eInvoicing: { peppolEnabled: true, provider: "odoo" } });
+      odooWithMove(121);
+      await send();
+      expect(calls("account.payment.register", "create")).toHaveLength(0);
     });
   });
 });

@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
+import { waitUntil } from '@vercel/functions';
 import Booking, { BookingStatus, ExtraCostType } from '../../models/booking';
 import User from '../../models/user';
 import PlatformSettings from '../../models/platformSettings';
@@ -37,6 +38,7 @@ import { notify } from '../../utils/notifications/notify';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
 import { calculateExtraCostBreakdown } from '../../utils/extraCostAccounting';
+import { commissionedExtraCostTotal } from '../../utils/customerPricing';
 import { getTransferStatus } from '../../utils/paymentSafety';
 
 const ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
@@ -87,14 +89,16 @@ const computeExtraCostCustomerCharge = async (
   extraCostTotal: number,
   vatRate = 0,
   reverseCharge = false,
+  extraCosts?: any[],
 ) => {
   const commissionPercent = await getPlatformCommissionPercent();
-  const subtotalInclCommission = roundToTwo(extraCostTotal * (1 + commissionPercent / 100));
+  const subtotalInclCommission = commissionedExtraCostTotal(extraCosts, extraCostTotal, commissionPercent);
   const loyalty = await computeCustomerLoyaltyDiscount(customer, subtotalInclCommission);
   const breakdown = calculateExtraCostBreakdown({
     extraCostNetAmount: extraCostTotal,
     commissionPercent,
     customerDiscount: loyalty.amount,
+    customerSubtotal: subtotalInclCommission,
   });
   const appliedLoyalty = {
     ...loyalty,
@@ -393,6 +397,7 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
               extraCostTotal,
               updatedBooking.payment?.vatRate,
               updatedBooking.payment?.reverseCharge,
+              (updatedBooking as any).extraCosts,
             )).customerChargeAmount
           : extraCostTotal;
         await notify({
@@ -532,6 +537,7 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
         extraCostTotal,
         booking.payment?.vatRate,
         booking.payment?.reverseCharge,
+        (booking as any).extraCosts,
       );
     const applicationFeeAmount = convertToStripeAmount(Math.max(0, platformFeeAmount), currency);
 
@@ -833,7 +839,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
 
     if (extraCostTotal < 0 && finalizedBooking.payment?.stripePaymentIntentId) {
       const commissionPercent = await getPlatformCommissionPercent();
-      const refundAmount = Math.round(Math.abs(extraCostTotal) * (1 + commissionPercent / 100) * 100) / 100;
+      const refundAmount = Math.abs(commissionedExtraCostTotal((finalizedBooking as any).extraCosts, extraCostTotal, commissionPercent));
       const currency = (finalizedBooking.payment.currency || 'EUR').toLowerCase();
       await stripe.refunds.create({
         payment_intent: finalizedBooking.payment.stripePaymentIntentId,
@@ -876,12 +882,15 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       console.error('Error awarding booking completion points:', e);
     }
 
-    void ensureBookingInvoiceArtifacts(finalizedBooking._id.toString()).catch((invoiceError: unknown) => {
+    // The Odoo Peppol send takes well over the time Vercel keeps running
+    // work it was not told about once the response is out; unfinished, it
+    // left drafts in Odoo that were never posted or sent.
+    waitUntil(ensureBookingInvoiceArtifacts(finalizedBooking._id.toString()).catch((invoiceError: unknown) => {
       console.error(
         'Failed to generate booking invoice artifacts:',
         invoiceError instanceof Error ? invoiceError.message : invoiceError
       );
-    });
+    }));
 
     try {
       const [customerUser, professionalUser] = await Promise.all([
