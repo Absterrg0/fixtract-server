@@ -9,7 +9,12 @@ import { getExtraCostQuantity, roundLineAmount } from "./invoiceLineQuantity";
  * The professional's amount never changes; the cents are platform fee.
  */
 
-const roundMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+// The same rounding as the invoice lines (half away from zero), so the price
+// charged here is the one Odoo and the UBL multiply back exactly.
+const roundMoney = (value: number): number => {
+  const rounded = roundLineAmount(value);
+  return rounded === 0 ? 0 : rounded;
+};
 
 const toFinite = (value: unknown): number | undefined => {
   if (value == null || value === "") return undefined;

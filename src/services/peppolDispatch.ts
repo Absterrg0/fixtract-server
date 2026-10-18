@@ -2,7 +2,7 @@ import { Buffer } from "buffer";
 import { PEPPOL_DISPATCH_STATUSES, type PeppolDispatchStatus } from "../constants/peppol";
 import PlatformSettings from "../models/platformSettings";
 import { parseVatCountryCode, normalizeVatCountry } from "../utils/vatManagement";
-import { reconcileUnitPrice } from "../utils/invoiceLineQuantity";
+import { reconcileUnitPrice, roundLineAmount } from "../utils/invoiceLineQuantity";
 import { getInvoicePayment } from "../utils/invoiceSettlement";
 import {
   discoverOdooAccountingConfig,
@@ -666,7 +666,7 @@ const buildOdooMoveVals = async (
     // multiply back to the charged amount; otherwise the quantity is dropped.
     const reconciled = reconcileUnitPrice(line.price, line.quantity, line.unitPrice);
     const hasQuantity = line.quantity != null && line.quantity !== 0 && reconciled != null
-      && Math.abs(Math.round(line.quantity * reconciled * 100) / 100 - line.price) < 0.005;
+      && Math.abs(roundLineAmount(line.quantity * reconciled) - line.price) < 0.005;
     const quantity = hasQuantity ? line.quantity! : 1;
     const priceUnit = hasQuantity ? reconciled! : line.price;
     const lineVals: Record<string, unknown> = {

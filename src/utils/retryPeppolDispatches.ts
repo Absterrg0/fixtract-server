@@ -16,6 +16,8 @@ const RETRYABLE_FAILURE = /did not answer|in progress|timed? ?out/i;
  * an interrupted request, sends Odoo was still processing (refreshed to
  * "sent"), and sends that failed on a timeout. Re-running invoice generation
  * reuses the Odoo draft or posted move, so nothing is created or sent twice.
+ * Each attempt is marked, so a send that stays stuck rotates behind the
+ * candidates that have not had a turn yet instead of taking a slot every day.
  */
 export async function retryStuckPeppolDispatches(options: { limit?: number; now?: Date } = {}) {
   const now = options.now ?? new Date();
@@ -35,7 +37,9 @@ export async function retryStuckPeppolDispatches(options: { limit?: number; now?
       { "payment.supplierPeppolDispatchStatus": "failed", "payment.supplierPeppolDispatchReason": RETRYABLE_FAILURE },
     ],
   })
-    .sort({ "payment.invoiceGeneratedAt": -1 })
+    // Least recently attempted first (missing values sort first), oldest
+    // invoice first on a tie, so still-stuck sends do not monopolize the slots.
+    .sort({ "payment.peppolRetriedAt": 1, "payment.invoiceGeneratedAt": 1 })
     .limit(options.limit ?? DEFAULT_LIMIT)
     .select("_id bookingNumber")
     .lean();
@@ -45,6 +49,9 @@ export async function retryStuckPeppolDispatches(options: { limit?: number; now?
   for (const booking of candidates) {
     if (Date.now() - startedAt > TIME_BUDGET_MS) break;
     try {
+      // Mark the attempt before dispatching: even if this run leaves the send
+      // stuck again, the next run prefers bookings without a recent attempt.
+      await Booking.updateOne({ _id: booking._id }, { $set: { "payment.peppolRetriedAt": now } });
       const result = await ensureBookingInvoiceArtifacts(String(booking._id));
       results.push({
         bookingNumber: booking.bookingNumber,

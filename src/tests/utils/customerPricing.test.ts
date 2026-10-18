@@ -24,6 +24,12 @@ describe("per-unit customer pricing", () => {
     expect(commissionedQuoteAmount(450, undefined, commission)).toBe(492.82);
   });
 
+  it("rounds half-cent ties away from zero, like the invoice lines", () => {
+    expect(withCommission(10.075, 0)).toBe(10.08);
+    expect(withCommission(-10.075, 0)).toBe(-10.08);
+    expect(Object.is(withCommission(-0.001, 0), 0)).toBe(true);
+  });
+
   it("adds options folded into the quote at their own commissioned price", () => {
     expect(commissionedQuoteAmount(500, unitSnapshot, commission)).toBe(492.9 + withCommission(50, commission));
   });

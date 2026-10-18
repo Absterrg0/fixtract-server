@@ -323,6 +323,8 @@ export interface IBooking extends Document {
     peppolDispatchReason?: string;
     peppolDispatchReference?: string;
     peppolDispatchedAt?: Date;
+    /** Last retry attempt, so still-stuck dispatches rotate behind ones without a turn yet. */
+    peppolRetriedAt?: Date;
     supplierPeppolDispatchStatus?: PeppolDispatchStatus;
     supplierPeppolDispatchReason?: string;
     supplierPeppolDispatchReference?: string;
@@ -993,6 +995,7 @@ const BookingSchema = new Schema({
     peppolDispatchReason: { type: String },
     peppolDispatchReference: { type: String },
     peppolDispatchedAt: { type: Date },
+    peppolRetriedAt: { type: Date },
     supplierPeppolDispatchStatus: { type: String, enum: PEPPOL_DISPATCH_STATUSES },
     supplierPeppolDispatchReason: { type: String },
     supplierPeppolDispatchReference: { type: String },
