@@ -18,6 +18,7 @@ import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
 import { deductPoints } from '../../utils/pointsSystem';
 import { notify } from '../../utils/notifications/notify';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
+import { reconcileExtraCostPayment } from '../../services/extraCostPayment';
 
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60 * 1000;
 
@@ -445,66 +446,8 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
 async function handleExtraCostPaymentSucceeded(paymentIntent: Stripe.PaymentIntent) {
   const bookingId = paymentIntent.metadata.bookingId;
   if (!bookingId) return;
-  const now = new Date();
-  let extraCostChargeId: string | undefined;
-  let extraCostTransferId: string | undefined;
-  try {
-    const rawCharge = paymentIntent.latest_charge;
-    extraCostChargeId = typeof rawCharge === 'string' ? rawCharge : rawCharge?.id;
-    if (extraCostChargeId) {
-      const charge = await stripe.charges.retrieve(extraCostChargeId, { expand: ['transfer'] });
-      const transfer = (charge as any).transfer;
-      extraCostTransferId = typeof transfer === 'string' ? transfer : transfer?.id;
-    }
-  } catch (chargeError: any) {
-    console.warn(`[WEBHOOK][EXTRA_COST] Could not reconcile charge/transfer for ${paymentIntent.id}:`, chargeError?.message || chargeError);
-  }
-  const transferFields = {
-    ...(extraCostChargeId ? { 'payment.extraCostStripeChargeId': extraCostChargeId } : {}),
-    ...(extraCostTransferId
-      ? {
-          'payment.extraCostTransferId': extraCostTransferId,
-          'payment.extraCostTransferStatus': 'succeeded',
-          'payment.extraCostTransferAttemptedAt': now,
-        }
-      : {}),
-  };
-  const booking = await Booking.findOneAndUpdate(
-    {
-      _id: bookingId,
-      'payment.extraCostStripePaymentIntentId': paymentIntent.id,
-      'payment.extraCostStatus': { $in: ['pending', 'succeeded'] },
-    },
-    {
-      $set: {
-        'payment.extraCostStatus': 'succeeded',
-        'payment.extraCostPaymentSucceeded': true,
-        'payment.extraCostPaidAt': now,
-        ...transferFields,
-      },
-    },
-    { new: true },
-  );
+  const booking = await reconcileExtraCostPayment(bookingId, paymentIntent);
   if (!booking) return;
-
-  await Payment.findOneAndUpdate(
-    { booking: booking._id, extraCostStripePaymentIntentId: paymentIntent.id },
-    {
-      $set: {
-        extraCostStatus: 'succeeded',
-        extraCostPaymentSucceeded: true,
-        extraCostPaidAt: now,
-        ...(extraCostChargeId ? { extraCostStripeChargeId: extraCostChargeId } : {}),
-        ...(extraCostTransferId
-          ? {
-              extraCostTransferId,
-              extraCostTransferStatus: 'succeeded',
-              extraCostTransferAttemptedAt: now,
-            }
-          : {}),
-      },
-    },
-  );
 
   if (booking.customer) {
     try {

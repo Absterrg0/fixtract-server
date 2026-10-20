@@ -25,6 +25,7 @@ import { commissionedExtraCostTotal } from '../customerPricing';
 import User from '../../models/user';
 import { notifyAsync } from './notify';
 import { isEligibleForAutoAccept } from './autoAcceptEligibility';
+import { reconcileExtraCostPayment } from '../../services/extraCostPayment';
 
 const PROFESSIONAL_COMPLETION_PENDING_STATUS: BookingStatus = 'professional_completed';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
@@ -72,6 +73,9 @@ export async function finalizeBookingCompletion(args: {
     const pi = await stripe.paymentIntents.retrieve(extraCostPiId);
     if (pi.status !== 'succeeded') {
       return { ok: false, reason: `extra_cost_status:${pi.status}`, skipped: true };
+    }
+    if (!await reconcileExtraCostPayment(booking._id.toString(), pi)) {
+      return { ok: false, reason: 'extra_cost_payment_conflict', skipped: true };
     }
   }
 
