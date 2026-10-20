@@ -659,6 +659,10 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
   }
 };
 
+/**
+ * Confirms a customer's completed booking after verifying milestone and extra
+ * payments, then finalizes the payout and schedules invoice generation.
+ */
 export const customerConfirmCompletion = async (req: Request, res: Response) => {
   try {
     const { bookingId } = req.params;

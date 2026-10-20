@@ -443,6 +443,10 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
   }
 }
 
+/**
+ * Reconciles an extra-cost payment and notifies the customer. Stripe lookup
+ * and persistence failures propagate so the webhook event can be retried.
+ */
 async function handleExtraCostPaymentSucceeded(paymentIntent: Stripe.PaymentIntent) {
   const bookingId = paymentIntent.metadata.bookingId;
   if (!bookingId) return;
