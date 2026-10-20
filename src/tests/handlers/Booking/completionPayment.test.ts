@@ -77,7 +77,7 @@ describe.each(['customer confirmation', 'automatic acceptance'] as const)('%s wi
   let generatedPdf: Buffer | undefined;
   let generatedXml: string | undefined;
 
-  const deliverSuccessWebhook = async () => {
+  const deliverSuccessWebhook = async (expectedError?: string) => {
     const json = vi.fn();
     const status = vi.fn().mockReturnThis();
     mocks.constructEvent.mockReturnValue({
@@ -88,8 +88,13 @@ describe.each(['customer confirmation', 'automatic acceptance'] as const)('%s wi
       } },
     });
     await handleWebhook({ headers: { 'stripe-signature': 'test-signature' }, body: Buffer.from('{}') } as any, { json, status } as any);
-    expect(json).toHaveBeenCalledWith({ received: true });
-    expect(status).not.toHaveBeenCalled();
+    if (expectedError) {
+      expect(json).toHaveBeenCalledWith({ received: false, error: expectedError });
+      expect(status).toHaveBeenCalledWith(500);
+    } else {
+      expect(json).toHaveBeenCalledWith({ received: true });
+      expect(status).not.toHaveBeenCalled();
+    }
   };
 
   const complete = async () => {
@@ -143,7 +148,9 @@ describe.each(['customer confirmation', 'automatic acceptance'] as const)('%s wi
       return booking;
     });
     mocks.retrieveIntent.mockResolvedValue({ id: 'pi_extra', status: 'succeeded', latest_charge: 'ch_extra' });
-    mocks.retrieveCharge.mockResolvedValue({ id: 'ch_extra', transfer: 'tr_extra' });
+    mocks.retrieveCharge.mockResolvedValue({
+      id: 'ch_extra', transfer: 'tr_extra', status: 'succeeded', refunded: false, amount_refunded: 0,
+    });
     mocks.paymentUpdate.mockResolvedValue({});
     mocks.stripeEventUpdate.mockResolvedValue({ upsertedCount: 1 });
     mocks.captureAndTransfer.mockResolvedValue({ success: true });
@@ -215,6 +222,67 @@ describe.each(['customer confirmation', 'automatic acceptance'] as const)('%s wi
     expect(mocks.captureAndTransfer).not.toHaveBeenCalled();
     expect(mocks.paymentUpdate).not.toHaveBeenCalled();
     expect(booking.payment.extraCostStatus).toBe('refunded');
+  });
+
+  it.each([
+    { name: 'fully refunded', status: 'succeeded', refunded: true, amount_refunded: 4063 },
+    { name: 'partly refunded', status: 'succeeded', refunded: false, amount_refunded: 100 },
+    { name: 'pending', status: 'pending', refunded: false, amount_refunded: 0 },
+    { name: 'failed', status: 'failed', refunded: false, amount_refunded: 0 },
+  ])('does not finalize a $name charge even if the intent still succeeded', async (charge) => {
+    mocks.retrieveCharge.mockResolvedValue({ id: 'ch_extra', transfer: 'tr_extra', ...charge });
+    await complete();
+
+    expect(mocks.invoiceArtifacts).not.toHaveBeenCalled();
+    expect(mocks.captureAndTransfer).not.toHaveBeenCalled();
+    expect(mocks.bookingFindOneAndUpdate).not.toHaveBeenCalled();
+    expect(mocks.paymentUpdate).not.toHaveBeenCalled();
+    expect(booking.status).toBe('professional_completed');
+    expect(booking.payment.extraCostStatus).toBe('pending');
+  });
+
+  it('does not complete or invoice when the charge cannot be verified', async () => {
+    mocks.retrieveCharge.mockRejectedValueOnce(new Error('Stripe unavailable'));
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      if (flow === 'automatic acceptance') {
+        await expect(complete()).rejects.toThrow('Stripe unavailable');
+      } else {
+        expect(await complete()).toMatchObject({ success: false, error: { code: 'SERVER_ERROR' } });
+      }
+    } finally {
+      consoleError.mockRestore();
+    }
+
+    expect(mocks.invoiceArtifacts).not.toHaveBeenCalled();
+    expect(mocks.captureAndTransfer).not.toHaveBeenCalled();
+    expect(mocks.bookingFindOneAndUpdate).not.toHaveBeenCalled();
+    expect(mocks.paymentUpdate).not.toHaveBeenCalled();
+    expect(booking.payment.extraCostStatus).toBe('pending');
+  });
+
+  it('does not let a late success webhook mark a refunded charge as paid', async () => {
+    mocks.retrieveCharge.mockResolvedValue({
+      id: 'ch_extra', status: 'succeeded', refunded: true, amount_refunded: 4063,
+    });
+    await deliverSuccessWebhook();
+
+    expect(mocks.bookingFindOneAndUpdate).not.toHaveBeenCalled();
+    expect(mocks.paymentUpdate).not.toHaveBeenCalled();
+    expect(booking.payment.extraCostStatus).toBe('pending');
+  });
+
+  it('returns a retryable webhook error when the charge cannot be verified', async () => {
+    mocks.retrieveCharge.mockRejectedValueOnce(new Error('Stripe unavailable'));
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await deliverSuccessWebhook('Stripe unavailable');
+    } finally {
+      consoleError.mockRestore();
+    }
+
+    expect(mocks.bookingFindOneAndUpdate).not.toHaveBeenCalled();
+    expect(mocks.paymentUpdate).not.toHaveBeenCalled();
   });
 
   it('does not finalize a replaced payment intent', async () => {

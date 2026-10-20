@@ -11,14 +11,13 @@ export async function reconcileExtraCostPayment(bookingId: string, paymentIntent
   const rawCharge = paymentIntent.latest_charge;
   const chargeId = typeof rawCharge === 'string' ? rawCharge : rawCharge?.id;
   let transferId: string | undefined;
-  try {
-    if (chargeId) {
-      const charge = await stripe.charges.retrieve(chargeId, { expand: ['transfer'] });
-      const transfer = charge.transfer;
-      transferId = typeof transfer === 'string' ? transfer : transfer?.id;
+  if (chargeId) {
+    const charge = await stripe.charges.retrieve(chargeId, { expand: ['transfer'] });
+    if (charge.refunded || charge.amount_refunded > 0 || charge.status !== 'succeeded') {
+      return null;
     }
-  } catch (error: unknown) {
-    console.warn(`Could not reconcile extra-cost transfer for ${paymentIntent.id}:`, error instanceof Error ? error.message : error);
+    const transfer = charge.transfer;
+    transferId = typeof transfer === 'string' ? transfer : transfer?.id;
   }
 
   const fields = {
