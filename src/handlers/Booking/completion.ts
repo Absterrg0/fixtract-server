@@ -40,6 +40,7 @@ import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
 import { calculateExtraCostBreakdown } from '../../utils/extraCostAccounting';
 import { commissionedExtraCostTotal } from '../../utils/customerPricing';
 import { getTransferStatus } from '../../utils/paymentSafety';
+import { reconcileExtraCostPayment } from '../../services/extraCostPayment';
 
 const ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
@@ -658,6 +659,10 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
   }
 };
 
+/**
+ * Confirms a customer's completed booking after verifying milestone and extra
+ * payments, then finalizes the payout and schedules invoice generation.
+ */
 export const customerConfirmCompletion = async (req: Request, res: Response) => {
   try {
     const { bookingId } = req.params;
@@ -719,6 +724,12 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
         return res.status(400).json({
           success: false,
           error: { code: 'EXTRA_COST_NOT_PAID', message: `Extra cost payment has not succeeded yet (status: ${pi.status})` }
+        });
+      }
+      if (!await reconcileExtraCostPayment(booking._id.toString(), pi)) {
+        return res.status(409).json({
+          success: false,
+          error: { code: 'EXTRA_COST_PAYMENT_CONFLICT', message: 'Extra cost payment changed before completion could be finalized. Please retry.' },
         });
       }
     }
