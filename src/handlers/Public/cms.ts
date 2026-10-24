@@ -12,13 +12,18 @@ import { param } from "../../utils/requestParams";
 import {
   CMS_COUNTRY_TARGETED_TYPES,
   cmsCountryVisibilityFilter,
-  isCmsContentVisibleForCountry,
   parseCmsCountryCode,
 } from "../../utils/cms/activeCountries";
 import { CMS_DEFAULT_LOCALE, resolveCmsLocale } from "../../utils/cms/locales";
+import {
+  filterCmsDocsVisibleThroughSource,
+  filterCmsDocsWithPublishedSource,
+  isCmsDocPubliclyVisible,
+} from "../../utils/cms/publicVisibility";
+import { resolveLocalizedRelatedContent } from "../../utils/cms/relatedContent";
 
 const LISTING_FIELDS =
-  "type title slug locale excerpt coverImage coverImageAlt tags publishedAt seo category author authorOverride relatedServiceSlug updatedAt";
+  "type title slug locale excerpt coverImage coverImageAlt tags publishedAt seo category author authorOverride relatedServiceSlug updatedAt translatedFrom";
 
 const BOT_UA_RE =
   /bot|crawl|spider|slurp|bingpreview|facebookexternalhit|linkedinbot|twitterbot|whatsapp|telegram|prerender|headlesschrome|lighthouse/i;
@@ -48,16 +53,13 @@ function compareByPublishedDesc(locale: string): (a: any, b: any) => number {
   };
 }
 
-/** True when the doc (or its country filter) hides it from this visitor. */
-export function isDocHiddenForCountry(
-  doc: Record<string, any>,
-  type: CmsContentType,
-  countryCode?: string
-): boolean {
-  return (
-    CMS_COUNTRY_TARGETED_TYPES.has(type) &&
-    !isCmsContentVisibleForCountry(doc.activeCountries, countryCode)
-  );
+/** Removes internal translation metadata added only to evaluate visibility. */
+function stripListingVisibilityMetadata<T extends Record<string, any>>(docs: T[]): T[] {
+  return docs.map((doc) => {
+    const copy = { ...doc };
+    delete copy.translatedFrom;
+    return copy;
+  });
 }
 
 export const listPublicCmsContent = async (req: Request, res: Response) => {
@@ -110,11 +112,20 @@ export const listPublicCmsContent = async (req: Request, res: Response) => {
             .lean(),
     ]);
 
+    // A translation may only be listed while its source is still public
+    // (legacy/manual rows can predate control-field mirroring). Filter before
+    // merging so a hidden translation does not suppress the en fallback.
+    const [visiblePrimary, visibleFallback] = await Promise.all([
+      filterCmsDocsVisibleThroughSource(primary as any[], countryCode),
+      filterCmsDocsVisibleThroughSource(fallback as any[], countryCode),
+    ]);
+
     // Merge requested-locale docs with en fallbacks, then paginate in memory
     // so hybrid lists keep stable sort + pagination semantics.
-    const merged = mergeLocaleFallback(primary, fallback).sort(
-      compareByPublishedDesc(locale)
-    );
+    const merged = mergeLocaleFallback(
+      stripListingVisibilityMetadata(visiblePrimary),
+      stripListingVisibilityMetadata(visibleFallback)
+    ).sort(compareByPublishedDesc(locale));
     const total = merged.length;
     const items = merged.slice(skip, skip + limit);
 
@@ -150,11 +161,6 @@ export const getPublicCmsContentBySlug = async (req: Request, res: Response) => 
 
     const populateOptions = [
       { path: "author", select: "name" },
-      {
-        path: "relatedContent",
-        match: { status: "published" },
-        select: "title slug type excerpt coverImage coverImageAlt publishedAt activeCountries",
-      },
       { path: "relatedServices", select: "name slug" },
     ] as const;
 
@@ -168,7 +174,10 @@ export const getPublicCmsContentBySlug = async (req: Request, res: Response) => 
         .populate(populateOptions as any)
         .lean();
       if (!candidateDoc) return null;
-      if (requireVisible && isDocHiddenForCountry(candidateDoc as any, type, countryCode)) {
+      if (
+        requireVisible &&
+        !(await isCmsDocPubliclyVisible(candidateDoc as any, countryCode))
+      ) {
         return null;
       }
       return candidateDoc;
@@ -188,20 +197,15 @@ export const getPublicCmsContentBySlug = async (req: Request, res: Response) => 
       );
     }
 
+    // Related ids are copied from the source, so resolve them to the requested
+    // locale (with en fallback) and drop anything not publicly eligible.
+    (doc as Record<string, any>).relatedContent = await resolveLocalizedRelatedContent(
+      (doc as Record<string, any>).relatedContent,
+      locale,
+      countryCode
+    );
+
     const presigned = await presignCmsDoc(doc);
-    const relatedContent = presigned.relatedContent as unknown as Array<{
-      type?: CmsContentType;
-      activeCountries?: string[];
-    }> | undefined;
-    if (Array.isArray(relatedContent)) {
-      // Mongoose types the populated field as ObjectId[], but the runtime value
-      // is a populated document because of the populate() above.
-      (presigned as unknown as { relatedContent: typeof relatedContent }).relatedContent = relatedContent.filter(
-        (item) =>
-          !CMS_COUNTRY_TARGETED_TYPES.has(item.type || "") ||
-          isCmsContentVisibleForCountry(item.activeCountries, countryCode),
-      );
-    }
     return res.status(200).json({ success: true, data: presigned });
   } catch (error) {
     console.error("Public get CMS content error:", error);
@@ -215,17 +219,24 @@ export const listPublicPolicyLinks = async (req: Request, res: Response) => {
 
     await connectDB();
 
-    const [items, enItems] = await Promise.all([
+    const [rawItems, rawEnItems] = await Promise.all([
       CmsContent.find({ type: "policy", status: "published", locale })
-        .select("title slug locale updatedAt publishedAt")
+        .select("title slug locale updatedAt publishedAt translatedFrom")
         .sort({ title: 1 })
         .lean(),
       locale === CMS_DEFAULT_LOCALE
         ? Promise.resolve([])
         : CmsContent.find({ type: "policy", status: "published", locale: CMS_DEFAULT_LOCALE })
-            .select("title slug locale updatedAt publishedAt")
+            .select("title slug locale updatedAt publishedAt translatedFrom")
             .sort({ title: 1 })
             .lean(),
+    ]);
+
+    // Hide translations whose source was unpublished/removed; filter before
+    // merging so the en fallback still covers slugs the hidden row blocked.
+    const [items, enItems] = await Promise.all([
+      filterCmsDocsVisibleThroughSource(rawItems as any[]),
+      filterCmsDocsVisibleThroughSource(rawEnItems as any[]),
     ]);
 
     // Stubs without a published translation in the requested locale still
@@ -258,14 +269,14 @@ export const listPublicFaq = async (req: Request, res: Response) => {
 
     const faqFilter = cmsCountryVisibilityFilter(countryCode);
 
-    const [items, enItems] = await Promise.all([
+    const [rawItems, rawEnItems] = await Promise.all([
       CmsContent.find({
         type: "faq",
         status: "published",
         locale,
         ...faqFilter,
       })
-        .select("title slug locale body category publishedAt updatedAt")
+        .select("title slug locale body category publishedAt updatedAt translatedFrom")
         .sort({ category: 1, publishedAt: -1 })
         .lean(),
       locale === CMS_DEFAULT_LOCALE
@@ -276,10 +287,19 @@ export const listPublicFaq = async (req: Request, res: Response) => {
             locale: CMS_DEFAULT_LOCALE,
             ...faqFilter,
           })
-            .select("title slug locale body category publishedAt updatedAt")
+            .select("title slug locale body category publishedAt updatedAt translatedFrom")
             .sort({ category: 1, publishedAt: -1 })
             .lean(),
     ]);
+
+    // Filter before merging so a hidden translation does not suppress the en
+    // fallback for the same slug.
+    const [visibleItems, visibleEnItems] = await Promise.all([
+      filterCmsDocsVisibleThroughSource(rawItems as any[], countryCode),
+      filterCmsDocsVisibleThroughSource(rawEnItems as any[], countryCode),
+    ]);
+    const items = stripListingVisibilityMetadata(visibleItems);
+    const enItems = stripListingVisibilityMetadata(visibleEnItems);
 
     const merged = mergeLocaleFallback(items, enItems).sort((a, b) => {
       const byCategory = String(a.category ?? "").localeCompare(String(b.category ?? ""));
@@ -326,9 +346,9 @@ export const listCmsSitemapEntries = async (req: Request, res: Response) => {
 
     const filter = { status: "published" };
 
-    const [items, total] = await Promise.all([
+    const [rawItems, total] = await Promise.all([
       CmsContent.find(filter)
-        .select("type slug locale updatedAt publishedAt")
+        .select("type slug locale updatedAt publishedAt translatedFrom")
         .sort({ updatedAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -336,13 +356,21 @@ export const listCmsSitemapEntries = async (req: Request, res: Response) => {
       CmsContent.countDocuments(filter),
     ]);
 
-    if (items.length >= SITEMAP_MAX_LIMIT) {
+    // The sitemap is global and deliberately country-agnostic, so country
+    // targeting must not hide valid entries. A linked translation must still
+    // not be advertised after its source was unpublished or removed: the URL
+    // would 404 on the public detail endpoint and only leak a stale path.
+    const items = stripListingVisibilityMetadata(
+      await filterCmsDocsWithPublishedSource(rawItems as any[])
+    );
+
+    if (rawItems.length >= SITEMAP_MAX_LIMIT) {
       console.warn(
         `CMS sitemap response truncated at SITEMAP_MAX_LIMIT=${SITEMAP_MAX_LIMIT}; clients must paginate`
       );
     }
 
-    const hasMore = skip + items.length < total;
+    const hasMore = skip + rawItems.length < total;
     const totalPages = Math.ceil(total / limit);
 
     return res.status(200).json({

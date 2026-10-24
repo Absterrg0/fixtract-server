@@ -16,8 +16,6 @@ import {
   uploadToS3,
   generateFileName,
   validateImageFileBuffer,
-  parseS3KeyFromUrl,
-  deleteFromS3,
   presignS3Url,
 } from "../../utils/s3Upload";
 import { presignCmsDoc, presignCmsDocs } from "../../utils/cmsPresign";
@@ -34,6 +32,7 @@ import {
   coverImageForCreate,
 } from "../../utils/cmsCoverImage";
 import { sanitizeCmsActiveCountries } from "../../utils/cms/activeCountries";
+import { deleteCmsMediaIfUnreferenced } from "../../utils/cms/coverImageCleanup";
 import {
   CMS_LOCALES,
   isCmsLocale,
@@ -605,15 +604,6 @@ export const updateCmsContent = async (req: Request, res: Response) => {
 
     await doc.save();
 
-    if (previousCoverToCleanup) {
-      const key = parseS3KeyFromUrl(previousCoverToCleanup);
-      if (key && key.startsWith("cms/")) {
-        deleteFromS3(key).catch((err) =>
-          console.error("Failed to delete replaced CMS cover image:", err)
-        );
-      }
-    }
-
     // Await synchronously (serverless freezes post-response work). A failure
     // here is reported in the response; the admin's save is never rolled back.
     // Only originals are sources; a manual translation (translatedFrom set) is
@@ -629,6 +619,18 @@ export const updateCmsContent = async (req: Request, res: Response) => {
       } catch (err) {
         console.error("CMS translation sync/move crashed after save (save kept):", err);
         translations = [{ locale: "*", status: "failed", error: "Translation sync crashed" }];
+      }
+    }
+
+    // Drop the replaced object only after the sync: auto siblings have moved
+    // to the new cover by now, while manual survivors still reference the old
+    // one and must keep it. A failed sync also leaves references in place, so
+    // the reference check preserves the object instead of breaking those docs.
+    if (previousCoverToCleanup) {
+      try {
+        await deleteCmsMediaIfUnreferenced(previousCoverToCleanup);
+      } catch (err) {
+        console.error("Failed to delete replaced CMS cover image:", err);
       }
     }
 
@@ -667,12 +669,14 @@ export const deleteCmsContent = async (req: Request, res: Response) => {
       console.error("Failed to clean up auto-translated CMS siblings:", siblingError);
     }
 
+    // The deleted doc is gone; auto siblings were deleted above and manual
+    // survivors detached. Only remove the shared S3 object when nothing that
+    // remains (including manual translations kept on purpose) references it.
     if (doc.coverImage) {
-      const key = parseS3KeyFromUrl(doc.coverImage);
-      if (key && key.startsWith("cms/")) {
-        try { await deleteFromS3(key); } catch (err) {
-          console.error("Failed to delete CMS cover image:", err);
-        }
+      try {
+        await deleteCmsMediaIfUnreferenced(doc.coverImage);
+      } catch (err) {
+        console.error("Failed to delete CMS cover image:", err);
       }
     }
 

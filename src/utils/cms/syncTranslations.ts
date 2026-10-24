@@ -61,6 +61,13 @@ const COPYABLE_TOP_LEVEL_FIELDS = [
 const COPYABLE_SEO_FIELDS = ["ogImage", "noindex"] as const;
 
 /**
+ * Publication/visibility controls. Unlike text, these are never "manual copy":
+ * a translation must stop being public when its source is unpublished or its
+ * country targeting changes, even when an admin replaced the machine text.
+ */
+const CONTROL_FIELDS = ["status", "publishedAt", "activeCountries"] as const;
+
+/**
  * Hash inputs that define whether translated text fields are stale. Only
  * translatable text goes in, so a slug/status/non-text-only change never
  * triggers a translator call.
@@ -136,6 +143,13 @@ function copiedFields(source: Record<string, any>): Record<string, unknown> {
   return fields;
 }
 
+/** Source publication/visibility controls as a flat path → value map. */
+function controlFields(source: Record<string, any>): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  for (const field of CONTROL_FIELDS) fields[field] = source[field];
+  return fields;
+}
+
 /**
  * Translates the source's text fields into `targetLocale`. Missing/blank
  * source values come back as undefined so callers can clear stale text.
@@ -203,7 +217,10 @@ export function isTranslationSource(
  * - Only originals (autoTranslated !== true and no translatedFrom) are sources;
  *   every other doc returns [] (even with force), so a translation can never
  *   overwrite the locale it came from.
- * - Manual translations (autoTranslated: false) always win, unless force=true.
+ * - Manual translations (autoTranslated: false) always win for text, unless
+ *   force=true. Publication controls (status, publishedAt, activeCountries)
+ *   are still mirrored from the source when the translation is linked to it,
+ *   so unpublishing/geo-restricting the source hides the translation too.
  * - Unchanged sourceHash → sync non-text fields only; no translator call.
  * - New/stale → translate and upsert with the SAME type/slug as the source
  *   (the frontend switches language on one URL, so slugs stay identical).
@@ -251,6 +268,24 @@ export async function syncCmsTranslations(
         }).lean());
 
       if (sibling && sibling.autoTranslated !== true && !options.force) {
+        // Manual translations keep their human-written text, but publication
+        // and country visibility are source controls: unpublishing or
+        // geo-restricting the source must hide the translation too. Only a
+        // sibling explicitly linked to this source is managed; a same-slug
+        // independent manual original is left completely untouched.
+        if (
+          sibling.translatedFrom &&
+          String(sibling.translatedFrom) === String(source._id)
+        ) {
+          const controls = buildUpdate(controlFields(source));
+          await CmsContent.updateOne(
+            { _id: sibling._id },
+            {
+              $set: { ...controls.$set, translatedFrom: source._id },
+              ...(Object.keys(controls.$unset).length ? { $unset: controls.$unset } : {}),
+            }
+          );
+        }
         results.push({ locale, status: "skipped_manual" });
         continue;
       }

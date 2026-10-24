@@ -123,6 +123,75 @@ beforeEach(() => {
 });
 
 describe('syncCmsTranslations', () => {
+  it("mirrors publication controls onto a manual translation without touching its text", async () => {
+    siblings = [
+      manualSibling("nl", { translatedFrom: "source-1", title: "Handmatige titel" }),
+      manualSibling("fr", { translatedFrom: "source-1", title: "Titre manuel" }),
+    ];
+
+    const results = await syncCmsTranslations(
+      makeSource({ status: "draft", publishedAt: undefined, activeCountries: ["BE"] })
+    );
+
+    expect(results).toEqual([
+      { locale: "nl", status: "skipped_manual" },
+      { locale: "fr", status: "skipped_manual" },
+    ]);
+    expect(translateTexts).not.toHaveBeenCalled();
+    expect(updateOne).toHaveBeenCalledTimes(2);
+
+    const [query, update] = updateOne.mock.calls[0];
+    expect(query).toEqual({ _id: "nl-manual-1" });
+    expect(update.$set).toEqual({
+      status: "draft",
+      activeCountries: ["BE"],
+      translatedFrom: "source-1",
+    });
+    expect(update.$unset).toEqual({ publishedAt: 1 });
+    expect(update.$set.title).toBeUndefined();
+    expect(update.$set.body).toBeUndefined();
+    expect(update.$set.excerpt).toBeUndefined();
+  });
+
+  it("mirrors a republished source's date and country targeting onto manual translations", async () => {
+    siblings = [
+      manualSibling("nl", { translatedFrom: "source-1" }),
+      manualSibling("fr", { translatedFrom: "source-1" }),
+    ];
+
+    const publishedAt = new Date("2026-03-01T00:00:00.000Z");
+    const results = await syncCmsTranslations(
+      makeSource({ status: "published", publishedAt, activeCountries: ["NL"] })
+    );
+
+    expect(results).toEqual([
+      { locale: "nl", status: "skipped_manual" },
+      { locale: "fr", status: "skipped_manual" },
+    ]);
+    const [, update] = updateOne.mock.calls[0];
+    expect(update.$set).toEqual({
+      status: "published",
+      publishedAt,
+      activeCountries: ["NL"],
+      translatedFrom: "source-1",
+    });
+    expect(update.$unset).toBeUndefined();
+  });
+
+  it("leaves an independent same-slug manual original untouched", async () => {
+    siblings = [manualSibling("nl"), manualSibling("fr")];
+
+    const results = await syncCmsTranslations(
+      makeSource({ status: "draft", publishedAt: undefined, activeCountries: ["BE"] })
+    );
+
+    expect(results).toEqual([
+      { locale: "nl", status: "skipped_manual" },
+      { locale: "fr", status: "skipped_manual" },
+    ]);
+    expect(updateOne).not.toHaveBeenCalled();
+  });
+
   it('skips manual translations and never calls the provider for them', async () => {
     siblings = [manualSibling('nl'), manualSibling('fr')];
 

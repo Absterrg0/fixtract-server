@@ -202,4 +202,113 @@ describe('public CMS locale fallback', () => {
     expect(res.body.data.items.map((item: any) => item.slug)).toEqual(['en-1']);
     expect(res.body.data.pagination).toMatchObject({ page: 2, limit: 2, total: 3, totalPages: 2 });
   });
+
+  it('hides a published manual translation whose source was unpublished', async () => {
+    const nlDoc = {
+      ...listing('nl', 'solar-guide', '2026-02-01', 'Zonne-energie'),
+      translatedFrom: 'source-1',
+      body: '<p>Hallo</p>',
+    };
+    findOne.mockImplementation((filter: Record<string, any>) => ({
+      populate: () => ({
+        lean: async () => (filter.locale === 'nl' ? nlDoc : null),
+      }),
+    }));
+    find.mockReturnValue({
+      select: () => ({
+        lean: async () => [
+          { _id: 'source-1', type: 'blog', status: 'draft', activeCountries: [] },
+        ],
+      }),
+    });
+
+    const res = mockRes();
+    await getPublicCmsContentBySlug(
+      mockReq({ params: { type: 'blog', slug: 'solar-guide' }, query: { locale: 'nl' } }),
+      res
+    );
+
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({ success: false, msg: 'Not found' });
+  });
+
+  it('hides a translation when the source targets other countries', async () => {
+    const nlDoc = {
+      ...listing('nl', 'solar-guide', '2026-02-01', 'Zonne-energie'),
+      translatedFrom: 'source-1',
+      body: '<p>Hallo</p>',
+    };
+    findOne.mockImplementation((filter: Record<string, any>) => ({
+      populate: () => ({
+        lean: async () => (filter.locale === 'nl' ? nlDoc : null),
+      }),
+    }));
+    find.mockReturnValue({
+      select: () => ({
+        lean: async () => [
+          { _id: 'source-1', type: 'blog', status: 'published', activeCountries: ['BE'] },
+        ],
+      }),
+    });
+
+    const inGermany = mockRes();
+    await getPublicCmsContentBySlug(
+      mockReq({
+        params: { type: 'blog', slug: 'solar-guide' },
+        query: { locale: 'nl' },
+        get: (name: string) => (name === 'x-vercel-ip-country' ? 'DE' : undefined),
+      }),
+      inGermany
+    );
+    expect(inGermany.statusCode).toBe(404);
+
+    const inBelgium = mockRes();
+    await getPublicCmsContentBySlug(
+      mockReq({
+        params: { type: 'blog', slug: 'solar-guide' },
+        query: { locale: 'nl' },
+        get: (name: string) => (name === 'x-vercel-ip-country' ? 'BE' : undefined),
+      }),
+      inBelgium
+    );
+    expect(inBelgium.statusCode).toBe(200);
+    expect(inBelgium.body.data.locale).toBe('nl');
+  });
+
+  it('omits translations hidden through their source from listings', async () => {
+    const nlDoc = {
+      ...listing('nl', 'solar-guide', '2026-02-01', 'Zonne-energie'),
+      translatedFrom: 'source-1',
+    };
+    const enFallback = listing('en', 'heat-pump', '2026-01-01', 'Heat pump');
+
+    find.mockImplementation((filter: Record<string, any>) => {
+      if (filter._id) {
+        return {
+          select: () => ({
+            lean: async () => [
+              { _id: 'source-1', type: 'blog', status: 'draft', activeCountries: [] },
+            ],
+          }),
+        };
+      }
+      const docs = filter.locale === 'nl' ? [nlDoc] : [enFallback];
+      const builder: any = {
+        select: () => builder,
+        populate: () => builder,
+        lean: async () => docs,
+      };
+      return builder;
+    });
+
+    const res = mockRes();
+    await listPublicCmsContent(
+      mockReq({ params: { type: 'blog' }, query: { locale: 'nl' } }),
+      res
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.items.map((item: any) => item.slug)).toEqual(['heat-pump']);
+    expect(res.body.data.items[0].translatedFrom).toBeUndefined();
+  });
 });
