@@ -1,9 +1,36 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import mongoose, { Types } from 'mongoose';
 
 const testUri = process.env.FIXERA_TEST_MONGODB_URI;
 const hasDisposableMongo = Boolean(testUri && /test/i.test(testUri));
 const describeDb = hasDisposableMongo ? describe : describe.skip;
+const commitRetryAppName = `fixera-commit-retry-${process.pid}-${Date.now()}`;
+let commitFailpointsAvailable = false;
+
+const setCommitFailure = async (
+  times: number,
+  errorLabels: string[],
+  errorCode = 112,
+) => {
+  await mongoose.connection.db!.admin().command({
+    configureFailPoint: 'failCommand',
+    mode: { times },
+    data: {
+      failCommands: ['commitTransaction'],
+      errorCode,
+      errorLabels,
+      appName: commitRetryAppName,
+    },
+  });
+};
+
+const clearCommitFailure = async () => {
+  if (!commitFailpointsAvailable) return;
+  await mongoose.connection.db!.admin().command({
+    configureFailPoint: 'failCommand',
+    mode: 'off',
+  });
+};
 
 vi.hoisted(() => {
   process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_support_integration';
@@ -212,6 +239,8 @@ import {
   supersedeSupportMeetingNotifications,
 } from '../../utils/support/meetingNotifications';
 import { adminUpdateMeetingRequest } from '../../handlers/Admin/support';
+import { cancelMeeting } from '../../handlers/Meeting';
+import { extendBookingExecution } from '../../handlers/Booking/payment-integration';
 
 const professionalId = new Types.ObjectId('507f1f77bcf86cd799439012');
 const otherUserId = new Types.ObjectId('507f1f77bcf86cd799439013');
@@ -395,7 +424,21 @@ const clearCollections = async () => {
 
 describeDb('real Mongo calendar and meeting concurrency', () => {
   beforeAll(async () => {
-    await mongoose.connect(testUri!, { dbName: `fixera_support_it_${Date.now()}` });
+    await mongoose.connect(testUri!, {
+      dbName: `fixera_support_it_${Date.now()}`,
+      appName: commitRetryAppName,
+    });
+    try {
+      // The regression below needs a disposable server started with
+      // enableTestCommands=1 so commitTransaction can fail deterministically.
+      await mongoose.connection.db!.admin().command({
+        configureFailPoint: 'failCommand',
+        mode: 'off',
+      });
+      commitFailpointsAvailable = true;
+    } catch {
+      commitFailpointsAvailable = false;
+    }
     await Promise.all([
       SupportTicket.createIndexes(),
       SupportTicketInternalNote.createIndexes(),
@@ -421,6 +464,10 @@ describeDb('real Mongo calendar and meeting concurrency', () => {
     sendRescheduled.mockResolvedValue(true);
     sendCancelled.mockResolvedValue(true);
     await clearCollections();
+  });
+
+  afterEach(async () => {
+    await clearCommitFailure().catch(() => undefined);
   });
 
   afterAll(async () => {
@@ -1003,6 +1050,201 @@ describeDb('real Mongo calendar and meeting concurrency', () => {
       windowStart.toISOString(),
       new Date(windowStart.getTime() + 15 * 60 * 1000).toISOString(),
     ]));
+  });
+
+  it('persists a normal Meeting cancellation when commitTransaction fails transiently after the callback', async (context) => {
+    if (!commitFailpointsAvailable) {
+      context.skip('MongoDB test commands (enableTestCommands=1) are not enabled');
+    }
+    const meeting = await Meeting.create({
+      projectId: new Types.ObjectId().toString(),
+      professionalId,
+      meetingType: 'team',
+      title: 'Commit replay meeting',
+      scheduledDate: new Date('2030-12-02T00:00:00.000Z'),
+      startTime: '09:00',
+      endTime: '10:00',
+      duration: 60,
+      attendees: [],
+      status: 'scheduled',
+      createdBy: professionalId.toString(),
+    });
+    await reserveCalendarKeys({
+      sourceType: 'meeting',
+      sourceId: meeting._id,
+      keys: buildCalendarReservationKeysForInterval({
+        role: 'professional',
+        userId: professionalId,
+        startAt: new Date('2030-12-02T09:00:00.000Z'),
+        endAt: new Date('2030-12-02T10:00:00.000Z'),
+      }),
+    });
+    expect(await CalendarReservation.countDocuments({ sourceType: 'meeting', sourceId: meeting._id })).toBe(4);
+
+    const saveSpy = vi.spyOn(Meeting.prototype, 'save');
+    let saveCalls = 0;
+    try {
+      await setCommitFailure(1, ['TransientTransactionError']);
+      const res = mockRes();
+      await cancelMeeting({
+        params: { meetingId: String(meeting._id) },
+        body: { cancellationReason: 'No longer needed' },
+        user: { professionalId },
+      } as any, res as any);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body.success).toBe(true);
+      saveCalls = saveSpy.mock.calls.length;
+    } finally {
+      saveSpy.mockRestore();
+      await clearCommitFailure();
+    }
+
+    // One save from the first attempt and one from the replayed callback.
+    expect(saveCalls).toBe(2);
+    const stored = await Meeting.findById(meeting._id).lean();
+    expect(stored?.status).toBe('cancelled');
+    expect(stored?.cancellationReason).toBe('No longer needed');
+    expect(stored?.cancelledBy).toBe(professionalId.toString());
+    expect(stored?.cancelledAt).toBeInstanceOf(Date);
+    expect(await CalendarReservation.countDocuments({ sourceType: 'meeting', sourceId: meeting._id })).toBe(0);
+  });
+
+  it('persists a normal booking extension and one history entry when commitTransaction fails transiently', async (context) => {
+    if (!commitFailpointsAvailable) {
+      context.skip('MongoDB test commands (enableTestCommands=1) are not enabled');
+    }
+    await User.collection.insertOne({
+      _id: professionalId,
+      name: 'Piet',
+      email: 'piet@example.com',
+      role: 'professional',
+    });
+    const bookingId = new Types.ObjectId();
+    const originalStart = new Date('2030-12-03T09:00:00.000Z');
+    const originalEnd = new Date('2030-12-03T10:00:00.000Z');
+    const extendedEnd = new Date('2030-12-03T12:00:00.000Z');
+    await Booking.collection.insertOne({
+      _id: bookingId,
+      bookingNumber: 'BK-COMMIT-REPLAY',
+      bookingType: 'professional',
+      customer: otherUserId,
+      professional: professionalId,
+      status: 'in_progress',
+      quote: { amount: 100, currency: 'EUR' },
+      rfqData: { serviceType: 'Renovation', description: 'Bathroom work' },
+      vatDecision: { action: 'standard_rate', standardRate: 21, appliedRate: 21 },
+      location: { type: 'Point', coordinates: [0, 0] },
+      scheduledStartDate: originalStart,
+      scheduledExecutionEndDate: originalEnd,
+      assignedTeamMembers: [],
+      resourcePlan: [],
+      statusHistory: [],
+      __v: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await reserveCalendarKeys({
+      sourceType: 'booking',
+      sourceId: bookingId,
+      keys: buildCalendarReservationKeysForInterval({
+        role: 'professional',
+        userId: professionalId,
+        startAt: originalStart,
+        endAt: originalEnd,
+      }),
+    });
+
+    const saveSpy = vi.spyOn(Booking.prototype, 'save');
+    let saveCalls = 0;
+    try {
+      await setCommitFailure(1, ['TransientTransactionError']);
+      const res = mockRes();
+      await extendBookingExecution({
+        params: { bookingId: String(bookingId) },
+        body: {
+          newExecutionEndDate: extendedEnd.toISOString(),
+          note: 'Extra work',
+        },
+        user: { _id: professionalId, role: 'professional' },
+      } as any, res as any);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body.success).toBe(true);
+      saveCalls = saveSpy.mock.calls.length;
+    } finally {
+      saveSpy.mockRestore();
+      await clearCommitFailure();
+    }
+
+    expect(saveCalls).toBe(2);
+    const stored = await Booking.findById(bookingId).lean();
+    expect(stored?.status).toBe('in_progress');
+    expect(stored?.scheduledExecutionEndDate?.toISOString()).toBe(extendedEnd.toISOString());
+    expect(stored?.statusHistory).toHaveLength(1);
+    expect(stored?.statusHistory?.[0]?.note).toBe('Execution extended: Extra work');
+    const keys = await CalendarReservation.find({ sourceType: 'booking', sourceId: bookingId })
+      .select('key startAt')
+      .lean();
+    expect(keys).toHaveLength(12);
+    expect(keys.every((row: any) => {
+      const start = row.startAt.getTime();
+      return start >= originalStart.getTime() && start < extendedEnd.getTime();
+    })).toBe(true);
+  });
+
+  it('retries only the commit for UnknownTransactionCommitResult without re-running the callback', async (context) => {
+    if (!commitFailpointsAvailable) {
+      context.skip('MongoDB test commands (enableTestCommands=1) are not enabled');
+    }
+    const meeting = await Meeting.create({
+      projectId: new Types.ObjectId().toString(),
+      professionalId,
+      meetingType: 'team',
+      title: 'Unknown commit result meeting',
+      scheduledDate: new Date('2030-12-04T00:00:00.000Z'),
+      startTime: '09:00',
+      endTime: '10:00',
+      duration: 60,
+      attendees: [],
+      status: 'scheduled',
+      createdBy: professionalId.toString(),
+    });
+    await reserveCalendarKeys({
+      sourceType: 'meeting',
+      sourceId: meeting._id,
+      keys: buildCalendarReservationKeysForInterval({
+        role: 'professional',
+        userId: professionalId,
+        startAt: new Date('2030-12-04T09:00:00.000Z'),
+        endAt: new Date('2030-12-04T10:00:00.000Z'),
+      }),
+    });
+
+    const saveSpy = vi.spyOn(Meeting.prototype, 'save');
+    let saveCalls = 0;
+    try {
+      await setCommitFailure(1, ['UnknownTransactionCommitResult']);
+      const res = mockRes();
+      await cancelMeeting({
+        params: { meetingId: String(meeting._id) },
+        body: { cancellationReason: 'Commit retry' },
+        user: { professionalId },
+      } as any, res as any);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body.success).toBe(true);
+      saveCalls = saveSpy.mock.calls.length;
+    } finally {
+      saveSpy.mockRestore();
+      await clearCommitFailure();
+    }
+
+    expect(saveCalls).toBe(1);
+    const stored = await Meeting.findById(meeting._id).lean();
+    expect(stored?.status).toBe('cancelled');
+    expect(stored?.cancellationReason).toBe('Commit retry');
+    expect(await CalendarReservation.countDocuments({ sourceType: 'meeting', sourceId: meeting._id })).toBe(0);
   });
 
   it('persists a saved document and a new document when the driver replays after a post-save conflict', async () => {

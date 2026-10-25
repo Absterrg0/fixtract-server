@@ -114,6 +114,27 @@ export async function releaseCalendarReservations(
   );
 }
 
+const commitReplayResetMarker = Symbol("calendarCommitReplayReset");
+
+/**
+ * A throw from the transaction callback is the only public signal that makes
+ * `Connection#transaction()` restore documents saved by an aborted attempt.
+ * The driver retries the whole transaction for a `TransientTransactionError`,
+ * which is exactly the commit-phase replay that skips Mongoose's own reset.
+ */
+const commitReplayResetError = () => {
+  const error = new mongoose.mongo.MongoServerError({
+    message: "Calendar transaction commit-phase replay needs a document reset",
+    code: 112,
+    errorLabels: ["TransientTransactionError"],
+  });
+  (error as unknown as Record<symbol, boolean>)[commitReplayResetMarker] = true;
+  return error;
+};
+
+const isCommitReplayResetError = (error: unknown): boolean =>
+  Boolean((error as Record<symbol, boolean> | null)?.[commitReplayResetMarker]);
+
 /**
  * Serializes the check+write with other calendar writers through the unique
  * reservation collection. Mongo retries transient write conflicts itself.
@@ -127,11 +148,44 @@ export async function releaseCalendarReservations(
  * pre-attempt modified paths/version before the callback runs again. Callbacks
  * must therefore only assign absolute values (no network or external side
  * effects); every calendar writer follows that rule.
+ *
+ * Mongoose only restores documents when the callback rejects. `commitTransaction`
+ * may also fail with a `TransientTransactionError` after the callback already
+ * succeeded; the driver then re-runs the callback without that restoration. Detect
+ * that replay and reject once with a transient error so Mongoose restores the
+ * tracked documents before the driver re-runs the real callback. Without this,
+ * a replayed `doc.save()` is an empty-update no-op and the transaction can commit
+ * the other commands while reporting success with the document write missing.
  */
 export async function withCalendarTransaction<T>(
   fn: (session: ClientSession) => Promise<T>,
 ): Promise<T> {
-  const result = await mongoose.connection.transaction(fn);
+  let callbackCompleted = false;
+
+  let result: T;
+  try {
+    result = await mongoose.connection.transaction(async (session) => {
+      if (callbackCompleted) {
+        // The previous attempt's callback finished, so this invocation only
+        // happens when commitTransaction returned TransientTransactionError.
+        // Throw before the callback so _wrapUserTransaction resets the tracked
+        // documents; the driver then retries the whole transaction.
+        callbackCompleted = false;
+        throw commitReplayResetError();
+      }
+      const value = await fn(session);
+      callbackCompleted = true;
+      return value;
+    });
+  } catch (error) {
+    if (isCommitReplayResetError(error)) {
+      throw new Error(
+        "Calendar transaction could not reset captured documents after a commit-phase transient error",
+      );
+    }
+    throw error;
+  }
+
   if (result === undefined) {
     throw new Error("Calendar transaction finished without a result");
   }
