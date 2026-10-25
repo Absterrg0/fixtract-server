@@ -13,6 +13,10 @@ import {
   formatChatClosedMessage,
   normalizeInboxSearch,
 } from "../../utils/adminSupportChat";
+import {
+  assertSupportChatEnabled,
+  assertSupportChatWriteAllowed,
+} from "../../utils/support/settings";
 
 const VALID_STATUSES = ["pending", "reviewed", "dismissed"] as const;
 
@@ -291,14 +295,25 @@ export const adminStartSupportChat = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, msg: "initialMessage is required (max 2000 chars)" });
     }
 
+    try {
+      await assertSupportChatEnabled();
+    } catch (error) {
+      return res.status(403).json({
+        success: false,
+        msg: error instanceof Error ? error.message : "Support chat is currently disabled.",
+        code: "FORBIDDEN",
+      });
+    }
+
     const targetUser = await User.findById(targetUserId).select("_id role name email").lean();
     if (!targetUser) {
       return res.status(404).json({ success: false, msg: "Target user not found" });
     }
-    if (targetUser.role !== "customer" && targetUser.role !== "professional") {
-      return res.status(400).json({
+    if (targetUser.role !== "professional") {
+      return res.status(403).json({
         success: false,
-        msg: "Support chats are only available for customers or professionals",
+        msg: "Support chats are only available for professionals",
+        code: "FORBIDDEN",
       });
     }
 
@@ -392,6 +407,15 @@ export const adminReplySupportChat = async (req: Request, res: Response) => {
     }
     if (conversation.status !== "active") {
       return res.status(409).json({ success: false, msg: "This support conversation is closed" });
+    }
+    try {
+      await assertSupportChatWriteAllowed(conversation.supportTargetUserId?.toString() || "");
+    } catch (error) {
+      return res.status(403).json({
+        success: false,
+        msg: error instanceof Error ? error.message : "Support chat is currently disabled.",
+        code: "FORBIDDEN",
+      });
     }
 
     const adminObjectId = new mongoose.Types.ObjectId(adminId);

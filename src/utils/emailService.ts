@@ -11,6 +11,8 @@ interface SendEmailMeta {
   attachmentName?: string;
   /** Base64-encoded attachment content. Takes precedence over attachmentUrl. */
   attachmentContent?: string;
+  /** Redact URL credentials/query/fragment from dev body/error logs. */
+  redactLogUrls?: boolean;
 }
 
 // Initialize Brevo API with proper configuration
@@ -1393,13 +1395,43 @@ const buildEmailButton = (href: string, label: string, color = '#667eea') => `
 const EMAIL_DEV_NO_SEND = process.env.EMAIL_DEV_NO_SEND === 'true';
 const IS_DEV = process.env.NODE_ENV !== 'production';
 
-const logDevEmail = (outcome: string, to: string, subject: string, template: string, htmlContent: string, errorMessage?: string) => {
+/**
+ * Development email logs print the rendered body. Strip URL credentials, query
+ * strings and fragments so meeting-provider access tokens never land in logs.
+ */
+const redactUrlsForLog = (value: string): string =>
+  value.replace(/https?:\/\/[^\s"'<>]+/gi, (raw) => {
+    try {
+      const url = new URL(raw.replace(/&amp;/g, '&'));
+      url.username = '';
+      url.password = '';
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    } catch {
+      return '[redacted-url]';
+    }
+  });
+
+const logDevEmail = (
+  outcome: string,
+  to: string,
+  subject: string,
+  template: string,
+  htmlContent: string,
+  errorMessage?: string,
+  redactLogUrls = false,
+) => {
   if (!IS_DEV) return;
   const banner = '='.repeat(80);
-  console.log(`\n${banner}\n[EMAIL ${outcome}] template=${template}\n  to:      ${to}\n  subject: ${subject}${errorMessage ? `\n  error:   ${errorMessage}` : ''}\n--- BODY ---\n${htmlContent}\n--- END ---\n${banner}`);
+  const safeBody = redactLogUrls ? redactUrlsForLog(htmlContent) : htmlContent;
+  const safeError = errorMessage
+    ? (redactLogUrls ? redactUrlsForLog(errorMessage) : errorMessage)
+    : '';
+  console.log(`\n${banner}\n[EMAIL ${outcome}] template=${template}\n  to:      ${to}\n  subject: ${subject}${safeError ? `\n  error:   ${safeError}` : ''}\n--- BODY ---\n${safeBody}\n--- END ---\n${banner}`);
 };
 
-const sendEmail = async (
+export const sendEmail = async (
   to: string,
   subject: string,
   htmlContent: string,
@@ -1408,7 +1440,7 @@ const sendEmail = async (
   const template = meta.template || 'unknown';
 
   if (EMAIL_DEV_NO_SEND) {
-    logDevEmail('SKIPPED', to, subject, template, htmlContent);
+    logDevEmail('SKIPPED', to, subject, template, htmlContent, undefined, meta.redactLogUrls);
     logEmail({
       to,
       subject,
@@ -1423,7 +1455,7 @@ const sendEmail = async (
   if (!process.env.BREVO_API_KEY) {
     const errorMessage = 'BREVO_API_KEY is not set';
     console.error(`Cannot send email "${subject}" to ${to}: ${errorMessage}`);
-    logDevEmail('FAILED', to, subject, template, htmlContent, errorMessage);
+    logDevEmail('FAILED', to, subject, template, htmlContent, errorMessage, meta.redactLogUrls);
     logEmail({
       to,
       subject,
@@ -1457,7 +1489,7 @@ const sendEmail = async (
       }];
     }
     await emailAPI.sendTransacEmail(sendSmtpEmail);
-    logDevEmail('SENT', to, subject, template, htmlContent);
+    logDevEmail('SENT', to, subject, template, htmlContent, undefined, meta.redactLogUrls);
     logEmail({
       to,
       subject,
@@ -1468,14 +1500,22 @@ const sendEmail = async (
     }).catch(err => console.error('Failed to write EmailLog:', { to, subject, template }, err));
     return true;
   } catch (error: any) {
-    console.error(`Failed to send email "${subject}" to ${to}:`, error);
-    logDevEmail('FAILED', to, subject, template, htmlContent, error?.message || String(error));
+    const rawErrorMessage = error?.message || String(error);
+    const safeErrorMessage = meta.redactLogUrls
+      ? redactUrlsForLog(rawErrorMessage)
+      : rawErrorMessage;
+    if (meta.redactLogUrls) {
+      console.error(`Failed to send email "${subject}" to ${to}: ${safeErrorMessage}`);
+    } else {
+      console.error(`Failed to send email "${subject}" to ${to}:`, error);
+    }
+    logDevEmail('FAILED', to, subject, template, htmlContent, safeErrorMessage, meta.redactLogUrls);
     logEmail({
       to,
       subject,
       template,
       status: 'failed',
-      errorMessage: error?.message || String(error),
+      errorMessage: safeErrorMessage,
       relatedBooking: meta.relatedBooking,
       relatedUser: meta.relatedUser,
     }).catch(err => console.error('Failed to write EmailLog:', { to, subject, template }, err));

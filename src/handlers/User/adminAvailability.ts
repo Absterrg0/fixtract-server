@@ -170,7 +170,45 @@ function serialize(user: IUser) {
 export const getAdminAvailability = async (req: Request, res: Response) => {
   const user = req.user as IUser | undefined;
   if (!user || user.role !== 'admin') return res.status(403).json({ success: false, msg: 'Admin access required' });
-  return res.json({ success: true, data: serialize(user) });
+  const { listSupportCalendarEvents } = await import('../../utils/support/calendarEvents');
+  const { parseSupportAvailabilityRange } = await import('../../utils/support/availability');
+  const { getEffectiveAccessForUser } = await import('../../utils/adminRbac/roleAccess');
+  const timeZone = typeof req.query.timeZone === 'string' && isValidTimeZone(req.query.timeZone)
+    ? req.query.timeZone
+    : (isValidTimeZone(user.timeZone) ? user.timeZone : 'UTC');
+  let from = new Date();
+  let to = new Date(from.getTime() + 31 * 24 * 60 * 60 * 1000);
+  try {
+    const range = parseSupportAvailabilityRange(
+      typeof req.query.from === 'string' ? req.query.from : from.toISOString(),
+      typeof req.query.to === 'string' ? req.query.to : to.toISOString(),
+      timeZone,
+    );
+    from = range.from;
+    to = range.to;
+  } catch {
+    return res.status(400).json({ success: false, msg: 'A valid from/to range of at most 31 days is required' });
+  }
+  let events: Awaited<ReturnType<typeof listSupportCalendarEvents>> = [];
+  try {
+    const levels = await getEffectiveAccessForUser(user);
+    const canReadSupport = levels.support === 'read' || levels.support === 'write';
+    if (canReadSupport) {
+      events = await listSupportCalendarEvents({
+        viewer: 'admin',
+        adminId: String(user._id),
+        from,
+        to,
+        timeZone,
+      });
+    }
+  } catch (error) {
+    console.error('Failed to load support events for admin availability:', error);
+  }
+  // The normal admin availability reader now carries its own support events so
+  // the calendar does not need a second feature-specific fetch. The dedicated
+  // support endpoint remains the combined multi-admin feed.
+  return res.json({ success: true, data: { ...serialize(user), events, supportEvents: events } });
 };
 
 export const updateAdminAvailability = async (req: Request, res: Response) => {
