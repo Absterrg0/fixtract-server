@@ -111,7 +111,7 @@ export const getPaymentStats = async (req: Request, res: Response) => {
     console.error('Error fetching payment stats:', error);
     res.status(500).json({
       success: false,
-      error: { code: 'SERVER_ERROR', message: error.message || 'Failed to fetch payment stats' },
+      error: { code: 'SERVER_ERROR', message: "We couldn't load your payment statistics. Please try again." },
     });
   }
 };
@@ -155,7 +155,7 @@ export const getTransactions = async (req: Request, res: Response) => {
     console.error('Error fetching transactions:', error);
     res.status(500).json({
       success: false,
-      error: { code: 'SERVER_ERROR', message: error.message || 'Failed to fetch transactions' },
+      error: { code: 'SERVER_ERROR', message: "We couldn't load your transactions. Please try again." },
     });
   }
 };

@@ -18,6 +18,7 @@ import ProfileView from '../../models/profileView';
 import DiscountCodeUsage from '../../models/discountCodeUsage';
 import Payment from '../../models/payment';
 import { auditLog } from '../../utils/auditLogger';
+import { bookingForViewer, sanitizePaymentForViewer } from '../../utils/invoiceVisibility';
 
 export const exportMyData = async (req: Request, res: Response) => {
   try {
@@ -95,12 +96,13 @@ export const exportMyData = async (req: Request, res: Response) => {
       ],
     }).lean();
 
+    const exportRole = userDoc?.role === 'professional' ? 'professional' : 'customer';
     const exportPayload = {
       exportedAt: new Date().toISOString(),
       exportSchemaVersion: 1,
       user: userDoc,
-      bookings,
-      payments,
+      bookings: bookings.map((booking: any) => bookingForViewer(booking, exportRole)),
+      payments: payments.map((payment: any) => sanitizePaymentForViewer(payment, exportRole)),
       conversations,
       chatMessages,
       projects,

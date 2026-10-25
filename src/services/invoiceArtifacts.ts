@@ -30,6 +30,7 @@ import {
   type ManualInvoiceOverride,
 } from "./invoiceGenerator";
 import { maybeDispatchPeppolInvoice } from "./peppolDispatch";
+import { isUserFacingError, UserFacingError } from "../utils/appErrors";
 import { notify } from "../utils/notifications/notify";
 import type { InvoiceArtifactHistoryEntry } from "../Types/invoice";
 
@@ -42,6 +43,18 @@ const COMMERCIAL_CUSTOMIZATION_ID =
 const COMMERCIAL_PROFILE_ID = "urn:fdc:peppol.eu:2017:poacc:billing:01:1.0";
 const PEPPOL_DISPATCH_IN_PROGRESS =
   "Peppol dispatch in progress; if this does not change, generate the invoice again to finish it";
+// Anything unexpected at the provider boundary stays in logs; only safe,
+// actionable text is persisted on the booking/payment.
+const PEPPOL_DISPATCH_RETRY_REASON =
+  "Peppol dispatch failed. Generate the invoice again to retry; if it keeps failing, check the Peppol settings.";
+const PEPPOL_PLATFORM_CONFIG_REASON =
+  "Peppol dispatch could not start because the platform invoice details are incomplete. Check the platform company and VAT settings, then generate the invoice again.";
+const providerErrorMessage = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.slice(0, 500);
+};
+const dispatchFailureReason = (error: unknown): string =>
+  isUserFacingError(error) ? error.message : PEPPOL_DISPATCH_RETRY_REASON;
 
 type InvoiceArtifactResult = {
   invoiceNumber: string;
@@ -1178,14 +1191,14 @@ const retryPeppolForExistingArtifacts = async (
   try {
     platform = await getPlatformParty();
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`[INVOICE] Platform invoice party could not be loaded for booking ${bookingId}:`, providerErrorMessage(error));
     if (existing.payment.peppolDispatchStatus !== "sent") {
       update.peppolDispatchStatus = "failed";
-      update.peppolDispatchReason = reason;
+      update.peppolDispatchReason = PEPPOL_PLATFORM_CONFIG_REASON;
     }
     if (existing.payment.supplierPeppolDispatchStatus !== "sent") {
       update.supplierPeppolDispatchStatus = "failed";
-      update.supplierPeppolDispatchReason = reason;
+      update.supplierPeppolDispatchReason = PEPPOL_PLATFORM_CONFIG_REASON;
     }
     await persistPaymentArtifactUpdate(bookingId, paymentId, {
       peppolDispatchStatus: update.peppolDispatchStatus,
@@ -1228,9 +1241,10 @@ const retryPeppolForExistingArtifacts = async (
         peppolDispatchReference: result.reference,
       });
     } catch (error) {
+      console.error(`[INVOICE] Customer Peppol dispatch failed for booking ${bookingId}:`, providerErrorMessage(error));
       Object.assign(update, {
         peppolDispatchStatus: "failed",
-        peppolDispatchReason: error instanceof Error ? error.message : String(error),
+        peppolDispatchReason: dispatchFailureReason(error),
       });
     }
   }
@@ -1267,9 +1281,10 @@ const retryPeppolForExistingArtifacts = async (
         supplierPeppolDispatchReference: result.reference,
       });
     } catch (error) {
+      console.error(`[INVOICE] Supplier Peppol dispatch failed for booking ${bookingId}:`, providerErrorMessage(error));
       Object.assign(update, {
         supplierPeppolDispatchStatus: "failed",
-        supplierPeppolDispatchReason: error instanceof Error ? error.message : String(error),
+        supplierPeppolDispatchReason: dispatchFailureReason(error),
       });
     }
   }
@@ -1425,17 +1440,17 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
       supplierPeppolError instanceof Error ? supplierPeppolError.message : supplierPeppolError,
     );
     update.supplierPeppolDispatchStatus = "failed";
-    update.supplierPeppolDispatchReason = supplierPeppolError instanceof Error ? supplierPeppolError.message : String(supplierPeppolError);
+    update.supplierPeppolDispatchReason = dispatchFailureReason(supplierPeppolError);
     await Booking.updateOne(
       { _id: booking._id },
       { $set: {
         "payment.supplierPeppolDispatchStatus": "failed",
-        "payment.supplierPeppolDispatchReason": supplierPeppolError instanceof Error ? supplierPeppolError.message : String(supplierPeppolError),
+        "payment.supplierPeppolDispatchReason": dispatchFailureReason(supplierPeppolError),
       } },
     );
     await persistPaymentArtifactUpdate(booking._id, paymentId, {
       supplierPeppolDispatchStatus: "failed",
-      supplierPeppolDispatchReason: supplierPeppolError instanceof Error ? supplierPeppolError.message : String(supplierPeppolError),
+      supplierPeppolDispatchReason: dispatchFailureReason(supplierPeppolError),
     });
   }
 
@@ -1601,10 +1616,10 @@ export async function ensureBookingInvoiceArtifacts(
     } catch (peppolError) {
       console.error(
         `[INVOICE] Peppol dispatch failed for booking ${bookingId} after artifacts were saved:`,
-        peppolError instanceof Error ? peppolError.message : peppolError
+        providerErrorMessage(peppolError)
       );
       update.peppolDispatchStatus = "failed";
-      update.peppolDispatchReason = peppolError instanceof Error ? peppolError.message : String(peppolError);
+      update.peppolDispatchReason = dispatchFailureReason(peppolError);
       await Booking.updateOne(
         { _id: booking._id },
         { $set: {
@@ -1614,7 +1629,7 @@ export async function ensureBookingInvoiceArtifacts(
       );
       await persistPaymentArtifactUpdate(booking._id, paymentId, {
         peppolDispatchStatus: "failed",
-        peppolDispatchReason: peppolError instanceof Error ? peppolError.message : String(peppolError),
+        peppolDispatchReason: dispatchFailureReason(peppolError),
       });
     }
 
@@ -1660,17 +1675,17 @@ export async function ensureBookingInvoiceArtifacts(
         supplierPeppolError instanceof Error ? supplierPeppolError.message : supplierPeppolError,
       );
       update.supplierPeppolDispatchStatus = "failed";
-      update.supplierPeppolDispatchReason = supplierPeppolError instanceof Error ? supplierPeppolError.message : String(supplierPeppolError);
+      update.supplierPeppolDispatchReason = dispatchFailureReason(supplierPeppolError);
       await Booking.updateOne(
         { _id: booking._id },
         { $set: {
           "payment.supplierPeppolDispatchStatus": "failed",
-          "payment.supplierPeppolDispatchReason": supplierPeppolError instanceof Error ? supplierPeppolError.message : String(supplierPeppolError),
+          "payment.supplierPeppolDispatchReason": dispatchFailureReason(supplierPeppolError),
         } },
       );
       await persistPaymentArtifactUpdate(booking._id, paymentId, {
         supplierPeppolDispatchStatus: "failed",
-        supplierPeppolDispatchReason: supplierPeppolError instanceof Error ? supplierPeppolError.message : String(supplierPeppolError),
+        supplierPeppolDispatchReason: dispatchFailureReason(supplierPeppolError),
       });
     }
 
@@ -1698,20 +1713,22 @@ const retryPeppolForExistingCreditArtifacts = async (
   try {
     platform = await getPlatformParty();
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`[INVOICE] Platform invoice party could not be loaded for credit notes on booking ${bookingId}:`, providerErrorMessage(error));
     if (update.creditNotePeppolDispatchStatus !== "sent") {
       update.creditNotePeppolDispatchStatus = "failed";
-      update.creditNotePeppolDispatchReason = reason;
+      update.creditNotePeppolDispatchReason = PEPPOL_PLATFORM_CONFIG_REASON;
     }
     if (update.supplierCreditNotePeppolDispatchStatus !== "sent") {
       update.supplierCreditNotePeppolDispatchStatus = "failed";
-      update.supplierCreditNotePeppolDispatchReason = reason;
+      update.supplierCreditNotePeppolDispatchReason = PEPPOL_PLATFORM_CONFIG_REASON;
     }
   }
 
   if (platform && update.creditNotePeppolDispatchStatus !== "sent") {
     try {
-      if (!existing.payment.creditNoteUblUrl) throw new Error("Customer credit note UBL artifact is missing.");
+      if (!existing.payment.creditNoteUblUrl) {
+        throw new UserFacingError(502, "Customer credit note UBL artifact is missing. Generate the credit note again.", 'UNAVAILABLE');
+      }
       const customerUblXml = buildUblInvoiceXml(
         booking,
         existing.payment.creditNoteNumber,
@@ -1743,14 +1760,17 @@ const retryPeppolForExistingCreditArtifacts = async (
       update.creditNotePeppolDispatchReason = result.reason;
       update.creditNotePeppolDispatchReference = result.reference;
     } catch (error) {
+      console.error(`[INVOICE] Customer credit-note Peppol dispatch failed for booking ${bookingId}:`, providerErrorMessage(error));
       update.creditNotePeppolDispatchStatus = "failed";
-      update.creditNotePeppolDispatchReason = error instanceof Error ? error.message : String(error);
+      update.creditNotePeppolDispatchReason = dispatchFailureReason(error);
     }
   }
 
   if (platform && update.supplierCreditNotePeppolDispatchStatus !== "sent") {
     try {
-      if (!existing.payment.supplierCreditNoteUblUrl) throw new Error("Supplier credit note UBL artifact is missing.");
+      if (!existing.payment.supplierCreditNoteUblUrl) {
+        throw new UserFacingError(502, "Supplier credit note UBL artifact is missing. Generate the credit note again.", 'UNAVAILABLE');
+      }
       const supplierUblXml = buildUblInvoiceXml(
         booking,
         existing.payment.supplierCreditNoteNumber,
@@ -1782,8 +1802,9 @@ const retryPeppolForExistingCreditArtifacts = async (
       update.supplierCreditNotePeppolDispatchReason = result.reason;
       update.supplierCreditNotePeppolDispatchReference = result.reference;
     } catch (error) {
+      console.error(`[INVOICE] Supplier credit-note Peppol dispatch failed for booking ${bookingId}:`, providerErrorMessage(error));
       update.supplierCreditNotePeppolDispatchStatus = "failed";
-      update.supplierCreditNotePeppolDispatchReason = error instanceof Error ? error.message : String(error);
+      update.supplierCreditNotePeppolDispatchReason = dispatchFailureReason(error);
     }
   }
 
@@ -1996,20 +2017,21 @@ export async function ensureCreditInvoiceArtifacts(
           creditNotePeppolDispatchReference: peppolResult.reference,
         });
       } catch (peppolError) {
-        const reason = peppolError instanceof Error ? peppolError.message : String(peppolError);
+        const reason = providerErrorMessage(peppolError);
         console.error(`[INVOICE] Peppol customer credit-note dispatch failed for booking ${bookingId}:`, reason);
+        const safeReason = dispatchFailureReason(peppolError);
         update.creditNotePeppolDispatchStatus = "failed";
-        update.creditNotePeppolDispatchReason = reason;
+        update.creditNotePeppolDispatchReason = safeReason;
         await Booking.updateOne(
           { _id: booking._id },
           { $set: {
             "payment.creditNotePeppolDispatchStatus": "failed",
-            "payment.creditNotePeppolDispatchReason": reason,
+            "payment.creditNotePeppolDispatchReason": safeReason,
           } }
         );
         await persistPaymentArtifactUpdate(booking._id, paymentId, {
           creditNotePeppolDispatchStatus: "failed",
-          creditNotePeppolDispatchReason: reason,
+          creditNotePeppolDispatchReason: safeReason,
         });
       }
     }
@@ -2049,20 +2071,21 @@ export async function ensureCreditInvoiceArtifacts(
           supplierCreditNotePeppolDispatchReference: supplierPeppolResult.reference,
         });
       } catch (supplierPeppolError) {
-        const reason = supplierPeppolError instanceof Error ? supplierPeppolError.message : String(supplierPeppolError);
+        const reason = providerErrorMessage(supplierPeppolError);
         console.error(`[INVOICE] Peppol supplier credit-note dispatch failed for booking ${bookingId}:`, reason);
+        const safeReason = dispatchFailureReason(supplierPeppolError);
         update.supplierCreditNotePeppolDispatchStatus = "failed";
-        update.supplierCreditNotePeppolDispatchReason = reason;
+        update.supplierCreditNotePeppolDispatchReason = safeReason;
         await Booking.updateOne(
           { _id: booking._id },
           { $set: {
             "payment.supplierCreditNotePeppolDispatchStatus": "failed",
-            "payment.supplierCreditNotePeppolDispatchReason": reason,
+            "payment.supplierCreditNotePeppolDispatchReason": safeReason,
           } }
         );
         await persistPaymentArtifactUpdate(booking._id, paymentId, {
           supplierCreditNotePeppolDispatchStatus: "failed",
-          supplierCreditNotePeppolDispatchReason: reason,
+          supplierCreditNotePeppolDispatchReason: safeReason,
         });
       }
     }
@@ -2215,8 +2238,9 @@ export async function createManualInvoiceArtifact(
     peppolDispatchReason = result.reason;
     peppolDispatchReference = result.reference;
   } catch (error) {
+    console.error(`[INVOICE] Manual ${input.documentType} Peppol dispatch failed for booking ${bookingId}:`, providerErrorMessage(error));
     peppolDispatchStatus = "failed";
-    peppolDispatchReason = error instanceof Error ? error.message : String(error);
+    peppolDispatchReason = dispatchFailureReason(error);
   }
 
   const isCustomer = input.side === "customer";

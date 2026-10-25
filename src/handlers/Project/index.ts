@@ -533,15 +533,15 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
     console.error("[PROJECT] Auto-save error:", error);
     console.error("Error stack:", error.stack);
     if (error?.name === "ValidationError" && error.errors) {
-      const messages = Object.values(error.errors).map((entry: any) => entry.message || String(entry));
+      const messages = Object.values(error.errors)
+        .map((entry: any) => (typeof entry?.message === "string" ? entry.message : ""))
+        .filter(Boolean);
       return res.status(400).json({
-        error: "Project validation failed",
+        error: "Project validation failed. Check the highlighted fields and try again.",
         details: messages.join(" | "),
       });
     }
-    res
-      .status(500)
-      .json({ error: "Failed to save project draft", details: error.message });
+    res.status(500).json({ error: "Failed to save project draft. Please try again." });
   }
 };
 
@@ -1947,9 +1947,7 @@ export const submitProject = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("[PROJECT] Submit project error:", error);
     console.error("Error stack:", error.stack);
-    res
-      .status(500)
-      .json({ error: "Failed to submit project", details: error.message });
+    res.status(500).json({ error: "Failed to submit project. Please try again." });
   }
 };
 

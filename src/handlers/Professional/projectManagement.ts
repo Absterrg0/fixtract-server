@@ -56,8 +56,7 @@ export const saveProjectDraft = async (req: Request, res: Response) => {
   } catch (error: any) {
     res.status(500).json({
       success: false,
-      message: 'Error saving project',
-      error: error.message
+      message: "We couldn't save your project. Please try again.",
     });
   }
 };
@@ -106,8 +105,7 @@ export const getProject = async (req: Request, res: Response) => {
   } catch (error: any) {
     res.status(500).json({
       success: false,
-      message: 'Error fetching project',
-      error: error.message
+      message: "We couldn't load this project. Please try again.",
     });
   }
 };
@@ -150,8 +148,7 @@ export const getAllProjects = async (req: Request, res: Response) => {
   } catch (error: any) {
     res.status(500).json({
       success: false,
-      message: 'Error fetching projects',
-      error: error.message
+      message: "We couldn't load your projects. Please try again.",
     });
   }
 };
@@ -210,8 +207,7 @@ export const submitProject = async (req: Request, res: Response) => {
   } catch (error: any) {
     res.status(500).json({
       success: false,
-      message: 'Error submitting project',
-      error: error.message
+      message: "We couldn't submit your project. Please try again.",
     });
   }
 };
@@ -269,8 +265,7 @@ export const deleteProject = async (req: Request, res: Response) => {
   } catch (error: any) {
     res.status(500).json({
       success: false,
-      message: 'Error deleting project',
-      error: error.message
+      message: "We couldn't delete your project. Please try again.",
     });
   }
 };
@@ -307,8 +302,7 @@ export const getEmployeeAssignedProjects = async (req: Request, res: Response) =
   } catch (error: any) {
     res.status(500).json({
       success: false,
-      message: 'Error fetching assigned projects',
-      error: error.message
+      message: "We couldn't load your assigned projects. Please try again.",
     });
   }
 };

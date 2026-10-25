@@ -294,7 +294,9 @@ export const inviteStaff = async (req: Request, res: Response) => {
         data: serializeStaff(staff),
         inviteUrl,
         emailSent: sent,
-        emailError: error,
+        ...(error
+          ? { emailError: 'Invitation email could not be sent. Copy the invite link and share it manually.' }
+          : {}),
         msg: sent
           ? 'Invite resent — a fresh link was emailed'
           : 'Invite link regenerated — copy it below (email could not be sent)',
@@ -338,10 +340,12 @@ export const inviteStaff = async (req: Request, res: Response) => {
       data: serializeStaff(staff),
       inviteUrl,
       emailSent: emailResult.sent,
-      emailError: emailResult.error,
+      ...(emailResult.error
+        ? { emailError: 'Invitation email could not be sent. Copy the invite link and share it manually.' }
+        : {}),
     });
   } catch (error) {
-    return sendHandlerError(res, error, 'Failed to invite staff');
+    return sendHandlerError(res, error, "We couldn't invite this staff member. Please try again.");
   }
 };
 
@@ -378,13 +382,15 @@ export const resendStaffInvite = async (req: Request, res: Response) => {
       data: serializeStaff(updated),
       inviteUrl,
       emailSent: sent,
-      emailError: error,
+      ...(error
+        ? { emailError: 'Invitation email could not be sent. Copy the invite link and share it manually.' }
+        : {}),
       msg: sent
         ? 'Invite resent — a fresh link was emailed'
         : 'Invite link regenerated — copy it below (email could not be sent)',
     });
   } catch (error) {
-    return sendHandlerError(res, error, 'Failed to resend invite');
+    return sendHandlerError(res, error, "We couldn't resend the invite. Please try again.");
   }
 };
 
@@ -497,7 +503,7 @@ export const updateStaff = async (req: Request, res: Response) => {
     await staff.save();
     return res.json({ success: true, data: serializeStaff(staff) });
   } catch (error) {
-    return sendHandlerError(res, error, 'Failed to update staff');
+    return sendHandlerError(res, error, "We couldn't update this staff member. Please try again.");
   } finally {
     if (superAdminGuard) {
       await CronJobLock.deleteOne({ key: SUPER_ADMIN_GUARD_KEY, claimId: superAdminGuard }).catch((error) => {

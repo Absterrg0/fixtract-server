@@ -12,6 +12,7 @@ import { buildSettledTransferExpression } from "../../utils/paymentSafety";
 import { addPoints, deductPoints } from "../../utils/pointsSystem";
 import { updateProfessionalLevel } from "../../utils/professionalLevelSystem";
 import mongoose from 'mongoose';
+import { sendHandlerError } from '../../utils/handlerErrors';
 
 const LOYALTY_LEVELS = ["Bronze", "Silver", "Gold", "Platinum", "Diamond"] as const;
 const PROFESSIONAL_LEVELS = ["New", "Level 1", "Level 2", "Level 3", "Expert"] as const;
@@ -133,7 +134,7 @@ export const updateLoyaltyConfig = async (req: Request, res: Response, next: Nex
     });
   } catch (error: any) {
     console.error('Update loyalty config error:', error);
-    return res.status(500).json({ success: false, msg: error.message || "Failed to update loyalty configuration" });
+    return sendHandlerError(res, error, "We couldn't update the loyalty configuration. Please try again.");
   }
 };
 
@@ -349,7 +350,7 @@ export const adjustUserPoints = async (req: Request, res: Response, next: NextFu
     });
   } catch (error: any) {
     console.error('Adjust user points error:', error);
-    return res.status(400).json({ success: false, msg: error.message || "Failed to adjust points" });
+    return sendHandlerError(res, error, "We couldn't adjust points. Check the amount and try again.");
   }
 };
 
@@ -455,7 +456,7 @@ export const updateProfessionalLevelConfig = async (req: Request, res: Response,
     });
   } catch (error: any) {
     console.error('Update professional level config error:', error);
-    return res.status(500).json({ success: false, msg: error.message || "Failed to update professional level configuration" });
+    return sendHandlerError(res, error, "We couldn't update the professional level configuration. Please try again.");
   }
 };
 
@@ -608,7 +609,7 @@ export const updateProfessionalManagement = async (req: Request, res: Response) 
   try {
     const adminId = (req as any).admin?._id;
     if (!adminId) {
-      return res.status(401).json({ success: false, msg: `Admin authentication required to update professional management (adminId: ${String(adminId)})` });
+      return res.status(401).json({ success: false, msg: "Admin authentication required to update professional management." });
     }
 
     const { professionalId } = req.params;
@@ -766,7 +767,7 @@ export const updateCustomerManagement = async (req: Request, res: Response) => {
   try {
     const adminId = (req as any).admin?._id;
     if (!adminId) {
-      return res.status(401).json({ success: false, msg: `Admin authentication required to update customer management (adminId: ${String(adminId)})` });
+      return res.status(401).json({ success: false, msg: "Admin authentication required to update customer management." });
     }
 
     const { customerId } = req.params;

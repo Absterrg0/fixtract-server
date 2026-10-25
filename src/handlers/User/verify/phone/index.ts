@@ -64,7 +64,10 @@ export const VerifyPhone = async (req:Request,res:Response,next:NextFunction)=>{
     }
     catch(e){
         console.error("Twilio verification error:", e);
-        next(e);
+        return res.status(502).json({
+            success: false,
+            msg: "We couldn't send the SMS verification code. Please try again in a moment."
+        });
     }
 }
 
@@ -120,6 +123,9 @@ export const VerifyPhoneCheck = async(req:Request,res:Response,next:NextFunction
     }
     catch(e){
         console.error("Twilio verification check error:", e);
-        next(e);
+        return res.status(502).json({
+            success: false,
+            msg: "We couldn't verify the code right now. Please try again."
+        });
     }
 }

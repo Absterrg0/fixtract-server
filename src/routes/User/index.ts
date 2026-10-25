@@ -8,6 +8,7 @@ import { GetCurrentUser } from "../../handlers";
 import { validateVAT, updateUserVAT, validateAndPopulateVAT } from "../../handlers/User/validateVat";
 import { uploadIdProof, updateProfessionalProfile, submitForVerification, updatePhone, updateCustomerProfile, updateIdInfo, uploadProfileImage, deleteProfileImage, checkUsernameAvailability, generateUsernameSuggestionsHandler, updateUsername } from "../../handlers/User/profileManagement";
 import { upload, uploadProfileImage as profileImageUpload } from "../../utils/s3Upload";
+import { toHandlerError } from "../../utils/handlerErrors";
 import { getLoyaltyStatus, addSpending, getLeaderboard, getUserPointsBalance, getUserPointsHistory, getProfessionalLevelStatus, boostProfessionalLevel } from "../../handlers/User/loyaltyManagement";
 import { inviteEmployee, getEmployees, updateEmployeeStatus, acceptInvitation, updateEmployeeEmail, removeEmployee } from "../../handlers/User/employeeManagement";
 import { changePassword, resetEmployeePassword } from "../../handlers/User/passwordManagement";
@@ -56,12 +57,10 @@ import { submitBacklink, listBacklinks, getBacklinkStats, getBacklinkById } from
 const userRouter = Router();
 
 const handleProfileImageUpload = (req: Request, res: Response, next: NextFunction) => {
-    profileImageUpload.single('profileImage')(req, res, (error: any) => {
+    profileImageUpload.single('profileImage')(req, res, (error: unknown) => {
         if (error) {
-            return res.status(400).json({
-                success: false,
-                msg: error.message || 'Invalid profile image upload'
-            });
+            const { status, body } = toHandlerError(error, 'Invalid profile image upload');
+            return res.status(status).json(body);
         }
         next();
     });

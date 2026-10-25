@@ -131,8 +131,7 @@ export const getEmployeeAvailability = async (req: Request, res: Response) => {
         console.error('Get employee availability error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to get employee availability',
-            error: error.message
+            message: 'Failed to get employee availability. Please try again.',
         });
     }
 };
@@ -255,8 +254,7 @@ export const createMeeting = async (req: Request, res: Response) => {
         console.error('Create meeting error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to create meeting',
-            error: error.message
+            message: 'Failed to create meeting. Please try again.',
         });
     }
 };
@@ -295,8 +293,7 @@ export const getProjectMeetings = async (req: Request, res: Response) => {
         console.error('Get project meetings error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to get project meetings',
-            error: error.message
+            message: 'Failed to get project meetings. Please try again.',
         });
     }
 };
@@ -330,8 +327,7 @@ export const getMeetingById = async (req: Request, res: Response) => {
         console.error('Get meeting error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to get meeting',
-            error: error.message
+            message: 'Failed to get meeting. Please try again.',
         });
     }
 };
@@ -392,8 +388,7 @@ export const updateMeeting = async (req: Request, res: Response) => {
         console.error('Update meeting error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to update meeting',
-            error: error.message
+            message: 'Failed to update meeting. Please try again.',
         });
     }
 };
@@ -443,8 +438,7 @@ export const cancelMeeting = async (req: Request, res: Response) => {
         console.error('Cancel meeting error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to cancel meeting',
-            error: error.message
+            message: 'Failed to cancel meeting. Please try again.',
         });
     }
 };
@@ -490,8 +484,7 @@ export const getAllMeetings = async (req: Request, res: Response) => {
         console.error('Get all meetings error:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to get meetings',
-            error: error.message
+            message: 'Failed to get meetings. Please try again.',
         });
     }
 };

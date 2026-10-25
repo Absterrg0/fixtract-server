@@ -484,7 +484,7 @@ export const uploadWarrantyEvidence = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error("[WARRANTY] upload evidence error:", error);
-    return res.status(500).json({ success: false, msg: "Failed to upload evidence" });
+    return res.status(500).json({ success: false, msg: "We couldn't upload the evidence files. Please try again." });
   }
 };
 
@@ -555,7 +555,7 @@ export const attachClaimEvidence = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error("[WARRANTY] attach claim evidence error:", error);
-    return res.status(500).json({ success: false, msg: "Failed to attach evidence" });
+    return res.status(500).json({ success: false, msg: "We couldn't attach the evidence files. Please try again." });
   }
 };
 

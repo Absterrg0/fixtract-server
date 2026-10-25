@@ -1273,7 +1273,7 @@ export const triggerKpiEmailReport = async (req: Request, res: Response) => {
       } catch (e) {
         console.error('KPI background report failed', e);
         try {
-          await sendKpiReportEmail(adminEmail, { from, to, error: (e as Error)?.message || 'Unknown error' });
+          await sendKpiReportEmail(adminEmail, { from, to, error: 'Report generation failed. Check server logs for details.' });
         } catch (innerErr) {
           console.error('Failed to send KPI failure email', innerErr);
         }

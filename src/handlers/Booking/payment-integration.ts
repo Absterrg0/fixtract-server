@@ -38,6 +38,7 @@ import { findTeamConflicts } from '../../utils/scheduleConflict';
 import { releaseScheduleSlots } from '../../utils/scheduleRelease';
 import User from '../../models/user';
 import WarrantyClaim from '../../models/warrantyClaim';
+import { bookingForRequest } from '../../utils/invoiceVisibility';
 
 const REFUNDABLE_PAYMENT_STATUSES = new Set(['authorized', 'completed', 'partially_refunded']);
 
@@ -519,7 +520,7 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
 
       return res.json({
         success: true,
-        data: { message: 'Quote rejected', booking }
+        data: { message: 'Quote rejected', booking: bookingForRequest(booking, (req as any).user) }
       });
     }
 
@@ -538,7 +539,7 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
         success: true,
         data: {
           message: 'Quote accepted. Please complete the booking wizard to proceed to payment.',
-          booking,
+          booking: bookingForRequest(booking, (req as any).user),
           requiresBookingWizard: true,
         }
       });
@@ -555,7 +556,7 @@ export const respondToQuoteWithPayment = async (req: Request, res: Response) => 
       success: false,
       error: {
         code: 'SERVER_ERROR',
-        message: 'Failed to process request'
+        message: "We couldn't complete this request. Please try again."
       }
     });
   }
@@ -753,7 +754,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           success: true,
           data: {
             message: finalizeResult.alreadyCompleted ? 'Booking is already completed' : 'Booking completed',
-            booking
+            booking: bookingForRequest(booking, (req as any).user)
           }
         });
       }
@@ -777,7 +778,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
               success: false,
               error: {
                 code: 'BOOKING_STATUS_CONFLICT_REFUND_FAILED',
-                message: `Payment was captured but booking could not be completed because status is "${finalizeResult.conflictStatus}". Compensating refund failed: ${refundResult.error?.message || 'unknown error'}`
+                message: 'Payment was captured, but the booking could not be completed and the automatic refund failed. Please contact support before retrying.'
               }
             });
           }
@@ -853,7 +854,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
             message: finalizeResult.alreadyCompleted
               ? 'Booking is already completed'
               : 'Booking completed and payment transferred to professional',
-            booking
+            booking: bookingForRequest(booking, (req as any).user)
           }
         });
       }
@@ -920,7 +921,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
 
     res.json({
       success: true,
-      data: { message: 'Booking status updated', booking }
+      data: { message: 'Booking status updated', booking: bookingForRequest(booking, (req as any).user) }
     });
 
   } catch (error: any) {
@@ -929,7 +930,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       success: false,
       error: {
         code: 'SERVER_ERROR',
-        message: 'Failed to process request'
+        message: "We couldn't complete this request. Please try again."
       }
     });
   }
@@ -982,7 +983,7 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
         data: {
           message: 'Payment already processed',
           paymentStatus: booking.payment.status,
-          booking,
+          booking: bookingForRequest(booking, (req as any).user),
           shouldRedirect: true,
           redirectTo: `/bookings/${bookingId}/payment/success`
         }
@@ -1039,7 +1040,7 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
         success: true,
         data: {
           clientSecret: booking.payment.stripeClientSecret,
-          booking
+          booking: bookingForRequest(booking, (req as any).user)
         }
       });
     }
@@ -1066,7 +1067,7 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
       success: true,
       data: {
         clientSecret: paymentResult.clientSecret,
-        booking: refreshedBooking || booking
+        booking: bookingForRequest(refreshedBooking || booking, (req as any).user)
       }
     });
   } catch (error: any) {
@@ -1075,7 +1076,7 @@ export const ensurePaymentIntent = async (req: Request, res: Response) => {
       success: false,
       error: {
         code: 'SERVER_ERROR',
-        message: 'Failed to process request'
+        message: "We couldn't complete this request. Please try again."
       }
     });
   }
@@ -1164,11 +1165,11 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      data: { message: 'Schedule set successfully', booking }
+      data: { message: 'Schedule set successfully', booking: bookingForRequest(booking, (req as any).user) }
     });
   } catch (error: any) {
     console.error('Error setting booking schedule:', error);
-    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to set schedule' } });
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't set the schedule. Please try again." } });
   }
 };
 
@@ -1341,11 +1342,11 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      data: { message: 'Rescheduling request submitted', booking },
+      data: { message: 'Rescheduling request submitted', booking: bookingForRequest(booking, (req as any).user) },
     });
   } catch (error: any) {
     console.error('Error requesting booking reschedule:', error);
-    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to request rescheduling' } });
+    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't submit the rescheduling request. Please try again." } });
   }
 };
 
@@ -1561,12 +1562,12 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       success: true,
       data: {
         message: messageByAction[normalizedAction] || 'Rescheduling request processed',
-        booking,
+        booking: bookingForRequest(booking, (req as any).user),
       },
     });
   } catch (error: any) {
     console.error('Error responding to booking reschedule:', error);
-    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to respond to rescheduling request' } });
+    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't update the rescheduling request. Please try again." } });
   }
 };
 
@@ -1641,10 +1642,10 @@ export const extendBookingExecution = async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      data: { message: 'Execution extended successfully', booking },
+      data: { message: 'Execution extended successfully', booking: bookingForRequest(booking, (req as any).user) },
     });
   } catch (error: any) {
     console.error('Error extending booking execution:', error);
-    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to extend execution' } });
+    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't extend the execution date. Please try again." } });
   }
 };

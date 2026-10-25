@@ -33,7 +33,7 @@ const chatSendLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: userKeyGenerator,
-  message: { success: false, msg: "Too many messages, please try again later" },
+  message: { success: false, msg: "Too many messages. Please wait a minute and try again.", code: "RATE_LIMITED" },
 });
 
 const chatUploadLimiter = rateLimit({
@@ -42,7 +42,7 @@ const chatUploadLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: userKeyGenerator,
-  message: { success: false, msg: "Too many uploads, please try again later" },
+  message: { success: false, msg: "Too many uploads. Please wait a minute and try again.", code: "RATE_LIMITED" },
 });
 
 const chatReadLimiter = rateLimit({
@@ -51,7 +51,7 @@ const chatReadLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: userKeyGenerator,
-  message: { success: false, msg: "Too many requests, please try again later" },
+  message: { success: false, msg: "Too many requests. Please wait a minute and try again.", code: "RATE_LIMITED" },
 });
 
 const chatToggleLimiter = rateLimit({
@@ -60,7 +60,7 @@ const chatToggleLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: userKeyGenerator,
-  message: { success: false, msg: "Too many requests, please try again later" },
+  message: { success: false, msg: "Too many requests. Please wait a minute and try again.", code: "RATE_LIMITED" },
 });
 
 const chatReportLimiter = rateLimit({
@@ -69,7 +69,7 @@ const chatReportLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: userKeyGenerator,
-  message: { success: false, msg: "Too many reports, please try again later" },
+  message: { success: false, msg: "Too many reports. Please wait a few minutes and try again.", code: "RATE_LIMITED" },
 });
 
 const chatSearchLimiter = rateLimit({
@@ -78,7 +78,7 @@ const chatSearchLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: userKeyGenerator,
-  message: { success: false, msg: "Too many searches, please try again later" },
+  message: { success: false, msg: "Too many searches. Please wait a minute and try again.", code: "RATE_LIMITED" },
 });
 
 router.use(protect);

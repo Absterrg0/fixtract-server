@@ -49,6 +49,11 @@ const schedulingRateLimiter = rateLimit({
   limit: 60,
   standardHeaders: true,
   legacyHeaders: false,
+  message: {
+    success: false,
+    msg: 'Too many requests. Please wait a few minutes and try again.',
+    code: 'RATE_LIMITED',
+  },
 });
 
 // Google Maps configuration (public endpoint)

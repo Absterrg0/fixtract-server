@@ -119,8 +119,16 @@ Base path: `/api`
 
 ## Error Handling
 
-- Centralized error handler returns JSON: `{ message, stack (in dev) }`.
-- Auth and verification handlers return clear `success`/`msg` or `message` fields.
+- Error responses keep the existing `{ success: false, msg: string }` envelope
+  (legacy endpoints may use `message` or `error.message`; status codes are authoritative).
+- Shared error paths can add an optional `code`: `VALIDATION`, `AUTH_REQUIRED`, `FORBIDDEN`,
+  `NOT_FOUND`, `CONFLICT`, `RATE_LIMITED`, `UNAVAILABLE`, `INTERNAL`.
+- Unexpected errors never expose exception, stack, database or provider text. Raw diagnostics stay
+  in server logs. Known validation/business-rule messages are preserved.
+- Use `sendHandlerError(res, error, fallback)` for new handlers. It maps duplicate keys, Mongoose
+  validation/cast errors, upload limits, JSON parse errors and known outages, then falls back to a
+  safe 500 message.
+- Unknown `/api/*` routes and rate limits return JSON, not HTML/plain text.
 
 ## Environment Variable Setup Guide
 

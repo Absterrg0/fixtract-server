@@ -12,6 +12,9 @@ import { isValidUsernameFormat, isTooSimilarToCompanyName, generateUsernameSugge
 import { sendProfessionalWelcomeEmail } from "../../utils/emailService";
 import ServiceConfiguration from "../../models/serviceConfiguration";
 import { params } from "../../utils/requestParams";
+import { sendHandlerError } from '../../utils/handlerErrors';
+import { parseBlockedRanges } from '../../utils/blockedRanges';
+import { safeErrorSummary } from '../../utils/safeErrorLog';
 
 const phoneUtil = PhoneNumberUtil.getInstance();
 
@@ -196,10 +199,7 @@ export const uploadIdProof = async (req: Request, res: Response, next: NextFunct
 
   } catch (error: any) {
     console.error('ID proof upload error:', error);
-    return res.status(500).json({
-      success: false,
-      msg: "Failed to upload ID proof"
-    });
+    return sendHandlerError(res, error, "We couldn't upload your ID proof. Please check the file and try again.");
   }
 };
 
@@ -376,35 +376,7 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
       });
     }
     if (blockedRanges !== undefined) {
-      if (!Array.isArray(blockedRanges)) {
-        return res.status(400).json({
-          success: false,
-          msg: "Blocked ranges must be an array"
-        });
-      }
-
-      const validatedRanges = blockedRanges.map((range, index) => {
-        if (!range.startDate || !range.endDate) {
-          throw new Error('Start date and end date are required for blocked ranges');
-        }
-
-        const startDate = new Date(range.startDate);
-        const endDate = new Date(range.endDate);
-
-        if (startDate > endDate) {
-          throw new Error('Start date must be before or equal to end date');
-        }
-
-        const processedRange = {
-          startDate,
-          endDate,
-          reason: range.reason || undefined,
-          createdAt: new Date()
-        };
-        return processedRange;
-      });
-
-      user.blockedRanges = validatedRanges;
+      user.blockedRanges = parseBlockedRanges(blockedRanges, { itemLabel: 'Blocked range' });
     }
 
     // Handle company availability (for team members to inherit)
@@ -438,35 +410,10 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
     }
 
     if (companyBlockedRanges !== undefined) {
-      if (!Array.isArray(companyBlockedRanges)) {
-        return res.status(400).json({
-          success: false,
-          msg: "Company blocked ranges must be an array"
-        });
-      }
-
-      const validatedCompanyRanges = companyBlockedRanges.map((range) => {
-        if (!range.startDate || !range.endDate) {
-          throw new Error('Start date and end date are required for company blocked ranges');
-        }
-
-        const startDate = new Date(range.startDate);
-        const endDate = new Date(range.endDate);
-
-        if (startDate > endDate) {
-          throw new Error('Start date must be before or equal to end date');
-        }
-
-        return {
-          startDate,
-          endDate,
-          reason: range.reason || undefined,
-          isHoliday: range.isHoliday || false,
-          createdAt: new Date()
-        };
+      user.companyBlockedRanges = parseBlockedRanges(companyBlockedRanges, {
+        itemLabel: 'Company blocked range',
+        includeHoliday: true,
       });
-
-      user.companyBlockedRanges = validatedCompanyRanges;
     }
 
     if (onboardingAgreements !== undefined) {
@@ -532,11 +479,8 @@ export const updateProfessionalProfile = async (req: Request, res: Response, nex
     });
 
   } catch (error: any) {
-    console.error('Professional profile update error:', error);
-    return res.status(500).json({
-      success: false,
-      msg: "Failed to update professional profile"
-    });
+    console.error('Professional profile update error:', safeErrorSummary(error));
+    return sendHandlerError(res, error, "We couldn't save your professional profile. Please try again.");
   }
 };
 
@@ -742,10 +686,7 @@ export const submitForVerification = async (req: Request, res: Response, next: N
     });
 
   } catch (error: any) {
-    return res.status(500).json({
-      success: false,
-      msg: "Failed to submit profile for verification"
-    });
+    return sendHandlerError(res, error, "We couldn't submit your profile for verification. Please try again.");
   }
 };
 
@@ -852,10 +793,7 @@ export const updatePhone = async (req: Request, res: Response, next: NextFunctio
 
   } catch (error: any) {
     console.error('Update phone error:', error);
-    return res.status(500).json({
-      success: false,
-      msg: "Failed to update phone number"
-    });
+    return sendHandlerError(res, error, "We couldn't update your phone number. Please try again.");
   }
 };
 
@@ -987,10 +925,7 @@ export const updateCustomerProfile = async (req: Request, res: Response, next: N
 
   } catch (error: any) {
     console.error('Update customer profile error:', error);
-    return res.status(500).json({
-      success: false,
-      msg: "Failed to update customer profile"
-    });
+    return sendHandlerError(res, error, "We couldn't update your profile. Please try again.");
   }
 };
 
@@ -1110,13 +1045,7 @@ export const updateIdInfo = async (req: Request, res: Response, next: NextFuncti
 
   } catch (error: any) {
     console.error('Update ID info error:', error);
-    if (error?.name === 'ValidationError') {
-      console.error('Validation details:', JSON.stringify(error.errors, null, 2));
-    }
-    return res.status(500).json({
-      success: false,
-      msg: "Internal server error"
-    });
+    return sendHandlerError(res, error, "We couldn't save your ID information. Please try again.");
   }
 };
 

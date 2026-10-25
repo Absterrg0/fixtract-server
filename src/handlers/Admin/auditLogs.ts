@@ -98,7 +98,7 @@ export const listAuditLogs = async (req: Request, res: Response) => {
     console.error('[ADMIN][AUDIT_LOGS] Failed to list logs', error);
     return res.status(500).json({
       success: false,
-      msg: error?.message || 'Failed to load audit logs',
+      msg: "We couldn't load audit logs. Please try again.",
     });
   }
 };
@@ -123,7 +123,7 @@ export const getAuditLogStats = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('[ADMIN][AUDIT_LOGS][STATS] Failed', error);
-    return res.status(500).json({ success: false, msg: error?.message || 'Failed to load audit stats' });
+    return res.status(500).json({ success: false, msg: "We couldn't load audit statistics. Please try again." });
   }
 };
 
@@ -142,7 +142,7 @@ export const getAuditLogFilterOptions = async (_req: Request, res: Response) => 
     });
   } catch (error: any) {
     console.error('[ADMIN][AUDIT_LOGS][OPTIONS] Failed', error);
-    return res.status(500).json({ success: false, msg: error?.message || 'Failed to load audit filter options' });
+    return res.status(500).json({ success: false, msg: "We couldn't load audit filters. Please try again." });
   }
 };
 
@@ -197,6 +197,6 @@ export const exportAuditLogs = async (req: Request, res: Response) => {
     return res.send(csv);
   } catch (error: any) {
     console.error('[ADMIN][AUDIT_LOGS][EXPORT] Failed', error);
-    return res.status(500).json({ success: false, msg: error?.message || 'Failed to export audit logs' });
+    return res.status(500).json({ success: false, msg: "We couldn't export audit logs. Please try again." });
   }
 };

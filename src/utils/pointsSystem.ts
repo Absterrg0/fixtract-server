@@ -3,6 +3,7 @@ import User from '../models/user';
 import PointTransaction from '../models/pointTransaction';
 import PointsConfig from '../models/pointsConfig';
 import type { PointSource } from '../models/pointTransaction';
+import { UserFacingError } from './appErrors';
 
 /**
  * Add points to a user's balance with transaction logging.
@@ -20,7 +21,7 @@ export const addPoints = async (
   }
 ): Promise<{ newBalance: number; transaction: any }> => {
   if (amount <= 0) {
-    throw new Error('Points amount must be positive');
+    throw new UserFacingError(400, 'Points amount must be positive', 'VALIDATION');
   }
 
   const config = await PointsConfig.getCurrentConfig();
@@ -45,8 +46,8 @@ export const addPoints = async (
     );
     if (!prevUser) {
       const exists = await User.findById(userId).select('_id role').session(session);
-      if (!exists) throw new Error('User not found');
-      if (exists.role === 'employee') throw new Error('Employees cannot earn or spend points');
+      if (!exists) throw new UserFacingError(404, 'User not found', 'NOT_FOUND');
+      if (exists.role === 'employee') throw new UserFacingError(400, 'Employees cannot earn or spend points', 'VALIDATION');
       throw new Error('User not found');
     }
 
@@ -103,7 +104,7 @@ export const deductPoints = async (
   }
 ): Promise<{ newBalance: number; transaction: any }> => {
   if (amount <= 0) {
-    throw new Error('Points amount must be positive');
+    throw new UserFacingError(400, 'Points amount must be positive', 'VALIDATION');
   }
 
   // Atomically decrement with guard and return the previous document
@@ -119,9 +120,9 @@ export const deductPoints = async (
   if (!prevUser) {
     // Distinguish between user-not-found, employee, and insufficient balance
     const exists = await User.findById(userId).select('_id role points');
-    if (!exists) throw new Error('User not found');
-    if (exists.role === 'employee') throw new Error('Employees cannot earn or spend points');
-    throw new Error(`Insufficient points: has ${exists.points || 0}, needs ${amount}`);
+    if (!exists) throw new UserFacingError(404, 'User not found', 'NOT_FOUND');
+    if (exists.role === 'employee') throw new UserFacingError(400, 'Employees cannot earn or spend points', 'VALIDATION');
+    throw new UserFacingError(400, `Insufficient points: has ${exists.points || 0}, needs ${amount}`, 'VALIDATION');
   }
 
   const balanceBefore = prevUser.points || 0;

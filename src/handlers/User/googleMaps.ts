@@ -51,9 +51,11 @@ export const validateAddress = async (req: Request, res: Response) => {
   } catch (error: any) {
     const timedOut = error instanceof Error && error.name === "TimeoutError";
     console.error("Address validation error:", timedOut ? "Google request timed out" : error);
-    return res.status(500).json({
+    return res.status(timedOut ? 504 : 500).json({
       success: false,
-      message: timedOut ? "Address validation timed out" : "Failed to validate address"
+      message: timedOut
+        ? "Address validation took too long. Please try again."
+        : "We couldn't validate this address right now. Please try again."
     });
   }
 };

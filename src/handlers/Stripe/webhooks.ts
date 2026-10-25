@@ -19,6 +19,7 @@ import { deductPoints } from '../../utils/pointsSystem';
 import { notify } from '../../utils/notifications/notify';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
 import { reconcileExtraCostPayment } from '../../services/extraCostPayment';
+import { safeErrorSummary } from '../../utils/safeErrorLog';
 
 const WEBHOOK_PROCESSING_LEASE_MS = 5 * 60 * 1000;
 
@@ -145,14 +146,14 @@ export const handleWebhook = async (req: Request, res: Response) => {
     );
   } catch (err: any) {
     console.error('Webhook signature verification failed:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    return res.status(400).send('Webhook Error: Invalid signature');
   }
 
   let reservation: { shouldProcess: boolean };
   try {
     reservation = await reserveWebhookEvent(event);
   } catch (reservationError: any) {
-    console.error(`Failed to persist Stripe event ${event.id} before processing:`, reservationError);
+    console.error(`Failed to persist Stripe event ${event.id} before processing:`, safeErrorSummary(reservationError));
     return res.status(500).json({ received: false, error: 'Failed to reserve webhook event' });
   }
 
@@ -237,9 +238,10 @@ export const handleWebhook = async (req: Request, res: Response) => {
 
   } catch (error: any) {
     await markWebhookEventFailed(event.id, error);
-    console.error(`Error handling webhook ${event.type}:`, error);
-    // Return 500 so Stripe retries the webhook
-    res.status(500).json({ received: false, error: error.message });
+    console.error(`Error handling webhook ${event.type}:`, safeErrorSummary(error));
+    // Return 500 so Stripe retries the webhook. Never echo provider/DB details;
+    // Stripe acts on the status, and the raw error stays in logs/StripeEvent.
+    res.status(500).json({ received: false, error: 'Webhook processing failed' });
   }
 };
 

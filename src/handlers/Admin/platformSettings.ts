@@ -185,7 +185,7 @@ export const getOdooCompanies = async (req: Request, res: Response) => {
     console.error('List Odoo companies error:', error);
     return res.status(502).json({
       success: false,
-      msg: error?.message || "Failed to load Odoo companies",
+      msg: "We couldn't load Odoo companies. Check the Odoo connection settings and try again.",
     });
   }
 };

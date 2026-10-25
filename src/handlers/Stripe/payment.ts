@@ -721,7 +721,7 @@ export const createPaymentIntent = async (
       success: false,
       error: {
         code: 'STRIPE_ERROR',
-        message: error.message || 'Failed to create payment intent'
+        message: "We couldn't start the payment. Please try again."
       }
     };
   }
@@ -956,7 +956,7 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
           success: false,
           error: {
             code: 'CHARGE_RECONCILIATION_FAILED',
-            message: `The captured Stripe payment could not be reconciled before transfer: ${paymentIntentError?.message || 'payment intent lookup failed'}`,
+            message: 'The captured payment could not be reconciled before transfer. Review the payment in Stripe and retry.',
           },
         };
       }
@@ -1039,7 +1039,7 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
           success: false,
           error: {
             code: 'CHARGE_RECONCILIATION_FAILED',
-            message: `The Stripe charge could not be reconciled before transfer: ${chargeInspectError?.message || 'settlement lookup failed'}`,
+            message: 'The payment settlement could not be reconciled before transfer. Review the payment in Stripe and retry.',
           },
         };
       }
@@ -1108,9 +1108,9 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
       if (!ambiguousTransferFailure) {
         booking.payment.transferIdempotencyKey = undefined;
       }
-      booking.payment.transferFailureReason = transferError.message;
+      booking.payment.transferFailureReason = 'Professional transfer failed. Review the payment in the payment provider and retry the transfer.';
       booking.payment.transferAttemptedAt = new Date();
-      booking.payment.refundNotes = `Transfer failed after capture: ${transferError.message}. Funds held in platform account.`;
+      booking.payment.refundNotes = 'Transfer failed after capture. Funds are held in the platform account.';
       await booking.save();
 
       await Payment.findOneAndUpdate(
@@ -1122,13 +1122,12 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
           transferIdempotencyKey: ambiguousTransferFailure
             ? booking.payment.transferIdempotencyKey
             : undefined,
-          transferFailureReason: transferError.message,
+          transferFailureReason: 'Professional transfer failed. Review the payment in the payment provider and retry the transfer.',
           transferAttemptedAt: booking.payment.transferAttemptedAt,
           capturedAt: booking.payment.capturedAt,
           stripeChargeId: booking.payment.stripeChargeId,
           metadata: {
             transferFailed: true,
-            transferError: transferError.message,
             attemptedTransferCurrency: transferCurrency,
             attemptedTransferAmount: transferAmount,
             bookingCurrency,
@@ -1187,7 +1186,7 @@ export const captureAndTransferPayment = async (bookingId: string): Promise<{ su
       success: false,
       error: {
         code: 'STRIPE_ERROR',
-        message: error.message || 'Failed to capture payment'
+        message: "We couldn't complete the payment. Check the payment status before retrying."
       }
     };
   }
@@ -1514,7 +1513,7 @@ export const refundPayment = async (req: Request, res: Response) => {
     }
     res.status(500).json({
       success: false,
-      error: { code: 'STRIPE_ERROR', message: 'Failed to refund payment' }
+      error: { code: 'STRIPE_ERROR', message: "We couldn't process the refund. Check the payment status before retrying." }
     });
   }
 };

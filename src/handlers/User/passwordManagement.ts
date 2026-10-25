@@ -100,7 +100,7 @@ export const changePassword = async (req: Request, res: Response, next: NextFunc
         console.error("❌ PASSWORD: Error changing password:", error);
         res.status(500).json({
             success: false,
-            msg: "Internal server error"
+            msg: "We couldn't change your password. Please try again."
         });
     }
 };
@@ -202,7 +202,7 @@ export const resetEmployeePassword = async (req: Request, res: Response, next: N
         console.error("❌ PASSWORD: Error resetting employee password:", error);
         res.status(500).json({
             success: false,
-            msg: "Internal server error"
+            msg: "We couldn't reset the employee's password. Please try again."
         });
     }
 };

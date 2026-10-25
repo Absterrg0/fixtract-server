@@ -1,44 +1,250 @@
 export type InvoiceViewerRole = "admin" | "customer" | "professional";
 
-/** Remove the other party's invoice artifacts, including identifiers, before returning a booking. */
-export const filterInvoiceFieldsByRole = (booking: any, viewerRole: InvoiceViewerRole) => {
-  if (!booking?.payment || viewerRole === "admin") return booking;
-  if (viewerRole === "customer") {
-    booking.payment = {
-      ...booking.payment,
-      supplierInvoiceNumber: undefined,
-      supplierCreditNoteNumber: undefined,
-      supplierInvoiceUrl: undefined,
-      supplierInvoiceUblUrl: undefined,
-      supplierCreditNoteUrl: undefined,
-      supplierCreditNoteUblUrl: undefined,
-      supplierInvoiceGeneratedAt: undefined,
-      supplierCreditNoteGeneratedAt: undefined,
-      supplierPeppolDispatchStatus: undefined,
-      supplierPeppolDispatchReason: undefined,
-      supplierPeppolDispatchReference: undefined,
-      invoiceArtifactHistory: Array.isArray(booking.payment.invoiceArtifactHistory)
-        ? booking.payment.invoiceArtifactHistory.filter((entry: any) => entry.side === "customer")
-        : booking.payment.invoiceArtifactHistory,
-    };
-    return booking;
+/**
+ * Provider diagnostics are admin-only. Historical booking/payment rows can
+ * still contain raw Odoo/Peppol text, so strip it from non-admin payloads
+ * without a DB migration.
+ */
+const PEPPOL_DIAGNOSTIC_FIELDS = [
+  "peppolDispatchReason",
+  "supplierPeppolDispatchReason",
+  "creditNotePeppolDispatchReason",
+  "supplierCreditNotePeppolDispatchReason",
+] as const;
+
+/**
+ * Internal payment diagnostics. These are written from provider/webhook
+ * failures or platform recovery notes and are never safe to show to a
+ * customer or professional. Status/amount/timestamp fields stay intact.
+ */
+const INTERNAL_PAYMENT_DIAGNOSTIC_FIELDS = [
+  "transferFailureReason",
+  "extraCostTransferFailureReason",
+  "refundNotes",
+] as const;
+
+/**
+ * `metadata` is a free-form stripe/recovery bag. Only known diagnostic keys
+ * are removed; operational flags such as `transferFailed` remain available.
+ */
+const INTERNAL_PAYMENT_METADATA_KEYS = [
+  "transferError",
+  "lastError",
+  "error",
+  "errorMessage",
+  "failureReason",
+  "transferFailureReason",
+  "providerError",
+  "stripeError",
+] as const;
+
+/** Invoice fields that belong to the customer (FIX) side. */
+const CUSTOMER_INVOICE_FIELDS = [
+  "invoiceNumber",
+  "creditNoteNumber",
+  "invoiceUrl",
+  "invoiceUblUrl",
+  "creditNoteUrl",
+  "creditNoteUblUrl",
+  "invoiceGeneratedAt",
+  "creditNoteGeneratedAt",
+  "creditNoteRelatedInvoiceNumber",
+  "peppolDispatchStatus",
+  "peppolDispatchReference",
+  "peppolDispatchedAt",
+  "peppolRetriedAt",
+  "creditNotePeppolDispatchStatus",
+  "creditNotePeppolDispatchReference",
+  "creditNoteGenerationClaim",
+] as const;
+
+/** Invoice fields that belong to the professional/supplier self-billing (SUP) side. */
+const SUPPLIER_INVOICE_FIELDS = [
+  "supplierInvoiceNumber",
+  "supplierCreditNoteNumber",
+  "supplierInvoiceUrl",
+  "supplierInvoiceUblUrl",
+  "supplierCreditNoteUrl",
+  "supplierCreditNoteUblUrl",
+  "supplierInvoiceGeneratedAt",
+  "supplierCreditNoteGeneratedAt",
+  "supplierCreditNoteRelatedInvoiceNumber",
+  "supplierPeppolDispatchStatus",
+  "supplierPeppolDispatchReference",
+  "supplierPeppolDispatchedAt",
+  "supplierCreditNotePeppolDispatchStatus",
+  "supplierCreditNotePeppolDispatchReference",
+  "supplierInvoiceGenerationClaim",
+] as const;
+
+const stripFields = (payment: Record<string, any>, fields: readonly string[]) => {
+  for (const field of fields) {
+    if (field in payment) payment[field] = undefined;
   }
-  booking.payment = {
-    ...booking.payment,
-    invoiceNumber: undefined,
-    creditNoteNumber: undefined,
-    invoiceUrl: undefined,
-    invoiceUblUrl: undefined,
-    creditNoteUrl: undefined,
-    creditNoteUblUrl: undefined,
-    invoiceGeneratedAt: undefined,
-    creditNoteGeneratedAt: undefined,
-    peppolDispatchStatus: undefined,
-    peppolDispatchReason: undefined,
-    peppolDispatchReference: undefined,
-    invoiceArtifactHistory: Array.isArray(booking.payment.invoiceArtifactHistory)
-      ? booking.payment.invoiceArtifactHistory.filter((entry: any) => entry.side === "supplier")
-      : booking.payment.invoiceArtifactHistory,
-  };
+};
+
+const filterArtifactHistory = (
+  history: unknown,
+  side: "customer" | "supplier"
+): unknown => {
+  if (!Array.isArray(history)) return history;
+  return history.filter((entry: any) => entry?.side === side);
+};
+
+const filterManualArtifactClaims = (
+  claims: unknown,
+  side: "customer" | "supplier"
+): unknown => {
+  if (!Array.isArray(claims)) return claims;
+  return claims.filter((claim: any) => claim?.side === side);
+};
+
+/**
+ * Remove non-role-specific internal/provider diagnostics from a payment
+ * payload (booking.payment subdocument or a Payment document). Never mutates
+ * the source object.
+ */
+export const stripInternalPaymentDiagnostics = <T extends Record<string, any>>(
+  payment: T
+): T => {
+  if (!payment || typeof payment !== "object") return payment;
+
+  const clean: Record<string, any> = { ...payment };
+  stripFields(clean, PEPPOL_DIAGNOSTIC_FIELDS);
+  stripFields(clean, INTERNAL_PAYMENT_DIAGNOSTIC_FIELDS);
+
+  if (Array.isArray(clean.refunds)) {
+    clean.refunds = clean.refunds.map((refund: any) =>
+      refund && typeof refund === "object" ? { ...refund, notes: undefined } : refund
+    );
+  }
+
+  if (clean.metadata && typeof clean.metadata === "object" && !Array.isArray(clean.metadata)) {
+    const metadata = { ...clean.metadata };
+    for (const key of INTERNAL_PAYMENT_METADATA_KEYS) delete metadata[key];
+    clean.metadata = metadata;
+  }
+
+  return clean as T;
+};
+
+/**
+ * Backwards-compatible name for the expanded payment sanitizer. Prefer
+ * `stripInternalPaymentDiagnostics` in new code.
+ */
+export const stripPeppolDispatchDiagnostics = <T extends Record<string, any>>(
+  payment: T
+): T => stripInternalPaymentDiagnostics(payment);
+
+/**
+ * Role-aware payment serializer. Admins keep diagnostics; everyone else gets
+ * only their own invoice side (including history/claims) and no internal
+ * provider text. Returns a new object and never mutates the source.
+ */
+export const sanitizePaymentForViewer = (
+  payment: any,
+  viewerRole: InvoiceViewerRole
+) => {
+  if (!payment || typeof payment !== "object") return payment;
+  if (viewerRole === "admin") return { ...payment };
+
+  const clean: Record<string, any> = stripInternalPaymentDiagnostics(payment);
+
+  if (viewerRole === "customer") {
+    stripFields(clean, SUPPLIER_INVOICE_FIELDS);
+  } else {
+    stripFields(clean, CUSTOMER_INVOICE_FIELDS);
+    // A client secret can confirm or capture the customer's payment. The
+    // professional only needs payout/invoice data, never the payment credential.
+    if ("stripeClientSecret" in clean) clean.stripeClientSecret = undefined;
+    if ("extraCostClientSecret" in clean) clean.extraCostClientSecret = undefined;
+  }
+
+  const side = viewerRole === "customer" ? "customer" : "supplier";
+  clean.invoiceArtifactHistory = filterArtifactHistory(clean.invoiceArtifactHistory, side);
+  clean.manualArtifactClaims = filterManualArtifactClaims(clean.manualArtifactClaims, side);
+
+  return clean;
+};
+
+/**
+ * Milestone payment records only need their schedule/status/amount fields in a
+ * booking payload. Client secrets are handed out by the dedicated
+ * payment-intent endpoint instead.
+ */
+export const sanitizeMilestonesForViewer = (milestones: unknown) => {
+  if (!Array.isArray(milestones)) return milestones;
+  return milestones.map((milestone: any) => sanitizeMilestoneForViewer(milestone));
+};
+
+export const sanitizeMilestoneForViewer = (milestone: any) => {
+  if (!milestone || typeof milestone !== "object") return milestone;
+  return { ...milestone, stripeClientSecret: undefined };
+};
+
+/**
+ * Remove the other party's invoice artifacts, including identifiers, before
+ * returning a booking. Admins keep the stored diagnostics and both sides.
+ */
+export const filterInvoiceFieldsByRole = (booking: any, viewerRole: InvoiceViewerRole) => {
+  if (!booking || typeof booking !== "object" || viewerRole === "admin") return booking;
+
+  if (booking.payment && typeof booking.payment === "object") {
+    booking.payment = sanitizePaymentForViewer(booking.payment, viewerRole);
+  }
+
+  booking.milestonePayments = sanitizeMilestonesForViewer(booking.milestonePayments);
+
   return booking;
 };
+
+/**
+ * Non-mutating booking serializer for route responses. Accepts Mongoose
+ * documents or lean objects and returns a plain object safe for the viewer.
+ */
+export const bookingForViewer = (booking: any, viewerRole: InvoiceViewerRole) => {
+  if (!booking || typeof booking !== "object" || viewerRole === "admin") return booking;
+
+  const source = typeof booking.toObject === "function" ? booking.toObject() : { ...booking };
+  return filterInvoiceFieldsByRole(source, viewerRole);
+};
+
+const referenceId = (value: any): string | undefined => {
+  if (value === null || value === undefined) return undefined;
+  // ObjectId also exposes a binary `.id` buffer, so prefer its hex form.
+  if (typeof value.toHexString === "function") return value.toHexString();
+  const raw = value._id ?? value.id ?? value;
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw.toHexString === "function") return raw.toHexString();
+  return typeof raw.toString === "function" ? raw.toString() : String(raw);
+};
+
+/**
+ * Resolve the role of the authenticated viewer relative to a booking. This is
+ * safer than trusting a single global role for dual-party routes and also
+ * recognizes project owners and admins.
+ */
+export const resolveBookingViewerRole = (
+  user: any,
+  booking: any
+): InvoiceViewerRole => {
+  if (user?.role === "admin" || user?.isAdmin === true) return "admin";
+
+  const userId = referenceId(user?._id ?? user?.id ?? user);
+  if (userId) {
+    const customerId = referenceId(booking?.customer);
+    const professionalId =
+      referenceId(booking?.professional) || referenceId(booking?.project?.professionalId);
+    if (professionalId && userId === professionalId) return "professional";
+    if (customerId && userId === customerId) return "customer";
+  }
+
+  return user?.role === "professional" ? "professional" : "customer";
+};
+
+/** Resolve which booking/payment payload the current request may receive. */
+export const bookingForRequest = (booking: any, user: any) =>
+  bookingForViewer(booking, resolveBookingViewerRole(user, booking));
+
+export const paymentForViewer = (payment: any, viewerRole: InvoiceViewerRole) =>
+  sanitizePaymentForViewer(payment, viewerRole);

@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import User from '../../models/user';
 import CronJobLock from '../../models/cronJobLock';
 import { runNotificationReminders } from '../../utils/notifications/runNotificationReminders';
-import { retryStuckPeppolDispatches } from '../../utils/retryPeppolDispatches';
+import { retryStuckPeppolDispatches, sanitizePeppolRetryResultForResponse } from '../../utils/retryPeppolDispatches';
 import { hasPermission, resolveAdminRole } from '../../utils/adminRbac/rolePermissions';
 import {
   syncPendingBrevoResubscribes,
@@ -56,6 +56,31 @@ type KpiMonthlyReportResult = {
 type AdminRecipient = { _id?: unknown; email?: string | null };
 const KPI_LOCK_LEASE_MS = 30 * 60 * 1000;
 class KpiLockLostError extends Error {}
+
+// Cron responses are operational diagnostics. Raw provider/DB text stays in server logs.
+const OPERATIONAL_ERROR = 'One or more operations failed. See server logs for details.';
+
+const sanitizeReminderErrors = (reminders: any) => ({
+  ...reminders,
+  errors: Array.isArray(reminders?.errors) ? reminders.errors.map(() => OPERATIONAL_ERROR) : [],
+});
+
+const sanitizeKpiErrors = (kpi: any) =>
+  kpi && Array.isArray(kpi.errors) ? { ...kpi, errors: kpi.errors.map(() => OPERATIONAL_ERROR) } : kpi;
+
+const sanitizeMarketingResult = (marketing: any) => ({
+  ...marketing,
+  ...(marketing?.error ? { error: OPERATIONAL_ERROR } : {}),
+  scheduledResults: Array.isArray(marketing?.scheduledResults)
+    ? marketing.scheduledResults.map((result: any) => ({
+        ...result,
+        ...(result?.error ? { error: OPERATIONAL_ERROR } : {}),
+      }))
+    : [],
+  ...(marketing?.reengagement
+    ? { reengagement: { ...marketing.reengagement, ...(marketing.reengagement.error ? { error: OPERATIONAL_ERROR } : {}) } }
+    : {}),
+});
 
 function kpiReportEmailOverride(): string[] {
   return (process.env.KPI_REPORT_EMAILS || '')
@@ -190,8 +215,7 @@ async function executeKpiMonthlyReport(
     };
   } catch (error: unknown) {
     console.error('[Cron] Monthly KPI report failed:', error);
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    await notifyKpiFailure(recipients, from, to, message);
+    await notifyKpiFailure(recipients, from, to, 'Monthly KPI report failed. Check server logs for details.');
     throw error;
   }
 }
@@ -270,7 +294,7 @@ async function maybeRunKpiMonthly(opts?: { force?: boolean }): Promise<
     } catch (unlockErr) {
       console.error('[Cron] Failed to release KPI monthly lock', unlockErr);
     }
-    const message = error instanceof Error ? error.message : 'Monthly KPI report failed';
+    const message = 'Monthly KPI report failed. See server logs for details.';
     console.error('[Cron] Piggybacked monthly KPI report failed:', error);
     return { error: message };
   }
@@ -289,10 +313,10 @@ export const runPeppolRetryCron = async (req: Request, res: Response) => {
   }
   try {
     const result = await retryStuckPeppolDispatches();
-    return res.json({ success: true, data: result });
+    return res.json({ success: true, data: sanitizePeppolRetryResultForResponse(result) });
   } catch (error: unknown) {
     console.error('[Cron] Peppol retry failed:', error);
-    return res.status(500).json({ success: false, msg: error instanceof Error ? error.message : 'Peppol retry failed' });
+    return res.status(500).json({ success: false, msg: 'Peppol dispatch retry failed. Check server logs for details.' });
   }
 };
 
@@ -356,9 +380,9 @@ export const runNotificationRemindersCron = async (req: Request, res: Response) 
       msg: 'One or more scheduled jobs failed',
       data: {
         durationMs,
-        error: remindersError || reminderJobError,
-        ...(kpiMonthly ? { kpiMonthly } : {}),
-        ...(marketing ? { marketing } : {}),
+        error: remindersError || reminderJobError ? OPERATIONAL_ERROR : undefined,
+        ...(kpiMonthly ? { kpiMonthly: sanitizeKpiErrors(kpiMonthly) } : {}),
+        ...(marketing ? { marketing: sanitizeMarketingResult(marketing) } : {}),
       },
     });
   }
@@ -366,10 +390,10 @@ export const runNotificationRemindersCron = async (req: Request, res: Response) 
   return res.json({
     success: true,
     data: {
-      ...reminders!,
+      ...sanitizeReminderErrors(reminders),
       durationMs,
-      ...(kpiMonthly ? { kpiMonthly } : {}),
-      ...(marketing ? { marketing } : {}),
+      ...(kpiMonthly ? { kpiMonthly: sanitizeKpiErrors(kpiMonthly) } : {}),
+      ...(marketing ? { marketing: sanitizeMarketingResult(marketing) } : {}),
     },
   });
 };
@@ -390,15 +414,18 @@ export const runKpiMonthlyReportCron = async (req: Request, res: Response) => {
       return res.status(502).json({
         success: false,
         msg: 'Monthly KPI report email delivery failed',
-        data,
+        data: {
+          ...data,
+          ...(data && 'error' in data ? { error: OPERATIONAL_ERROR } : {}),
+          ...(Array.isArray((data as any)?.errors) ? { errors: (data as any).errors.map(() => OPERATIONAL_ERROR) } : {}),
+        },
       });
     }
     return res.json({ success: true, data });
   } catch (error: unknown) {
     return res.status(500).json({
       success: false,
-      msg: 'Monthly KPI report failed',
-      error: error instanceof Error ? error.message : 'Unknown error',
+      msg: 'Monthly KPI report failed. Check server logs for details.',
     });
   }
 };
@@ -500,7 +527,7 @@ export const runMarketingCampaignsCron = async (req: Request, res: Response) => 
 
   try {
     const data = await executeMarketingCampaignsDaily();
-    return res.json({ success: true, data });
+    return res.json({ success: true, data: sanitizeMarketingResult(data) });
   } catch (error: unknown) {
     console.error('[Cron] Marketing campaigns failed:', error);
     return res.status(500).json({ success: false, msg: 'Marketing campaigns cron failed' });

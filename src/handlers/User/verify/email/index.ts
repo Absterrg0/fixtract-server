@@ -34,7 +34,6 @@ export const sendEmailOTP = async (req: Request, res: Response, next: NextFuncti
 
     // Generate OTP
     const otp = generateOTP();
-    console.log(`🔐 Generated EMAIL OTP for verification: ${otp} (${email})`);
     const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Update user with OTP and expiry
@@ -47,9 +46,9 @@ export const sendEmailOTP = async (req: Request, res: Response, next: NextFuncti
     const emailSent = await sendOTPEmail(email, otp, user.name);
     
     if (!emailSent) {
-      return res.status(500).json({
+      return res.status(502).json({
         success: false,
-        message: "Failed to send verification email"
+        message: "We couldn't send the verification email. Please try again in a moment."
       });
     }
 
@@ -188,7 +187,6 @@ export const resendEmailOTP = async (req: Request, res: Response, next: NextFunc
 
     // Generate new OTP
     const otp = generateOTP();
-    console.log(`🔐 Resend EMAIL OTP: ${otp} (${email})`);
     const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Update user with new OTP and expiry
@@ -201,9 +199,9 @@ export const resendEmailOTP = async (req: Request, res: Response, next: NextFunc
     const emailSent = await sendOTPEmail(email, otp, user.name);
     
     if (!emailSent) {
-      return res.status(500).json({
+      return res.status(502).json({
         success: false,
-        message: "Failed to send verification email"
+        message: "We couldn't send the verification email. Please try again in a moment."
       });
     }
 
@@ -216,6 +214,5 @@ export const resendEmailOTP = async (req: Request, res: Response, next: NextFunc
     next(error);
   }
 };
-
 
 

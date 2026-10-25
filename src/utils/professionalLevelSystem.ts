@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import User from '../models/user';
+import { UserFacingError } from './appErrors';
 import Booking from '../models/booking';
 import PointTransaction from '../models/pointTransaction';
 import ProfessionalLevelConfig, { ProfessionalLevelName } from '../models/professionalLevelConfig';
@@ -65,7 +66,7 @@ export const getProfessionalMetrics = async (
   const findOpts = opts?.session ? { session: opts.session } : {};
   const user = await User.findById(professionalId, null, findOpts).select('createdAt');
   if (!user) {
-    throw new Error('Professional not found');
+    throw new UserFacingError(404, 'Professional not found', 'NOT_FOUND');
   }
 
   // Days since account creation
@@ -165,7 +166,7 @@ export const calculateProfessionalLevel = async (
   const activeLevels = config.levels.filter((l) => l.isActive).sort((a, b) => a.order - b.order);
 
   if (activeLevels.length === 0) {
-    throw new Error('No active professional levels configured');
+    throw new UserFacingError(400, 'No active professional levels are configured. Contact an administrator.', 'VALIDATION');
   }
 
   // Find the highest level where ALL criteria are met
@@ -322,7 +323,7 @@ export const applyPointsBoost = async (
     User.findById(professionalId).select('professionalLevel')
   ]);
   if (!professional) {
-    throw new Error('Professional not found');
+    throw new UserFacingError(404, 'Professional not found', 'NOT_FOUND');
   }
 
   // Use the professional's current level to determine the points required per booking credit
@@ -332,7 +333,7 @@ export const applyPointsBoost = async (
 
   const boostedBookings = Math.floor(pointsToSpend / boostRatio);
   if (boostedBookings < 1) {
-    throw new Error(`Need at least ${boostRatio} points for 1 booking credit`);
+    throw new UserFacingError(400, `You need at least ${boostRatio} points for 1 booking credit`, 'VALIDATION');
   }
 
   // Only spend exact multiple

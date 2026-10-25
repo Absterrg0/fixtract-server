@@ -359,7 +359,7 @@ export async function syncCmsTranslations(
       const isDuplicateKey = err?.code === 11000;
       const message = isDuplicateKey
         ? `A ${String(source.type)} with slug "${String(source.slug)}" already exists in locale ${locale}`
-        : err?.message ?? String(err);
+        : 'Translation failed. Check server logs for details.';
       console.error(`[cmsTranslations] sync failed for locale ${locale} (slug ${source.slug}):`, err);
       results.push({ locale, status: "failed", error: message });
     }
@@ -394,7 +394,7 @@ export async function moveAutoTranslatedSiblings(
       const message =
         err?.code === 11000
           ? `Slug "${String(source.slug)}" already exists in locale ${locale}`
-          : err?.message ?? String(err);
+          : 'Translation update failed. Check server logs for details.';
       results.push({ locale, status: "failed", error: message });
     }
   }

@@ -11,6 +11,7 @@ import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../util
 import { generateReferralCode, validateReferralCode, createReferral } from "../../utils/referralSystem";
 import { sendIdExpiredEmail } from "../../utils/emailService";
 import { permissionsForLevels, permissionsForRole, resolveAdminRole } from "../../utils/adminRbac/rolePermissions";
+import { sendHandlerError } from '../../utils/handlerErrors';
 
 function adminAccessFields(user: { role?: string; adminRole?: string; adminPermissionLevels?: any; timeZone?: string }) {
   if (user.role !== 'admin') return {};
@@ -328,7 +329,6 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
     let welcomeEmailSent = false;
 
     try {
-      console.log(`🔐 Generated EMAIL OTP for signup: ${emailOtp} (${user.email})`);
       emailOtpSent = await sendOTPEmail(user.email, emailOtp, user.name);
     } catch (e) {
       console.error('Error sending email OTP during signup:', e);
@@ -428,26 +428,7 @@ export const SignUp = async (req: Request, res: Response, next: NextFunction) =>
 
   } catch (error: any) {
     console.error('SignUp error:', error);
-    
-    // Handle mongoose validation errors
-    if (error.name === 'ValidationError') {
-      const messages = Object.values(error.errors).map((err: any) => err.message);
-      return res.status(400).json({
-        success: false,
-        msg: messages.join(', ')
-      });
-    }
-
-    // Handle duplicate key errors
-    if (error.code === 11000) {
-      const field = Object.keys(error.keyPattern)[0];
-      return res.status(409).json({
-        success: false,
-        msg: `An account with this ${field} already exists`
-      });
-    }
-
-    next(error);
+    return sendHandlerError(res, error, "We couldn't create your account. Please try again.");
   }
 };
 

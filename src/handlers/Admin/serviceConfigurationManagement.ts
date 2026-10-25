@@ -4,14 +4,15 @@ import CmsContent from '../../models/cmsContent';
 import { IUser } from '../../models/user';
 import { toSlug } from '../../utils/slug';
 import { withArticle47ProfessionalQuestion, ARTICLE_47_FIELD_NAME, resolveArticle47Classification, normalizeArticle47Classification, DEFAULT_ARTICLE_47_CLASSIFICATION } from '../../utils/vatManagement';
+import { safeErrorSummary } from '../../utils/safeErrorLog';
 
 function respondWithSchemaError(res: Response, error: any, fallbackMessage: string) {
     if (error?.name === 'ValidationError' && error.errors) {
         const fieldErrors = Object.entries(error.errors).map(([path, e]: [string, any]) => ({
             path,
             kind: e?.kind,
-            message: e?.message,
-            value: e?.value,
+            message: typeof e?.message === 'string' ? e.message : `Invalid value for "${path}".`,
+            ...(typeof e?.value === 'string' || typeof e?.value === 'number' ? { value: e.value } : {}),
         }));
         return res.status(400).json({
             success: false,
@@ -20,21 +21,21 @@ function respondWithSchemaError(res: Response, error: any, fallbackMessage: stri
         });
     }
     if (error?.name === 'CastError') {
+        const field = typeof error.path === 'string' && error.path ? error.path : 'value';
         return res.status(400).json({
             success: false,
             message: fallbackMessage,
             fieldErrors: [{
-                path: error.path,
+                path: field,
                 kind: 'CastError',
-                message: error.message,
-                value: error.value,
+                message: `Invalid value for "${field}".`,
             }],
         });
     }
+    console.error('[serviceConfiguration] unexpected error:', safeErrorSummary(error));
     return res.status(500).json({
         success: false,
         message: fallbackMessage,
-        error: error?.message,
     });
 }
 
@@ -58,7 +59,7 @@ async function ensureServiceLanding(serviceName: string, adminId?: string) {
             seo: {},
         });
     } catch (err) {
-        console.error('[ensureServiceLanding] failed to auto-create landing:', err);
+        console.error('[ensureServiceLanding] failed to auto-create landing:', safeErrorSummary(err));
     }
 }
 
@@ -84,11 +85,7 @@ export const getAllServiceConfigurations = async (req: Request, res: Response) =
             data: configurations
         });
     } catch (error: any) {
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching service configurations',
-            error: error.message
-        });
+        return respondWithSchemaError(res, error, "We couldn't load service configurations. Please try again.");
     }
 };
 
@@ -114,11 +111,7 @@ export const getServiceConfigurationById = async (req: Request, res: Response) =
             data: configuration
         });
     } catch (error: any) {
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching service configuration',
-            error: error.message
-        });
+        return respondWithSchemaError(res, error, "We couldn't load this service configuration. Please try again.");
     }
 };
 
@@ -283,8 +276,8 @@ export const createServiceConfiguration = async (req: Request, res: Response) =>
             data: configuration
         });
     } catch (error: any) {
-        console.error('[createServiceConfiguration] failed:', error);
-        return respondWithSchemaError(res, error, 'Error creating service configuration');
+        console.error('[createServiceConfiguration] failed:', safeErrorSummary(error));
+        return respondWithSchemaError(res, error, "We couldn't create the service configuration. Please try again.");
     }
 };
 
@@ -337,8 +330,8 @@ export const updateServiceConfiguration = async (req: Request, res: Response) =>
             data: configuration
         });
     } catch (error: any) {
-        console.error('[updateServiceConfiguration] failed:', { id: req.params?.id, error });
-        return respondWithSchemaError(res, error, 'Error updating service configuration');
+        console.error('[updateServiceConfiguration] failed:', { id: req.params?.id, error: safeErrorSummary(error) });
+        return respondWithSchemaError(res, error, "We couldn't update the service configuration. Please try again.");
     }
 };
 
@@ -364,11 +357,7 @@ export const deleteServiceConfiguration = async (req: Request, res: Response) =>
             message: 'Service configuration deleted successfully'
         });
     } catch (error: any) {
-        res.status(500).json({
-            success: false,
-            message: 'Error deleting service configuration',
-            error: error.message
-        });
+        return respondWithSchemaError(res, error, "We couldn't delete this service configuration. Please try again.");
     }
 };
 
@@ -398,11 +387,7 @@ export const toggleServiceConfigurationActive = async (req: Request, res: Respon
             data: configuration
         });
     } catch (error: any) {
-        res.status(500).json({
-            success: false,
-            message: 'Error toggling service configuration status',
-            error: error.message
-        });
+        return respondWithSchemaError(res, error, "We couldn't update this service configuration. Please try again.");
     }
 };
 
@@ -419,11 +404,7 @@ export const getCategories = async (req: Request, res: Response) => {
             data: categories.sort()
         });
     } catch (error: any) {
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching categories',
-            error: error.message
-        });
+        return respondWithSchemaError(res, error, "We couldn't load categories. Please try again.");
     }
 };
 
@@ -442,10 +423,6 @@ export const getServicesByCategory = async (req: Request, res: Response) => {
             data: services.sort()
         });
     } catch (error: any) {
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching services',
-            error: error.message
-        });
+        return respondWithSchemaError(res, error, "We couldn't load services. Please try again.");
     }
 };

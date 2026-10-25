@@ -5,6 +5,7 @@ import multer from 'multer';
 import path from 'path';
 import crypto from 'crypto';
 import { fromBuffer as fileTypeFromBuffer } from 'file-type';
+import { UserFacingError } from './appErrors';
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -35,7 +36,7 @@ const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilt
   if (allowedMimeTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file type. Allowed: JPEG, PNG, WebP, PDF, MP4, MOV, AVI'));
+    cb(new UserFacingError(400, 'Invalid file type. Allowed: JPEG, PNG, WebP, PDF, MP4, MOV, AVI', 'VALIDATION'));
   }
 };
 
@@ -53,7 +54,7 @@ const reviewImageFilter = (req: Request, file: Express.Multer.File, cb: multer.F
   if (ALLOWED_IMAGE_MIMES.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file type. Only JPEG, PNG, and WebP images are allowed for reviews'));
+    cb(new UserFacingError(400, 'Invalid file type. Only JPEG, PNG, and WebP images are allowed for reviews', 'VALIDATION'));
   }
 };
 
@@ -71,7 +72,7 @@ const rfqFileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileF
   if (allowedMimeTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file type. Allowed: JPEG, PNG, WebP, PDF, TXT, DOC, DOCX, XLS, XLSX'));
+    cb(new UserFacingError(400, 'Invalid file type. Allowed: JPEG, PNG, WebP, PDF, TXT, DOC, DOCX, XLS, XLSX', 'VALIDATION'));
   }
 };
 
@@ -95,7 +96,7 @@ const profileImageFilter = (req: Request, file: Express.Multer.File, cb: multer.
   if (ALLOWED_IMAGE_MIMES.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file type. Only JPEG, PNG, and WebP images are allowed for profile images'));
+    cb(new UserFacingError(400, 'Invalid file type. Only JPEG, PNG, and WebP images are allowed for profile images', 'VALIDATION'));
   }
 };
 
@@ -144,7 +145,7 @@ export const uploadToS3 = async (
     };
   } catch (error) {
     console.error('❌ S3: Upload failed:', error);
-    throw new Error('Failed to upload file to S3');
+    throw new UserFacingError(502, "We couldn't store the uploaded file. Please try again.", 'UNAVAILABLE');
   }
 };
 
@@ -168,7 +169,7 @@ export const uploadBufferToS3 = async (
     return `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION || 'us-east-1'}.amazonaws.com/${encodedKey}`;
   } catch (error) {
     console.error('S3 buffer upload failed:', error);
-    throw new Error('Failed to upload buffer to S3');
+    throw new UserFacingError(502, "We couldn't store the generated file. Please try again.", 'UNAVAILABLE');
   }
 };
 
@@ -188,7 +189,7 @@ export const deleteFromS3 = async (key: string): Promise<void> => {
     console.log(`✅ S3: File deleted successfully - ${key}`);
   } catch (error) {
     console.error('❌ S3: Delete failed:', error);
-    throw new Error('Failed to delete file from S3');
+    throw new UserFacingError(502, "We couldn't delete the stored file. Please try again.", 'UNAVAILABLE');
   }
 };
 
@@ -204,7 +205,7 @@ export const getPresignedUrl = async (key: string, expiresIn: number = 3600): Pr
     return signedUrl;
   } catch (error) {
     console.error('❌ S3: Failed to generate presigned URL:', error);
-    throw new Error('Failed to generate file access URL');
+    throw new UserFacingError(502, "We couldn't open this file. Please try again.", 'UNAVAILABLE');
   }
 };
 

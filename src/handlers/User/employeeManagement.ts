@@ -189,7 +189,7 @@ export const inviteEmployee = async (req: Request, res: Response, next: NextFunc
         console.error("❌ EMPLOYEE: Error inviting employee:", error);
         res.status(500).json({
             success: false,
-            msg: "Internal server error"
+            msg: "We couldn't send the invitation. Please try again."
         });
     }
 };
@@ -298,7 +298,7 @@ export const getEmployees = async (req: Request, res: Response, next: NextFuncti
         console.error("❌ EMPLOYEE: Error getting employees:", error);
         res.status(500).json({
             success: false,
-            msg: "Internal server error"
+            msg: "We couldn't load employees. Please try again."
         });
     }
 };
@@ -372,7 +372,7 @@ export const updateEmployeeStatus = async (req: Request, res: Response, next: Ne
         console.error("❌ EMPLOYEE: Error updating employee status:", error);
         res.status(500).json({
             success: false,
-            msg: "Internal server error"
+            msg: "We couldn't update the employee. Please try again."
         });
     }
 };
@@ -480,9 +480,9 @@ export const updateEmployeeEmail = async (req: Request, res: Response, next: Nex
                 console.log(`📧 EMPLOYEE: Invitation email sent to ${normalizedEmail}`);
             } catch (emailError) {
                 console.error(`❌ EMPLOYEE: Failed to send invitation email:`, emailError);
-                return res.status(500).json({
+                return res.status(502).json({
                     success: false,
-                    msg: "Failed to send invitation email. Employee email not updated."
+                    msg: "We couldn't send the invitation email. The employee's email was not changed. Please try again."
                 });
             }
 
@@ -518,7 +518,7 @@ export const updateEmployeeEmail = async (req: Request, res: Response, next: Nex
         console.error("❌ EMPLOYEE: Error updating employee email:", error);
         res.status(500).json({
             success: false,
-            msg: "Internal server error"
+            msg: "We couldn't update the employee's email. Please try again."
         });
     }
 };
@@ -581,7 +581,7 @@ export const removeEmployee = async (req: Request, res: Response, next: NextFunc
         console.error("❌ EMPLOYEE: Error removing employee:", error);
         res.status(500).json({
             success: false,
-            msg: "Internal server error"
+            msg: "We couldn't remove the employee. Please try again."
         });
     }
 };
@@ -660,7 +660,7 @@ export const acceptInvitation = async (req: Request, res: Response, next: NextFu
         console.error("❌ EMPLOYEE: Error accepting invitation:", error);
         res.status(500).json({
             success: false,
-            msg: "Internal server error"
+            msg: "We couldn't activate this invitation. Please try again."
         });
     }
 };
