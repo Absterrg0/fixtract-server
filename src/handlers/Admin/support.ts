@@ -7,10 +7,35 @@ import MeetingRequest, {
 } from "../../models/meetingRequest";
 import connectDB from "../../config/db";
 import { IUser } from "../../models/user";
+import User from "../../models/user";
 import { params } from "../../utils/requestParams";
 import { isAdminAvailableForMeeting } from "../User/adminAvailability";
+import { sendSupportReplyEmail } from "../../utils/support/emails";
+import { UserFacingError } from "../../utils/appErrors";
+import {
+  professionalHasBusyConflict,
+  resolveStoredCalendarTimeZone,
+} from "../../utils/support/availability";
+import {
+  buildCalendarReservationKeysForInterval,
+  releaseCalendarReservations,
+  reserveCalendarKeys,
+} from "../../utils/support/calendarReservations";
 
 const isValidObjectId = (id: string): boolean => mongoose.Types.ObjectId.isValid(id);
+
+/**
+ * Optimistic-concurrency filter for the legacy schedule update. The document
+ * is loaded before the reservation/schedule transaction; if a delete or another
+ * writer changed it first, the update must match nothing and abort the
+ * transaction instead of committing orphan reservation keys.
+ */
+const meetingRequestVersionFilter = (doc: { __v?: number }): Record<string, unknown> => {
+  const version = Number(doc.__v || 0);
+  return version === 0
+    ? { $or: [{ __v: 0 }, { __v: { $exists: false } }] }
+    : { __v: version };
+};
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -90,10 +115,24 @@ export const adminUpdateTicket = async (req: Request, res: Response) => {
       });
     }
 
+    if (
+      nextStatus === "closed" &&
+      ticket.kind === "meeting" &&
+      ticket.meeting &&
+      ["pending", "scheduled"].includes(ticket.meeting.status)
+    ) {
+      return res.status(409).json({
+        success: false,
+        msg: "Cancel or complete the meeting before closing this request.",
+      });
+    }
+
     if (nextStatus) ticket.status = nextStatus;
 
+    let replyBody: string | undefined;
     if (hasReply) {
       const body = req.body.reply.trim().slice(0, 5000);
+      replyBody = body;
       ticket.replies.push({
         authorId: admin._id,
         authorRole: "admin",
@@ -103,8 +142,33 @@ export const adminUpdateTicket = async (req: Request, res: Response) => {
     }
 
     await ticket.save();
-    return res.status(200).json({ success: true, data: ticket });
+    let emailSent: boolean | undefined;
+    if (replyBody) {
+      try {
+        await ticket.populate("userId", "name email isEmailVerified deletedAt");
+        emailSent = await sendSupportReplyEmail(
+          ticket.userId as unknown as { name?: string; email?: string; isEmailVerified?: boolean },
+          ticket as unknown as never,
+          replyBody,
+        );
+      } catch (error) {
+        console.error("Support reply email failed:", error);
+        emailSent = false;
+      }
+    }
+    return res.status(200).json({
+      success: true,
+      data: ticket,
+      ...(emailSent !== undefined ? { emailSent } : {}),
+    });
   } catch (error) {
+    if ((error as { name?: string })?.name === "VersionError") {
+      return res.status(409).json({
+        success: false,
+        msg: "This ticket changed while you were editing it. Refresh and try again.",
+        code: "CONFLICT",
+      });
+    }
     console.error("Admin update ticket error:", error);
     return res.status(500).json({ success: false, msg: "Failed to update ticket" });
   }
@@ -195,6 +259,32 @@ export const adminUpdateMeetingRequest = async (req: Request, res: Response) => 
         return res.status(409).json({ success: false, msg: "The selected time is outside your availability or is blocked" });
       }
 
+      const professional = await User.findById(doc.userId).select(
+        "name email timeZone businessInfo role deletedAt",
+      );
+      if (!professional || professional.deletedAt) {
+        return res.status(404).json({ success: false, msg: "Meeting requester not found" });
+      }
+      const professionalTimeZone = resolveStoredCalendarTimeZone(professional);
+      if (
+        await professionalHasBusyConflict(
+          doc.userId,
+          professionalTimeZone,
+          effectiveScheduledAt,
+          doc.durationMinutes,
+          undefined,
+          {
+            calendarTimeZone: professionalTimeZone,
+            excludeMeetingRequestId: String(doc._id),
+          },
+        )
+      ) {
+        return res.status(409).json({
+          success: false,
+          msg: "The selected time overlaps a booking, meeting, or support reservation on the professional's calendar",
+        });
+      }
+
       const windowEnd = new Date(effectiveScheduledAt.getTime() + doc.durationMinutes * 60 * 1000);
       const maxDurationMinutes = 240;
       const updateFields: Record<string, unknown> = {};
@@ -207,6 +297,7 @@ export const adminUpdateMeetingRequest = async (req: Request, res: Response) => 
 
       const session = await mongoose.startSession();
       let scheduleConflict = false;
+      let reservationError: unknown;
       try {
         await session.withTransaction(async () => {
           const nearbyRequests = await MeetingRequest.find({
@@ -227,14 +318,61 @@ export const adminUpdateMeetingRequest = async (req: Request, res: Response) => 
             return;
           }
 
-          await MeetingRequest.updateOne({ _id: doc._id }, { $set: updateFields }, { session });
+          // Reserve the same shared calendar keys as support meetings and
+          // project meetings so the three writers cannot double-book.
+          await releaseCalendarReservations('meeting_request', doc._id, session);
+          await reserveCalendarKeys(
+            {
+              sourceType: 'meeting_request',
+              sourceId: doc._id,
+              keys: [
+                ...buildCalendarReservationKeysForInterval({
+                  role: 'admin',
+                  userId: admin._id,
+                  startAt: effectiveScheduledAt,
+                  endAt: windowEnd,
+                }),
+                ...buildCalendarReservationKeysForInterval({
+                  role: 'professional',
+                  userId: doc.userId,
+                  startAt: effectiveScheduledAt,
+                  endAt: windowEnd,
+                }),
+              ],
+            },
+            session,
+          );
+          const updated = await MeetingRequest.updateOne(
+            { _id: doc._id, ...meetingRequestVersionFilter(doc) },
+            { $set: updateFields, $inc: { __v: 1 } },
+            { session },
+          );
+          if (updated.matchedCount === 0) {
+            throw new UserFacingError(
+              409,
+              "This meeting request changed concurrently. Refresh and try again.",
+              "CONFLICT",
+            );
+          }
         });
+      } catch (error) {
+        reservationError = error;
       } finally {
         await session.endSession();
       }
 
       if (scheduleConflict) {
         return res.status(409).json({ success: false, msg: "The selected time overlaps another scheduled support meeting" });
+      }
+      if (reservationError) {
+        if (reservationError instanceof UserFacingError) {
+          return res.status(reservationError.status).json({
+            success: false,
+            msg: reservationError.message,
+            code: reservationError.code,
+          });
+        }
+        throw reservationError;
       }
 
       const refreshed = await MeetingRequest.findById(doc._id);
@@ -249,6 +387,9 @@ export const adminUpdateMeetingRequest = async (req: Request, res: Response) => 
     }
 
     await doc.save();
+    if (doc.status !== 'scheduled') {
+      await releaseCalendarReservations('meeting_request', doc._id);
+    }
     return res.status(200).json({ success: true, data: doc });
   } catch (error) {
     console.error("Admin update meeting request error:", error);

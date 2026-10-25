@@ -5,33 +5,39 @@ import MeetingRequest from "../../models/meetingRequest";
 import connectDB from "../../config/db";
 import { IUser } from "../../models/user";
 import { params } from "../../utils/requestParams";
+import { createSupportItemForUser } from "../Support/service";
+import { serializeSupportTicketUser } from "../../utils/support/serializers";
+import { sendHandlerError } from "../../utils/handlerErrors";
 
 const isValidObjectId = (id: string): boolean => mongoose.Types.ObjectId.isValid(id);
+
+const requesterFromUser = (user: IUser) => ({
+  _id: String(user._id),
+  id: String(user._id),
+  name: user.name,
+  email: user.email,
+  role: user.role,
+});
 
 export const createSupportTicket = async (req: Request, res: Response) => {
   try {
     const user = req.user as IUser;
-    const subject = typeof req.body?.subject === "string" ? req.body.subject.trim() : "";
-    const description = typeof req.body?.description === "string" ? req.body.description.trim() : "";
-
-    if (!subject || subject.length > 200) {
-      return res.status(400).json({ success: false, msg: "Subject is required (max 200 chars)" });
-    }
-    if (!description || description.length > 5000) {
-      return res.status(400).json({ success: false, msg: "Description is required (max 5000 chars)" });
-    }
-
     await connectDB();
-    const ticket = await SupportTicket.create({
-      userId: user._id,
-      subject,
-      description,
+    // Legacy professional route: older clients do not send reason/locale. The
+    // canonical reason ID "other" keeps the compatibility path working while
+    // new records still get a unique number and acknowledgement email.
+    const result = await createSupportItemForUser({
+      user,
+      body: { ...(req.body || {}), kind: "ticket" },
+      options: { legacyTicketWithoutReason: true },
     });
-
-    return res.status(201).json({ success: true, data: ticket });
+    return res.status(201).json({
+      success: true,
+      data: await serializeSupportTicketUser(result.ticket, { requester: requesterFromUser(user) }),
+      emailSent: result.emailSent,
+    });
   } catch (error) {
-    console.error("Create support ticket error:", error);
-    return res.status(500).json({ success: false, msg: "Failed to create ticket" });
+    return sendHandlerError(res, error, "Failed to create ticket");
   }
 };
 
@@ -39,11 +45,18 @@ export const listMyTickets = async (req: Request, res: Response) => {
   try {
     const user = req.user as IUser;
     await connectDB();
-    const items = await SupportTicket.find({ userId: user._id })
+    const tickets = await SupportTicket.find({ userId: user._id })
       .sort({ updatedAt: -1 })
       .limit(200)
       .lean();
-    return res.status(200).json({ success: true, data: { items } });
+    return res.status(200).json({
+      success: true,
+      data: {
+        items: await Promise.all(tickets.map((ticket) =>
+          serializeSupportTicketUser(ticket, { requester: requesterFromUser(user) }),
+        )),
+      },
+    });
   } catch (error) {
     console.error("List my tickets error:", error);
     return res.status(500).json({ success: false, msg: "Failed to load tickets" });
@@ -75,7 +88,10 @@ export const replyToMyTicket = async (req: Request, res: Response) => {
       createdAt: new Date(),
     });
     await ticket.save();
-    return res.status(200).json({ success: true, data: ticket });
+    return res.status(200).json({
+      success: true,
+      data: await serializeSupportTicketUser(ticket, { requester: requesterFromUser(user) }),
+    });
   } catch (error) {
     console.error("Reply to ticket error:", error);
     return res.status(500).json({ success: false, msg: "Failed to reply" });

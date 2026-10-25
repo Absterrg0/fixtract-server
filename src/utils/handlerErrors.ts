@@ -57,6 +57,22 @@ function castErrorResult(error: unknown): HandlerErrorResult | null {
   };
 }
 
+function versionErrorResult(error: unknown): HandlerErrorResult | null {
+  if (!error || typeof error !== 'object' || (error as { name?: string }).name !== 'VersionError') {
+    return null;
+  }
+  // Mongoose optimistic concurrency: another request changed this document
+  // between the read and the write. Never silently overwrite it.
+  return {
+    status: 409,
+    body: {
+      success: false,
+      msg: 'This item changed while you were editing it. Refresh and try again.',
+      code: 'CONFLICT',
+    },
+  };
+}
+
 function bsonErrorResult(error: unknown): HandlerErrorResult | null {
   if (!error || typeof error !== 'object') return null;
   const name = (error as { name?: string }).name;
@@ -199,6 +215,9 @@ export function toHandlerError(error: unknown, fallback: string): HandlerErrorRe
 
   const cast = castErrorResult(error);
   if (cast) return cast;
+
+  const version = versionErrorResult(error);
+  if (version) return version;
 
   const bson = bsonErrorResult(error);
   if (bson) return bson;

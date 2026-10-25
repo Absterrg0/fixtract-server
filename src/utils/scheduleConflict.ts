@@ -1,5 +1,6 @@
 import { Types } from "mongoose";
 import Booking from "../models/booking";
+import { findSharedCalendarConflicts } from "./support/calendarBusy";
 
 export interface TeamConflict {
   bookingId: string;
@@ -9,6 +10,8 @@ export interface TeamConflict {
   overlapEnd: Date;
   otherStart?: Date;
   otherEnd?: Date;
+  /** Where the conflict comes from; bookings are the historical default. */
+  source?: "booking" | "support" | "meeting" | "meeting_request";
 }
 
 const ACTIVE_STATUSES = ["booked", "in_progress", "rescheduling_requested"];
@@ -34,29 +37,45 @@ export const findTeamConflicts = async (
     return [];
   }
 
-  const memberIdStrings = teamMemberIds.map(toIdString).filter(Boolean);
+  const memberIdStrings: string[] = teamMemberIds.map((id) => toIdString(id)).filter(Boolean);
   if (memberIdStrings.length === 0) return [];
 
+  const memberObjectIds = memberIdStrings.map((id) => new Types.ObjectId(id));
   const conflicts = await Booking.find({
     _id: { $ne: new Types.ObjectId(excludeBookingId) },
     status: { $in: ACTIVE_STATUSES },
-    assignedTeamMembers: { $in: memberIdStrings.map((id) => new Types.ObjectId(id)) },
     scheduledStartDate: { $lt: proposedEnd },
-    $or: [
-      { scheduledBufferEndDate: { $gt: proposedStart } },
-      { scheduledExecutionEndDate: { $gt: proposedStart } },
+    $and: [
+      {
+        $or: [
+          { assignedTeamMembers: { $in: memberObjectIds } },
+          { professional: { $in: memberObjectIds } },
+        ],
+      },
+      {
+        $or: [
+          { scheduledBufferEndDate: { $gt: proposedStart } },
+          { scheduledExecutionEndDate: { $gt: proposedStart } },
+        ],
+      },
     ],
   })
-    .select("bookingNumber assignedTeamMembers scheduledStartDate scheduledExecutionEndDate scheduledBufferEndDate")
+    .select("bookingNumber assignedTeamMembers professional scheduledStartDate scheduledExecutionEndDate scheduledBufferEndDate")
     .lean();
 
-  return conflicts.map((b: any) => {
+  const result: TeamConflict[] = conflicts.map((b: any) => {
     const otherStart: Date | undefined = b.scheduledStartDate;
     const otherEnd: Date | undefined = b.scheduledBufferEndDate || b.scheduledExecutionEndDate;
     const overlapStart = otherStart && otherStart > proposedStart ? otherStart : proposedStart;
     const overlapEnd = otherEnd && otherEnd < proposedEnd ? otherEnd : proposedEnd;
-    const otherMembers = (b.assignedTeamMembers || []).map(toIdString);
-    const intersecting = otherMembers.filter((id: string) => memberIdStrings.includes(id));
+    const otherMembers: string[] = (b.assignedTeamMembers || [])
+      .map((member: any) => toIdString(member));
+    const professionalId = toIdString(b.professional);
+    if (professionalId && memberIdStrings.includes(professionalId)) {
+      otherMembers.push(professionalId);
+    }
+    const intersecting = Array.from(new Set<string>(otherMembers))
+      .filter((id) => memberIdStrings.includes(id));
     return {
       bookingId: b._id.toString(),
       bookingNumber: b.bookingNumber,
@@ -65,6 +84,25 @@ export const findTeamConflicts = async (
       overlapEnd,
       otherStart,
       otherEnd,
+      source: "booking" as const,
     };
   });
+
+  // Support meetings, project Meetings and legacy requests are not Booking
+  // rows but occupy the same people. Include them without pretending they are
+  // bookings, so a reschedule request/accept cannot double-book a support slot.
+  const shared = await findSharedCalendarConflicts(memberIdStrings, proposedStart, proposedEnd);
+  for (const source of shared) {
+    result.push({
+      bookingId: source.id,
+      teamMemberIds: [source.userId],
+      overlapStart: new Date(Math.max(source.start, proposedStart.getTime())),
+      overlapEnd: new Date(Math.min(source.end, proposedEnd.getTime())),
+      otherStart: new Date(source.start),
+      otherEnd: new Date(source.end),
+      source: source.source,
+    });
+  }
+
+  return result;
 };

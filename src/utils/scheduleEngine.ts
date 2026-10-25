@@ -5,6 +5,7 @@ import Project from "../models/project";
 import User from "../models/user";
 import { DEFAULT_AVAILABILITY, resolveAvailability } from "./availabilityHelpers";
 import { DateTime } from "luxon";
+import { loadSharedCalendarBusy } from "./support/calendarBusy";
 
 type DurationUnit = "hours" | "days";
 
@@ -527,6 +528,22 @@ const buildBlockedData = async (
     }
   });
 
+  // Support meetings, project Meetings and legacy requests occupy the same
+  // calendar as bookings. In single-resource mode the project-wide block list
+  // is that member's calendar, so include only that member's intervals. In
+  // multi-resource mode each member's own intervals are added per member, so an
+  // unrelated employee is never marked busy.
+  if (teamMemberIds.length === 1) {
+    const sharedBusy = await loadSharedCalendarBusy([teamMemberIds[0]]);
+    for (const interval of sharedBusy.byUser.get(teamMemberIds[0]) || []) {
+      blockedRanges.push({
+        start: new Date(interval.start),
+        end: new Date(interval.end),
+        reason: "shared-calendar",
+      });
+    }
+  }
+
   if (customerBlocks?.dates) {
     customerBlocks.dates.forEach((blocked) => {
       if (!blocked?.date) return;
@@ -820,6 +837,31 @@ const buildPerMemberBlockedData = async (
     companyBlockedRanges,
     teamMemberIds
   );
+
+  // Step 4b: Add each member's own support/Meeting/legacy-request intervals.
+  // Batched once; intervals are attached only to the members they belong to.
+  if (teamMemberIds.length > 0) {
+    const sharedBusy = await loadSharedCalendarBusy(teamMemberIds);
+    for (const memberId of teamMemberIds) {
+      const intervals = sharedBusy.byUser.get(memberId) || [];
+      if (intervals.length === 0) continue;
+      let memberData = memberBlocksMap.get(memberId);
+      if (!memberData) {
+        memberData = {
+          blockedDates: new Set<string>(companyBlockedDates),
+          blockedRanges: [...companyBlockedRanges],
+        };
+        memberBlocksMap.set(memberId, memberData);
+      }
+      for (const interval of intervals) {
+        memberData.blockedRanges.push({
+          start: new Date(interval.start),
+          end: new Date(interval.end),
+          reason: "shared-calendar",
+        });
+      }
+    }
+  }
 
   // Step 5: Ensure all team members have entries and populate perMemberData
   teamMemberIds.forEach((memberId) => {

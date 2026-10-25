@@ -36,6 +36,12 @@ import { MAX_RESCHEDULES_PER_BOOKING } from '../../constants/booking';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { findTeamConflicts } from '../../utils/scheduleConflict';
 import { releaseScheduleSlots } from '../../utils/scheduleRelease';
+import { withCalendarTransactionIfConnected } from '../../utils/support/calendarReservations';
+import {
+  findBookingCalendarConflictsForSchedule,
+  replaceBookingCalendar,
+  releaseBookingCalendar,
+} from '../../utils/support/bookingCalendar';
 import User from '../../models/user';
 import WarrantyClaim from '../../models/warrantyClaim';
 import { bookingForRequest } from '../../utils/invoiceVisibility';
@@ -677,6 +683,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           booking.milestonePayments = refreshed.milestonePayments;
           booking.__v = refreshed.__v;
         }
+        await releaseBookingCalendar(booking._id);
         return { alreadyCompleted: false as const };
       };
 
@@ -884,6 +891,10 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
     }
 
     await booking.save();
+
+    if (['cancelled', 'refunded', 'completed'].includes(requestedStatus)) {
+      await releaseBookingCalendar(booking._id);
+    }
 
     if (
       requestedStatus === 'in_progress' &&
@@ -1140,7 +1151,40 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       booking.rfqData.additionalNotes = additionalNotes;
     }
 
-    await booking.save();
+    const candidate = {
+      _id: booking._id,
+      professional: (booking.professional as any)?._id || booking.professional,
+      assignedTeamMembers:
+        scheduleUpdate.data.assignedTeamMembers || booking.assignedTeamMembers || [],
+      resourcePlan: booking.resourcePlan || [],
+      scheduledStartDate: scheduleUpdate.data.scheduledStartDate,
+      scheduledExecutionEndDate: scheduleUpdate.data.scheduledExecutionEndDate,
+      scheduledBufferEndDate: scheduleUpdate.data.scheduledBufferEndDate,
+    };
+    const proposedConflicts = await findBookingCalendarConflictsForSchedule({
+      bookingId: booking._id,
+      booking: candidate as any,
+    });
+    if (
+      scheduleUpdate.data.scheduledStartDate &&
+      (scheduleUpdate.data.scheduledBufferEndDate || scheduleUpdate.data.scheduledExecutionEndDate) &&
+      proposedConflicts.length > 0
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'TEAM_CONFLICT',
+          message: 'The proposed schedule now conflicts with another booking, meeting, or support reservation',
+          conflicts: proposedConflicts,
+        },
+      });
+    }
+
+    const updatedBooking = await withCalendarTransactionIfConnected(async (session) => {
+      await replaceBookingCalendar(candidate as any, session);
+      await booking.save(session ? { session } : undefined);
+      return booking;
+    });
 
     try {
       const professional = booking.professional as any;
@@ -1155,7 +1199,7 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
           context: {
             bookingId: String(booking._id),
             customerName: customer?.name,
-            scheduledStart: (booking as any).scheduledStartDate,
+            scheduledStart: (updatedBooking as any).scheduledStartDate,
           },
         });
       }
@@ -1165,9 +1209,15 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      data: { message: 'Schedule set successfully', booking: bookingForRequest(booking, (req as any).user) }
+      data: { message: 'Schedule set successfully', booking: bookingForRequest(updatedBooking, (req as any).user) }
     });
   } catch (error: any) {
+    if (error?.status === 409 || error?.code === 'SCHEDULE_CONFLICT') {
+      return res.status(409).json({
+        success: false,
+        error: { code: error.code || 'SCHEDULE_CONFLICT', message: error.message || 'The schedule changed. Refresh and try again.' },
+      });
+    }
     console.error('Error setting booking schedule:', error);
     res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't set the schedule. Please try again." } });
   }
@@ -1365,14 +1415,15 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       return res.status(400).json({ success: false, error: { code: 'INVALID_ACTION', message: 'Action must be accept, refund, or dispute' } });
     }
 
-    const booking = await Booking.findById(bookingId)
+    const loadedBooking = await Booking.findById(bookingId)
       .populate('customer', 'name email phone customerType location')
       .populate('professional', 'name email username businessInfo')
       .populate('project', 'title description pricing category service professionalId extraOptions postBookingQuestions');
 
-    if (!booking) {
+    if (!loadedBooking) {
       return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Booking not found' } });
     }
+    let booking = loadedBooking;
 
     if (booking.customer?._id?.toString?.() !== userId && booking.customer?.toString?.() !== userId) {
       return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Only the customer can respond to a rescheduling request' } });
@@ -1382,10 +1433,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'There is no pending rescheduling request for this booking' } });
     }
 
-    booking.rescheduleRequest.respondedAt = new Date();
-    booking.rescheduleRequest.respondedBy = (req as any).user._id;
-    booking.rescheduleRequest.responseNote = typeof note === 'string' ? note.trim() : undefined;
-    booking.statusHistory = booking.statusHistory || [];
+    const responseNote = typeof note === 'string' ? note.trim() : undefined;
 
     if (normalizedAction === 'accept') {
       const proposedTeamMembers =
@@ -1415,16 +1463,67 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
             },
           });
         }
+        const sharedConflicts = await findBookingCalendarConflictsForSchedule({
+          bookingId: booking._id,
+          booking: {
+            _id: booking._id,
+            professional: (booking.professional as any)?._id || booking.professional,
+            assignedTeamMembers: proposedTeamMembers as any[],
+            resourcePlan: booking.resourcePlan || [],
+            scheduledStartDate: proposedStart as Date,
+            scheduledExecutionEndDate: booking.rescheduleRequest.proposedSchedule?.scheduledExecutionEndDate,
+            scheduledBufferEndDate: booking.rescheduleRequest.proposedSchedule?.scheduledBufferEndDate,
+          },
+        });
+        if (sharedConflicts.length > 0) {
+          return res.status(409).json({
+            success: false,
+            error: {
+              code: 'TEAM_CONFLICT',
+              message: 'The proposed schedule now conflicts with another meeting or support reservation',
+              conflicts: sharedConflicts,
+            },
+          });
+        }
       }
 
-      booking.rescheduleRequest.status = 'accepted';
-      applyScheduleFields(booking, booking.rescheduleRequest.proposedSchedule || {});
+      const proposedSchedule = booking.rescheduleRequest.proposedSchedule || {};
+      const calendarCandidate = {
+        _id: booking._id,
+        professional: (booking.professional as any)?._id || booking.professional,
+        assignedTeamMembers: proposedTeamMembers,
+        resourcePlan: booking.resourcePlan || [],
+        scheduledStartDate: proposedSchedule.scheduledStartDate,
+        scheduledExecutionEndDate: proposedSchedule.scheduledExecutionEndDate,
+        scheduledBufferEndDate: proposedSchedule.scheduledBufferEndDate,
+      };
+      // Prepare the document before the transaction. The driver may replay the
+      // callback after a transient conflict; only the save may re-run, so the
+      // additive status-history entry is created exactly once.
+      booking.rescheduleRequest!.respondedAt = new Date();
+      booking.rescheduleRequest!.respondedBy = (req as any).user._id;
+      if (responseNote !== undefined) booking.rescheduleRequest!.responseNote = responseNote;
+      booking.rescheduleRequest!.status = 'accepted';
+      applyScheduleFields(booking, proposedSchedule || {});
       booking.status = 'booked';
+      booking.statusHistory = booking.statusHistory || [];
       booking.statusHistory.push(
         createStatusHistoryEntry('booked', (req as any).user._id, 'Customer accepted the rescheduling request')
       );
-    } else if (normalizedAction === 'refund') {
-      booking.rescheduleRequest.status = 'declined';
+      booking = await withCalendarTransactionIfConnected(async (session) => {
+        await replaceBookingCalendar(calendarCandidate as any, session);
+        await booking.save(session ? { session } : undefined);
+        return booking;
+      });
+    } else {
+      booking.rescheduleRequest!.respondedAt = new Date();
+      booking.rescheduleRequest!.respondedBy = (req as any).user._id;
+      booking.rescheduleRequest!.responseNote = responseNote;
+      booking.statusHistory = booking.statusHistory || [];
+    }
+
+    if (normalizedAction === 'refund') {
+      booking.rescheduleRequest!.status = 'declined';
       const refundReasonText = typeof note === 'string' && note.trim()
         ? `Customer declined rescheduling request: ${note.trim()}`
         : 'Customer declined rescheduling request';
@@ -1467,7 +1566,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       );
       releaseScheduleSlots(booking, (req as any).user._id);
     } else if (normalizedAction === 'dispute') {
-      booking.rescheduleRequest.status = 'declined';
+      booking.rescheduleRequest!.status = 'declined';
       const disputeReason = typeof reason === 'string' && reason.trim()
         ? reason.trim()
         : 'Reschedule dispute';
@@ -1493,20 +1592,24 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
 
     booking.rescheduleHistory = booking.rescheduleHistory || [];
     booking.rescheduleHistory.push({
-      requestedBy: booking.rescheduleRequest.requestedBy,
-      requestedAt: booking.rescheduleRequest.requestedAt,
-      reason: booking.rescheduleRequest.reason,
-      note: booking.rescheduleRequest.note,
-      previousSchedule: booking.rescheduleRequest.previousSchedule,
-      proposedSchedule: booking.rescheduleRequest.proposedSchedule,
+      requestedBy: booking.rescheduleRequest!.requestedBy,
+      requestedAt: booking.rescheduleRequest!.requestedAt,
+      reason: booking.rescheduleRequest!.reason,
+      note: booking.rescheduleRequest!.note,
+      previousSchedule: booking.rescheduleRequest!.previousSchedule,
+      proposedSchedule: booking.rescheduleRequest!.proposedSchedule,
       status: normalizedAction === 'accept' ? 'accepted' : 'declined',
-      respondedAt: booking.rescheduleRequest.respondedAt,
-      respondedBy: booking.rescheduleRequest.respondedBy,
-      responseNote: booking.rescheduleRequest.responseNote,
+      respondedAt: booking.rescheduleRequest!.respondedAt,
+      respondedBy: booking.rescheduleRequest!.respondedBy,
+      responseNote: booking.rescheduleRequest!.responseNote,
     } as any);
     booking.rescheduleRequest = undefined;
 
     await booking.save();
+
+    if (normalizedAction !== 'accept' && ['cancelled', 'refunded'].includes(booking.status)) {
+      await releaseBookingCalendar(booking._id);
+    }
 
     if (normalizedAction === 'accept') {
       try {
@@ -1566,6 +1669,12 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       },
     });
   } catch (error: any) {
+    if (error?.status === 409) {
+      return res.status(409).json({
+        success: false,
+        error: { code: error.code || 'RESCHEDULE_CONFLICT', message: error.message || 'The rescheduling request changed. Refresh and try again.' },
+      });
+    }
     console.error('Error responding to booking reschedule:', error);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't update the rescheduling request. Please try again." } });
   }
@@ -1615,36 +1724,87 @@ export const extendBookingExecution = async (req: Request, res: Response) => {
     }
 
     const extensionMs = nextExecutionEndDate.getTime() - currentExecutionEndDate.getTime();
-    booking.scheduledExecutionEndDate = nextExecutionEndDate;
+    const nextBufferStart = booking.scheduledBufferStartDate
+      ? new Date(booking.scheduledBufferStartDate.getTime() + extensionMs)
+      : booking.scheduledBufferEndDate
+        ? nextExecutionEndDate
+        : undefined;
+    const nextBufferEnd = booking.scheduledBufferEndDate
+      ? new Date(booking.scheduledBufferEndDate.getTime() + extensionMs)
+      : undefined;
 
-    if (booking.scheduledBufferStartDate) {
-      booking.scheduledBufferStartDate = new Date(booking.scheduledBufferStartDate.getTime() + extensionMs);
-    } else if (booking.scheduledBufferEndDate) {
-      booking.scheduledBufferStartDate = nextExecutionEndDate;
-    }
-
-    if (booking.scheduledBufferEndDate) {
-      booking.scheduledBufferEndDate = new Date(booking.scheduledBufferEndDate.getTime() + extensionMs);
-    }
-
-    booking.statusHistory = booking.statusHistory || [];
-    booking.statusHistory.push(
-      createStatusHistoryEntry(
-        'in_progress',
-        (req as any).user._id,
-        normalizedNote
-          ? truncateStatusHistoryNote(`Execution extended: ${normalizedNote}`)
-          : truncateStatusHistoryNote(`Execution end date moved to ${nextExecutionEndDate.toISOString()}`)
-      )
+    const statusEntry = createStatusHistoryEntry(
+      'in_progress',
+      (req as any).user._id,
+      normalizedNote
+        ? truncateStatusHistoryNote(`Execution extended: ${normalizedNote}`)
+        : truncateStatusHistoryNote(`Execution end date moved to ${nextExecutionEndDate.toISOString()}`)
     );
 
-    await booking.save();
+    const candidate = {
+      _id: booking._id,
+      professional: (booking.professional as any)?._id || booking.professional,
+      assignedTeamMembers: booking.assignedTeamMembers || [],
+      resourcePlan: booking.resourcePlan || [],
+      scheduledStartDate: booking.scheduledStartDate,
+      scheduledExecutionEndDate: nextExecutionEndDate,
+      scheduledBufferEndDate: nextBufferEnd,
+    };
+    const intervalEnd = nextBufferEnd || nextExecutionEndDate;
+    const calendarConflicts = booking.scheduledStartDate
+      ? await findBookingCalendarConflictsForSchedule({
+          bookingId: booking._id,
+          booking: candidate as any,
+        })
+      : [];
+    const bookingConflicts = booking.scheduledStartDate
+      ? await findTeamConflicts(
+          String(booking._id),
+          [
+            ...((booking.professional as any)?._id ? [(booking.professional as any)._id] : []),
+            ...(candidate.assignedTeamMembers as any[]),
+          ] as any[],
+          booking.scheduledStartDate,
+          intervalEnd,
+        )
+      : [];
+    const conflicts = [...calendarConflicts, ...bookingConflicts];
+    if (conflicts.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'TEAM_CONFLICT',
+          message: 'The extended schedule conflicts with another booking, meeting, or support reservation',
+          conflicts,
+        },
+      });
+    }
+
+    // Prepare the document before the transaction (see respondToBookingReschedule):
+    // a replayed callback must not append the history entry twice.
+    booking.scheduledExecutionEndDate = nextExecutionEndDate;
+    booking.scheduledBufferStartDate = nextBufferStart;
+    booking.scheduledBufferEndDate = nextBufferEnd;
+    booking.statusHistory = booking.statusHistory || [];
+    booking.statusHistory.push(statusEntry);
+
+    const updatedBooking = await withCalendarTransactionIfConnected(async (session) => {
+      await replaceBookingCalendar(candidate as any, session);
+      await booking.save(session ? { session } : undefined);
+      return booking;
+    });
 
     return res.json({
       success: true,
-      data: { message: 'Execution extended successfully', booking: bookingForRequest(booking, (req as any).user) },
+      data: { message: 'Execution extended successfully', booking: bookingForRequest(updatedBooking, (req as any).user) },
     });
   } catch (error: any) {
+    if (error?.status === 409) {
+      return res.status(409).json({
+        success: false,
+        error: { code: error.code || 'SCHEDULE_CONFLICT', message: error.message || 'The schedule changed. Refresh and try again.' },
+      });
+    }
     console.error('Error extending booking execution:', error);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't extend the execution date. Please try again." } });
   }

@@ -67,6 +67,7 @@ import {
   getOdooCompanies,
   getPlatformSettings,
   updatePlatformSettings,
+  updateSupportChatSetting,
 } from "../../handlers/Admin/platformSettings";
 import {
   getAdminReviews,
@@ -146,6 +147,16 @@ import {
   adminListMeetingRequests,
   adminUpdateMeetingRequest,
 } from "../../handlers/Admin/support";
+import {
+  adminCreateSupportNote,
+  adminGetSupportAvailability,
+  adminGetSupportItem,
+  adminListSupportItems,
+  adminListSupportNotes,
+  adminReplySupportItem,
+  adminUpdateSupportItem,
+  adminUpdateSupportMeeting,
+} from "../../handlers/Admin/supportItems";
 import { listEmailLogs } from "../../handlers/Admin/emailLogs";
 import {
   listCancellationRequests,
@@ -312,12 +323,21 @@ adminRouter.route('/favorites/:id').delete(deleteFavorite);
 
 // Platform settings routes
 adminRouter.route('/platform-settings').get(getPlatformSettings).put(updatePlatformSettings);
+adminRouter.route('/platform-settings/support-chat').patch(updateSupportChatSetting);
 adminRouter.route('/platform-settings/odoo-companies').get(getOdooCompanies);
 
 // Site settings (social media links etc)
 adminRouter.route('/site-settings').get(getAdminSiteSettings).put(updateAdminSiteSettings);
 
-// Professional support management
+// Unified support inbox (tickets + meetings + historical MeetingRequest rows)
+adminRouter.route('/support/items').get(adminListSupportItems);
+adminRouter.route('/support/items/:kind/:id').get(adminGetSupportItem).patch(adminUpdateSupportItem);
+adminRouter.route('/support/items/:kind/:id/notes').get(adminListSupportNotes).post(adminCreateSupportNote);
+adminRouter.route('/support/items/:kind/:id/replies').post(adminReplySupportItem);
+adminRouter.route('/support/items/:kind/:id/meeting').patch(adminUpdateSupportMeeting);
+adminRouter.route('/support/availability').get(adminGetSupportAvailability);
+
+// Legacy professional support management (kept for old clients)
 adminRouter.route('/support/tickets').get(adminListTickets);
 adminRouter.route('/support/tickets/:id').patch(adminUpdateTicket);
 adminRouter.route('/support/meeting-requests').get(adminListMeetingRequests);

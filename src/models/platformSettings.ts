@@ -13,6 +13,8 @@ export interface IPlatformSettings extends Omit<Document, '_id'> {
     postalCode?: string;
     country?: string;
   };
+  /** Superadmin-controlled feature flag for professional support chat. */
+  supportChatEnabled: boolean;
   eInvoicing?: {
     peppolEnabled?: boolean;
     provider?: 'odoo' | 'manual';
@@ -46,6 +48,10 @@ const platformSettingsSchema = new Schema<IPlatformSettings>({
   companyVatNumber: {
     type: String,
     trim: true,
+  },
+  supportChatEnabled: {
+    type: Boolean,
+    default: false,
   },
   companyAddress: {
     name: { type: String, trim: true, default: 'Fixtract' },
@@ -101,6 +107,7 @@ platformSettingsSchema.statics.getCurrentConfig = async function (): Promise<IPl
     {
       $setOnInsert: {
         commissionPercent: seedValue,
+        supportChatEnabled: false,
         lastModified: new Date(),
         version: 1,
       },

@@ -6,6 +6,7 @@ import Payment from "../../models/payment";
 import User from "../../models/user";
 import { executeRefund, RefundError } from "../Stripe/payment";
 import { releaseScheduleSlots } from "../../utils/scheduleRelease";
+import { releaseBookingCalendar } from "../../utils/support/bookingCalendar";
 import { notifyBookingCancelledAndRefunded } from "../../utils/notifications/notifyBookingCancelledAndRefunded";
 import { auditLog } from "../../utils/auditLogger";
 import { param, params } from "../../utils/requestParams";
@@ -227,6 +228,7 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
 
     releaseScheduleSlots(freshBooking, adminId);
     await freshBooking.save();
+    await releaseBookingCalendar(freshBooking._id);
 
     cancellation.status = "approved";
     cancellation.resolvedAt = new Date();
