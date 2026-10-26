@@ -3810,6 +3810,408 @@ describeDb('admin account anonymization', () => {
     expect(JSON.stringify(adminWarranty.body)).not.toContain(targetEvidence);
   });
 
+  it('masks a tombstoned customer warranty decision note in details, activity, canonical, and admin full', async () => {
+    const customer = await createTarget('customer', {
+      deletedAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    const professional = await createTarget('professional');
+    const booking = await createBooking({
+      customer: customer._id,
+      professional: professional._id,
+      status: 'completed',
+    });
+    const privateDecision = 'Private customer warranty decision +32 455 10 20 30';
+    const privateClose = 'Private customer close note +32 455 10 20 31';
+    const claim = await WarrantyClaim.create({
+      booking: booking._id,
+      customer: customer._id,
+      professional: professional._id,
+      status: 'closed',
+      reason: 'defect',
+      description: 'Private customer warranty description +32 455 10 20 32',
+      evidence: [],
+      warrantyEndsAt: new Date('2027-01-01T00:00:00.000Z'),
+      openedAt: new Date('2026-02-01T00:00:00.000Z'),
+      proposal: {
+        message: 'Professional proposal stays for the active professional',
+        proposedBy: professional._id,
+        proposedAt: new Date('2026-02-02T00:00:00.000Z'),
+        customerDecision: 'declined',
+        decidedAt: new Date('2026-02-03T00:00:00.000Z'),
+        decisionNote: privateDecision,
+      },
+      statusHistory: [
+        {
+          status: 'open',
+          timestamp: new Date('2026-02-01T00:00:00.000Z'),
+          updatedBy: customer._id,
+          note: 'Private customer open note +32 455 10 20 33',
+        },
+        {
+          status: 'closed',
+          timestamp: new Date('2026-02-04T00:00:00.000Z'),
+          updatedBy: customer._id,
+          note: privateClose,
+        },
+      ],
+    });
+
+    const participantDetails = await request(
+      'GET',
+      `/api/bookings/${booking._id}/details`,
+      { cookie: jwtCookie(professional) },
+    );
+    expect(participantDetails.status).toBe(200);
+    const details = participantDetails.body.data;
+    expect(details.warrantyClaims).toHaveLength(1);
+    expect(details.warrantyClaims[0]).toMatchObject({
+      id: String(claim._id),
+      claimNumber: claim.claimNumber,
+      status: 'closed',
+      reason: 'defect',
+      linkHint: 'participant_warranty',
+    });
+    expect(details.parties.professional.name).toBe('Piet Professional');
+    expect(
+      details.activity.items.find((item: any) => item.type === 'warranty_proposal_declined')?.description,
+    ).toBe('[deleted]');
+    expect(JSON.stringify(details.activity)).not.toContain(privateDecision);
+
+    const participantActivity = await request(
+      'GET',
+      `/api/bookings/${booking._id}/activity`,
+      { cookie: jwtCookie(professional) },
+    );
+    expect(participantActivity.status).toBe(200);
+    expect(
+      participantActivity.body.data.items.find((item: any) => item.type === 'warranty_proposal_declined')?.description,
+    ).toBe('[deleted]');
+    expect(JSON.stringify(participantActivity.body.data)).not.toContain(privateDecision);
+
+    const canonical = await request(
+      'GET',
+      `/api/bookings/${booking._id}`,
+      { cookie: jwtCookie(professional) },
+    );
+    expect(canonical.status).toBe(200);
+    expect(canonical.body.details.warrantyClaims[0].claimNumber).toBe(claim.claimNumber);
+    expect(JSON.stringify(canonical.body)).not.toContain(privateDecision);
+
+    const adminFull = await request(
+      'GET',
+      `/api/admin/bookings/${booking._id}/full`,
+      { cookie: superCookie },
+    );
+    expect(adminFull.status).toBe(200);
+    expect(adminFull.body.data.details.warrantyClaims[0]).toMatchObject({
+      id: String(claim._id),
+      claimNumber: claim.claimNumber,
+      status: 'closed',
+      reason: 'defect',
+      linkHint: 'admin_warranty',
+    });
+    expect(adminFull.body.data.details.adminLinks.warrantyClaims).toBe('/admin/warranty-claims');
+    expect(
+      adminFull.body.data.details.activity.items.find((item: any) => item.type === 'warranty_closed')?.description,
+    ).toBe('[deleted]');
+    expect(JSON.stringify(adminFull.body)).not.toContain(privateDecision);
+    expect(JSON.stringify(adminFull.body)).not.toContain(privateClose);
+  });
+
+  it('masks an anonymized professional warranty escalation note without stripping the active customer decision', async () => {
+    const customer = await createTarget('customer');
+    const professional = await createTarget('professional', {
+      isAnonymized: true,
+      anonymizedAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    const booking = await createBooking({
+      customer: customer._id,
+      professional: professional._id,
+      status: 'completed',
+    });
+    const activeDecision = 'Active customer decision note stays visible';
+    const privateEscalation = 'Private professional warranty escalation +32 455 10 20 40';
+    const claim = await WarrantyClaim.create({
+      booking: booking._id,
+      customer: customer._id,
+      professional: professional._id,
+      status: 'escalated',
+      reason: 'incomplete_work',
+      description: 'Customer warranty description',
+      evidence: [],
+      openedAt: new Date('2026-02-01T00:00:00.000Z'),
+      proposal: {
+        message: 'Private professional proposal message +32 455 10 20 41',
+        proposedBy: professional._id,
+        proposedAt: new Date('2026-02-02T00:00:00.000Z'),
+        customerDecision: 'declined',
+        decidedAt: new Date('2026-02-03T00:00:00.000Z'),
+        decisionNote: activeDecision,
+      },
+      escalation: {
+        escalatedAt: new Date('2026-02-04T00:00:00.000Z'),
+        escalatedBy: professional._id,
+        autoEscalated: false,
+        reason: privateEscalation,
+      },
+    });
+
+    const participantDetails = await request(
+      'GET',
+      `/api/bookings/${booking._id}/details`,
+      { cookie: jwtCookie(customer) },
+    );
+    expect(participantDetails.status).toBe(200);
+    const details = participantDetails.body.data;
+    expect(details.warrantyClaims[0]).toMatchObject({
+      id: String(claim._id),
+      status: 'escalated',
+      reason: 'incomplete_work',
+      linkHint: 'participant_warranty',
+    });
+    expect(details.parties.customer.name).toBe('Carla Customer');
+    expect(details.parties.professional.isAnonymized).toBe(true);
+    expect(
+      details.activity.items.find((item: any) => item.type === 'warranty_proposal_declined')?.description,
+    ).toBe(activeDecision);
+    const escalation = details.activity.items.find((item: any) => item.type === 'warranty_escalated');
+    expect(escalation?.description).toBe('[deleted]');
+    expect(escalation?.actor?.isAnonymized).toBe(true);
+    expect(JSON.stringify(details.activity)).not.toContain(privateEscalation);
+  });
+
+  it('masks a tombstoned customer warranty narrative on the booking warranty route', async () => {
+    const customer = await createTarget('customer', {
+      deletedAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    const professional = await createTarget('professional');
+    const otherCustomer = await createTarget('customer');
+    const booking = await createBooking({
+      customer: customer._id,
+      professional: professional._id,
+      status: 'completed',
+    });
+    const privateDecision = 'Private customer warranty route decision +32 455 20 20 30';
+    const privateDescription = 'Private customer warranty route description +32 455 20 20 31';
+    const privateCustomerNote = 'Private customer warranty route status note +32 455 20 20 32';
+    const privateEvidence = s3Url('warranty-claims', String(customer._id), 'customer-proof.pdf');
+    const professionalNote = 'Active professional status note stays visible';
+    const claim = await WarrantyClaim.create({
+      booking: booking._id,
+      customer: customer._id,
+      professional: professional._id,
+      status: 'escalated',
+      reason: 'defect',
+      description: privateDescription,
+      evidence: [privateEvidence],
+      openedAt: new Date('2026-02-01T00:00:00.000Z'),
+      proposal: {
+        message: 'Active professional proposal stays visible',
+        proposedBy: professional._id,
+        proposedAt: new Date('2026-02-02T00:00:00.000Z'),
+        customerDecision: 'declined',
+        decidedAt: new Date('2026-02-03T00:00:00.000Z'),
+        decisionNote: privateDecision,
+      },
+      statusHistory: [
+        {
+          status: 'open',
+          timestamp: new Date('2026-02-01T00:00:00.000Z'),
+          updatedBy: customer._id,
+          note: privateCustomerNote,
+        },
+        {
+          status: 'escalated',
+          timestamp: new Date('2026-02-04T00:00:00.000Z'),
+          updatedBy: professional._id,
+          note: professionalNote,
+        },
+      ],
+    });
+
+    const asProfessional = await request(
+      'GET',
+      `/api/warranty-claims/booking/${booking._id}`,
+      { cookie: jwtCookie(professional) },
+    );
+    expect(asProfessional.status).toBe(200);
+    const { activeClaim, latestClaim } = asProfessional.body.data;
+    expect(activeClaim).toMatchObject({
+      _id: String(claim._id),
+      claimNumber: claim.claimNumber,
+      status: 'escalated',
+      reason: 'defect',
+    });
+    expect(latestClaim._id).toBe(String(claim._id));
+    expect(String(activeClaim.customer)).toBe(String(customer._id));
+    expect(String(activeClaim.professional)).toBe(String(professional._id));
+    expect(activeClaim.description).toBe('[deleted]');
+    expect(activeClaim.proposal).toMatchObject({
+      message: 'Active professional proposal stays visible',
+      decisionNote: '[deleted]',
+    });
+    expect(activeClaim.statusHistory.map((entry: any) => entry.note)).toEqual([
+      '[deleted]',
+      professionalNote,
+    ]);
+    expect(activeClaim.evidence).toEqual([]);
+    expect(JSON.stringify(asProfessional.body)).not.toContain(privateDecision);
+    expect(JSON.stringify(asProfessional.body)).not.toContain(privateDescription);
+    expect(JSON.stringify(asProfessional.body)).not.toContain(privateCustomerNote);
+    expect(JSON.stringify(asProfessional.body)).not.toContain(privateEvidence);
+
+    const asAdmin = await request(
+      'GET',
+      `/api/warranty-claims/booking/${booking._id}`,
+      { cookie: superCookie },
+    );
+    expect(asAdmin.status).toBe(200);
+    expect(asAdmin.body.data.latestClaim._id).toBe(String(claim._id));
+    expect(JSON.stringify(asAdmin.body)).not.toContain(privateDecision);
+    expect(JSON.stringify(asAdmin.body)).not.toContain(privateCustomerNote);
+
+    const nonParticipant = await request(
+      'GET',
+      `/api/warranty-claims/booking/${booking._id}`,
+      { cookie: jwtCookie(otherCustomer) },
+    );
+    expect(nonParticipant.status).toBe(403);
+
+    const unauthenticated = await request(
+      'GET',
+      `/api/warranty-claims/booking/${booking._id}`,
+    );
+    expect(unauthenticated.status).toBe(401);
+  });
+
+  it('masks an anonymized professional warranty proposal on the booking warranty route', async () => {
+    const customer = await createTarget('customer');
+    const professional = await createTarget('professional', {
+      isAnonymized: true,
+      anonymizedAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    const booking = await createBooking({
+      customer: customer._id,
+      professional: professional._id,
+      status: 'completed',
+    });
+    const privateProposal = 'Private professional warranty route proposal +32 455 20 20 40';
+    const privateEscalation = 'Private professional warranty route escalation +32 455 20 20 41';
+    const privateResolution = 'Private professional warranty route resolution +32 455 20 20 42';
+    const activeDescription = 'Active customer warranty description stays visible';
+    const activeDecision = 'Active customer warranty decision stays visible';
+    const claim = await WarrantyClaim.create({
+      booking: booking._id,
+      customer: customer._id,
+      professional: professional._id,
+      status: 'escalated',
+      reason: 'incomplete_work',
+      description: activeDescription,
+      evidence: [],
+      openedAt: new Date('2026-02-01T00:00:00.000Z'),
+      proposal: {
+        message: privateProposal,
+        proposedBy: professional._id,
+        proposedAt: new Date('2026-02-02T00:00:00.000Z'),
+        customerDecision: 'declined',
+        decidedAt: new Date('2026-02-03T00:00:00.000Z'),
+        decisionNote: activeDecision,
+      },
+      escalation: {
+        escalatedAt: new Date('2026-02-04T00:00:00.000Z'),
+        escalatedBy: professional._id,
+        autoEscalated: false,
+        reason: privateEscalation,
+      },
+      resolution: {
+        summary: privateResolution,
+        resolvedAt: new Date('2026-02-05T00:00:00.000Z'),
+        resolvedBy: professional._id,
+      },
+    });
+
+    const asCustomer = await request(
+      'GET',
+      `/api/warranty-claims/booking/${booking._id}`,
+      { cookie: jwtCookie(customer) },
+    );
+    expect(asCustomer.status).toBe(200);
+    const claimBody = asCustomer.body.data.latestClaim;
+    expect(claimBody).toMatchObject({
+      _id: String(claim._id),
+      claimNumber: claim.claimNumber,
+      status: 'escalated',
+      reason: 'incomplete_work',
+      description: activeDescription,
+    });
+    expect(String(claimBody.customer)).toBe(String(customer._id));
+    expect(String(claimBody.professional)).toBe(String(professional._id));
+    expect(claimBody.proposal).toMatchObject({
+      message: '[deleted]',
+      decisionNote: activeDecision,
+    });
+    expect(claimBody.escalation.reason).toBe('[deleted]');
+    expect(claimBody.resolution.summary).toBe('[deleted]');
+    expect(JSON.stringify(asCustomer.body)).not.toContain(privateProposal);
+    expect(JSON.stringify(asCustomer.body)).not.toContain(privateEscalation);
+    expect(JSON.stringify(asCustomer.body)).not.toContain(privateResolution);
+  });
+
+  it('leaves an ordinary active counterparty warranty narrative unchanged on the booking warranty route', async () => {
+    const customer = await createTarget('customer');
+    const professional = await createTarget('professional');
+    const booking = await createBooking({
+      customer: customer._id,
+      professional: professional._id,
+      status: 'completed',
+    });
+    const activeDecision = 'Ordinary active customer decision note';
+    const activeProposal = 'Ordinary active professional proposal message';
+    const claim = await WarrantyClaim.create({
+      booking: booking._id,
+      customer: customer._id,
+      professional: professional._id,
+      status: 'proposal_sent',
+      reason: 'defect',
+      description: 'Ordinary active customer warranty description',
+      evidence: [],
+      openedAt: new Date('2026-02-01T00:00:00.000Z'),
+      proposal: {
+        message: activeProposal,
+        proposedBy: professional._id,
+        proposedAt: new Date('2026-02-02T00:00:00.000Z'),
+        customerDecision: 'declined',
+        decidedAt: new Date('2026-02-03T00:00:00.000Z'),
+        decisionNote: activeDecision,
+      },
+    });
+
+    const asCustomer = await request(
+      'GET',
+      `/api/warranty-claims/booking/${booking._id}`,
+      { cookie: jwtCookie(customer) },
+    );
+    expect(asCustomer.status).toBe(200);
+    const claimBody = asCustomer.body.data.latestClaim;
+    expect(claimBody).toMatchObject({
+      _id: String(claim._id),
+      status: 'proposal_sent',
+      description: 'Ordinary active customer warranty description',
+    });
+    expect(claimBody.proposal.message).toBe(activeProposal);
+    expect(claimBody.proposal.decisionNote).toBe(activeDecision);
+    expect(String(claimBody.customer)).toBe(String(customer._id));
+    expect(String(claimBody.professional)).toBe(String(professional._id));
+
+    const asProfessional = await request(
+      'GET',
+      `/api/warranty-claims/booking/${booking._id}`,
+      { cookie: jwtCookie(professional) },
+    );
+    expect(asProfessional.status).toBe(200);
+    expect(asProfessional.body.data.latestClaim.proposal.message).toBe(activeProposal);
+  });
+
   it('redacts post-booking question snapshot attachments in the write path and deletes the owned keys', async () => {
     const customer = await createTarget('customer');
     const professional = await createTarget('professional');

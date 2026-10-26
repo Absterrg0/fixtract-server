@@ -642,14 +642,24 @@ export const maskCancellationRequestForAnonymizedParties = <T>(
 };
 
 /** Read mask for warranty claim narratives and target-owned evidence. */
-export const maskWarrantyClaimForAnonymizedParties = <T>(claim: T): T => {
+export const maskWarrantyClaimForAnonymizedParties = <T>(
+  claim: T,
+  flags: {
+    customerId?: string;
+    professionalId?: string;
+    customerAnonymized?: boolean;
+    professionalAnonymized?: boolean;
+  } = {},
+): T => {
   const source = asObject(claim);
   if (!source) return claim;
-  const customerAnonymized = isAnonymizedAccount(source.customer);
-  const professionalAnonymized = isAnonymizedAccount(source.professional);
+  const customerAnonymized = flags.customerAnonymized === true
+    || isAnonymizedAccount(source.customer);
+  const professionalAnonymized = flags.professionalAnonymized === true
+    || isAnonymizedAccount(source.professional);
   const targetIds = [
-    customerAnonymized ? referenceId(source.customer) : "",
-    professionalAnonymized ? referenceId(source.professional) : "",
+    customerAnonymized ? (referenceId(source.customer) || flags.customerId || "") : "",
+    professionalAnonymized ? (referenceId(source.professional) || flags.professionalId || "") : "",
   ].filter(Boolean);
   if (targetIds.length === 0) return claim;
 
@@ -671,7 +681,10 @@ export const maskWarrantyClaimForAnonymizedParties = <T>(claim: T): T => {
       next.proposal = { ...proposal, message: ANONYMIZED_TEXT };
     }
     const resolution = asObject(source.resolution);
-    if (resolution?.summary && isAnonymizedAccount(resolution.resolvedBy)) {
+    if (resolution?.summary && (
+      isAnonymizedAccount(resolution.resolvedBy)
+      || targetIds.includes(referenceId(resolution.resolvedBy))
+    )) {
       next.resolution = { ...resolution, summary: ANONYMIZED_TEXT };
     }
   }
