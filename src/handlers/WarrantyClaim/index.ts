@@ -32,7 +32,7 @@ import { getProfessionalDisplayName } from "../../utils/displayName";
 import { params } from "../../utils/requestParams";
 import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
 import { UserFacingError } from "../../utils/appErrors";
-import { maskAnonymizedUser, maskWarrantyClaimForAnonymizedParties } from "../../utils/accountAnonymity";
+import { isAnonymizedAccount, maskAnonymizedUser, maskWarrantyClaimForAnonymizedParties, referenceId } from "../../utils/accountAnonymity";
 
 const WARRANTY_ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
@@ -100,10 +100,18 @@ const validateWarrantyUrlsForClaim = (urls: string[], claim: any, userId: string
   return { validUrls, invalidUrls };
 };
 
-const presignClaim = async (claim: any) => {
+const presignClaim = async (
+  claim: any,
+  flags: {
+    customerId?: string;
+    professionalId?: string;
+    customerAnonymized?: boolean;
+    professionalAnonymized?: boolean;
+  } = {},
+) => {
   if (!claim) return claim;
   const raw = claim.toObject ? claim.toObject() : { ...claim };
-  const obj = maskWarrantyClaimForAnonymizedParties(raw);
+  const obj = maskWarrantyClaimForAnonymizedParties(raw, flags);
   if (Array.isArray(obj.evidence) && obj.evidence.length > 0) {
     const results = await Promise.all(
       obj.evidence.map(async (url: string) => {
@@ -796,14 +804,19 @@ export const getWarrantyClaimByBooking = async (req: Request, res: Response) => 
       return res.status(400).json({ success: false, msg: "Invalid bookingId" });
     }
 
-    const booking = await Booking.findById(bookingId).select("customer professional");
+    const booking = await Booking.findById(bookingId)
+      .select("customer professional")
+      .populate("customer", "isAnonymized deletedAt")
+      .populate("professional", "isAnonymized deletedAt");
     if (!booking) {
       return res.status(404).json({ success: false, msg: "Booking not found" });
     }
 
+    const customerId = referenceId(booking.customer);
+    const professionalId = referenceId(booking.professional);
     const userIsParticipant =
-      booking.customer.toString() === userId ||
-      booking.professional?.toString() === userId ||
+      customerId === userId ||
+      professionalId === userId ||
       isAdmin(req);
     if (!userIsParticipant) {
       return res.status(403).json({ success: false, msg: "Not authorized for this booking" });
@@ -817,9 +830,15 @@ export const getWarrantyClaimByBooking = async (req: Request, res: Response) => 
       WarrantyClaim.findOne({ booking: booking._id }).sort({ createdAt: -1 }),
     ]);
 
+    const maskFlags = {
+      customerId: customerId || undefined,
+      professionalId: professionalId || undefined,
+      customerAnonymized: isAnonymizedAccount(booking.customer),
+      professionalAnonymized: isAnonymizedAccount(booking.professional),
+    };
     const [activeClaim, latestClaim] = await Promise.all([
-      presignClaim(activeClaimRaw),
-      presignClaim(latestClaimRaw),
+      presignClaim(activeClaimRaw, maskFlags),
+      presignClaim(latestClaimRaw, maskFlags),
     ]);
 
     return res.status(200).json({

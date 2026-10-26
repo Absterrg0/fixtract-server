@@ -887,7 +887,12 @@ export const buildBookingDetails = async (params: {
     }),
   );
   const maskedWarrantyClaims = warrantyClaims.map((claim) =>
-    maskWarrantyClaimForAnonymizedParties(claim),
+    maskWarrantyClaimForAnonymizedParties(claim, {
+      customerId: customerId || undefined,
+      professionalId: professionalId || undefined,
+      customerAnonymized: customerMasked,
+      professionalAnonymized: professionalMasked,
+    }),
   );
   const projectId = referenceId(booking.project) || str((booking.bookingSnapshot as any)?.project?.id);
   const captured = booking.bookingSnapshot || null;
