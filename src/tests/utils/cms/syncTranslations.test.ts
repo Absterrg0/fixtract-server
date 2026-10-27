@@ -324,6 +324,30 @@ describe('syncCmsTranslations', () => {
     warn.mockRestore();
   });
 
+  it('still mirrors non-text and control fields when the translator is not configured', async () => {
+    isTranslatorConfigured.mockReturnValue(false);
+    const source = makeSource();
+    // nl: fresh auto sibling (hash matches) → synced path mirrors non-text.
+    // fr: linked manual sibling → skipped_manual path mirrors controls.
+    siblings = [
+      autoSibling('nl', computeSourceHash(source), { coverImage: 'https://cdn.example.test/stale.jpg' }),
+      { ...manualSibling('fr'), translatedFrom: 'source-1' },
+    ];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const results = await syncCmsTranslations(source);
+
+    expect(results).toEqual([
+      { locale: 'nl', status: 'synced' },
+      { locale: 'fr', status: 'skipped_manual' },
+    ]);
+    expect(translateTexts).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(updateOne).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
   it('does not let one locale failure affect the other', async () => {
     siblings = [];
     create.mockImplementation(async (payload: Record<string, any>) => {

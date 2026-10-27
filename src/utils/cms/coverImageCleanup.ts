@@ -17,11 +17,12 @@ function mediaKey(url: unknown): string | null {
 export async function isCmsMediaKeyReferenced(key: string): Promise<boolean> {
   if (!key) return false;
 
+  // Narrow the scan in the database first; the exact key comparison below
+  // stays authoritative so signed/unsigned URL variants cannot mismatch.
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`/${escaped}(?:[?#]|$)`);
   const docs = (await CmsContent.find({
-    $or: [
-      { coverImage: { $exists: true, $ne: null } },
-      { "seo.ogImage": { $exists: true, $ne: null } },
-    ],
+    $or: [{ coverImage: pattern }, { "seo.ogImage": pattern }],
   })
     .select("coverImage seo.ogImage")
     .lean()) as Array<{ coverImage?: string; seo?: { ogImage?: string } }>;

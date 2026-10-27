@@ -239,11 +239,11 @@ export async function syncCmsTranslations(
 
   const targetLocales = targetLocalesFor(source.locale);
 
-  if (!isTranslatorConfigured()) {
+  const translatorEnabled = isTranslatorConfigured();
+  if (!translatorEnabled) {
     console.warn(
       "[cmsTranslations] AZURE_TRANSLATOR_KEY not set; CMS auto-translation disabled"
     );
-    return targetLocales.map((locale) => ({ locale, status: "disabled" as const }));
   }
 
   const sourceHash = computeSourceHash(source);
@@ -316,7 +316,16 @@ export async function syncCmsTranslations(
         continue;
       }
 
-      const translatedFields = await translateSourceFields(source, locale);
+      const translatedFields = translatorEnabled
+        ? await translateSourceFields(source, locale)
+        : null;
+      if (!translatedFields) {
+        // No translator: text cannot be created or refreshed, but the
+        // skipped_manual/synced paths above already mirrored control and
+        // non-text fields for this locale.
+        results.push({ locale, status: "disabled" });
+        continue;
+      }
       const copied = buildUpdate(copiedFields(source));
       const meta = {
         autoTranslated: true,

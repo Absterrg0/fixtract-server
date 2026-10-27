@@ -38,7 +38,17 @@ function requestCountryCode(req: Request): string | undefined {
  */
 function mergeLocaleFallback(primary: any[], fallback: any[]): any[] {
   const coveredSlugs = new Set(primary.map((doc) => doc.slug));
-  return [...primary, ...fallback.filter((doc) => !coveredSlugs.has(doc.slug))];
+  // A manual translation may carry a different slug than its source; treat a
+  // fallback doc as covered when it is the English origin of a primary doc.
+  const coveredSources = new Set(
+    primary.filter((doc) => doc.translatedFrom).map((doc) => String(doc.translatedFrom))
+  );
+  return [
+    ...primary,
+    ...fallback.filter(
+      (doc) => !coveredSlugs.has(doc.slug) && !coveredSources.has(String(doc._id))
+    ),
+  ];
 }
 
 /** Sorts merged listings by publishedAt desc; ties put the requested locale first. */
@@ -121,10 +131,11 @@ export const listPublicCmsContent = async (req: Request, res: Response) => {
     ]);
 
     // Merge requested-locale docs with en fallbacks, then paginate in memory
-    // so hybrid lists keep stable sort + pagination semantics.
-    const merged = mergeLocaleFallback(
-      stripListingVisibilityMetadata(visiblePrimary),
-      stripListingVisibilityMetadata(visibleFallback)
+    // so hybrid lists keep stable sort + pagination semantics. Merge before
+    // stripping: translatedFrom is needed to suppress a source whose slug
+    // differs from its manual translation.
+    const merged = stripListingVisibilityMetadata(
+      mergeLocaleFallback(visiblePrimary, visibleFallback)
     ).sort(compareByPublishedDesc(locale));
     const total = merged.length;
     const items = merged.slice(skip, skip + limit);
@@ -298,10 +309,14 @@ export const listPublicFaq = async (req: Request, res: Response) => {
       filterCmsDocsVisibleThroughSource(rawItems as any[], countryCode),
       filterCmsDocsVisibleThroughSource(rawEnItems as any[], countryCode),
     ]);
-    const items = stripListingVisibilityMetadata(visibleItems);
-    const enItems = stripListingVisibilityMetadata(visibleEnItems);
+    const items = visibleItems;
+    const enItems = visibleEnItems;
 
-    const merged = mergeLocaleFallback(items, enItems).sort((a, b) => {
+    // Merge before stripping: translatedFrom is needed to suppress a source
+    // whose slug differs from its manual translation.
+    const merged = stripListingVisibilityMetadata(
+      mergeLocaleFallback(items, enItems)
+    ).sort((a, b) => {
       const byCategory = String(a.category ?? "").localeCompare(String(b.category ?? ""));
       if (byCategory !== 0) return byCategory;
       return compareByPublishedDesc(locale)(a, b);
