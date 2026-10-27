@@ -125,6 +125,8 @@ export interface IQuoteVersion {
   rejectedBy?: Types.ObjectId;
   /** Customer-facing amounts frozen at submit/edit; absent for legacy versions. */
   customerTotals?: IQuoteCustomerTotals;
+  /** Earliest feasible execution start computed server-side at submit/edit; null when unavailable. */
+  firstPossibleStart?: Date | null;
   /** Service address as submitted with this version; absent for legacy versions. */
   serviceLocation?: {
     country?: string;
@@ -976,6 +978,7 @@ const BookingSchema = new Schema({
     rejectedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     customerTotals: { type: QuoteCustomerTotalsSchema },
     serviceLocation: { type: QuoteServiceLocationSchema },
+    firstPossibleStart: { type: Date },
   }],
   currentQuoteVersion: { type: Number },
   acceptedQuoteVersion: { type: Number, min: 1 },

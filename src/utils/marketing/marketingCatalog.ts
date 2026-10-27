@@ -116,6 +116,24 @@ export function resolveSubscriberLocale(
   return { locale: 'en', source: 'fallback' };
 }
 
+/**
+ * Country precedence for display-locale resolution: explicit location first,
+ * then company address, then business info. Used by the notification
+ * preferences GET so the UI can show the country default (NL -> nl) without
+ * ever writing it back or treating it as consent.
+ */
+export function subscriberCountryFromUser(user: any): string | undefined {
+  const candidates = [
+    user?.location?.country,
+    user?.companyAddress?.country,
+    user?.businessInfo?.country,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  return undefined;
+}
+
 export function marketingLanguagesForCountries(countries: readonly string[]): MarketingLocale[] {
   if (countries.length === 0) return [...MARKETING_LOCALES];
   const normalized = new Set(countries.map((country) => country.trim().toUpperCase()));
