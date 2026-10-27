@@ -841,10 +841,18 @@ export const withArticle47ProfessionalQuestion = <T extends {
     isRequired: boolean;
   }>;
 }>(vat: T): NonNullable<T["professionalVatQuestions"]> => {
-  const existing = vat.professionalVatQuestions || [];
+  // The served question list always reflects the CURRENT classification: a
+  // previously persisted reserved Article 47 question is filtered out first,
+  // then re-injected only when the current classification is project
+  // dependent. Stored answers/snapshots on existing projects and bookings are
+  // never rewritten here — pruning of stale answers happens at the write
+  // boundary (project draft save / booking creation) and at VAT decision
+  // time the reserved answer is ignored unless currently project dependent.
+  const existing = (vat.professionalVatQuestions || []).filter(
+    (question) => question?.fieldName !== ARTICLE_47_FIELD_NAME,
+  );
   const classification = resolveArticle47Classification(vat.article47Classification);
   if (classification !== "project_dependent") return existing;
-  if (existing.some((question) => question.fieldName === ARTICLE_47_FIELD_NAME)) return existing;
   return [
     {
       question: ARTICLE_47_QUESTION,
@@ -854,4 +862,23 @@ export const withArticle47ProfessionalQuestion = <T extends {
     },
     ...existing,
   ];
+};
+
+/**
+ * Drop a stale reserved Article 47 answer unless the CURRENT service-config
+ * classification is project dependent. All unrelated answers are preserved.
+ * Historical booking/invoice snapshots and past VAT decisions are untouched —
+ * this applies only to the current project draft / new booking authority.
+ */
+export const pruneStaleArticle47ProfessionalAnswers = <T extends { fieldName?: unknown }>(
+  answers: T[] | undefined | null,
+  article47Classification: unknown,
+): T[] => {
+  if (!Array.isArray(answers)) return [];
+  const classification =
+    typeof article47Classification === 'string'
+      ? resolveArticle47Classification(article47Classification)
+      : undefined;
+  if (classification === "project_dependent") return answers;
+  return answers.filter((answer) => answer?.fieldName !== ARTICLE_47_FIELD_NAME);
 };

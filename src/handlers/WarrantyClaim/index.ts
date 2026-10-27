@@ -5,6 +5,7 @@ import WarrantyClaim, {
   IWarrantyClaim,
   WarrantyClaimStatus,
 } from "../../models/warrantyClaim";
+import Project from "../../models/project";
 import Conversation from "../../models/conversation";
 import ChatMessage from "../../models/chatMessage";
 import User from "../../models/user";
@@ -897,7 +898,7 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
       return res.status(401).json({ success: false, msg: "Authentication required" });
     }
 
-    const { status, page = "1", limit = "20" } = req.query;
+    const { status, page = "1", limit = "20", q, search, bookingId, service } = req.query;
     const pageNumber = Math.max(Number.parseInt(String(page), 10) || 1, 1);
     const limitNumber = Math.min(Math.max(Number.parseInt(String(limit), 10) || 20, 1), 100);
     const skip = (pageNumber - 1) * limitNumber;
@@ -908,6 +909,83 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
 
     if (role === "customer") query.customer = toObjectId(userId);
     if (role === "professional") query.professional = toObjectId(userId);
+
+    // Literal search: claim number substring (escaped, never raw regex) or
+    // exact booking identity. Booking-number text resolves through the
+    // viewer's own bookings, preserving role ownership.
+    const searchRaw = typeof q === "string" && q ? q
+      : typeof search === "string" && search ? search : "";
+    const trimmedSearch = searchRaw.trim().slice(0, 80);
+    if (trimmedSearch) {
+      const escaped = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(escaped, "i");
+      const searchOr: Record<string, any>[] = [{ claimNumber: regex }];
+      // Scope booking-number resolution to the viewer's own bookings,
+      // mirroring the my-bookings role scope (pro includes owned projects).
+      let bookingScope: Record<string, any> = {};
+      if (query.customer) {
+        bookingScope = { customer: query.customer };
+      } else if (query.professional) {
+        const ownedProjectIds = await Project.find({ professionalId: query.professional }).select("_id").lean();
+        bookingScope = {
+          $or: [
+            { professional: query.professional },
+            { project: { $in: ownedProjectIds.map((p: any) => p._id) } },
+          ],
+        };
+      }
+      if (mongoose.Types.ObjectId.isValid(trimmedSearch)) {
+        const scoped = await WarrantyClaim.exists({ ...bookingScope, booking: new mongoose.Types.ObjectId(trimmedSearch) });
+        if (scoped) {
+          searchOr.push({ booking: new mongoose.Types.ObjectId(trimmedSearch) });
+        } else {
+          searchOr.push({ claimNumber: regex });
+        }
+      } else {
+        const matchingBookings = await Booking.find({
+          ...bookingScope,
+          bookingNumber: regex,
+        }).select("_id").lean();
+        if (matchingBookings.length > 0) {
+          searchOr.push({ booking: { $in: matchingBookings.map((b: any) => b._id) } });
+        }
+      }
+      query.$and = (query.$and || []).concat([{ $or: searchOr }]);
+    }
+
+    if (bookingId && typeof bookingId === "string" && mongoose.Types.ObjectId.isValid(bookingId)) {
+      query.booking = new mongoose.Types.ObjectId(bookingId);
+    }
+
+    // Service filter resolves through the viewer's own bookings.
+    if (service && typeof service === "string" && service !== "all") {
+      const serviceProjectIds = await Project.find({ service }).select("_id").lean();
+      const serviceOr: Record<string, any>[] = [{ "rfqData.serviceType": service }];
+      if (serviceProjectIds.length > 0) {
+        serviceOr.push({ project: { $in: serviceProjectIds.map((p: any) => p._id) } });
+      }
+      // Preserve the role scope ($or for professionals) under $and so the
+      // service $or cannot clobber it.
+      const serviceBookingFilter: Record<string, any> = { $and: [{ $or: serviceOr }] };
+      if (query.customer) {
+        serviceBookingFilter.$and.push({ customer: query.customer });
+      } else if (query.professional) {
+        const ownedProjectIds = await Project.find({ professionalId: query.professional }).select("_id").lean();
+        serviceBookingFilter.$and.push({
+          $or: [
+            { professional: query.professional },
+            { project: { $in: ownedProjectIds.map((p: any) => p._id) } },
+          ],
+        });
+      }
+      const serviceBookings = await Booking.find(serviceBookingFilter).select("_id").lean();
+      const serviceIdSet = new Set(serviceBookings.map((b: any) => String(b._id)));
+      if (query.booking) {
+        query.booking = serviceIdSet.has(String(query.booking)) ? query.booking : { $in: [] };
+      } else {
+        query.booking = { $in: Array.from(serviceIdSet) };
+      }
+    }
 
     const [claims, total] = await Promise.all([
       WarrantyClaim.find(query)

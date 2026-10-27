@@ -21,6 +21,7 @@ import {
   assertSupportChatEnabled,
   assertSupportChatWriteAllowed,
 } from "../../utils/support/settings";
+import { resolveBookingAdminAccess } from "../../utils/bookingDetails/adminAccess";
 
 const VALID_STATUSES = ["pending", "reviewed", "dismissed"] as const;
 
@@ -640,7 +641,7 @@ export const adminGetConversationParticipant = async (req: Request, res: Respons
     const bookingMatch =
       user.role === "professional" ? { professional: user._id } : { customer: user._id };
 
-    const [agg, projectCount] = await Promise.all([
+    const [agg, projectCount, adminAccess] = await Promise.all([
       Booking.aggregate([
         { $match: bookingMatch },
         {
@@ -681,11 +682,11 @@ export const adminGetConversationParticipant = async (req: Request, res: Respons
                 $cond: [{ $in: ["$payment.status", ["refunded", "partially_refunded"]] }, 1, 0],
               },
             },
-            reviewCount: { $sum: { $cond: [{ $ifNull: ["$customerReview.reviewedAt", false] }, 1, 0] } },
+            reviewCount: { $sum: { $cond: [{ $ifNull: ["$customerReview.communicationLevel", false] }, 1, 0] } },
             avgRating: {
               $avg: {
                 $cond: [
-                  { $ifNull: ["$customerReview.reviewedAt", false] },
+                  { $ifNull: ["$customerReview.communicationLevel", false] },
                   {
                     $avg: [
                       { $ifNull: ["$customerReview.communicationLevel", null] },
@@ -706,16 +707,42 @@ export const adminGetConversationParticipant = async (req: Request, res: Respons
                 ],
               },
             },
+            // Per-currency recorded gross for completed bookings. A raw
+            // cross-currency sum is never a EUR figure, so gross is also
+            // bucketed by the booking payment currency.
+            grossByCurrency: {
+              $push: {
+                $cond: [
+                  { $eq: ["$status", "completed"] },
+                  {
+                    currency: { $ifNull: ["$payment.currency", "EUR"] },
+                    gross: { $ifNull: ["$payment.totalWithVat", { $ifNull: ["$payment.amount", 0] }] },
+                  },
+                  "$$REMOVE",
+                ],
+              },
+            },
           },
         },
       ]),
       user.role === "professional"
         ? Project.countDocuments({ professionalId: user._id })
         : Promise.resolve(0),
+      resolveBookingAdminAccess((req as any).admin ?? (req as any).user),
     ]);
 
     const row = agg[0] || {};
     const safeUser = maskAnonymizedUser(user);
+    // Collapse per-booking currency buckets into per-currency totals.
+    const grossBuckets = new Map<string, number>();
+    for (const bucket of (Array.isArray(row.grossByCurrency) ? row.grossByCurrency : [] as any[])) {
+      const currency = typeof bucket?.currency === "string" && bucket.currency ? bucket.currency : "EUR";
+      grossBuckets.set(currency, (grossBuckets.get(currency) || 0) + (Number(bucket?.gross) || 0));
+    }
+    const grossByCurrency = Array.from(grossBuckets.entries())
+      .map(([currency, gross]) => ({ currency, gross }))
+      .sort((a, b) => a.currency.localeCompare(b.currency));
+    const legacyGrossSum = Number(row.grossEur) || 0;
     return res.json({
       success: true,
       data: {
@@ -738,8 +765,10 @@ export const adminGetConversationParticipant = async (req: Request, res: Respons
           completedCount: Number(row.completedCount) || 0,
           quotedCount: Number(row.quotedCount) || 0,
           disputeCount: Number(row.disputeCount) || 0,
-          grossEur: Number(row.grossEur) || 0,
+          grossEur: legacyGrossSum,
           refundCount: Number(row.refundCount) || 0,
+          grossByCurrency,
+          financialAccess: adminAccess.payments === true,
         }),
       },
     });

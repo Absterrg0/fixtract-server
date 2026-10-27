@@ -574,8 +574,10 @@ export const getDrafts = async (req: Request, res: Response) => {
 export const getAllProjects = async (req: Request, res: Response) => {
   try {
     const professionalId = req.user?.id;
+    const includeArchived = String(req.query.includeArchived || "").toLowerCase() === "true";
     const projects = await Project.find({
       professionalId,
+      ...(includeArchived ? {} : { status: { $ne: "archived" } }),
     }).sort({ updatedAt: -1 });
 
     res.json(projects);
@@ -2109,11 +2111,99 @@ export const updateProjectStatus = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Status transition not allowed" });
     }
 
+    project.onHoldAt = status === "on_hold" ? new Date() : undefined;
     project.status = status as any;
     await saveProjectWithFence(project, professionalId);
     res.json({ success: true, project });
   } catch (error) {
     res.status(500).json({ error: "Failed to update project status" });
+  }
+};
+
+// Soft archive / restore for the Project Dashboard (group 15a). Archive
+// unpublishes + hides the project from the professional overview, public
+// search, and new bookings. It is never a delete: existing bookings,
+// details, and snapshots stay readable. Restore returns the project to
+// draft, or to its verified pre-archive status for non-published states —
+// never straight back to published (re-approval flow stays authoritative).
+export const archiveProject = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = (req.user as any)?.id || (req.user as any)?._id?.toString();
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const actor = await User.findById(userId).select("role professionalStatus");
+    if (!actor) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const isAdmin = actor.role === "admin";
+    if (!isAdmin) {
+      if (actor.role !== "professional" || actor.professionalStatus !== "approved") {
+        return res.status(403).json({ error: "Only approved professionals can archive projects" });
+      }
+    }
+
+    const project = isAdmin
+      ? await Project.findById(id)
+      : await Project.findOne({ _id: id, professionalId: userId });
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    if (project.status === "archived") {
+      return res.json({ success: true, project });
+    }
+
+    project.statusBeforeArchive = project.status as any;
+    project.archivedAt = new Date();
+    project.status = "archived" as any;
+    await saveProjectWithFence(project, userId);
+    res.json({ success: true, project });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to archive project" });
+  }
+};
+
+export const restoreProject = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = (req.user as any)?.id || (req.user as any)?._id?.toString();
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const actor = await User.findById(userId).select("role professionalStatus");
+    if (!actor) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const isAdmin = actor.role === "admin";
+    if (!isAdmin) {
+      if (actor.role !== "professional" || actor.professionalStatus !== "approved") {
+        return res.status(403).json({ error: "Only approved professionals can restore projects" });
+      }
+    }
+
+    const project = isAdmin
+      ? await Project.findById(id)
+      : await Project.findOne({ _id: id, professionalId: userId });
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    if (project.status !== "archived") {
+      return res.status(400).json({ error: "Project is not archived" });
+    }
+
+    // Never bypass approval: a previously published project restores as
+    // draft so the publish/approval flow runs again. Other verified states
+    // restore to their recorded pre-archive status.
+    const previous = project.statusBeforeArchive;
+    const restorable = ["draft", "pending", "rejected", "on_hold", "suspended"];
+    project.status = (previous && restorable.includes(previous) ? previous : "draft") as any;
+    project.statusBeforeArchive = undefined;
+    project.archivedAt = undefined;
+    await saveProjectWithFence(project, userId);
+    res.json({ success: true, project });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to restore project" });
   }
 };
 
@@ -2141,9 +2231,15 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
         filter.status = "rejected";
       } else if (status === "cancelled") {
         filter.status = "closed";
+      } else if (status === "archived") {
+        filter.status = "archived";
       } else {
         filter.status = status;
       }
+    } else {
+      // Archived projects are hidden from the professional overview by
+      // default; they remain reachable via the explicit archived tab.
+      filter.status = { $ne: "archived" };
     }
     if (category && category !== "all") {
       // Match either the primary category field or within services[] selections
@@ -2172,7 +2268,8 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
       Project.find(filter)
         .sort({ updatedAt: -1 })
         .skip((page - 1) * limit)
-        .limit(limit),
+        .limit(limit)
+        .lean(),
       Project.countDocuments(filter),
       Project.distinct("service", { professionalId }),
       // Status counts for header cards – normalize raw DB statuses
@@ -2190,6 +2287,7 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
                     { case: { $eq: ["$status", "on_hold"] }, then: "on_hold" },
                     { case: { $eq: ["$status", "suspended"] }, then: "suspended" },
                     { case: { $eq: ["$status", "rejected"] }, then: "rejected" },
+                    { case: { $eq: ["$status", "archived"] }, then: "archived" },
                   ],
                   default: "draft",
                 },
@@ -2214,12 +2312,29 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
           on_hold: byStatus["on_hold"] || 0,
           suspended: byStatus["suspended"] || 0,
           rejected: byStatus["rejected"] || 0,
+          archived: byStatus["archived"] || 0,
         };
       })(),
     ]);
 
+    // Assigned team member names, resolved in one batched lookup. Only
+    // ids + display names cross the wire — never full person payloads.
+    const teamIds = [...new Set(
+      items.flatMap((item: any) => Array.isArray(item?.resources) ? item.resources : [])
+        .filter((id: unknown) => typeof id === "string" && mongoose.Types.ObjectId.isValid(id)),
+    )];
+    const teamRows = teamIds.length > 0
+      ? await User.find({ _id: { $in: teamIds } }).select("_id name").lean()
+      : [];
+    const teamNames = new Map(teamRows.map((row: any) => [String(row._id), row.name || null]));
+    const itemsWithTeam = items.map((item: any) => ({
+      ...item,
+      teamMembers: (Array.isArray(item?.resources) ? item.resources : [])
+        .map((id: unknown) => ({ id: String(id), name: teamNames.get(String(id)) || null })),
+    }));
+
     res.json({
-      items,
+      items: itemsWithTeam,
       meta: {
         total,
         page,

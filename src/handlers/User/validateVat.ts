@@ -7,6 +7,13 @@ import { generateUsername, isValidUsernameFormat } from "../../utils/usernameUti
 import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
 
 export function parsePostalCity(lastLine: string): { postalCode?: string; city: string } {
+  // Dutch postcodes are canonically spaceless (e.g. "5026SL TILBURG") — match
+  // the 4-digit + 2-letter shape before the generic patterns, which only
+  // accept spaced postcodes and would otherwise lose the postal code.
+  const dutch = lastLine.match(/^(\d{4}\s?[A-Z]{2})\s+(.+)$/i);
+  if (dutch) {
+    return { postalCode: dutch[1].replace(/\s+/, '').toUpperCase(), city: dutch[2].trim() };
+  }
   const match = lastLine.match(/^(\d[\dA-Z]{1,4}(?:[\s-][\dA-Z]{2,5})?)\s+(.+)$/i)
     || lastLine.match(/^([A-Z]\d[\dA-Z](?:\s[\dA-Z]{2,4})?)\s+(.+)$/i);
   if (match) {

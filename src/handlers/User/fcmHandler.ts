@@ -9,7 +9,7 @@ import {
   getOriginFromRequest,
   isAllowedOrigin,
 } from '../../utils/fcmTokenUtils';
-import { MARKETING_LOCALES, isMarketingLocale } from '../../utils/marketing/marketingCatalog';
+import { MARKETING_LOCALES, isMarketingLocale, resolveSubscriberLocale, subscriberCountryFromUser } from '../../utils/marketing/marketingCatalog';
 import { isPromotionalEmailEnabled } from '../../utils/marketing/promotionalConsent';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 import { UserFacingError } from '../../utils/appErrors';
@@ -173,7 +173,7 @@ export const getNotificationPreferences = async (req: Request, res: Response): P
     }
 
     const user = await User.findById(userId).select(
-      'notificationPreferences marketingConsentAt marketingLocale marketingLocaleSource',
+      'notificationPreferences marketingConsentAt marketingLocale marketingLocaleSource preferredLocale locale language location companyAddress businessInfo',
     );
     if (!user) {
       res.status(404).json({ success: false, msg: 'User not found' });
@@ -186,9 +186,14 @@ export const getNotificationPreferences = async (req: Request, res: Response): P
       email: isPromotionalEmailEnabled(preferences),
     };
 
+    // Display-only default: explicit stored choice always wins; otherwise
+    // resolve from legacy fields/country (NL -> nl, BE stays neutral en).
+    // Never written back and never treated as consent/opt-in.
+    const resolved = resolveSubscriberLocale(user.toObject(), subscriberCountryFromUser(user.toObject()));
+
     res.status(200).json({
       success: true,
-      data: { ...preferences, marketingLocale: user.marketingLocale, marketingLocaleSource: user.marketingLocaleSource },
+      data: { ...preferences, marketingLocale: user.marketingLocale, marketingLocaleSource: user.marketingLocaleSource, resolvedMarketingLocale: resolved.locale, resolvedMarketingLocaleSource: resolved.source },
     });
   } catch (err) {
     console.error('getNotificationPreferences error:', err);

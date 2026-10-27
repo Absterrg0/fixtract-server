@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import Project from '../../models/project';
 import User from '../../models/user';
+import ServiceConfiguration from '../../models/serviceConfiguration';
+import { pruneStaleArticle47ProfessionalAnswers } from '../../utils/vatManagement';
 import Favorite from '../../models/favorite';
 import { invalidateFavoritesOverviewCache } from '../Admin/favoritesAdmin';
 import { normalizePreparationDuration } from '../../utils/projectDurations';
@@ -32,6 +34,24 @@ export const saveProjectDraft = async (req: Request, res: Response) => {
     }
 
     let project;
+
+    // Write boundary for reserved VAT answers: drop a stale article47 answer
+    // unless the CURRENT service-config classification is project dependent.
+    // All unrelated answers are preserved; historical bookings/invoices are
+    // untouched (their snapshots were computed under the config then current).
+    if (projectData.serviceConfigurationId && Array.isArray((projectData as any).vatProfessionalAnswers)) {
+      try {
+        const svcConfig = await ServiceConfiguration.findById(projectData.serviceConfigurationId)
+          .select('vatManagement.article47Classification')
+          .lean();
+        (projectData as any).vatProfessionalAnswers = pruneStaleArticle47ProfessionalAnswers(
+          (projectData as any).vatProfessionalAnswers,
+          svcConfig?.vatManagement?.article47Classification,
+        );
+      } catch {
+        // Lookup failure must never destroy draft data: leave answers as-is.
+      }
+    }
 
     if (projectData._id) {
       // Update existing draft

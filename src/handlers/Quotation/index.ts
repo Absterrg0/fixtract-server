@@ -21,6 +21,7 @@ import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
 import { bookingForRequest, sanitizeMilestoneForViewer, sanitizeMilestonesForViewer } from '../../utils/invoiceVisibility';
 import { buildQuoteCustomerTotals, quoteServiceLocationSnapshot } from '../../utils/bookingDetails/quoteTotals';
+import { computeQuoteFirstPossibleStartForBooking } from '../../utils/bookingDetails/quoteFirstStart';
 import { captureBookingSnapshotIfMissing, loadVatQuestionDefinitions } from '../../utils/bookingDetails/capture';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 import { UserFacingError } from '../../utils/appErrors';
@@ -791,6 +792,20 @@ export const submitQuotation = async (req: Request, res: Response) => {
       ...(customerTotals ? { customerTotals } : {}),
       ...(serviceLocation ? { serviceLocation } : {}),
     };
+    // Server-calculated earliest feasible start from the quantity-aware
+    // schedule engine (resource/calendar/lead-time/timezone). Read-only: no
+    // reservation. Null when unavailable/insufficient (incl. professional-only
+    // RFQs without a project); never blocks the quote write.
+    try {
+      const firstPossibleStart = await computeQuoteFirstPossibleStartForBooking(booking, {
+        executionDuration,
+        preparationDuration,
+        bufferDuration: bufferDuration || undefined,
+      });
+      quoteVersion.firstPossibleStart = firstPossibleStart ?? null;
+    } catch {
+      quoteVersion.firstPossibleStart = null;
+    }
 
     booking.quoteVersions = [quoteVersion];
     booking.currentQuoteVersion = 1;
@@ -997,6 +1012,16 @@ export const editQuotation = async (req: Request, res: Response) => {
       ...(customerTotals ? { customerTotals } : {}),
       ...(serviceLocation ? { serviceLocation } : {}),
     };
+    try {
+      const firstPossibleStart = await computeQuoteFirstPossibleStartForBooking(booking, {
+        executionDuration,
+        preparationDuration,
+        bufferDuration: bufferDuration || undefined,
+      });
+      quoteVersion.firstPossibleStart = firstPossibleStart ?? null;
+    } catch {
+      quoteVersion.firstPossibleStart = null;
+    }
 
     booking.quoteVersions.push(quoteVersion);
     booking.currentQuoteVersion = newVersionNumber;

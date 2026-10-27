@@ -105,6 +105,35 @@ const stripFields = (payment: Record<string, any>, fields: readonly string[]) =>
 };
 
 /**
+ * Pro-specific payout summary fields. These describe the platform→supplier
+ * transfer and are only ever visible to the professional (and entitled
+ * admins). Customer-own totals, statuses, and refund records are NOT part of
+ * this set and must stay intact in participant payloads.
+ */
+const PRO_PAYOUT_SUMMARY_FIELDS = [
+  "professionalPayout",
+  "transferredAt",
+  "transferStatus",
+] as const;
+
+/**
+ * Strip the pro-specific payout summary (transfer date/amount/status) from a
+ * booking.payment payload before it reaches a customer. Applied to the new
+ * shared bookings-table list payload only; existing payment-history and
+ * details endpoints keep their established shapes so legitimate
+ * customer-own refund details are never removed.
+ */
+export const stripProPayoutSummaryForCustomer = <T extends Record<string, any>>(
+  payment: T
+): T => {
+  if (!payment || typeof payment !== "object") return payment;
+  const clean: Record<string, any> = { ...payment };
+  stripFields(clean, PRO_PAYOUT_SUMMARY_FIELDS);
+  stripFields(clean, SUPPLIER_INVOICE_FIELDS);
+  return clean as T;
+};
+
+/**
  * Remove both invoice sides (and their artifact history/claims). Used when an
  * admin can read bookings but not the payments area: invoice documents are
  * payment-area artifacts, while amounts/statuses remain visible.
