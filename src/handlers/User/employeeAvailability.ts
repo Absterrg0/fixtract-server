@@ -4,6 +4,9 @@ import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { buildBookingBlockedRanges } from "../../utils/bookingBlocks";
+import { sendHandlerError } from '../../utils/handlerErrors';
+import { parseBlockedRanges } from '../../utils/blockedRanges';
+import { safeErrorSummary } from '../../utils/safeErrorLog';
 
 // They can only block specific dates
 export const updateEmployeeAvailabilityPreference = async (req: Request, res: Response, next: NextFunction) => {
@@ -67,34 +70,7 @@ export const updateEmployeeAvailability = async (req: Request, res: Response, ne
     }
 
     if (blockedRanges !== undefined) {
-      if (!Array.isArray(blockedRanges)) {
-        return res.status(400).json({
-          success: false,
-          msg: "Blocked ranges must be an array"
-        });
-      }
-
-      const validatedRanges = blockedRanges.map((range) => {
-        if (!range.startDate || !range.endDate) {
-          throw new Error('Start date and end date are required for blocked ranges');
-        }
-
-        const startDate = new Date(range.startDate);
-        const endDate = new Date(range.endDate);
-
-        if (startDate > endDate) {
-          throw new Error('Start date must be before or equal to end date');
-        }
-
-        return {
-          startDate,
-          endDate,
-          reason: range.reason || undefined,
-          createdAt: new Date()
-        };
-      });
-
-      user.blockedRanges = validatedRanges;
+      user.blockedRanges = parseBlockedRanges(blockedRanges, { itemLabel: 'Blocked range' });
     }
 
     await user.save();
@@ -109,11 +85,8 @@ export const updateEmployeeAvailability = async (req: Request, res: Response, ne
     });
 
   } catch (error: any) {
-    console.error(`❌ Error updating availability:`, error);
-    return res.status(500).json({
-      success: false,
-      msg: "Server error while updating availability"
-    });
+    console.error(`❌ Error updating availability:`, safeErrorSummary(error));
+    return sendHandlerError(res, error, "We couldn't update availability. Please try again.");
   }
 };
 
@@ -177,7 +150,7 @@ export const getEmployeeEffectiveAvailability = async (req: Request, res: Respon
     console.error(`❌ Error getting effective availability:`, error);
     return res.status(500).json({
       success: false,
-      msg: "Server error while getting effective availability"
+      msg: "We couldn't load availability. Please try again."
     });
   }
 };
@@ -259,34 +232,7 @@ export const updateManagedEmployeeAvailability = async (req: Request, res: Respo
     }
 
     if (blockedRanges !== undefined) {
-      if (!Array.isArray(blockedRanges)) {
-        return res.status(400).json({
-          success: false,
-          msg: "Blocked ranges must be an array"
-        });
-      }
-
-      const validatedRanges = blockedRanges.map((range) => {
-        if (!range.startDate || !range.endDate) {
-          throw new Error('Start date and end date are required for blocked ranges');
-        }
-
-        const startDate = new Date(range.startDate);
-        const endDate = new Date(range.endDate);
-
-        if (startDate > endDate) {
-          throw new Error('Start date must be before or equal to end date');
-        }
-
-        return {
-          startDate,
-          endDate,
-          reason: range.reason || undefined,
-          createdAt: new Date()
-        };
-      });
-
-      employee.blockedRanges = validatedRanges;
+      employee.blockedRanges = parseBlockedRanges(blockedRanges, { itemLabel: 'Blocked range' });
     }
 
     await employee.save();
@@ -301,10 +247,7 @@ export const updateManagedEmployeeAvailability = async (req: Request, res: Respo
     });
 
   } catch (error: any) {
-    console.error(`❌ Error updating managed employee availability:`, error);
-    return res.status(500).json({
-      success: false,
-      msg: "Server error while updating managed employee availability"
-    });
+    console.error(`❌ Error updating managed employee availability:`, safeErrorSummary(error));
+    return sendHandlerError(res, error, "We couldn't update this employee's availability. Please try again.");
   }
 };

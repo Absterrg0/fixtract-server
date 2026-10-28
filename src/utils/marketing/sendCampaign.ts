@@ -198,7 +198,11 @@ export async function sendMarketingCampaign(
       userId: recipient.userId,
     }));
   } catch (err: any) {
-    const error = err?.message || String(err) || 'Failed to resolve campaign audience';
+    const raw = err?.message || String(err) || 'Failed to resolve campaign audience';
+    console.error('[MARKETING] Failed to resolve campaign audience:', { campaignId, error: raw });
+    const error = /^Audience has \d+ recipients/.test(raw)
+      ? raw
+      : 'Failed to resolve the campaign audience. Check the campaign filters and try again.';
     return failOwnedCampaign(campaignId, claimId, error, undefined, sendAttempt);
   }
 
@@ -410,8 +414,17 @@ export async function sendMarketingCampaign(
     }
     return { ok: true, campaign: completed };
   } catch (err: any) {
-    const error = err?.message || String(err) || 'Send failed';
-    return failOwnedCampaign(campaignId, claimId, error, deliveries, sendAttempt);
+    console.error('[MARKETING] Campaign send failed:', {
+      campaignId,
+      error: err?.message || String(err) || 'Send failed',
+    });
+    return failOwnedCampaign(
+      campaignId,
+      claimId,
+      'Campaign send failed. Check server logs for details.',
+      deliveries,
+      sendAttempt,
+    );
   }
 }
 
@@ -441,9 +454,14 @@ export async function refreshCampaignStats(campaignId: string): Promise<IMarketi
         { $set: { 'deliveries.$.stats': stats }, $unset: { 'deliveries.$.error': 1 } },
       );
     } catch (err: any) {
+      console.error('[MARKETING] Failed to refresh campaign delivery stats:', {
+        campaignId,
+        locale: delivery.locale,
+        error: err?.message || String(err),
+      });
       await MarketingCampaign.updateOne(
         { _id: campaignId, status: 'sent', 'deliveries.locale': delivery.locale },
-        { $set: { 'deliveries.$.error': err?.message || 'Failed to refresh stats' } },
+        { $set: { 'deliveries.$.error': 'Statistics refresh failed. Check server logs for details.' } },
       );
     }
   }

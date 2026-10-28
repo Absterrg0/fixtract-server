@@ -87,7 +87,7 @@ export const listNotifications = async (req: Request, res: Response): Promise<vo
     });
   } catch (err) {
     console.error('listNotifications error:', err);
-    res.status(500).json({ success: false, msg: 'Internal server error' });
+    res.status(500).json({ success: false, msg: "We couldn't load notifications. Please try again." });
   }
 };
 
@@ -106,7 +106,7 @@ export const getUnreadNotificationCount = async (req: Request, res: Response): P
     res.status(200).json({ success: true, data: { unreadCount } });
   } catch (err) {
     console.error('getUnreadNotificationCount error:', err);
-    res.status(500).json({ success: false, msg: 'Internal server error' });
+    res.status(500).json({ success: false, msg: "We couldn't load your unread count. Please try again." });
   }
 };
 
@@ -151,7 +151,7 @@ export const markNotificationRead = async (req: Request, res: Response): Promise
     });
   } catch (err) {
     console.error('markNotificationRead error:', err);
-    res.status(500).json({ success: false, msg: 'Internal server error' });
+    res.status(500).json({ success: false, msg: "We couldn't update this notification. Please try again." });
   }
 };
 
@@ -177,6 +177,6 @@ export const markAllNotificationsRead = async (req: Request, res: Response): Pro
     });
   } catch (err) {
     console.error('markAllNotificationsRead error:', err);
-    res.status(500).json({ success: false, msg: 'Internal server error' });
+    res.status(500).json({ success: false, msg: "We couldn't update your notifications. Please try again." });
   }
 };

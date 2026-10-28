@@ -675,16 +675,16 @@ export const uploadCmsImage = async (req: Request, res: Response) => {
       signedUrl = await presignS3Url(result.url);
     } catch (presignError) {
       console.error("Upload CMS image presign error:", { url: result.url, error: presignError });
-      return res.status(500).json({ success: false, msg: "Failed to generate signed URL" });
+      return res.status(500).json({ success: false, msg: "We couldn't prepare the uploaded image. Please try again." });
     }
     if (!signedUrl) {
       console.error("Upload CMS image presign error: presignS3Url returned null", { url: result.url });
-      return res.status(500).json({ success: false, msg: "Failed to generate signed URL" });
+      return res.status(500).json({ success: false, msg: "We couldn't prepare the uploaded image. Please try again." });
     }
 
     return res.status(200).json({ success: true, data: { url: signedUrl, key: result.key } });
   } catch (error) {
     console.error("Upload CMS image error:", error);
-    return res.status(500).json({ success: false, msg: "Failed to upload image" });
+    return res.status(500).json({ success: false, msg: "We couldn't upload the image. Please try again." });
   }
 };

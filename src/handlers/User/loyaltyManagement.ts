@@ -10,6 +10,7 @@ import { calculateProfessionalLevel } from "../../utils/professionalLevelSystem"
 import { applyPointsBoost } from '../../utils/professionalLevelSystem';
 import LoyaltyConfig from "../../models/loyaltyConfig";
 import mongoose from 'mongoose';
+import { sendHandlerError } from '../../utils/handlerErrors';
 
 // Get user's loyalty status (tier info + points)
 export const getLoyaltyStatus = async (req: Request, res: Response, next: NextFunction) => {
@@ -177,7 +178,7 @@ export const boostProfessionalLevel = async (req: Request, res: Response, next: 
     });
   } catch (error: any) {
     console.error('Boost professional level error:', error);
-    return res.status(400).json({ success: false, msg: error.message || "Failed to boost level" });
+    return sendHandlerError(res, error, "We couldn't boost your level. Please try again.");
   }
 };
 

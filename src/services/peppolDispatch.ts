@@ -77,6 +77,28 @@ const ODOO_SEND_TIMEOUT_MS = 120_000;
 // Peppol participant lookups (SMP/DNS through Odoo's proxy) and posting.
 const ODOO_SLOW_CALL_TIMEOUT_MS = 45_000;
 
+// Provider errors stay in server logs. These are the only strings stored on
+// the booking/payment and returned to users or admins.
+const ODOO_CONFIG_FAILED_REASON =
+  "Odoo accounting configuration could not be loaded. Check the Odoo connection and e-invoicing settings, then generate the invoice again.";
+const ODOO_DELIVERY_FAILED_REASON =
+  "Odoo reported a Peppol delivery error. Check the EDI documents in Odoo, then generate the invoice again.";
+const ODOO_POST_FAILED_REASON =
+  "The invoice was created in Odoo but could not be posted for the Peppol send. Generate the invoice again to retry.";
+const ODOO_SEND_FAILED_REASON =
+  "Odoo could not request the Peppol send. Generate the invoice again to retry.";
+const ODOO_SYNC_FAILED_REASON =
+  "Odoo invoice sync failed. Check the Odoo connection and e-invoicing settings, then generate the invoice again.";
+const ODOO_SEND_TIMEOUT_REASON =
+  "The Peppol send request timed out; Odoo may still be processing it. Generate the invoice again later to refresh the status.";
+const STRIPE_PAYMENT_NOT_RECORDED_REASON =
+  "Stripe payment could not be recorded in Odoo. Record it manually in Odoo if needed.";
+
+const providerErrorMessage = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.slice(0, 500);
+};
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const isBelgianB2BBooking = (booking: any, side: "customer" | "supplier"): boolean => {
@@ -1281,9 +1303,9 @@ const withStripePaymentRecorded = async (
     if (note) console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] payment: ${note}`);
     return result;
   } catch (paymentError) {
-    const message = (paymentError as Error)?.message || String(paymentError);
+    const message = providerErrorMessage(paymentError);
     console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] payment: FAIL ${message}`);
-    return { ...result, reason: `${result.reason ? `${result.reason}; ` : ""}Stripe payment not booked in Odoo: ${message}` };
+    return { ...result, reason: `${result.reason ? `${result.reason}; ` : ""}${STRIPE_PAYMENT_NOT_RECORDED_REASON}` };
   }
 };
 
@@ -1298,11 +1320,18 @@ const odooDeliveryResult = (
     Boolean(document.error || document.error_message),
   );
   if (failedDocument) {
+    const providerMessage = htmlToText(String(failedDocument.error_message || failedDocument.error || ""));
+    console.error("[PEPPOL] Odoo EDI error:", {
+      moveId,
+      companyId: config.companyId,
+      state: failedDocument.state,
+      providerMessage,
+    });
     return {
       status: "failed",
       provider: "odoo",
       reference: `odoo-account.move-${moveId}`,
-      reason: htmlToText(String(failedDocument.error_message || failedDocument.error || "")) || "Odoo reported a Peppol EDI delivery error",
+      reason: ODOO_DELIVERY_FAILED_REASON,
       response: { moveId, companyId: config.companyId, ediDocuments },
       attempts: 1,
     };
@@ -1333,11 +1362,12 @@ const dispatchToOdoo = async (
   try {
     config = await discoverOdooAccountingConfig({ companyId: odooCompanyId });
   } catch (error: any) {
+    console.error("[PEPPOL] Odoo accounting discovery failed:", providerErrorMessage(error));
     return {
       status: "failed",
       provider: "odoo",
       reference,
-      reason: error?.message || "Odoo accounting discovery failed",
+      reason: ODOO_CONFIG_FAILED_REASON,
       attempts: 0,
     };
   }
@@ -1427,12 +1457,16 @@ const dispatchToOdoo = async (
           await odooCallOnce(config, "account.move", "unlink", { ids: [reusableMoveId] });
         } catch (unlinkError) {
           // Retrying would find the same draft and fail the same way, so the
-          // reason says what to fix instead of surfacing a bare delete error.
+          // reason says what to fix instead of surfacing the raw delete error.
+          console.error(
+            `[PEPPOL][${payload.invoiceNumber}][${payload.side}] draft unlink failed for move ${reusableMoveId}:`,
+            providerErrorMessage(unlinkError),
+          );
           return {
             status: "failed",
             provider: "odoo",
             reference,
-            reason: `${reuseCheck.reason}; Odoo then refused to delete that draft (${(unlinkError as Error)?.message}). Remove or fix draft ${reusableMoveId} in Odoo and generate the invoice again.`,
+            reason: `${reuseCheck.reason}; Odoo then refused to delete that draft. Remove or fix draft ${reusableMoveId} in Odoo and generate the invoice again.`,
             attempts: 1,
           };
         }
@@ -1490,11 +1524,15 @@ const dispatchToOdoo = async (
         await postOdooMove(config, moveId, payload);
       } catch (postError: any) {
         if (await readOdooMoveState(config, moveId) !== "posted") {
+          console.error(
+            `[PEPPOL][${payload.invoiceNumber}][${payload.side}] posting move ${moveId} failed:`,
+            providerErrorMessage(postError),
+          );
           return {
             status: "failed",
             provider: "odoo",
             reference: `odoo-account.move-${moveId}`,
-            reason: htmlToText(String(postError?.message || "")) || "Invoice created in Odoo but could not be posted for Peppol send",
+            reason: ODOO_POST_FAILED_REASON,
             dispatchedAt: new Date(),
             response: { moveId, companyId: config.companyId },
             attempts: 1,
@@ -1532,27 +1570,39 @@ const dispatchToOdoo = async (
         console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] delivery after timeout:`, JSON.stringify(ediDocuments || []));
         const result = odooDeliveryResult(config, moveId, ediDocuments);
         if (result.status === "queued") {
-          result.reason = `${sendError.message}; Odoo is still processing the Peppol send. Generate the invoice again later to refresh the status.`;
+          console.error(
+            `[PEPPOL][${payload.invoiceNumber}][${payload.side}] send timed out:`,
+            providerErrorMessage(sendError),
+          );
+          result.reason = ODOO_SEND_TIMEOUT_REASON;
         }
         return withStripePaymentRecorded(config, moveId, payload, result);
       }
       // The move is posted in the books either way, so its payment is too.
+      console.error(
+        `[PEPPOL][${payload.invoiceNumber}][${payload.side}] send failed:`,
+        providerErrorMessage(sendError),
+      );
       return withStripePaymentRecorded(config, moveId, payload, {
         status: "failed",
         provider: "odoo",
         reference: `odoo-account.move-${moveId}`,
-        reason: htmlToText(String(sendError?.message || "")) || "Odoo could not request the Peppol send",
+        reason: ODOO_SEND_FAILED_REASON,
         dispatchedAt: new Date(),
         response: { moveId, companyId: config.companyId },
         attempts: 1,
       });
     }
   } catch (error: any) {
+    console.error(
+      `[PEPPOL][${payload.invoiceNumber}][${payload.side}] Odoo invoice sync failed:`,
+      providerErrorMessage(error),
+    );
     return {
       status: "failed",
       provider: "odoo",
       reference,
-      reason: htmlToText(String(error?.message || "")) || "Odoo invoice sync failed",
+      reason: ODOO_SYNC_FAILED_REASON,
       response: error,
       attempts: MAX_DISPATCH_ATTEMPTS,
     };

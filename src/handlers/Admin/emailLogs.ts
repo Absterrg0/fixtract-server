@@ -84,7 +84,7 @@ export const listEmailLogs = async (req: Request, res: Response) => {
     console.error('[ADMIN][EMAIL_LOGS] Failed to list logs', error);
     return res.status(500).json({
       success: false,
-      msg: error?.message || 'Failed to load email logs',
+      msg: "We couldn't load email logs. Please try again.",
     });
   }
 };

@@ -21,7 +21,8 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
     if (!token) {
       return res.status(401).json({
         success: false,
-        msg: 'Access denied. No authentication token provided.'
+        msg: 'Please sign in to continue.',
+        code: 'AUTH_REQUIRED'
       });
     }
 
@@ -35,19 +36,22 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
     if (!user) {
       return res.status(401).json({ 
         success: false,
-        msg: 'Access denied. User not found.' 
+        msg: 'Your account is no longer available. Please sign in again.',
+        code: 'AUTH_REQUIRED'
       });
     }
     if (user.deletedAt) {
       return res.status(403).json({
         success: false,
-        msg: 'This account has been deleted.'
+        msg: 'This account has been deleted.',
+        code: 'FORBIDDEN'
       });
     }
     if (user.accountStatus === 'suspended') {
       return res.status(403).json({
         success: false,
-        msg: 'This account is suspended.'
+        msg: 'This account is suspended.',
+        code: 'FORBIDDEN'
       });
     }
 
@@ -64,7 +68,8 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
     if (error.name === 'JsonWebTokenError') {
       return res.status(401).json({ 
         success: false,
-        msg: 'Access denied. Invalid token.' 
+        msg: 'Your session is invalid. Please sign in again.',
+        code: 'AUTH_REQUIRED'
       });
     }
     
@@ -79,13 +84,15 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
       
       return res.status(401).json({ 
         success: false,
-        msg: 'Access denied. Token expired.' 
+        msg: 'Your session has expired. Please sign in again.',
+        code: 'AUTH_REQUIRED'
       });
     }
 
     return res.status(500).json({ 
       success: false,
-      msg: 'Server error during authentication.' 
+      msg: "We couldn't verify your session. Please try again.",
+      code: 'INTERNAL'
     });
   }
 };
@@ -141,7 +148,9 @@ export const authMiddleware = (allowedRoles: string[]) => {
       if (!token) {
         return res.status(401).json({
           success: false,
-          message: 'Access denied. No authentication token provided.'
+          msg: 'Please sign in to continue.',
+          message: 'Please sign in to continue.',
+          code: 'AUTH_REQUIRED'
         });
       }
 
@@ -154,19 +163,25 @@ export const authMiddleware = (allowedRoles: string[]) => {
       if (!user) {
         return res.status(401).json({
           success: false,
-          message: 'Access denied. User not found.'
+          msg: 'Your account is no longer available. Please sign in again.',
+          message: 'Your account is no longer available. Please sign in again.',
+          code: 'AUTH_REQUIRED'
         });
       }
       if (user.deletedAt) {
         return res.status(403).json({
           success: false,
-          message: 'This account has been deleted.'
+          msg: 'This account has been deleted.',
+          message: 'This account has been deleted.',
+          code: 'FORBIDDEN'
         });
       }
       if (user.accountStatus === 'suspended') {
         return res.status(403).json({
           success: false,
-          message: 'This account is suspended.'
+          msg: 'This account is suspended.',
+          message: 'This account is suspended.',
+          code: 'FORBIDDEN'
         });
       }
 
@@ -174,7 +189,9 @@ export const authMiddleware = (allowedRoles: string[]) => {
       if (!allowedRoles.includes(user.role)) {
         return res.status(403).json({
           success: false,
-          message: `Access denied. ${allowedRoles.join(' or ')} role required.`
+          msg: `You don't have permission to do that. ${allowedRoles.join(' or ')} access is required.`,
+          message: `You don't have permission to do that. ${allowedRoles.join(' or ')} access is required.`,
+          code: 'FORBIDDEN'
         });
       }
 
@@ -196,7 +213,9 @@ export const authMiddleware = (allowedRoles: string[]) => {
       if (error.name === 'JsonWebTokenError') {
         return res.status(401).json({
           success: false,
-          message: 'Access denied. Invalid token.'
+          msg: 'Your session is invalid. Please sign in again.',
+          message: 'Your session is invalid. Please sign in again.',
+          code: 'AUTH_REQUIRED'
         });
       }
 
@@ -210,13 +229,17 @@ export const authMiddleware = (allowedRoles: string[]) => {
 
         return res.status(401).json({
           success: false,
-          message: 'Access denied. Token expired.'
+          msg: 'Your session has expired. Please sign in again.',
+          message: 'Your session has expired. Please sign in again.',
+          code: 'AUTH_REQUIRED'
         });
       }
 
       return res.status(500).json({
         success: false,
-        message: 'Server error during authentication.'
+        msg: "We couldn't verify your session. Please try again.",
+        message: "We couldn't verify your session. Please try again.",
+        code: 'INTERNAL'
       });
     }
   };

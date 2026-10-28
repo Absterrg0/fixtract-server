@@ -8,6 +8,7 @@ import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
 import { notifyBookingCancelledAndRefunded } from '../../utils/notifications/notifyBookingCancelledAndRefunded';
 import { notify } from '../../utils/notifications/notify';
+import { bookingForViewer } from '../../utils/invoiceVisibility';
 
 const REFUND_FINALIZED_BOOKING_STATUS = 'cancelled';
 
@@ -128,7 +129,13 @@ export const listProfessionalRefundRequests = async (req: Request, res: Response
       .sort({ createdAt: -1 })
       .lean();
 
-    return res.json({ success: true, data: { requests } });
+    const visibleRequests = requests.map((request: any) =>
+      request?.booking && typeof request.booking === 'object'
+        ? { ...request, booking: bookingForViewer(request.booking, 'professional') }
+        : request
+    );
+
+    return res.json({ success: true, data: { requests: visibleRequests } });
   } catch (error: any) {
     console.error('listProfessionalRefundRequests error:', error);
     return res.status(500).json({ success: false, msg: 'Failed to load refund requests' });

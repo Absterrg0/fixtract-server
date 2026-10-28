@@ -19,6 +19,7 @@ import { firstVatCountry, getQuotationTierRateOptionsFromConfig, getVatRateOptio
 import { notify } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
+import { bookingForRequest, sanitizeMilestoneForViewer, sanitizeMilestonesForViewer } from '../../utils/invoiceVisibility';
 
 const getSafeCommissionPercent = async (): Promise<number> => {
   try {
@@ -554,7 +555,7 @@ export const respondToRFQ = async (req: Request, res: Response) => {
         success: true,
         data: {
           message: 'RFQ accepted. You have 4 working days to submit a quotation.',
-          booking,
+          booking: bookingForRequest(booking, (req as any).user),
           rfqDeadline: booking.rfqDeadline,
         }
       });
@@ -597,11 +598,11 @@ export const respondToRFQ = async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      data: { message: 'RFQ rejected', booking }
+      data: { message: 'RFQ rejected', booking: bookingForRequest(booking, (req as any).user) }
     });
   } catch (error: any) {
     console.error('Error responding to RFQ:', error);
-    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to process request' } });
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
 };
 
@@ -788,13 +789,13 @@ export const submitQuotation = async (req: Request, res: Response) => {
       success: true,
       data: {
         message: 'Quotation submitted successfully',
-        booking,
+        booking: bookingForRequest(booking, (req as any).user),
         quotationNumber: booking.quotationNumber,
       }
     });
   } catch (error: any) {
     console.error('Error submitting quotation:', error);
-    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to process request' } });
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
 };
 
@@ -961,13 +962,13 @@ export const editQuotation = async (req: Request, res: Response) => {
       success: true,
       data: {
         message: `Quotation updated to version ${newVersionNumber}`,
-        booking,
+        booking: bookingForRequest(booking, (req as any).user),
         version: newVersionNumber,
       }
     });
   } catch (error: any) {
     console.error('Error editing quotation:', error);
-    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to process request' } });
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
 };
 
@@ -1049,7 +1050,7 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
 
       return res.json({
         success: true,
-        data: { message: 'Quotation rejected', booking }
+        data: { message: 'Quotation rejected', booking: bookingForRequest(booking, (req as any).user) }
       });
     }
 
@@ -1112,13 +1113,13 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
       success: true,
       data: {
         message: 'Quotation accepted. Please complete the booking wizard to select your start date and proceed to payment.',
-        booking,
+        booking: bookingForRequest(booking, (req as any).user),
         requiresBookingWizard: true,
       }
     });
   } catch (error: any) {
     console.error('Error responding to quotation:', error);
-    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to process request' } });
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
 };
 
@@ -1258,12 +1259,12 @@ export const createDirectQuotation = async (req: Request, res: Response) => {
       data: {
         message: 'Direct quotation draft created',
         bookingId: booking._id.toString(),
-        booking,
+        booking: bookingForRequest(booking, (req as any).user),
       }
     });
   } catch (error: any) {
     console.error('Error creating direct quotation:', error);
-    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to process request' } });
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
 };
 
@@ -1299,7 +1300,7 @@ export const getActiveCustomers = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error getting active customers:', error);
-    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to process request' } });
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
 };
 
@@ -1324,7 +1325,7 @@ export const getActiveProjects = async (req: Request, res: Response) => {
     return res.json({ success: true, data: { projects } });
   } catch (error: any) {
     console.error('Error getting active projects:', error);
-    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to process request' } });
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
 };
 
@@ -1364,7 +1365,7 @@ export const getQuotationVersions = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error getting quotation versions:', error);
-    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to process request' } });
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
 };
 
@@ -1501,8 +1502,8 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
       success: true,
       data: {
         message: action === 'start' ? 'Milestone started successfully' : 'Milestone completed successfully',
-        milestone: booking.milestonePayments[milestoneIndex],
-        booking,
+        milestone: sanitizeMilestoneForViewer(booking.milestonePayments[milestoneIndex]),
+        booking: bookingForRequest(booking, (req as any).user),
       }
     });
   } catch (error: any) {
@@ -1546,7 +1547,7 @@ export const getMilestonePaymentStatus = async (req: Request, res: Response) => 
     return res.json({
       success: true,
       data: {
-        milestones,
+        milestones: sanitizeMilestonesForViewer(milestones),
         totalAmount,
         paidAmount,
         remainingAmount: totalAmount - paidAmount,
@@ -1556,7 +1557,7 @@ export const getMilestonePaymentStatus = async (req: Request, res: Response) => 
     });
   } catch (error: any) {
     console.error('Error getting milestone status:', error);
-    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to process request' } });
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
 };
 
@@ -1616,6 +1617,6 @@ export const createMilestonePaymentIntent = async (req: Request, res: Response) 
     });
   } catch (error: any) {
     console.error('Error creating milestone payment intent:', error);
-    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to process request' } });
+    res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't complete this request. Please try again." } });
   }
 };

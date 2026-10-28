@@ -4,7 +4,10 @@ const mocks = vi.hoisted(() => ({ find: vi.fn(), updateOne: vi.fn(), settings: v
 vi.mock("../../models/booking", () => ({ default: { find: mocks.find, updateOne: mocks.updateOne } }));
 vi.mock("../../models/platformSettings", () => ({ default: { getCurrentConfig: mocks.settings } }));
 vi.mock("../../services/invoiceArtifacts", () => ({ ensureBookingInvoiceArtifacts: mocks.ensure }));
-import { retryStuckPeppolDispatches } from "../../utils/retryPeppolDispatches";
+import {
+  retryStuckPeppolDispatches,
+  sanitizePeppolRetryResultForResponse,
+} from "../../utils/retryPeppolDispatches";
 
 const chain = (rows: unknown[]) => {
   const query: any = {};
@@ -42,5 +45,33 @@ describe("Peppol retry", () => {
     mocks.settings.mockResolvedValue({ eInvoicing: { peppolEnabled: true, provider: "manual" } });
     expect((await retryStuckPeppolDispatches()).checked).toBe(0);
     expect(mocks.find).not.toHaveBeenCalled();
+  });
+});
+
+describe("Peppol retry cron response", () => {
+  it("keeps status fields but hides raw provider errors", () => {
+    const result = sanitizePeppolRetryResultForResponse({
+      checked: 2,
+      results: [
+        { bookingNumber: "BK-1", customer: "sent", supplier: "skipped" },
+        {
+          bookingNumber: "BK-2",
+          error: "Odoo Server Error: Traceback; SQLSTATE 42P01 api_key=sk_live_secret",
+        },
+      ],
+    });
+
+    expect(result.checked).toBe(2);
+    expect(result.results[0]).toEqual({
+      bookingNumber: "BK-1",
+      customer: "sent",
+      supplier: "skipped",
+    });
+    expect(result.results[1]).toEqual({
+      bookingNumber: "BK-2",
+      error: "Peppol retry failed. Check server logs for details.",
+    });
+    expect(JSON.stringify(result)).not.toContain("Traceback");
+    expect(JSON.stringify(result)).not.toContain("sk_live_secret");
   });
 });
