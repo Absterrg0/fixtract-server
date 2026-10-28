@@ -16,8 +16,6 @@ import {
   uploadToS3,
   generateFileName,
   validateImageFileBuffer,
-  parseS3KeyFromUrl,
-  deleteFromS3,
   presignS3Url,
 } from "../../utils/s3Upload";
 import { presignCmsDoc, presignCmsDocs } from "../../utils/cmsPresign";
@@ -34,6 +32,11 @@ import {
   coverImageForCreate,
 } from "../../utils/cmsCoverImage";
 import { sanitizeCmsActiveCountries } from "../../utils/cms/activeCountries";
+import { deleteCmsMediaIfUnreferenced } from "../../utils/cms/coverImageCleanup";
+import {
+  CMS_LOCALES,
+  isCmsLocale,
+} from "../../utils/cms/locales";
 
 const isValidObjectId = (id: string): boolean => mongoose.Types.ObjectId.isValid(id);
 
@@ -340,7 +343,15 @@ export const createCmsContent = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, msg: "Slug is required" });
     }
 
-    const locale = typeof body.locale === "string" && body.locale.trim() ? body.locale.trim().toLowerCase() : "en";
+    const rawLocale =
+      typeof body.locale === "string" && body.locale.trim() ? body.locale.trim().toLowerCase() : "en";
+    if (!isCmsLocale(rawLocale)) {
+      return res.status(400).json({
+        success: false,
+        msg: `Unsupported locale: ${rawLocale}. Supported locales: ${CMS_LOCALES.join(", ")}`,
+      });
+    }
+    const locale = rawLocale;
     const status: CmsContentStatus = CMS_CONTENT_STATUSES.includes(body.status)
       ? body.status
       : "draft";
@@ -438,10 +449,15 @@ export const updateCmsContent = async (req: Request, res: Response) => {
 
     const finalSlug =
       typeof body.slug === "string" && body.slug.trim() ? toSlug(body.slug) : doc.slug;
-    const finalLocale =
-      typeof body.locale === "string" && body.locale.trim()
-        ? body.locale.trim().toLowerCase()
-        : doc.locale;
+    const rawFinalLocale =
+      typeof body.locale === "string" && body.locale.trim() ? body.locale.trim().toLowerCase() : doc.locale;
+    if (!isCmsLocale(rawFinalLocale)) {
+      return res.status(400).json({
+        success: false,
+        msg: `Unsupported locale: ${rawFinalLocale}. Supported locales: ${CMS_LOCALES.join(", ")}`,
+      });
+    }
+    const finalLocale = rawFinalLocale;
 
     if (!finalSlug) {
       return res.status(400).json({ success: false, msg: "Slug is required" });
@@ -553,12 +569,13 @@ export const updateCmsContent = async (req: Request, res: Response) => {
 
     await doc.save();
 
+    // Drop the replaced cover object only when no surviving CMS document
+    // (including manual translations kept on purpose) references it.
     if (previousCoverToCleanup) {
-      const key = parseS3KeyFromUrl(previousCoverToCleanup);
-      if (key && key.startsWith("cms/")) {
-        deleteFromS3(key).catch((err) =>
-          console.error("Failed to delete replaced CMS cover image:", err)
-        );
+      try {
+        await deleteCmsMediaIfUnreferenced(previousCoverToCleanup);
+      } catch (err) {
+        console.error("Failed to delete replaced CMS cover image:", err);
       }
     }
 
@@ -588,12 +605,13 @@ export const deleteCmsContent = async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, msg: "Content not found" });
     }
 
+    // The deleted doc is gone. Only remove the shared S3 object when nothing
+    // that remains (including manual translations kept on purpose) references it.
     if (doc.coverImage) {
-      const key = parseS3KeyFromUrl(doc.coverImage);
-      if (key && key.startsWith("cms/")) {
-        try { await deleteFromS3(key); } catch (err) {
-          console.error("Failed to delete CMS cover image:", err);
-        }
+      try {
+        await deleteCmsMediaIfUnreferenced(doc.coverImage);
+      } catch (err) {
+        console.error("Failed to delete CMS cover image:", err);
       }
     }
 
