@@ -1090,6 +1090,21 @@ export const readOdooEdiDeliveryState = async (
   }
 };
 
+/**
+ * Log-safe EDI delivery summary. Full EDI documents can carry provider error
+ * text (credentials, endpoint details), so logs only keep state and move
+ * references; the complete documents stay in the persisted dispatch response.
+ */
+const summarizeEdiDocuments = (
+  ediDocuments: unknown,
+): Array<{ state?: unknown; blockingLevel?: unknown }> => {
+  if (!Array.isArray(ediDocuments)) return [];
+  return ediDocuments.map((doc: any) => ({
+    state: doc?.state,
+    blockingLevel: doc?.blocking_level,
+  }));
+};
+
 const readOdooMovePeppolState = async (
   config: OdooAccountingConfig,
   moveId: number,
@@ -1559,7 +1574,7 @@ const dispatchToOdoo = async (
       });
       console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] submission: EDI send triggered via ${sendMode}`);
       const ediDocuments = await readOdooEdiDeliveryState(config, moveId);
-      console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] delivery:`, JSON.stringify(ediDocuments || []));
+      console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] delivery:`, JSON.stringify({ moveId, companyId: config.companyId, documents: summarizeEdiDocuments(ediDocuments) }));
       return withStripePaymentRecorded(config, moveId, payload, odooDeliveryResult(config, moveId, ediDocuments));
     } catch (sendError: any) {
       if (isOdooTimeout(sendError)) {
@@ -1567,7 +1582,7 @@ const dispatchToOdoo = async (
         // likely gone out. Report what the move says instead of "failed";
         // re-running invoice generation refreshes it without sending twice.
         const ediDocuments = await readOdooEdiDeliveryState(config, moveId);
-        console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] delivery after timeout:`, JSON.stringify(ediDocuments || []));
+        console.log(`[PEPPOL][${payload.invoiceNumber}][${payload.side}] delivery after timeout:`, JSON.stringify({ moveId, companyId: config.companyId, documents: summarizeEdiDocuments(ediDocuments) }));
         const result = odooDeliveryResult(config, moveId, ediDocuments);
         if (result.status === "queued") {
           console.error(
