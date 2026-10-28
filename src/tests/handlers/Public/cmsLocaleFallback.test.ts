@@ -7,12 +7,18 @@ const { find, findOne, updateOne } = vi.hoisted(() => ({
   updateOne: vi.fn(),
 }));
 
+const { userFind } = vi.hoisted(() => ({ userFind: vi.fn() }));
+
 vi.mock('../../../models/cmsContent', () => ({
   default: { find, findOne, updateOne },
   CMS_CONTENT_TYPES: ['blog', 'news', 'faq', 'policy', 'landing'],
   CMS_CONTENT_STATUSES: ['draft', 'published'],
   FAQ_CATEGORIES: [{ slug: 'general', name: 'General' }],
   FAQ_CATEGORY_SLUGS: ['general'],
+}));
+
+vi.mock('../../../models/user', () => ({
+  default: { find: userFind },
 }));
 
 vi.mock('../../../config/db', () => ({ default: vi.fn(async () => undefined) }));
@@ -76,6 +82,7 @@ function listing(locale: string, slug: string, publishedAt: string, title: strin
 beforeEach(() => {
   vi.clearAllMocks();
   updateOne.mockResolvedValue({});
+  userFind.mockReturnValue({ select: () => ({ lean: async () => [] }) });
 });
 
 describe('public CMS locale fallback', () => {
@@ -141,9 +148,7 @@ describe('public CMS locale fallback', () => {
 
     find.mockImplementation((filter: Record<string, any>) => ({
       select: () => ({
-        populate: () => ({
-          lean: async () => (filter.locale === 'nl' ? [nlDoc] : [enSameSlug, enFallback]),
-        }),
+        lean: async () => (filter.locale === 'nl' ? [nlDoc] : [enSameSlug, enFallback]),
       }),
     }));
 
@@ -165,7 +170,7 @@ describe('public CMS locale fallback', () => {
     const enDoc = listing('en', 'solar-guide', '2026-02-01', 'Solar guide');
     find.mockImplementation(() => ({
       select: () => ({
-        populate: () => ({ lean: async () => [enDoc] }),
+        lean: async () => [enDoc],
       }),
     }));
 
@@ -187,9 +192,7 @@ describe('public CMS locale fallback', () => {
 
     find.mockImplementation((filter: Record<string, any>) => ({
       select: () => ({
-        populate: () => ({
-          lean: async () => (filter.locale === 'nl' ? nlDocs : [enFallback]),
-        }),
+        lean: async () => (filter.locale === 'nl' ? nlDocs : [enFallback]),
       }),
     }));
 
@@ -310,5 +313,27 @@ describe('public CMS locale fallback', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body.data.items.map((item: any) => item.slug)).toEqual(['heat-pump']);
     expect(res.body.data.items[0].translatedFrom).toBeUndefined();
+  });
+
+  it('attaches author names with a single bounded lookup for the page slice', async () => {
+    const nlDoc = { ...listing('nl', 'solar-guide', '2026-02-01', 'Zonne-energie'), author: 'author-1' };
+    find.mockImplementation(() => ({
+      select: () => ({
+        lean: async () => [nlDoc],
+      }),
+    }));
+    userFind.mockReturnValue({
+      select: () => ({ lean: async () => [{ _id: 'author-1', name: 'Jane Pro' }] }),
+    });
+
+    const res = mockRes();
+    await listPublicCmsContent(
+      mockReq({ params: { type: 'blog' }, query: { locale: 'nl' } }),
+      res
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.items[0].author).toEqual({ _id: 'author-1', name: 'Jane Pro' });
+    expect(userFind).toHaveBeenCalledTimes(1);
   });
 });

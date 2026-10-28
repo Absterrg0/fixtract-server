@@ -6,6 +6,7 @@ import CmsContent, {
   FAQ_CATEGORY_SLUGS,
 } from "../../models/cmsContent";
 import connectDB from "../../config/db";
+import User from "../../models/user";
 import { presignCmsDoc, presignCmsDocs } from "../../utils/cmsPresign";
 import { toSlug } from "../../utils/slug";
 import { param } from "../../utils/requestParams";
@@ -49,6 +50,37 @@ function mergeLocaleFallback(primary: any[], fallback: any[]): any[] {
       (doc) => !coveredSlugs.has(doc.slug) && !coveredSources.has(String(doc._id))
     ),
   ];
+}
+
+/**
+ * Batch-resolves author display names for a page slice. Listing queries
+ * intentionally skip populate() so per-request DB work stays bounded (two
+ * light queries + one small author lookup); this restores the same
+ * `{ _id, name }` shape populate() produced, but only for the returned page.
+ */
+async function attachListingAuthorNames(items: any[]): Promise<void> {
+  const ids = [
+    ...new Set(
+      items
+        .map((doc) => doc?.author)
+        .filter(
+          (author) => author != null && (typeof author !== "object" || !(author as any).name)
+        )
+        .map((author) => String((author as any)?._id ?? author))
+    ),
+  ];
+  if (ids.length === 0) return;
+  const users = await User.find({ _id: { $in: ids } })
+    .select("name")
+    .lean();
+  const names = new Map(
+    (users as Array<{ _id: unknown; name?: string }>).map((user) => [String(user._id), user.name])
+  );
+  for (const doc of items) {
+    if (doc?.author == null) continue;
+    const key = String(doc.author?._id ?? doc.author);
+    if (names.has(key)) doc.author = { _id: doc.author, name: names.get(key) };
+  }
 }
 
 /** Sorts merged listings by publishedAt desc; ties put the requested locale first. */
@@ -109,16 +141,20 @@ export const listPublicCmsContent = async (req: Request, res: Response) => {
       ...(serviceSlug && (type === "blog" || type === "news") ? { relatedServiceSlug: serviceSlug } : {}),
     });
 
+    // Bulk fetch without populate: author names are resolved below for the
+    // page slice only, so per-request DB work stays bounded (two light
+    // queries + one small author lookup) instead of populating every
+    // matching document. Merge/sort/pagination keep exact in-memory
+    // semantics because hybrid locale lists cannot page correctly from a
+    // single DB query (fallbacks fill gaps left by the requested locale).
     const [primary, fallback] = await Promise.all([
       CmsContent.find(buildFilter(locale))
         .select(LISTING_FIELDS)
-        .populate("author", "name")
         .lean(),
       locale === CMS_DEFAULT_LOCALE
         ? Promise.resolve([])
         : CmsContent.find(buildFilter(CMS_DEFAULT_LOCALE))
             .select(LISTING_FIELDS)
-            .populate("author", "name")
             .lean(),
     ]);
 
@@ -139,6 +175,9 @@ export const listPublicCmsContent = async (req: Request, res: Response) => {
     ).sort(compareByPublishedDesc(locale));
     const total = merged.length;
     const items = merged.slice(skip, skip + limit);
+
+    // Resolve author names for the page slice only (bounded $in query).
+    await attachListingAuthorNames(items);
 
     const presigned = await presignCmsDocs(items);
 
