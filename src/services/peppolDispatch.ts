@@ -1335,12 +1335,13 @@ const odooDeliveryResult = (
     Boolean(document.error || document.error_message),
   );
   if (failedDocument) {
-    const providerMessage = htmlToText(String(failedDocument.error_message || failedDocument.error || ""));
+    // Provider-supplied error text can carry credentials: it stays out of
+    // logs entirely. State + move/company ids are enough to correlate; the
+    // full EDI documents are in the persisted dispatch response.
     console.error("[PEPPOL] Odoo EDI error:", {
       moveId,
       companyId: config.companyId,
       state: failedDocument.state,
-      providerMessage,
     });
     return {
       status: "failed",

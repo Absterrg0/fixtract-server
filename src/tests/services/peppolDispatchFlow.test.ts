@@ -150,13 +150,16 @@ describe("Peppol Odoo dispatch", () => {
       });
       const logged: unknown[][] = [];
       const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args); });
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const errored: unknown[][] = [];
+      const errorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { errored.push(args); });
       const result = await dispatch("customer");
       logSpy.mockRestore();
       errorSpy.mockRestore();
       expect(result).toMatchObject({ status: "failed" });
       expect(JSON.stringify(logged)).not.toContain("edisecret-provider-token");
       expect(JSON.stringify(logged)).not.toContain("Odoo proxy rejected");
+      expect(JSON.stringify(errored)).not.toContain("edisecret-provider-token");
+      expect(JSON.stringify(errored)).not.toContain("Odoo proxy rejected");
     });
 
     it("reuses the partner Odoo created after a slow (VIES) create timed out", async () => {
