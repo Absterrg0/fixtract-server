@@ -306,6 +306,12 @@ export function buildLegacyMeetingRequestFilter(
 }
 
 /** Stable merged order for new support rows + legacy MeetingRequest rows. */
+const supportItemTime = (value: unknown): number => {
+  if (value instanceof Date) return value.getTime();
+  const ms = new Date(value as string | number).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+};
+
 export function mergeSupportItemsPage<T extends Record<string, any>>(
   tickets: T[],
   legacy: T[],
@@ -314,7 +320,9 @@ export function mergeSupportItemsPage<T extends Record<string, any>>(
 ): T[] {
   return [...tickets, ...legacy]
     .sort((a, b) => {
-      const byDate = String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+      // Compare real timestamps: String(Date) is locale text and does not sort
+      // chronologically, and lean docs hand us Date values.
+      const byDate = supportItemTime(b.updatedAt) - supportItemTime(a.updatedAt);
       if (byDate !== 0) return byDate;
       return String(b._id || "").localeCompare(String(a._id || ""));
     })

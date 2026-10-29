@@ -99,13 +99,18 @@ async function serializeAttachment(
   };
 }
 
-function serializeReplies(replies: unknown) {
+function serializeReplies(replies: unknown, includeAdminAuthorId: boolean) {
   if (!Array.isArray(replies)) return [];
   return replies.map((reply) => {
     const raw = plain(reply);
+    const isAdminReply = raw.authorRole === "admin";
     return {
       ...(raw._id ? { _id: String(raw._id) } : {}),
-      authorId: raw.authorId ? String(raw.authorId) : "",
+      // Owner-facing payloads must never expose admin user ids.
+      authorId:
+        raw.authorId && (includeAdminAuthorId || !isAdminReply)
+          ? String(raw.authorId)
+          : "",
       authorRole: raw.authorRole === "admin" ? "admin" : raw.authorRole === "customer" ? "customer" : "professional",
       body: String(raw.body || ""),
       createdAt: raw.createdAt ? new Date(raw.createdAt).toISOString() : new Date(0).toISOString(),
@@ -188,7 +193,7 @@ async function serializeBase(
     booking,
     attachments: attachment ? [attachment] : [],
     attachment,
-    replies: serializeReplies(ticket.replies),
+    replies: serializeReplies(ticket.replies, options.includeAdminDetails === true),
     meeting,
     tags: {
       reason: reasonId,

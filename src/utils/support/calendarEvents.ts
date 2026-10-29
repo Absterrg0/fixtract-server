@@ -72,6 +72,11 @@ export async function listSupportCalendarEvents(params: {
   /** Admin feeds: restrict new support meetings to this assigned admin. */
   adminId?: string;
 }): Promise<SupportCalendarEvent[]> {
+  // Fail closed: a professional feed without a user id would otherwise drop the
+  // owner filter and expose every user's support meetings.
+  if (params.viewer === "professional" && !params.userId) {
+    throw new Error("userId is required for professional support calendar feeds.");
+  }
   const ticketFilter: Record<string, unknown> = {
     kind: "meeting",
     "meeting.scheduledAt": { $gte: params.from, $lte: params.to },

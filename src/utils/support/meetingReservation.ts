@@ -933,7 +933,7 @@ async function cancelSupportMeetingAttempt(
   const eventId = supportMeetingEventId("cancelled", revision);
   const transitionSet: Record<string, unknown> = {
     "meeting.status": "cancelled",
-    "meeting.cancelledAt": new Date(),
+    "meeting.cancelledAt": params.now || new Date(),
     "meeting.cancelledBy": new Types.ObjectId(String(params.actorId)),
     "meeting.cancelledByRole": params.actorRole,
     "meeting.cancelledEventId": eventId,
@@ -1000,12 +1000,14 @@ async function cancelSupportMeetingAttempt(
 export async function completeSupportMeeting(params: {
   ticket: ISupportTicket;
   actorId: Types.ObjectId | string;
+  /** Injectable clock for tests and callers that need a deterministic time. */
+  now?: Date;
 }): Promise<ISupportTicket> {
   return completeSupportMeetingAttempt(params, 0);
 }
 
 async function completeSupportMeetingAttempt(
-  params: { ticket: ISupportTicket; actorId: Types.ObjectId | string },
+  params: { ticket: ISupportTicket; actorId: Types.ObjectId | string; now?: Date },
   attempt: number,
 ): Promise<ISupportTicket> {
   const { ticket } = params;
@@ -1031,7 +1033,7 @@ async function completeSupportMeetingAttempt(
         stateFilter: { "meeting.status": "scheduled", "meeting.meetingLink": { $ne: null } },
         set: {
           "meeting.status": "completed",
-          "meeting.completedAt": new Date(),
+          "meeting.completedAt": params.now || new Date(),
           "meeting.revision": revision,
           status: "resolved",
         },

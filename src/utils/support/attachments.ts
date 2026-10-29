@@ -27,6 +27,19 @@ const SUPPORT_MIMES = new Set([
 const canonicalMime = (mime: string): string =>
   mime === "image/jpg" ? "image/jpeg" : mime;
 
+/** Stored extension per validated MIME type (never trust the client filename). */
+const SUPPORT_ATTACHMENT_EXTENSION: Record<string, string> = {
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+  "application/pdf": ".pdf",
+  "text/plain": ".txt",
+  "application/msword": ".doc",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+  "application/vnd.ms-excel": ".xls",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+};
+
 export function sanitizeSupportFileName(originalName: string): string {
   const base = path.basename(originalName || "attachment");
   const cleaned = base
@@ -155,7 +168,14 @@ export async function uploadSupportAttachment(
   const validated = await validateSupportAttachmentBuffer(file);
   file.originalname = validated.fileName;
   file.mimetype = validated.mimeType;
-  const key = generateFileName(validated.fileName, userId, "support-attachments");
+  // Derive the stored extension from the validated MIME type, never from the
+  // client filename: a PNG named "x.html" must not land in S3 as .html, and
+  // raw filename characters (#, malformed %) break key parsing/signing later.
+  const key = generateFileName(
+    `file${SUPPORT_ATTACHMENT_EXTENSION[validated.mimeType] ?? ""}`,
+    userId,
+    "support-attachments",
+  );
   const uploaded = await uploadToS3(file, key);
   return {
     key: uploaded.key,

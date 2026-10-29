@@ -150,7 +150,9 @@ export async function buildAdminBusyIntervals(
       "meeting.status": { $in: ["pending", "scheduled"] },
       "meeting.adminId": { $in: adminIds },
     };
-    if (excludeMeetingTicketId) supportFilter._id = { $ne: excludeMeetingTicketId };
+    if (excludeMeetingTicketId && Types.ObjectId.isValid(excludeMeetingTicketId)) {
+      supportFilter._id = { $ne: new Types.ObjectId(excludeMeetingTicketId) };
+    }
     const tickets = await SupportTicket.find(supportFilter)
       .select("meeting.adminId meeting.scheduledAt meeting.durationMinutes")
       .lean();
@@ -230,7 +232,9 @@ export async function buildProfessionalBusyIntervals(
     kind: "meeting",
     "meeting.status": { $in: ["pending", "scheduled"] },
   };
-  if (excludeMeetingTicketId) supportFilter._id = { $ne: excludeMeetingTicketId };
+  if (excludeMeetingTicketId && Types.ObjectId.isValid(excludeMeetingTicketId)) {
+    supportFilter._id = { $ne: new Types.ObjectId(excludeMeetingTicketId) };
+  }
   const supportMeetings = await SupportTicket.find(supportFilter)
     .select("meeting.scheduledAt meeting.durationMinutes")
     .lean();

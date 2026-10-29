@@ -65,10 +65,17 @@ export async function discardSupportCreation(
   ticketId: Types.ObjectId | string,
 ): Promise<void> {
   const id = new Types.ObjectId(String(ticketId));
-  await Promise.allSettled([
+  const results = await Promise.allSettled([
     releaseCalendarReservations("support", id),
     SupportTicketInternalNote.deleteMany({ ticketId: id }),
     SupportMeetingNotification.deleteMany({ ticketId: id }),
   ]);
+  const failed = results.filter((result) => result.status === "rejected");
+  if (failed.length > 0) {
+    // Keep the ticket: it is the only handle that can still release its slot
+    // keys, so deleting it after a failed cleanup would strand reservations.
+    console.error("Support creation cleanup incomplete:", String(id), failed.length);
+    throw new Error("Support creation cleanup incomplete.");
+  }
   await SupportTicket.deleteOne({ _id: id });
 }
