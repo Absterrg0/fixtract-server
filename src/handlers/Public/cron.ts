@@ -1,3 +1,4 @@
+import { retryPendingBookingCalendarReleases } from "../../utils/support/calendarReleaseRetry";
 import { Request, Response } from 'express';
 import User from '../../models/user';
 import CronJobLock from '../../models/cronJobLock';
@@ -317,6 +318,25 @@ export const runPeppolRetryCron = async (req: Request, res: Response) => {
   } catch (error: unknown) {
     console.error('[Cron] Peppol retry failed:', error);
     return res.status(500).json({ success: false, msg: 'Peppol dispatch retry failed. Check server logs for details.' });
+  }
+};
+
+/**
+ * Retries terminal-booking calendar releases recorded by the booking post-save
+ * hook. Secured via Authorization: Bearer ${CRON_SECRET}.
+ */
+export const runSupportCalendarRetryCron = async (req: Request, res: Response) => {
+  if (!isAuthorizedCron(req)) {
+    return res.status(401).json({ success: false, msg: "Unauthorized" });
+  }
+  try {
+    const released = await retryPendingBookingCalendarReleases();
+    return res.json({ success: true, data: { released } });
+  } catch (error: unknown) {
+    console.error("[Cron] Support calendar release retry failed:", error);
+    return res
+      .status(500)
+      .json({ success: false, msg: "Calendar release retry failed. Check server logs for details." });
   }
 };
 
