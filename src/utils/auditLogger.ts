@@ -13,8 +13,24 @@ interface AuditLogInput {
   errorMessage?: string;
 }
 
-const SENSITIVE_KEY_PATTERN = /password|token|secret|cvv|cardNumber|verificationCode|idProof/i;
+// meetingLink is redacted because meeting providers may embed access tokens
+// or passwords in the URL query string; the link itself stays in the ticket.
+const SENSITIVE_KEY_PATTERN = /password|token|secret|cvv|cardNumber|verificationCode|idProof|meetingLink|internalNote/i;
 const MAX_STRING_LENGTH = 2048;
+const SUPPORT_NOTE_ROUTE_RE = /\/support\/(?:items\/[^/]+\/[^/]+|tickets\/[^/]+)\/notes(?:\/|$|\?)/i;
+
+/** Private note bodies are never written to the audit trail verbatim. */
+export function sanitizeAdminAuditBody(path: string, body: any): any {
+  const sanitized = sanitizeForAudit(body);
+  if (!SUPPORT_NOTE_ROUTE_RE.test(path.split("?")[0])) return sanitized;
+  if (sanitized && typeof sanitized === "object" && !Array.isArray(sanitized)) {
+    const out = { ...sanitized };
+    if (typeof out.body === "string") out.body = "[redacted:private-note]";
+    return out;
+  }
+  if (typeof sanitized === "string") return "[redacted:private-note]";
+  return sanitized;
+}
 
 export const getRequestIp = (req: Request): string | undefined => {
   const forwardedFor = req.headers['x-forwarded-for']?.toString();

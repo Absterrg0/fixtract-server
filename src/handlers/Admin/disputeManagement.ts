@@ -20,6 +20,14 @@ import { auditLog } from '../../utils/auditLogger';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { presignS3Url } from '../../utils/s3Upload';
 import { buildProjectScheduleWindow } from '../../utils/scheduleEngine';
+import { findTeamConflicts } from '../../utils/scheduleConflict';
+import {
+  findBookingCalendarConflictsForSchedule,
+  releaseBookingCalendar,
+  replaceBookingCalendar,
+} from '../../utils/support/bookingCalendar';
+import { withCalendarTransactionIfConnected } from '../../utils/support/calendarReservations';
+import { UserFacingError } from '../../utils/appErrors';
 import { param, params } from '../../utils/requestParams';
 import { notify } from '../../utils/notifications/notify';
 
@@ -62,6 +70,8 @@ import {
 
 const ACTIVE_DISPUTE_STATUS: BookingStatus = 'dispute';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
+
+class DisputeResolutionConflictError extends Error {}
 
 type ForceBookingStatus = 'completed' | 'cancelled' | 'refunded' | 'in_progress' | 'booked' | 'professional_completed';
 const FORCE_STATUS_VALUES: ForceBookingStatus[] = ['completed', 'cancelled', 'refunded', 'in_progress', 'booked', 'professional_completed'];
@@ -488,6 +498,55 @@ export const resolveDispute = async (req: Request, res: Response) => {
         }
       : null;
 
+    // The same per-person reservation boundary normal booking/support writers
+    // use. If a forced reschedule is requested, the keys must move with the
+    // booking in one transaction; cancelling/completing releases them.
+    const calendarCandidate = rescheduleScheduleFields
+      ? {
+          _id: booking._id,
+          professional: (booking.professional as any)?._id || booking.professional,
+          assignedTeamMembers:
+            rescheduleScheduleFields.assignedTeamMembers || booking.assignedTeamMembers || [],
+          resourcePlan: booking.resourcePlan || [],
+          scheduledStartDate: rescheduleScheduleFields.scheduledStartDate,
+          scheduledExecutionEndDate: rescheduleScheduleFields.scheduledExecutionEndDate,
+          scheduledBufferEndDate: rescheduleScheduleFields.scheduledBufferEndDate,
+        }
+      : null;
+    if (calendarCandidate) {
+      const calendarConflicts = await findBookingCalendarConflictsForSchedule({
+        bookingId: booking._id,
+        booking: calendarCandidate as any,
+      });
+      const bookingConflicts = await findTeamConflicts(
+        String(booking._id),
+        [
+          ...((booking.professional as any)?._id ? [(booking.professional as any)._id] : []),
+          ...((calendarCandidate.assignedTeamMembers as any[]) || []),
+        ] as any[],
+        new Date(calendarCandidate.scheduledStartDate),
+        new Date(
+          calendarCandidate.scheduledBufferEndDate
+          || calendarCandidate.scheduledExecutionEndDate,
+        ),
+      );
+      const conflicts = [...calendarConflicts, ...bookingConflicts];
+      if (conflicts.length > 0) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'TEAM_CONFLICT',
+            message: 'The forced schedule conflicts with another booking, meeting, or support reservation.',
+            conflicts,
+          },
+        });
+      }
+    }
+
+    const terminalStatus = ['cancelled', 'refunded', COMPLETED_BOOKING_STATUS].includes(targetStatus);
+    const releaseInTransaction = targetStatus === 'cancelled' || targetStatus === COMPLETED_BOOKING_STATUS;
+    const replaceInTransaction = Boolean(calendarCandidate) && !terminalStatus;
+
     const completionDate = new Date();
     const setFields: Record<string, any> = {
       status: targetStatus,
@@ -525,23 +584,40 @@ export const resolveDispute = async (req: Request, res: Response) => {
       }
     }
 
-    resolvedBooking = await Booking.findOneAndUpdate(
-      { _id: booking._id, 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null },
-      {
-        $set: setFields,
-        $push: {
-          statusHistory: {
-            status: targetStatus,
-            timestamp: completionDate,
-            updatedBy: adminUser._id,
-            note: `Admin resolved dispute (${action}): ${resolution}`
+    let resolutionConflict = false;
+    resolvedBooking = await withCalendarTransactionIfConnected(async (session) => {
+      resolutionConflict = false;
+      if (releaseInTransaction) {
+        await releaseBookingCalendar(booking._id, session);
+      } else if (replaceInTransaction && calendarCandidate) {
+        await replaceBookingCalendar(calendarCandidate as any, session);
+      }
+      const updated = await Booking.findOneAndUpdate(
+        { _id: booking._id, 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null },
+        {
+          $set: setFields,
+          $push: {
+            statusHistory: {
+              status: targetStatus,
+              timestamp: completionDate,
+              updatedBy: adminUser._id,
+              note: `Admin resolved dispute (${action}): ${resolution}`
+            }
           }
-        }
-      },
-      { new: true }
-    );
+        },
+        { new: true, ...(session ? { session } : {}) }
+      );
+      if (!updated) {
+        resolutionConflict = true;
+        throw new DisputeResolutionConflictError('Dispute already resolved');
+      }
+      return updated;
+    }).catch((error) => {
+      if (error instanceof DisputeResolutionConflictError) return null;
+      throw error;
+    });
 
-    if (!resolvedBooking) {
+    if (!resolvedBooking || resolutionConflict) {
       const currentBooking = await Booking.findById(booking._id).select('status');
       return res.status(409).json({
         success: false,
@@ -587,6 +663,11 @@ export const resolveDispute = async (req: Request, res: Response) => {
             },
           }
         ).catch((cancelWriteError) => console.error('Failed to record dispute refund on booking cancellation:', cancelWriteError));
+        try {
+          await releaseBookingCalendar(booking._id);
+        } catch (releaseError) {
+          console.error('Dispute refunded but calendar reservation release failed:', releaseError);
+        }
       } catch (refundError: any) {
         const rollbackSet: Record<string, any> = { status: originalDisputeStatus };
         const rollbackUnset: Record<string, any> = {
@@ -634,6 +715,10 @@ export const resolveDispute = async (req: Request, res: Response) => {
     }
   } catch (error: any) {
     console.error('Error resolving dispute:', error);
+    // A shared-calendar duplicate can appear between the pre-check and the
+    // transaction (another writer takes the slot first). The transaction rolled
+    // back, so this is a real, actionable conflict rather than a server error.
+    const calendarConflict = error instanceof UserFacingError && error.status === 409;
     try {
       await auditLog({
         req,
@@ -641,11 +726,20 @@ export const resolveDispute = async (req: Request, res: Response) => {
         targetType: 'Booking',
         targetId: param(req.params.bookingId),
         status: 'failure',
-        statusCode: 500,
+        statusCode: calendarConflict ? 409 : 500,
         errorMessage: error?.message || 'unknown',
       });
     } catch (auditError) {
       console.error('Audit log failed during dispute resolve failure:', auditError);
+    }
+    if (calendarConflict) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: error.code || 'TEAM_CONFLICT',
+          message: error.message,
+        }
+      });
     }
     return res.status(500).json({
       success: false,

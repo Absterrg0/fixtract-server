@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { IUser } from "../models/user";
 import { permissionsForLevels, permissionsForRole, resolveAdminRole } from "../utils/adminRbac/rolePermissions";
+import { getEffectiveAccessForUser, adminAccessLevelsForResponse } from "../utils/adminRbac/roleAccess";
 // Handler to get current authenticated user
 export const GetCurrentUser = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -21,6 +22,12 @@ export const GetCurrentUser = async (req: Request, res: Response, next: NextFunc
     const adminPermissions = user.role === 'admin'
       ? [...(user.adminPermissionLevels ? permissionsForLevels(user.adminPermissionLevels) : permissionsForRole(resolveAdminRole(user.adminRole)))]
       : undefined;
+    // The legacy permission array only advertises write-derived permissions.
+    // Return the same effective area levels the server authorizes with so a
+    // support-read staff member can open the read-only inbox.
+    const adminAccessLevels = user.role === 'admin'
+      ? adminAccessLevelsForResponse(await getEffectiveAccessForUser(user))
+      : undefined;
 
     return res.status(200).json({
       success: true,
@@ -33,6 +40,8 @@ export const GetCurrentUser = async (req: Request, res: Response, next: NextFunc
         adminRole: user.adminRole,
         adminPermissions,
         adminPermissionLevels: user.role === 'admin' ? (user as any).adminPermissionLevels : undefined,
+        adminAccessLevels,
+        supportAccessLevel: adminAccessLevels?.support || 'none',
         isEmailVerified: user.isEmailVerified || false,
         isPhoneVerified: user.isPhoneVerified || false,
         vatNumber: user.vatNumber,

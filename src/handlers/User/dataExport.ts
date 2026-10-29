@@ -19,6 +19,7 @@ import DiscountCodeUsage from '../../models/discountCodeUsage';
 import Payment from '../../models/payment';
 import { auditLog } from '../../utils/auditLogger';
 import { bookingForViewer, sanitizePaymentForViewer } from '../../utils/invoiceVisibility';
+import { serializeSupportTicketsForExport } from '../../utils/support/serializers';
 
 export const exportMyData = async (req: Request, res: Response) => {
   try {
@@ -117,7 +118,7 @@ export const exportMyData = async (req: Request, res: Response) => {
       chatReports,
       favorites,
       cancellationRequests,
-      supportTickets,
+      supportTickets: await serializeSupportTicketsForExport(supportTickets as any[]),
       profileViews,
       discountCodeUsages,
     };

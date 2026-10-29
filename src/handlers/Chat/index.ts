@@ -9,6 +9,7 @@ import { generateFileName, uploadToS3, validateImageFile, validateFile, validate
 import type { IChatAttachment } from "../../models/chatMessage";
 import { notifyAsync } from "../../utils/notifications/notify";
 import { params } from "../../utils/requestParams";
+import { assertSupportChatWriteAllowed } from "../../utils/support/settings";
 
 const toObjectId = (value: string) =>
   mongoose.Types.ObjectId.createFromHexString(value);
@@ -506,6 +507,20 @@ export const sendMessage = async (req: Request, res: Response) => {
     return res.status(409).json({ success: false, msg: "This support conversation is closed" });
   }
 
+  if (conversation.type === "support") {
+    // Professional-only + superadmin feature flag. Historical support threads
+    // stay readable through the read endpoints, but cannot be written to.
+    try {
+      await assertSupportChatWriteAllowed(getIdString(conversation.supportTargetUserId));
+    } catch (error) {
+      return res.status(403).json({
+        success: false,
+        msg: error instanceof Error ? error.message : "Support chat is currently disabled.",
+        code: "FORBIDDEN",
+      });
+    }
+  }
+
   const professionalId = getIdString(conversation.professionalId);
   const customerId = getIdString(conversation.customerId);
   const supportAdminId = getIdString(conversation.supportAdminId);
@@ -674,13 +689,26 @@ const authorizeAndUploadChat = async (
       throw new UploadError(400, "Invalid conversationId");
     }
 
-    const conversation = await Conversation.findById(conversationId).select("customerId professionalId");
+    const conversation = await Conversation.findById(conversationId).select(
+      "type customerId professionalId supportAdminId supportTargetUserId",
+    );
     if (!conversation) {
       throw new UploadError(404, "Conversation not found");
     }
 
     if (!isConversationParticipant(conversation, userId)) {
       throw new UploadError(403, "Not allowed to upload for this conversation");
+    }
+
+    if (conversation.type === "support") {
+      try {
+        await assertSupportChatWriteAllowed(getIdString(conversation.supportTargetUserId));
+      } catch (error) {
+        throw new UploadError(
+          403,
+          error instanceof Error ? error.message : "Support chat is currently disabled.",
+        );
+      }
     }
   }
 

@@ -80,4 +80,10 @@ describe('admin route permission mapping', () => {
     expect(accessRequirementForAdminPath('/marketing-campaigns/preview-audience', 'POST')).toBe('read');
     expect(accessRequirementForAdminPath('/marketing-campaigns/test-send', 'POST')).toBe('write');
   });
+
+  it('requires support write access for the manual meeting-link endpoint', () => {
+    expect(permissionForAdminPath('/support/items/meeting/abc/meeting')).toBe('support.tickets');
+    expect(accessRequirementForAdminPath('/support/items/meeting/abc/meeting', 'PATCH')).toBe('write');
+    expect(accessRequirementForAdminPath('/support/items', 'GET')).toBe('read');
+  });
 });
