@@ -168,6 +168,32 @@ describe("Peppol Odoo dispatch", () => {
       expect(JSON.stringify(errored)).not.toContain("Odoo proxy rejected");
     });
 
+    it("never logs secret-bearing EDI error text on the normal delivery path", async () => {
+      const secretDoc = {
+        state: "error",
+        blocking_level: "error",
+        error: "EDISecret",
+        error_message: "<p>Odoo proxy rejected endpoint; token=edisecret-provider-token</p>",
+      };
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.edi.document") return [secretDoc];
+        return normal(...args);
+      });
+      const logged: unknown[][] = [];
+      const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args); });
+      const errored: unknown[][] = [];
+      const errorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { errored.push(args); });
+      const result = await dispatch("customer");
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+      expect(result).toMatchObject({ status: "failed" });
+      expect(JSON.stringify(logged)).not.toContain("edisecret-provider-token");
+      expect(JSON.stringify(logged)).not.toContain("Odoo proxy rejected");
+      expect(JSON.stringify(errored)).not.toContain("edisecret-provider-token");
+      expect(JSON.stringify(errored)).not.toContain("Odoo proxy rejected");
+    });
+
     it("reuses the partner Odoo created after a slow (VIES) create timed out", async () => {
       let searches = 0;
       const normal = mocks.call.getMockImplementation()!;

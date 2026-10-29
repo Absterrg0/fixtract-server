@@ -1439,7 +1439,7 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
   } catch (supplierPeppolError) {
     console.error(
       `[INVOICE] Supplier Peppol dispatch failed for booking ${bookingId}:`,
-      supplierPeppolError instanceof Error ? supplierPeppolError.message : supplierPeppolError,
+      providerErrorMessage(supplierPeppolError),
     );
     update.supplierPeppolDispatchStatus = "failed";
     update.supplierPeppolDispatchReason = dispatchFailureReason(supplierPeppolError);
@@ -1674,7 +1674,7 @@ export async function ensureBookingInvoiceArtifacts(
     } catch (supplierPeppolError) {
       console.error(
         `[INVOICE] Supplier Peppol dispatch failed for booking ${bookingId}:`,
-        supplierPeppolError instanceof Error ? supplierPeppolError.message : supplierPeppolError,
+        providerErrorMessage(supplierPeppolError),
       );
       update.supplierPeppolDispatchStatus = "failed";
       update.supplierPeppolDispatchReason = dispatchFailureReason(supplierPeppolError);
