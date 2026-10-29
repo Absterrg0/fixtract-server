@@ -96,11 +96,17 @@ describe("Peppol Odoo dispatch", () => {
 
   it("turns an Odoo connection failure into an actionable safe reason", async () => {
     mocks.discover.mockRejectedValueOnce(new Error("connect ECONNREFUSED https://odoo.internal?token=provider-secret"));
+    const errored: unknown[][] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { errored.push(args); });
     const result = await dispatch("customer");
+    errorSpy.mockRestore();
     expect(result).toMatchObject({ status: "failed", attempts: 0 });
     expect(result.reason).toMatch(/Odoo accounting configuration could not be loaded/i);
     expect(result.reason).not.toContain("ECONNREFUSED");
     expect(result.reason).not.toContain("provider-secret");
+    // The discovery-failure log must carry only the allowlisted summary.
+    expect(JSON.stringify(errored)).not.toContain("provider-secret");
+    expect(JSON.stringify(errored)).not.toContain("ECONNREFUSED");
   });
 
   it.each([["sent", "sent"], ["processing", "queued"]])("refreshes an existing %s move without sending it again", async (state, status) => {

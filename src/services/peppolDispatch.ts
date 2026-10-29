@@ -1,4 +1,5 @@
 import { Buffer } from "buffer";
+import { safeErrorSummary } from "../utils/safeErrorLog";
 import { PEPPOL_DISPATCH_STATUSES, type PeppolDispatchStatus } from "../constants/peppol";
 import PlatformSettings from "../models/platformSettings";
 import { parseVatCountryCode, normalizeVatCountry } from "../utils/vatManagement";
@@ -94,10 +95,11 @@ const ODOO_SEND_TIMEOUT_REASON =
 const STRIPE_PAYMENT_NOT_RECORDED_REASON =
   "Stripe payment could not be recorded in Odoo. Record it manually in Odoo if needed.";
 
-const providerErrorMessage = (error: unknown): string => {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  return message.slice(0, 500);
-};
+const providerErrorMessage = (error: unknown): string =>
+  // Logs only: raw provider text can carry secrets (tokens, connection
+  // strings), so log the allowlisted summary instead. Persisted reasons
+  // already go through safe, user-facing copy.
+  JSON.stringify(safeErrorSummary(error));
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 

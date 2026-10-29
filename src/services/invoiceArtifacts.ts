@@ -31,6 +31,7 @@ import {
 } from "./invoiceGenerator";
 import { maybeDispatchPeppolInvoice } from "./peppolDispatch";
 import { isUserFacingError, UserFacingError } from "../utils/appErrors";
+import { safeErrorSummary } from "../utils/safeErrorLog";
 import { notify } from "../utils/notifications/notify";
 import type { InvoiceArtifactHistoryEntry } from "../Types/invoice";
 
@@ -49,10 +50,11 @@ const PEPPOL_DISPATCH_RETRY_REASON =
   "Peppol dispatch failed. Generate the invoice again to retry; if it keeps failing, check the Peppol settings.";
 const PEPPOL_PLATFORM_CONFIG_REASON =
   "Peppol dispatch could not start because the platform invoice details are incomplete. Check the platform company and VAT settings, then generate the invoice again.";
-const providerErrorMessage = (error: unknown): string => {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  return message.slice(0, 500);
-};
+const providerErrorMessage = (error: unknown): string =>
+  // Logs only: raw provider text can carry secrets (tokens, connection
+  // strings), so log the allowlisted summary instead. Persisted reasons
+  // already go through dispatchFailureReason.
+  JSON.stringify(safeErrorSummary(error));
 const dispatchFailureReason = (error: unknown): string =>
   isUserFacingError(error) ? error.message : PEPPOL_DISPATCH_RETRY_REASON;
 
