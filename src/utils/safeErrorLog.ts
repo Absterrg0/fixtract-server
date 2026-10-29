@@ -57,10 +57,16 @@ const safeStatus = (value: unknown): number | undefined =>
     : undefined;
 
 /** Stack frames are call sites; the first line (the message) is deliberately skipped. */
-const safeFrames = (stack: unknown): string[] | undefined => {
+const safeFrames = (stack: unknown, message: unknown): string[] | undefined => {
   if (typeof stack !== 'string') return undefined;
+  // V8 writes the message into the stack header, one stack line per message
+  // line. Skip those lines so message text never reaches the frame filter:
+  // a multiline message could otherwise contain a frame-looking line such as
+  // "at https://user:secret@host:123:456".
+  const headerLines = typeof message === 'string' ? message.split('\n').length : 1;
   const frames = stack
     .split('\n')
+    .slice(headerLines)
     .map((line) => line.trim())
     .filter((line) => isSafeFrame(line))
     .slice(0, MAX_FRAMES)
@@ -80,6 +86,7 @@ export function safeErrorSummary(error: unknown): SafeErrorSummary {
     code?: unknown;
     status?: unknown;
     statusCode?: unknown;
+    message?: unknown;
     stack?: unknown;
   };
   const summary: SafeErrorSummary = {
@@ -87,7 +94,7 @@ export function safeErrorSummary(error: unknown): SafeErrorSummary {
     type: safeText(err.type),
     code: safeCode(err.code),
     status: safeStatus(err.status) ?? safeStatus(err.statusCode),
-    frames: safeFrames(err.stack),
+    frames: safeFrames(err.stack, err.message),
   };
 
   return Object.fromEntries(

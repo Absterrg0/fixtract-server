@@ -71,6 +71,24 @@ describe("safeErrorSummary", () => {
     expect(serialized).toContain("/srv/app/provider.ts:8:2");
   });
 
+  it("does not keep message lines that look like valid frames", () => {
+    // V8 prepends the message to error.stack, so a multiline message line
+    // like "at https://user:secret@host:123:456" would otherwise pass the
+    // location check and leak. Header lines are skipped by message length.
+    const error = new Error("request failed\nat https://user:secret@host:123:456");
+    error.stack = [
+      "Error: request failed",
+      "at https://user:secret@host:123:456",
+      "    at handler (/srv/app/handler.ts:4:2)",
+    ].join("\n");
+
+    const summary = safeErrorSummary(error);
+    const serialized = JSON.stringify(summary);
+
+    expect(serialized).not.toContain("user:secret@host");
+    expect(summary.frames).toEqual(["at handler (/srv/app/handler.ts:4:2)"]);
+  });
+
   it("omits primitive throw values and message text", () => {
     expect(safeErrorSummary("password=hunter2")).toEqual({ name: "string" });
     expect(safeErrorSummary(null)).toEqual({ name: "null" });
