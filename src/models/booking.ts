@@ -4,6 +4,7 @@ import { STRIPE_CONFIG } from "../services/stripe";
 import { VatBreakdownLine } from "../Types/stripe";
 import { PEPPOL_DISPATCH_STATUSES, type PeppolDispatchStatus } from "../constants/peppol";
 import type { InvoiceArtifactHistoryEntry } from "../Types/invoice";
+import { releaseCalendarReservations } from "../utils/support/calendarReservations";
 
 const SUPPORTED_CURRENCIES = STRIPE_CONFIG.supportedCurrencies.length
   ? STRIPE_CONFIG.supportedCurrencies
@@ -1464,6 +1465,19 @@ BookingSchema.index({ professional: 1, project: 1, createdAt: 1 });
 BookingSchema.index({ createdAt: 1, 'location.city': 1, status: 1 });
 BookingSchema.index({ 'dispute.raisedAt': 1 }, { sparse: true });
 BookingSchema.index({ 'noShow.markedAt': 1 }, { sparse: true });
+
+// Terminal booking states no longer hold the shared calendar. This covers
+// cancellation/completion paths in payment, quotation, webhook and admin code
+// in addition to the explicit release calls.
+BookingSchema.post("save", async function (doc) {
+  if (!["cancelled", "refunded", "completed"].includes(String(doc.status))) return;
+  try {
+    const session = typeof (doc as any).$session === "function" ? (doc as any).$session() : undefined;
+    await releaseCalendarReservations("booking", doc._id, session || undefined);
+  } catch (error) {
+    console.error("Failed to release booking calendar reservations", error);
+  }
+});
 
 // Helper to parse HH:mm to minutes for comparison
 const parseTimeToMinutes = (time: string): number => {
