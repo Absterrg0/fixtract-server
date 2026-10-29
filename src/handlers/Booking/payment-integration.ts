@@ -683,7 +683,17 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
           booking.milestonePayments = refreshed.milestonePayments;
           booking.__v = refreshed.__v;
         }
-        await releaseBookingCalendar(booking._id);
+        try {
+          await releaseBookingCalendar(booking._id);
+        } catch (calendarError) {
+          // The booking is already completed and payment captured; a failed
+          // calendar release must not turn this into an error response. The
+          // post-save hook records `calendarReleasePending` for the retry cron.
+          console.error(
+            "Calendar release failed after completion; retry queued",
+            calendarError instanceof Error ? calendarError.name : typeof calendarError,
+          );
+        }
         return { alreadyCompleted: false as const };
       };
 

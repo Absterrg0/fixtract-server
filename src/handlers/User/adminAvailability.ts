@@ -187,7 +187,10 @@ export const getAdminAvailability = async (req: Request, res: Response) => {
     from = range.from;
     to = range.to;
   } catch {
-    return res.status(400).json({ success: false, msg: 'A valid from/to range of at most 31 days is required' });
+    // Availability is still useful without support events: fall back to the
+    // default window and report the range problem on the support slice only.
+    from = new Date();
+    to = new Date(from.getTime() + 31 * 24 * 60 * 60 * 1000);
   }
   let events: Awaited<ReturnType<typeof listSupportCalendarEvents>> = [];
   try {

@@ -32,7 +32,9 @@ const meetingErrorResponse = (res: Response, error: unknown, message: string) =>
 };
 
 const professionalTimeZone = (professional: { timeZone?: string; businessInfo?: { timezone?: string } } | null) =>
-    professional?.businessInfo?.timezone || professional?.timeZone || 'UTC';
+    // Writers and readers must agree: the busy readers skip invalid IANA names
+    // via resolveStoredCalendarTimeZone, so fall back the same way here.
+    resolveStoredCalendarTimeZone(professional);
 
 /**
  * Get employees' availability for a specific date range

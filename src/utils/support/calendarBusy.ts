@@ -26,6 +26,12 @@ export interface SharedCalendarBusyOptions {
   excludeSupportTicketId?: string;
   excludeMeetingId?: string;
   excludeMeetingRequestId?: string;
+  /**
+   * Optional window: callers that only need overlaps around a moment should
+   * pass it so the loader does not scan every meeting ever scheduled.
+   */
+  from?: Date;
+  to?: Date;
 }
 
 function idVariants(ids: string[]): Array<Types.ObjectId | string> {
@@ -84,6 +90,14 @@ export async function loadSharedCalendarBusy(
   if (options.excludeSupportTicketId && Types.ObjectId.isValid(options.excludeSupportTicketId)) {
     supportFilter._id = { $ne: new Types.ObjectId(options.excludeSupportTicketId) };
   }
+  if (options.from || options.to) {
+    const window: Record<string, Date> = {};
+    // Support meetings are bounded by their duration; widen slightly so an
+    // interval that starts before the window but overlaps it is still loaded.
+    if (options.from) window.$gte = new Date(options.from.getTime() - 24 * 60 * 60 * 1000);
+    if (options.to) window.$lte = options.to;
+    supportFilter["meeting.scheduledAt"] = window;
+  }
   const supportTickets = await SupportTicket.find(supportFilter)
     .select("userId meeting.scheduledAt meeting.durationMinutes meeting.adminId")
     .lean();
@@ -116,6 +130,12 @@ export async function loadSharedCalendarBusy(
   };
   if (options.excludeMeetingId && Types.ObjectId.isValid(options.excludeMeetingId)) {
     meetingFilter._id = { $ne: new Types.ObjectId(options.excludeMeetingId) };
+  }
+  if (options.from || options.to) {
+    const window: Record<string, Date> = {};
+    if (options.from) window.$gte = new Date(options.from.getTime() - 24 * 60 * 60 * 1000);
+    if (options.to) window.$lte = new Date(options.to.getTime() + 24 * 60 * 60 * 1000);
+    meetingFilter.scheduledDate = window;
   }
   const meetings = await Meeting.find(meetingFilter)
     .select("professionalId scheduledDate startTime endTime attendees.userId")
@@ -179,6 +199,12 @@ export async function loadSharedCalendarBusy(
   if (options.excludeMeetingRequestId && Types.ObjectId.isValid(options.excludeMeetingRequestId)) {
     legacyFilter._id = { $ne: new Types.ObjectId(options.excludeMeetingRequestId) };
   }
+  if (options.from || options.to) {
+    const window: Record<string, Date> = {};
+    if (options.from) window.$gte = new Date(options.from.getTime() - 24 * 60 * 60 * 1000);
+    if (options.to) window.$lte = new Date(options.to.getTime() + 24 * 60 * 60 * 1000);
+    legacyFilter.scheduledAt = window;
+  }
   const legacy = await MeetingRequest.find(legacyFilter)
     .select("userId scheduledAt durationMinutes")
     .lean();
@@ -206,7 +232,11 @@ export async function findSharedCalendarConflicts(
   endAt: Date,
   options: SharedCalendarBusyOptions = {},
 ): Promise<SharedCalendarBusySource[]> {
-  const { sources } = await loadSharedCalendarBusy(userIds, options);
+  const { sources } = await loadSharedCalendarBusy(userIds, {
+    ...options,
+    from: options.from ?? startAt,
+    to: options.to ?? endAt,
+  });
   const start = startAt.getTime();
   const end = endAt.getTime();
   return sources.filter((source) => intervalOverlaps(start, end, source));

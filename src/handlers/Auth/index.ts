@@ -506,16 +506,18 @@ export const LogIn = async (req: Request, res: Response, next: NextFunction) => 
     // Generate token
     const token = generateToken(userExists._id as mongoose.Types.ObjectId);
 
-    // Set httpOnly cookie
-    setTokenCookie(res, token);
-
     // Prepare user response (same shape as /auth/me so login hydrates the full
     // customer/professional profile, including address fields and the effective
-    // admin/support levels the server authorizes with).
+    // admin/support levels the server authorizes with). Resolve access levels
+    // BEFORE setting the cookie: a failure here must not leave the client
+    // holding a token for a response that errored.
     const adminAccessLevels = userExists.role === 'admin'
       ? await getEffectiveAccessForUser(userExists)
       : undefined;
     const userResponse = buildUserResponse(userExists, adminAccessLevels);
+
+    // Set httpOnly cookie
+    setTokenCookie(res, token);
 
     return res.status(200).json({
       success: true,

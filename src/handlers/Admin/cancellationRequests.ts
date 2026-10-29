@@ -228,7 +228,17 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
 
     releaseScheduleSlots(freshBooking, adminId);
     await freshBooking.save();
-    await releaseBookingCalendar(freshBooking._id);
+    try {
+      await releaseBookingCalendar(freshBooking._id);
+    } catch (calendarError) {
+      // The cancellation is already effective; a failed release must not leave
+      // the request stuck in `processing`. The booking post-save hook records
+      // `calendarReleasePending` for the scheduled retry.
+      console.error(
+        "Calendar release failed after approving cancellation; retry queued",
+        calendarError instanceof Error ? calendarError.name : typeof calendarError,
+      );
+    }
 
     cancellation.status = "approved";
     cancellation.resolvedAt = new Date();

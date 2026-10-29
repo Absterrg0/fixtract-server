@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
+import { isUserFacingError } from '../../utils/appErrors';
 import Booking, { BookingStatus } from '../../models/booking';
 import Project from '../../models/project';
 import User from '../../models/user';
@@ -480,6 +481,17 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
 
     return res.json({ success: true, data: payload });
   } catch (error: any) {
+    // A reservation race after the pre-check surfaces as SLOT_UNAVAILABLE;
+    // report it as a conflict so the client can retry, not as a 500.
+    if (isUserFacingError(error) && error.status === 409) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: (error as any).code || 'SLOT_UNAVAILABLE',
+          message: error.message,
+        },
+      });
+    }
     console.error('Error updating booking planning:', error);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to update planning' } });
   }
