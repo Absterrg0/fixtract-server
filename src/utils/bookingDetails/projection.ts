@@ -29,6 +29,7 @@ import type {
   WarrantyClaimSummaryDto,
 } from './types';
 import { actorForId, isActorRecorded, type ActorMap } from './actors';
+import { buildMilestoneChargePlan } from '../milestoneCharges';
 import {
   presignOwnedUrl,
   presignQuestionAnswerUrl,
@@ -687,9 +688,20 @@ const buildPayments = async (params: {
     || records[0]
     || null;
 
+  // Client bug list #19b: expected charges from the shared plan, using the
+  // recorded quote commission so the shown amounts match actual charges
+  // (options in full on the first milestone). Empty when unrecorded.
+  const chargeVersions = Array.isArray((booking as any).quoteVersions) ? (booking as any).quoteVersions : [];
+  const chargeVersion = chargeVersions
+    .find((version: any) => Number(version?.version) === Number((booking as any).currentQuoteVersion));
+  const recordedCommission = num(chargeVersion?.customerTotals?.commissionPercent);
+  const milestoneChargePlan = recordedCommission != null
+    ? buildMilestoneChargePlan(booking, recordedCommission)
+    : [];
   const milestones = (Array.isArray(booking.milestonePayments) ? booking.milestonePayments : []).map(
     (milestone: any, index: number) => {
       const matching = paymentRows.find((payment) => num(payment.milestoneIndex) === index);
+      const planEntry = milestoneChargePlan.find((entry) => entry.index === index);
       return {
         index,
         title: String(milestone.title || ''),
@@ -704,6 +716,8 @@ const buildPayments = async (params: {
         paidAt: iso(milestone.paidAt),
         customerChargeTotalWithVat: num(matching?.totalWithVat),
         paymentRowPresent: Boolean(matching),
+        expectedCustomerCharge: planEntry ? planEntry.expectedCustomerGross : null,
+        includesSelectedOptions: Boolean(planEntry?.includesSelectedOptions),
       };
     },
   );
@@ -1550,11 +1564,19 @@ export const buildBookingDetails = async (params: {
     );
     if (!already) historyEntries.push({ ...booking.rescheduleRequest, status: 'pending' });
   }
+  // Client bug list #9c: only the live pending request can be responded to.
+  // History entries (including disputed/terminal ones) always report false.
+  const pendingLiveRequest = booking.status === 'rescheduling_requested'
+    && (booking.rescheduleRequest as any)?.status === 'pending';
   for (const [index, entry] of historyEntries.entries()) {
     const requestedBy = actorForId(entry.requestedBy, actors, viewerRole, {
       roleHint: entry.requestedBy === customerId ? 'customer' : 'professional',
     });
     const respondedBy = actorForId(entry.respondedBy, actors, viewerRole, { roleHint: 'customer' });
+    const liveRequestedAt = iso((booking.rescheduleRequest as any)?.requestedAt);
+    const isLivePending = pendingLiveRequest
+      && liveRequestedAt != null
+      && iso(entry.requestedAt) === liveRequestedAt;
     reschedules.push({
       id: `reschedule:${index}:${iso(entry.requestedAt) || ''}`,
       requestedAt: iso(entry.requestedAt) || '',
@@ -1564,6 +1586,7 @@ export const buildBookingDetails = async (params: {
       description: str(entry.description),
       note: str(entry.note),
       status: entry.status || 'pending',
+      canRespond: entry.status === 'pending' && isLivePending,
       respondedAt: iso(entry.respondedAt),
       respondedBy,
       responseNote: str(entry.responseNote),
@@ -1575,7 +1598,13 @@ export const buildBookingDetails = async (params: {
   }
 
   const cancellationDtos: CancellationRequestDto[] = [];
-  const visibleCancellations = maySeeAdminArea('cancellations') ? maskedCancellations : [];
+  // Client bug list #3: participants must see the cancellation request on the
+  // booking page (status, reason, requested dates/actor). Admins keep the
+  // area-gated full view; participants get a safe subset without the
+  // admin-authored resolution note.
+  const visibleCancellations = isAdminViewer
+    ? (maySeeAdminArea('cancellations') ? maskedCancellations : [])
+    : maskedCancellations;
   for (const [index, request] of visibleCancellations.entries()) {
     const evidence = await attachmentUrlList(
       request.evidence,

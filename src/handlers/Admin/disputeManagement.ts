@@ -99,10 +99,12 @@ export const buildDisputeFilter = (status?: string) => {
   }
 
   if (status === 'open') {
-    return { 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null };
+    return { status: ACTIVE_DISPUTE_STATUS, 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null };
   }
 
-  return { 'dispute.raisedAt': { $exists: true } };
+  // Client bug list #7: the overview must only contain bookings whose status
+  // is 'dispute' — never plain extra-cost requests or resolved history.
+  return { status: ACTIVE_DISPUTE_STATUS, 'dispute.raisedAt': { $exists: true } };
 };
 
 const transferResolvedExtraCostIfNeeded = async (resolvedBooking: any, finalExtraCostAmount: number) => {
