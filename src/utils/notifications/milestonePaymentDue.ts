@@ -1,7 +1,6 @@
 import Booking from "../../models/booking";
 import PlatformSettings from "../../models/platformSettings";
-import { withCommission } from "../customerPricing";
-import { quoteAmountIncludesSelectedExtras } from "../payment";
+import { buildMilestoneChargePlan, toMilestoneCustomerGross } from "../milestoneCharges";
 import { notify } from "./notify";
 
 export type PayableMilestone = {
@@ -60,16 +59,12 @@ const customerChargeForMilestone = async (booking: any, milestone: PayableMilest
   try {
     const config = await PlatformSettings.getCurrentConfig();
     const commissionPercent = Number(config?.commissionPercent) || 0;
-    let charge = withCommission(Number(milestone.amount) || 0, commissionPercent);
-    const minOrder = Math.min(...sortedMilestones(booking).map((m) => m.order ?? 0));
-    if ((milestone.order ?? 0) === minOrder && !quoteAmountIncludesSelectedExtras(booking)) {
-      const optionsTotal = (Array.isArray(booking?.selectedExtraOptions) ? booking.selectedExtraOptions : []).reduce(
-        (sum: number, option: any) => sum + (Number(option?.bookedPrice) || 0),
-        0,
-      );
-      if (optionsTotal > 0) charge = Math.round((charge + withCommission(optionsTotal, commissionPercent)) * 100) / 100;
-    }
-    return charge;
+    // Client bug list #19b: same shared plan as the charge path, so the
+    // notified amount always matches what paying this milestone charges.
+    const entry = buildMilestoneChargePlan(booking, commissionPercent)
+      .find((candidate) => candidate.order === (milestone.order ?? 0));
+    if (entry) return entry.expectedCustomerGross;
+    return toMilestoneCustomerGross(Number(milestone.amount) || 0, commissionPercent);
   } catch {
     return undefined;
   }

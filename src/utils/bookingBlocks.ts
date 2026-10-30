@@ -8,6 +8,10 @@ type BookingBlockedRange = {
   reason?: string;
   bookingId?: string;
   bookingNumber?: string;
+  // Frontend calendar colours booking ranges by status (pending/in-progress/
+  // completed). Additive only; no private data is exposed here.
+  status?: string;
+  title?: string | null;
   customerName?: string;
   location?: {
     address?: string;
@@ -50,7 +54,7 @@ export const buildBookingBlockedRanges = async (
 
   const bookings = await Booking.find(bookingFilter)
     .select(
-      "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate location bookingNumber customer resourcePlan assignedTeamMembers"
+      "status scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate location bookingNumber customer rfqData.serviceType resourcePlan assignedTeamMembers"
     )
     .populate("customer", "name");
 
@@ -58,6 +62,13 @@ export const buildBookingBlockedRanges = async (
 
   bookings.forEach((booking) => {
     const customerName = (booking.customer as any)?.name;
+    // Additive display fields for the frontend calendar: booking lifecycle
+    // status for tier/colour rendering plus a human-readable title. The title
+    // falls back to the booked service type; no private data is added.
+    const bookingStatus = (booking as any).status ? String((booking as any).status) : undefined;
+    const bookingTitle = (booking as any).rfqData?.serviceType
+      ? String((booking as any).rfqData.serviceType)
+      : null;
     // Legacy field fallbacks are kept for older bookings until data is normalized.
     const scheduledExecutionEndDate =
       booking.scheduledExecutionEndDate || (booking as any).executionEndDate;
@@ -112,6 +123,8 @@ export const buildBookingBlockedRanges = async (
             reason: "booking",
             bookingId: String(booking._id),
             bookingNumber: booking.bookingNumber,
+            status: bookingStatus,
+            title: bookingTitle,
             customerName,
             location: booking.location,
           });
@@ -133,6 +146,8 @@ export const buildBookingBlockedRanges = async (
           reason: "booking",
           bookingId: String(booking._id),
           bookingNumber: booking.bookingNumber,
+          status: bookingStatus,
+          title: bookingTitle,
           customerName,
           location: booking.location,
         });
@@ -155,6 +170,8 @@ export const buildBookingBlockedRanges = async (
           reason: "booking-buffer",
           bookingId: String(booking._id),
           bookingNumber: booking.bookingNumber,
+          status: bookingStatus,
+          title: bookingTitle,
           customerName,
           location: booking.location,
         });

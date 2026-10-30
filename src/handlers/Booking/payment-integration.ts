@@ -1682,6 +1682,19 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Only the customer can respond to a rescheduling request' } });
     }
 
+    // Client bug list #9c (+ review nit): once the request is disputed,
+    // accept/decline stay rejected with the explicit 409 — checked first so
+    // post-dispute responses never report the generic 400.
+    const openRescheduleDispute = Boolean(
+      booking.dispute && !booking.dispute.resolvedAt && booking.dispute.type === 'reschedule',
+    );
+    if (openRescheduleDispute && normalizedAction !== 'dispute') {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'RESCHEDULE_DISPUTED', message: 'This rescheduling request was disputed and can no longer be accepted or declined' },
+      });
+    }
+
     if (booking.status !== 'rescheduling_requested' || booking.rescheduleRequest?.status !== 'pending') {
       return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'There is no pending rescheduling request for this booking' } });
     }
@@ -1825,7 +1838,9 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       );
       releaseScheduleSlots(booking, (req as any).user._id);
     } else if (normalizedAction === 'dispute') {
-      booking.rescheduleRequest!.status = 'declined';
+      // Review follow-up: the live subdoc must agree with the history entry
+      // and response DTO on the terminal 'disputed' state (never 'declined').
+      booking.rescheduleRequest!.status = 'disputed';
       const disputeReason = typeof reason === 'string' && reason.trim()
         ? reason.trim()
         : 'Reschedule dispute';
@@ -1858,7 +1873,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       note: booking.rescheduleRequest!.note,
       previousSchedule: booking.rescheduleRequest!.previousSchedule,
       proposedSchedule: booking.rescheduleRequest!.proposedSchedule,
-      status: normalizedAction === 'accept' ? 'accepted' : 'declined',
+      status: normalizedAction === 'accept' ? 'accepted' : normalizedAction === 'dispute' ? 'disputed' : 'declined',
       respondedAt: booking.rescheduleRequest!.respondedAt,
       respondedBy: booking.rescheduleRequest!.respondedBy,
       responseNote: booking.rescheduleRequest!.responseNote,

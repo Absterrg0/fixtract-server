@@ -545,6 +545,15 @@ export type MilestonePaymentDto = {
   paidAt: string | null;
   customerChargeTotalWithVat: number | null;
   paymentRowPresent: boolean;
+  /**
+   * Client bug list #19b: expected customer charge for this milestone from the
+   * shared charge plan (recorded commission, selected options in full on the
+   * first milestone). Null when no commission was recorded for the booking.
+   * The frontend's milestone/option UI must render this instead of splitting
+   * options proportionally across milestones.
+   */
+  expectedCustomerCharge: number | null;
+  includesSelectedOptions: boolean;
 };
 
 export type RefundDto = {
@@ -672,7 +681,9 @@ export type RescheduleHistoryDto = {
   reason: string;
   description: string | null;
   note: string | null;
-  status: 'pending' | 'accepted' | 'declined' | 'auto_cancelled';
+  status: 'pending' | 'accepted' | 'declined' | 'disputed' | 'auto_cancelled';
+  /** False once the request is disputed/terminal — the UI must disable accept/decline. */
+  canRespond: boolean;
   respondedAt: string | null;
   respondedBy: ActorDto | null;
   responseNote: string | null;

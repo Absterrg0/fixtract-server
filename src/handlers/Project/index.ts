@@ -79,6 +79,19 @@ const toBlockedRange = (range?: {
   };
 };
 
+/**
+ * Enriched per-booking range for the team calendar. `status`/`bookingId` are
+ * additive display fields (colour + link-back); every range array below shares
+ * this type so the shapes cannot drift apart again.
+ */
+type TeamBookingRange = {
+  startDate: string;
+  endDate: string;
+  reason?: string;
+  status?: string;
+  bookingId?: string;
+};
+
 type ProfessionalStats = {
   avgRating: number;
   totalReviews: number;
@@ -783,14 +796,14 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
       weekends: nonWorkingDates,
       company: {
         dates: [] as string[],
-        ranges: [] as Array<{ startDate: string; endDate: string; reason?: string }>,
+        ranges: [] as TeamBookingRange[],
       },
       personal: {
         dates: [] as string[],
-        ranges: [] as Array<{ startDate: string; endDate: string; reason?: string }>,
+        ranges: [] as TeamBookingRange[],
       },
       bookings: {
-        ranges: [] as Array<{ startDate: string; endDate: string; reason?: string }>,
+        ranges: [] as TeamBookingRange[],
       },
     };
 
@@ -970,7 +983,7 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 
     // Company blocked dates/ranges block ALL resources - add directly to allBlockedDates
     const allBlockedDates = new Set<string>(nonWorkingDates);
-    const allBlockedRanges: Array<{ startDate: string; endDate: string; reason?: string }> = [];
+    const allBlockedRanges: TeamBookingRange[] = [];
 
     if (professional?.companyBlockedDates) {
       professional.companyBlockedDates.forEach((blocked) => {
@@ -1198,7 +1211,16 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
           reason: "booking",
         });
         if (blockedRange) {
-          blockedCategories.bookings.ranges.push(blockedRange);
+          const bookingRange: TeamBookingRange = {
+            ...blockedRange,
+            // Frontend colours team-calendar booking ranges by status.
+            // Additive only; the booking id lets the UI link back. The same
+            // object reference is mirrored into `allBlockedRanges` by the
+            // loop below in simple mode, so shading and the range list agree.
+            status: (booking as any).status ? String((booking as any).status) : undefined,
+            bookingId: String(booking._id),
+          };
+          blockedCategories.bookings.ranges.push(bookingRange);
           // Mark each blocked resource for each day in the range
           blockedResourceIds.forEach((resourceId) => {
             expandRangeAndMarkBlocked(blockedRange.startDate, blockedRange.endDate, resourceId);
@@ -1228,7 +1250,11 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
           reason: "booking-buffer",
         });
         if (bufferRange) {
-          blockedCategories.bookings.ranges.push(bufferRange);
+          blockedCategories.bookings.ranges.push({
+            ...bufferRange,
+            status: (booking as any).status ? String((booking as any).status) : undefined,
+            bookingId: String(booking._id),
+          });
           // Mark each blocked resource for each day in the range
           blockedResourceIds.forEach((resourceId) => {
             expandRangeAndMarkBlocked(bufferRange.startDate, bufferRange.endDate, resourceId);
@@ -1350,6 +1376,11 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 
     // In multi-resource days mode, don't add individual booking/personal ranges.
     // We only want to block explicit dates (all resources unavailable or full overlap).
+    // Deliberate split: `blockedCategories` above remains the full structured
+    // feed (per-booking ranges keep `status`/`bookingId` for calendar shading),
+    // while the flat `blockedRanges` list below intentionally carries no
+    // per-range detail in window mode. In simple mode the mirror loop copies
+    // the same enriched references, so both views agree.
     const useWindowBasedCheck = useMultiResourceMode && executionDays && executionDays > 0;
 
     if (!useWindowBasedCheck) {

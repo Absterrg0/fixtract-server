@@ -26,6 +26,7 @@ import {
   computeGrossBookingAmount,
   quoteAmountIncludesSelectedExtras,
 } from '../../utils/payment';
+import { buildMilestoneChargePlan } from '../../utils/milestoneCharges';
 import { canRetryTransfer, getTransferStatus, requireProfessionalPayout } from '../../utils/paymentSafety';
 import { calculateVAT } from '../../utils/vat';
 import { calculateVatFromPricingLines } from '../../utils/vatLineCalculation';
@@ -417,7 +418,6 @@ export const createPaymentIntent = async (
 
     let chargeAmount = commissionedQuoteAmount(booking.quote.amount, (booking as any).checkoutSnapshot, commissionPercent);
     let milestoneIndex: number | null = null;
-    let milestoneOrder: number | null = null;
     if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
       const sorted = normalizeBookingMilestones(booking.milestonePayments as any[]);
       const nextPayable = sorted.find((milestone) => isMilestoneCurrentlyPayable(milestone, sorted));
@@ -436,7 +436,6 @@ export const createPaymentIntent = async (
         }
         chargeAmount = +(nextPayable.amount * (1 + commissionPercent / 100)).toFixed(2);
         milestoneIndex = nextPayable._originalIndex;
-        milestoneOrder = nextPayable.order ?? 0;
       } else {
         return {
           success: false,
@@ -447,19 +446,14 @@ export const createPaymentIntent = async (
         };
       }
     }
-    const extrasAlreadyInQuote = quoteAmountIncludesSelectedExtras(booking);
-    const commissionedExtraOptionsTotal = +(selectedExtraOptionsTotal * (1 + commissionPercent / 100)).toFixed(2);
-    let milestoneExtraOptionsCharge = 0;
-    if (selectedExtraOptionsTotal > 0 && !extrasAlreadyInQuote) {
-      if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
-        const minOrder = Math.min(...booking.milestonePayments.map((m: any) => m.order ?? 0));
-        if (milestoneOrder === minOrder) {
-          milestoneExtraOptionsCharge = commissionedExtraOptionsTotal;
-          chargeAmount += milestoneExtraOptionsCharge;
-        }
-      } else {
-        chargeAmount += commissionedExtraOptionsTotal;
-      }
+    // Client bug list #19b: options are charged in full with the first
+    // milestone via the shared charge plan — never split across milestones.
+    if (milestoneIndex !== null) {
+      const planEntry = buildMilestoneChargePlan(booking, commissionPercent)
+        .find((entry) => entry.index === milestoneIndex) || null;
+      if (planEntry) chargeAmount = planEntry.expectedCustomerGross;
+    } else if (selectedExtraOptionsTotal > 0 && !quoteAmountIncludesSelectedExtras(booking)) {
+      chargeAmount += +(selectedExtraOptionsTotal * (1 + commissionPercent / 100)).toFixed(2);
     }
 
     if (booking.payment?.stripePaymentIntentId && booking.payment?.stripeClientSecret) {

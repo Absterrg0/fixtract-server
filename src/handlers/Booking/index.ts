@@ -1253,7 +1253,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       msg:
         populated.status === "quote_accepted"
           ? "Booking created. Proceed to payment."
-          : "Booking request created successfully",
+          : populated.status === "rfq"
+            ? "Quotation request created successfully"
+            : "Booking request created successfully",
       booking: bookingForRequest(populated, req.user)
     });
 

@@ -92,16 +92,18 @@ class DisputeResolutionConflictError extends Error {}
 type ForceBookingStatus = 'completed' | 'cancelled' | 'refunded' | 'in_progress' | 'booked' | 'professional_completed';
 const FORCE_STATUS_VALUES: ForceBookingStatus[] = ['completed', 'cancelled', 'refunded', 'in_progress', 'booked', 'professional_completed'];
 
-const buildDisputeFilter = (status?: string) => {
+export const buildDisputeFilter = (status?: string) => {
   if (status === 'resolved') {
     return { 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': { $ne: null } };
   }
 
   if (status === 'open') {
-    return { 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null };
+    return { status: ACTIVE_DISPUTE_STATUS, 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null };
   }
 
-  return { 'dispute.raisedAt': { $exists: true } };
+  // Client bug list #7: the overview must only contain bookings whose status
+  // is 'dispute' — never plain extra-cost requests or resolved history.
+  return { status: ACTIVE_DISPUTE_STATUS, 'dispute.raisedAt': { $exists: true } };
 };
 
 const transferResolvedExtraCostIfNeeded = async (resolvedBooking: any, finalExtraCostAmount: number) => {

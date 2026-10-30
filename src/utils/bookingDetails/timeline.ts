@@ -908,7 +908,12 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
     const respondedAt = toIso(reschedule.respondedAt);
     if (respondedAt && reschedule.status !== 'pending') {
       const respondedBy = actorForId(reschedule.respondedBy, actors, viewerRole, { roleHint: 'customer' });
-      const type = reschedule.status === 'accepted' ? 'reschedule_accepted' : 'reschedule_declined';
+      // Client bug list #9c: a disputed request is terminal and distinct from
+      // a plain decline — it moves the booking to dispute, not cancellation.
+      const disputed = reschedule.status === 'disputed';
+      const type = reschedule.status === 'accepted'
+        ? 'reschedule_accepted'
+        : disputed ? 'reschedule_disputed' : 'reschedule_declined';
       pushEvent({
         id: `reschedule:${index}:${reschedule.status}`,
         type,
@@ -918,13 +923,13 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
         actorRecorded: isActorRecorded(respondedBy),
         description: reschedule.responseNote || null,
         statusFrom: 'rescheduling_requested',
-        statusTo: reschedule.status === 'accepted' ? 'booked' : 'cancelled',
+        statusTo: reschedule.status === 'accepted' ? 'booked' : disputed ? 'dispute' : 'cancelled',
         attachments: [],
         metadata: scheduleMetadata,
         source: 'reschedule',
         visibility: 'participants',
       });
-      markStatusCovered(coveredStatus, reschedule.status === 'accepted' ? 'booked' : 'cancelled', reschedule.respondedAt);
+      markStatusCovered(coveredStatus, reschedule.status === 'accepted' ? 'booked' : disputed ? 'dispute' : 'cancelled', reschedule.respondedAt);
     }
   }
 

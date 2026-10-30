@@ -50,6 +50,7 @@ import {
   projectMatchesPrice,
   type ProjectSearchDimensions,
 } from "../../utils/search/projectFilters";
+import { isRelevanceSort, sortProjectsByRelevance } from "../../utils/search/projectRelevance";
 import PlatformSettings from "../../models/platformSettings";
 import LoyaltyConfig from "../../models/loyaltyConfig";
 import { getCurrentTier } from "../../utils/loyaltySystem";
@@ -1005,7 +1006,34 @@ async function searchProjects(
       if (!Object.keys(counts).some((candidate) => normalizeSearchValue(candidate) === normalizeSearchValue(value))) counts[value] = 0;
     }
     if (!isPopularitySort && !usedGeoSearch) {
-      baseResults.sort((a: any, b: any) => (new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()) || a._id.toString().localeCompare(b._id.toString()));
+      if (isRelevanceSort(sortBy)) {
+        // Client bug list #4a: the default / "Most relevant" sort ranks by a
+        // real relevance score (level, admin tags, keyword/service/category
+        // match, rating, reviews). Any other explicit sort keeps the legacy
+        // newest-first behaviour. Sorting happens before the pagination slice
+        // below, so totals stay consistent.
+        const levelConfig = await getCachedLevelConfig().catch(() => null);
+        const rankByLevelName = new Map(
+          ((levelConfig as any)?.levels || []).map((level: any) => [level.name, Number(level.order) || 0]),
+        );
+        const queryText = typeof query === 'string' ? query : '';
+        const ranked = sortProjectsByRelevance(
+          baseResults.map((project: any) => ({
+            project,
+            professional: professionalMap.get(toObjectIdString(project.professionalId)),
+            rating: projectRatingMap?.get(project._id.toString()),
+          })),
+          {
+            query: queryText,
+            category,
+            services,
+            levelRankOf: (levelName) => (rankByLevelName.get(levelName || '') as number) || 0,
+          },
+        );
+        baseResults = ranked.map(({ project }) => project);
+      } else {
+        baseResults.sort((a: any, b: any) => (new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()) || a._id.toString().localeCompare(b._id.toString()));
+      }
     }
     const totalCount = baseResults.length;
     const finalResults = baseResults.slice(skip, skip + limit);
