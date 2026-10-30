@@ -903,7 +903,16 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
     await booking.save();
 
     if (['cancelled', 'refunded', 'completed'].includes(requestedStatus)) {
-      await releaseBookingCalendar(booking._id);
+      try {
+        await releaseBookingCalendar(booking._id);
+      } catch (calendarError) {
+        // The status change is already persisted; a calendar failure must not
+        // turn it into a 500 or block the remaining side effects.
+        console.error(
+          "Calendar release failed after status update; retry queued",
+          calendarError instanceof Error ? calendarError.name : typeof calendarError,
+        );
+      }
     }
 
     if (
@@ -1618,7 +1627,14 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
     await booking.save();
 
     if (normalizedAction !== 'accept' && ['cancelled', 'refunded'].includes(booking.status)) {
-      await releaseBookingCalendar(booking._id);
+      try {
+        await releaseBookingCalendar(booking._id);
+      } catch (calendarError) {
+        console.error(
+          "Calendar release failed after reschedule response; retry queued",
+          calendarError instanceof Error ? calendarError.name : typeof calendarError,
+        );
+      }
     }
 
     if (normalizedAction === 'accept') {
