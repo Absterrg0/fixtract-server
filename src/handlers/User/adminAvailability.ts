@@ -178,6 +178,8 @@ export const getAdminAvailability = async (req: Request, res: Response) => {
     : (isValidTimeZone(user.timeZone) ? user.timeZone : 'UTC');
   let from = new Date();
   let to = new Date(from.getTime() + 31 * 24 * 60 * 60 * 1000);
+  /** True when the requested from/to was unusable and the default window applied. */
+  let supportRangeIgnored = false;
   try {
     const range = parseSupportAvailabilityRange(
       typeof req.query.from === 'string' ? req.query.from : from.toISOString(),
@@ -188,7 +190,9 @@ export const getAdminAvailability = async (req: Request, res: Response) => {
     to = range.to;
   } catch {
     // Availability is still useful without support events: fall back to the
-    // default window and report the range problem on the support slice only.
+    // default window, but tell the client the applied window differs from the
+    // one it asked for so the calendar cannot silently show the wrong period.
+    supportRangeIgnored = true;
     from = new Date();
     to = new Date(from.getTime() + 31 * 24 * 60 * 60 * 1000);
   }
@@ -211,7 +215,19 @@ export const getAdminAvailability = async (req: Request, res: Response) => {
   // The normal admin availability reader now carries its own support events so
   // the calendar does not need a second feature-specific fetch. The dedicated
   // support endpoint remains the combined multi-admin feed.
-  return res.json({ success: true, data: { ...serialize(user), events, supportEvents: events } });
+  return res.json({
+    success: true,
+    data: {
+      ...serialize(user),
+      events,
+      supportEvents: events,
+      supportEventsWindow: {
+        from: from.toISOString(),
+        to: to.toISOString(),
+        requestedRangeIgnored: supportRangeIgnored,
+      },
+    },
+  });
 };
 
 export const updateAdminAvailability = async (req: Request, res: Response) => {
