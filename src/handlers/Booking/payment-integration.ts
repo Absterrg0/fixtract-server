@@ -18,9 +18,19 @@ import PointsConfig from '../../models/pointsConfig';
 import PointTransaction from '../../models/pointTransaction';
 import {
   buildProjectScheduleWindow,
+  buildPerResourceBlockedDays,
   getBookingScheduleOptions,
+  getResourcePolicy,
+  resolveEffectiveScheduleTimeZone,
   validateProjectScheduleSelection,
 } from '../../utils/scheduleEngine';
+import {
+  computeMinExecutionResourceDays,
+  planKeyToDate,
+  rebuildResourcePlanForNewStart,
+  resolveDayModeExecutionDays,
+  toPlanDayKeyInTimeZone,
+} from '../../utils/reschedulePlanning';
 import {
   addWarrantyDuration,
   getBookingWarrantyDuration,
@@ -217,18 +227,145 @@ const applyScheduleFields = (booking: any, schedule: Record<string, any>) => {
   }
 };
 
+/**
+ * Client bug list #9b (day-mode only): a rescheduled start date overrules
+ * earlier manual planning. All planned dates before the new start date become
+ * unplanned for every resource, planning on/after the new start is kept, and
+ * when the kept plan is shorter than the minimum execution duration
+ * (executionTime + executionTime * (resourceCount - 1) * overlapFraction),
+ * days are added across the assigned resources so the booking duration stays
+ * as short as possible. The professional can still adjust planning afterwards.
+ * Hour-mode bookings are left untouched (owned by another workstream).
+ */
+const applyReschedulePlanReset = async (booking: any, updatedBy: unknown) => {
+  const newStart = booking.scheduledStartDate ? new Date(booking.scheduledStartDate) : null;
+  if (!newStart || Number.isNaN(newStart.getTime())) return;
+
+  // Resolve the professional (and timezone) before deriving the plan day key:
+  // scheduledStartDate is stored as a real local-midnight instant, so the key
+  // must be derived in the professional's timezone — a plain UTC key points at
+  // the previous calendar day for UTC+ timezones.
+  const professionalId = await getProfessionalId(booking);
+  const professional = professionalId
+    ? await User.findById(professionalId).select(
+      'companyAvailability availability companyBlockedDates companyBlockedRanges businessInfo'
+    )
+    : null;
+  const timeZone = resolveEffectiveScheduleTimeZone((professional as any) || undefined);
+  const newStartKey = toPlanDayKeyInTimeZone(newStart, timeZone);
+  if (!newStartKey) return;
+
+  const projectId = (booking.project as any)?._id?.toString?.() || String(booking.project || '');
+  const projectDoc = projectId && mongoose.isValidObjectId(projectId)
+    ? await Project.findById(projectId).select('executionDuration subprojects minResources minOverlapPercentage resources')
+    : null;
+
+  const executionDays = resolveDayModeExecutionDays({
+    scheduleSnapshot: booking.scheduleSnapshot,
+    project: projectDoc,
+    selectedSubprojectIndex: booking.selectedSubprojectIndex,
+  });
+  if (executionDays == null) return;
+
+  const assignedIds = (Array.isArray(booking.assignedTeamMembers) ? booking.assignedTeamMembers : [])
+    .map((member: any) => (member?._id || member)?.toString?.())
+    .filter((id: unknown): id is string => typeof id === 'string' && mongoose.isValidObjectId(id));
+
+  const policy = projectDoc
+    ? getResourcePolicy(projectDoc)
+    : { minResources: 1, minOverlapPercentage: 90, totalResources: assignedIds.length };
+  const minResourceDays = computeMinExecutionResourceDays({
+    executionDays,
+    resourceCount: Math.max(1, assignedIds.length),
+    overlapFraction: policy.minOverlapPercentage / 100,
+  });
+
+  let blockedByResource: Map<string, Set<string>> | undefined;
+  try {
+    if (professional && assignedIds.length > 0) {
+      const windowFromReal = new Date(newStart);
+      const windowToReal = new Date(newStart.getTime() + (minResourceDays + 60) * 24 * 60 * 60 * 1000);
+      blockedByResource = await buildPerResourceBlockedDays(
+        (projectDoc || { _id: projectId }) as any,
+        professional,
+        assignedIds,
+        windowFromReal,
+        windowToReal,
+        timeZone,
+        String(booking._id),
+        booking.customerBlocks
+      );
+    }
+  } catch (blockedError: any) {
+    console.error('Failed to load blocked days for reschedule plan reset:', blockedError?.message || blockedError);
+  }
+
+  const currentPlan = (Array.isArray(booking.resourcePlan) ? booking.resourcePlan : []).map((entry: any) => ({
+    resourceId: ((entry?.resourceId?._id || entry?.resourceId)?.toString?.()) || '',
+    days: Array.isArray(entry?.days) ? entry.days : [],
+  }));
+
+  const rebuilt = rebuildResourcePlanForNewStart({
+    resourcePlan: currentPlan,
+    newStartKey,
+    assignedResourceIds: assignedIds,
+    blockedByResource,
+    minResourceDays,
+    executionDays,
+    minResourcesPerDay: policy.minResources,
+  });
+
+  if (rebuilt.removedDays === 0 && rebuilt.addedDays.length === 0) return;
+
+  booking.resourcePlan = rebuilt.resourcePlan
+    .filter((entry) => mongoose.isValidObjectId(entry.resourceId))
+    .map((entry) => ({
+      resourceId: new mongoose.Types.ObjectId(entry.resourceId),
+      days: entry.days
+        .map((key) => planKeyToDate(key))
+        .filter((date): date is Date => date instanceof Date),
+    }));
+
+  if (rebuilt.maxDayKey) {
+    const maxPlanned = planKeyToDate(rebuilt.maxDayKey);
+    const currentEnd = booking.scheduledExecutionEndDate ? new Date(booking.scheduledExecutionEndDate) : null;
+    if (maxPlanned && (!currentEnd || Number.isNaN(currentEnd.getTime()) || maxPlanned > currentEnd)) {
+      booking.scheduledExecutionEndDate = maxPlanned;
+      const bufferStart = booking.scheduledBufferStartDate ? new Date(booking.scheduledBufferStartDate) : null;
+      if (bufferStart && !Number.isNaN(bufferStart.getTime()) && maxPlanned >= bufferStart) {
+        // Keep the execution <= buffer invariant (mirrors manual planning,
+        // which clears the buffer when the plan changes).
+        booking.scheduledBufferStartDate = undefined;
+        booking.scheduledBufferEndDate = undefined;
+        booking.scheduledBufferUnit = undefined;
+      }
+    }
+  }
+
+  booking.statusHistory = booking.statusHistory || [];
+  booking.statusHistory.push(
+    createStatusHistoryEntry(
+      'booked',
+      updatedBy,
+      `Planning updated: rescheduled start ${newStartKey} overrules earlier planning (${rebuilt.keptDays} day(s) kept, ${rebuilt.addedDays.length} added)`
+    )
+  );
+};
+
 export const buildScheduleUpdatePayload = async ({
   booking,
   scheduledStartDate,
   scheduledStartTime,
   hasExplicitExtraOptions = false,
   selectedExtraOptions,
+  requestTimeZone,
 }: {
   booking: any;
   scheduledStartDate: string;
   scheduledStartTime?: string;
   hasExplicitExtraOptions?: boolean;
   selectedExtraOptions?: unknown;
+  requestTimeZone?: unknown;
 }): Promise<
   | { success: true; data: Record<string, any> }
   | { success: false; status: number; error: { code: string; message: string } }
@@ -281,6 +418,9 @@ export const buildScheduleUpdatePayload = async ({
       scheduleData.scheduledBufferUnit = undefined;
       scheduleData.scheduledStartTime = typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined;
       scheduleData.scheduledEndTime = undefined;
+      // Should-fix 4: record the resolved zone even for date-only RFQ
+      // schedules so details/timeline carry it.
+      scheduleData.scheduleTimeZone = resolveScheduleTimeZone(requestTimeZone) || undefined;
       if (Array.isArray(booking.assignedTeamMembers) && booking.assignedTeamMembers.length > 0) {
         scheduleData.assignedTeamMembers = booking.assignedTeamMembers;
       }
@@ -296,6 +436,7 @@ export const buildScheduleUpdatePayload = async ({
         startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
         customerBlocks: booking.customerBlocks,
         excludeBookingId,
+        requestTimeZone,
       });
 
       if (!validation.valid) {
@@ -317,6 +458,7 @@ export const buildScheduleUpdatePayload = async ({
         customerBlocks: booking.customerBlocks,
         ...scheduleOptions,
         excludeBookingId,
+        requestTimeZone,
       });
 
       if (!window) {
@@ -334,6 +476,9 @@ export const buildScheduleUpdatePayload = async ({
       scheduleData.scheduledBufferUnit = window.scheduledBufferUnit;
       scheduleData.scheduledStartTime = window.scheduledStartTime;
       scheduleData.scheduledEndTime = window.scheduledEndTime;
+      // Should-fix 4: persist the engine-resolved conversion zone so the
+      // details/timeline carry it even when the client sends no timeZone.
+      scheduleData.scheduleTimeZone = window.timeZone || undefined;
       if (window.assignedTeamMembers?.length) {
         scheduleData.assignedTeamMembers = window.assignedTeamMembers;
       } else if (Array.isArray(booking.assignedTeamMembers) && booking.assignedTeamMembers.length > 0) {
@@ -368,6 +513,7 @@ export const buildScheduleUpdatePayload = async ({
       scheduledStartTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
       scheduledEndTime: booking.scheduledEndTime,
       assignedTeamMembers: Array.isArray(booking.assignedTeamMembers) ? booking.assignedTeamMembers : undefined,
+      scheduleTimeZone: resolveScheduleTimeZone(requestTimeZone) || undefined,
     },
   };
 };
@@ -1208,6 +1354,9 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       scheduledStartTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
       hasExplicitExtraOptions,
       selectedExtraOptions,
+      // Client bug list #23b: convert the wall-clock time in the
+      // professional's effective zone, not silently in UTC.
+      requestTimeZone: (req.body as any)?.timeZone || (req.body as any)?.scheduleTimeZone,
     });
 
     if (!scheduleUpdate.success) {
@@ -1227,7 +1376,9 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       booking.rfqData.additionalNotes = additionalNotes;
     }
 
-    const scheduleTimeZone = resolveScheduleTimeZone(
+    // Should-fix 4: persist the engine-resolved conversion zone (the window
+    // already falls back to the request zone), not only a client-sent zone.
+    const scheduleTimeZone = scheduleUpdate.data.scheduleTimeZone || resolveScheduleTimeZone(
       (req.body as any)?.timeZone || (req.body as any)?.scheduleTimeZone,
     );
     if (scheduleTimeZone) {
@@ -1381,6 +1532,9 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
       booking,
       scheduledStartDate,
       scheduledStartTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
+      // Client bug list #23c: same effective-zone conversion as creation, so
+      // a reschedule to 12:00 lands on the same instant the calendar shows.
+      requestTimeZone: (req.body as any)?.timeZone || (req.body as any)?.scheduleTimeZone,
     });
 
     if (!proposedSchedule.success) {
@@ -1587,15 +1741,6 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       }
 
       const proposedSchedule = booking.rescheduleRequest.proposedSchedule || {};
-      const calendarCandidate = {
-        _id: booking._id,
-        professional: (booking.professional as any)?._id || booking.professional,
-        assignedTeamMembers: proposedTeamMembers,
-        resourcePlan: booking.resourcePlan || [],
-        scheduledStartDate: proposedSchedule.scheduledStartDate,
-        scheduledExecutionEndDate: proposedSchedule.scheduledExecutionEndDate,
-        scheduledBufferEndDate: proposedSchedule.scheduledBufferEndDate,
-      };
       // Prepare the document before the transaction. The driver may replay the
       // callback after a transient conflict; only the save may re-run, so the
       // additive status-history entry is created exactly once.
@@ -1604,6 +1749,18 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       if (responseNote !== undefined) booking.rescheduleRequest!.responseNote = responseNote;
       booking.rescheduleRequest!.status = 'accepted';
       applyScheduleFields(booking, proposedSchedule || {});
+      // Client bug list #9b: the new start date overrules earlier manual
+      // planning (day-mode only; hour-mode planning stays untouched).
+      await applyReschedulePlanReset(booking, (req as any).user._id);
+      const calendarCandidate = {
+        _id: booking._id,
+        professional: (booking.professional as any)?._id || booking.professional,
+        assignedTeamMembers: proposedTeamMembers,
+        resourcePlan: booking.resourcePlan || [],
+        scheduledStartDate: proposedSchedule.scheduledStartDate,
+        scheduledExecutionEndDate: booking.scheduledExecutionEndDate,
+        scheduledBufferEndDate: booking.scheduledBufferEndDate,
+      };
       booking.status = 'booked';
       booking.statusHistory = booking.statusHistory || [];
       booking.statusHistory.push(

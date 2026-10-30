@@ -38,6 +38,7 @@ import {
   sendRefundCounterOfferEmail,
   sendRefundEscalatedEmail,
   sendRefundDeniedEmail,
+  sendMilestonePaymentDueEmail,
   sendChatMirrorEmail,
   sendUnfinishedCheckoutEmail,
   sendPaymentFailedEmail,
@@ -81,6 +82,9 @@ export interface NotifyContext {
   isPartialRefund?: boolean;
   resolution?: string;
   adjustedAmount?: number;
+  milestoneTitle?: string;
+  milestoneAmount?: number;
+  milestoneOrder?: number;
   claimNumber?: string;
   warrantyMessage?: string;
   daysRemaining?: number;
@@ -352,6 +356,29 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
           String(ctx.professionalName || 'your professional'),
           typeof ctx.amount === 'number' ? ctx.amount : 0,
           String(ctx.bookingId || ''),
+          String(ctx.currency || 'EUR'),
+        ),
+    }),
+    'booking',
+  ),
+  'customer.milestone_payment_due': def(
+    'customer.milestone_payment_due',
+    'booking_updates',
+    'always_on',
+    'customer',
+    (ctx) => ({
+      title: 'Milestone payment due',
+      body: ctx.milestoneTitle
+        ? `A new milestone payment is due for your booking: "${ctx.milestoneTitle}".`
+        : 'A new milestone payment is due for your booking.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}/payment`),
+      sendEmail: async ({ email, name }) =>
+        sendMilestonePaymentDueEmail(
+          email,
+          name,
+          String(ctx.bookingId || ''),
+          String(ctx.milestoneTitle || 'Upcoming milestone'),
+          typeof ctx.milestoneAmount === 'number' ? ctx.milestoneAmount : undefined,
           String(ctx.currency || 'EUR'),
         ),
     }),
@@ -1018,6 +1045,20 @@ export const NOTIFICATION_REGISTRY: Record<string, EventDef> = {
           typeof ctx.amount === 'number' ? ctx.amount : undefined,
           String(ctx.currency || 'EUR'),
         ),
+    }),
+    'booking',
+  ),
+  'professional.milestone_payment_due': def(
+    'professional.milestone_payment_due',
+    'booking_updates',
+    'always_on',
+    'professional',
+    (ctx) => ({
+      title: 'Milestone payment pending',
+      body: ctx.milestoneTitle
+        ? `The milestone "${ctx.milestoneTitle}" is awaiting the customer payment.`
+        : 'A milestone payment is awaiting the customer payment.',
+      clickUrl: frontend(`/bookings/${ctx.bookingId || ''}`),
     }),
     'booking',
   ),

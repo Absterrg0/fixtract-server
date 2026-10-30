@@ -50,7 +50,7 @@ export const buildBookingBlockedRanges = async (
 
   const bookings = await Booking.find(bookingFilter)
     .select(
-      "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate location bookingNumber customer resourcePlan"
+      "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit executionEndDate bufferStartDate scheduledEndDate location bookingNumber customer resourcePlan assignedTeamMembers"
     )
     .populate("customer", "name");
 
@@ -68,6 +68,24 @@ export const buildBookingBlockedRanges = async (
 
     const plan: any[] = Array.isArray((booking as any).resourcePlan) ? (booking as any).resourcePlan : [];
     const hasPlan = plan.some((e: any) => Array.isArray(e?.days) && e.days.length > 0);
+    const assignedIds: string[] = Array.isArray((booking as any).assignedTeamMembers)
+      ? (booking as any).assignedTeamMembers.map((m: any) => ((m?._id ?? m)?.toString?.() ?? String(m)))
+      : [];
+
+    // Client bug list #24b: a booking blocks only the resources that attend
+    // it. When explicit attendees are recorded, the professional field alone
+    // must not block (otherwise an uninvolved resource gets a double
+    // booking). Legacy rows without attendees keep the professional fallback.
+    const hasExplicitAttendees = assignedIds.length > 0 || hasPlan;
+    if (hasExplicitAttendees && !assignedIds.includes(userIdString)) {
+      const ownEntry = plan.find(
+        (e: any) => ((e?.resourceId?._id || e?.resourceId)?.toString?.()) === userIdString
+      );
+      const ownDays: any[] = ownEntry && Array.isArray(ownEntry.days) ? ownEntry.days : [];
+      if (ownDays.length === 0) {
+        return;
+      }
+    }
 
     if (hasPlan) {
       const entry = plan.find(

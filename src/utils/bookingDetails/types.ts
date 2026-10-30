@@ -215,6 +215,7 @@ export type BookingSnapshotDto = {
     preferredStartTime: string | null;
     scheduledStartDate: string | null;
     scheduledStartTime: string | null;
+    scheduledEndTime: string | null;
     scheduledExecutionEndDate: string | null;
     scheduledBufferStartDate: string | null;
     scheduledBufferEndDate: string | null;
@@ -337,6 +338,7 @@ export type BookingWizardDto = {
   scheduleSelection: {
     startDate: string | null;
     startTime: string | null;
+    endTime: string | null;
     executionEndDate: string | null;
     bufferEndDate: string | null;
     timeZone: string | null;
@@ -670,7 +672,7 @@ export type RescheduleHistoryDto = {
   reason: string;
   description: string | null;
   note: string | null;
-  status: 'accepted' | 'declined' | 'auto_cancelled';
+  status: 'pending' | 'accepted' | 'declined' | 'auto_cancelled';
   respondedAt: string | null;
   respondedBy: ActorDto | null;
   responseNote: string | null;
