@@ -1,10 +1,10 @@
 import mongoose from 'mongoose';
 
-type SupportedSequenceField = 'bookingNumber' | 'quotationNumber';
+type SupportedSequenceField = 'bookingNumber' | 'quotationNumber' | 'ticketNumber';
 
 interface SequenceConfig {
   field: SupportedSequenceField;
-  collection: 'bookings';
+  collection: 'bookings' | 'supporttickets';
 }
 
 const getSequenceConfig = (key: string): SequenceConfig => {
@@ -14,6 +14,10 @@ const getSequenceConfig = (key: string): SequenceConfig => {
 
   if (key.startsWith('quotationNumber')) {
     return { field: 'quotationNumber', collection: 'bookings' };
+  }
+
+  if (key.startsWith('ticketNumber')) {
+    return { field: 'ticketNumber', collection: 'supporttickets' };
   }
 
   throw new Error(`Unsupported sequence key: ${key}`);

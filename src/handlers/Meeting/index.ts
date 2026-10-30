@@ -1,8 +1,40 @@
 import { Request, Response } from 'express';
+import { Types } from 'mongoose';
 import Meeting from '../../models/meeting';
 import User from '../../models/user';
 import Project from '../../models/project';
 import { buildBookingBlockedRanges } from '../../utils/bookingBlocks';
+import { UserFacingError } from '../../utils/appErrors';
+import {
+  meetingIntervalInTimeZone,
+  professionalHasBusyConflict,
+  resolveStoredCalendarTimeZone,
+} from '../../utils/support/availability';
+import { listSupportCalendarEvents } from '../../utils/support/calendarEvents';
+import {
+  buildCalendarReservationKeysForInterval,
+  releaseCalendarReservations,
+  reserveCalendarKeys,
+  withCalendarTransaction,
+} from '../../utils/support/calendarReservations';
+
+const meetingErrorResponse = (res: Response, error: unknown, message: string) => {
+    if (error instanceof UserFacingError) {
+        return res.status(error.status).json({
+            success: false,
+            message: error.message,
+            msg: error.message,
+            code: error.code,
+        });
+    }
+    console.error(message, error);
+    return res.status(500).json({ success: false, message, msg: message });
+};
+
+const professionalTimeZone = (professional: { timeZone?: string; businessInfo?: { timezone?: string } } | null) =>
+    // Writers and readers must agree: the busy readers skip invalid IANA names
+    // via resolveStoredCalendarTimeZone, so fall back the same way here.
+    resolveStoredCalendarTimeZone(professional);
 
 /**
  * Get employees' availability for a specific date range
@@ -141,7 +173,7 @@ export const getEmployeeAvailability = async (req: Request, res: Response) => {
  */
 export const createMeeting = async (req: Request, res: Response) => {
     try {
-        const { professionalId } = req.user!;
+        const professionalId = String(req.user!.professionalId || req.user!._id || '');
         const {
             projectId,
             meetingType,
@@ -214,7 +246,7 @@ export const createMeeting = async (req: Request, res: Response) => {
         }
 
         // Add the professional as an attendee
-        const professional = await User.findById(professionalId).select('name');
+        const professional = await User.findById(professionalId).select('name timeZone businessInfo');
         attendees.unshift({
             userId: professionalId || '',
             name: professional!.name,
@@ -222,8 +254,35 @@ export const createMeeting = async (req: Request, res: Response) => {
             status: 'accepted'
         });
 
-        // Create the meeting
+        const timeZone = professionalTimeZone(professional);
+        const interval = meetingIntervalInTimeZone(
+            new Date(scheduledDate),
+            startTime,
+            endTime,
+            timeZone,
+        );
+        if (!interval) {
+            return res.status(400).json({
+                success: false,
+                message: 'A valid meeting date and time range is required',
+                msg: 'A valid meeting date and time range is required',
+                code: 'VALIDATION',
+            });
+        }
+        const intervalMinutes = Math.max(1, Math.round((interval.end - interval.start) / 60000));
+        if (await professionalHasBusyConflict(professionalId, timeZone, new Date(interval.start), intervalMinutes)) {
+            return res.status(409).json({
+                success: false,
+                message: 'This time overlaps another booking, meeting, or support reservation',
+                msg: 'This time overlaps another booking, meeting, or support reservation',
+                code: 'SLOT_UNAVAILABLE',
+            });
+        }
+
+        // Create the meeting atomically with the shared calendar reservation.
+        const meetingId = new Types.ObjectId();
         const meeting = new Meeting({
+            _id: meetingId,
             projectId,
             professionalId,
             meetingType,
@@ -242,7 +301,23 @@ export const createMeeting = async (req: Request, res: Response) => {
             createdBy: professionalId
         });
 
-        await meeting.save();
+        await withCalendarTransaction(async (session) => {
+            await reserveCalendarKeys(
+                {
+                    sourceType: 'meeting',
+                    sourceId: meetingId,
+                    keys: buildCalendarReservationKeysForInterval({
+                        role: 'professional',
+                        userId: professionalId,
+                        startAt: new Date(interval.start),
+                        endAt: new Date(interval.end),
+                    }),
+                },
+                session,
+            );
+            await meeting.save({ session });
+            return true;
+        });
 
         res.status(201).json({
             success: true,
@@ -251,11 +326,7 @@ export const createMeeting = async (req: Request, res: Response) => {
         });
 
     } catch (error: any) {
-        console.error('Create meeting error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to create meeting. Please try again.',
-        });
+        return meetingErrorResponse(res, error, 'Failed to create meeting. Please try again.');
     }
 };
 
@@ -337,7 +408,7 @@ export const getMeetingById = async (req: Request, res: Response) => {
  */
 export const updateMeeting = async (req: Request, res: Response) => {
     try {
-        const { professionalId } = req.user!;
+        const professionalId = String(req.user!.professionalId || req.user!._id || '');
         const { meetingId } = req.params;
         const updates = req.body;
 
@@ -353,8 +424,57 @@ export const updateMeeting = async (req: Request, res: Response) => {
             });
         }
 
+        const professional = await User.findById(professionalId).select('timeZone businessInfo');
+        const timeZone = professionalTimeZone(professional);
+        const oldInterval = meetingIntervalInTimeZone(
+            meeting.scheduledDate,
+            meeting.startTime,
+            meeting.endTime,
+            timeZone,
+        );
+        const nextScheduledDate = updates.scheduledDate !== undefined
+            ? new Date(updates.scheduledDate)
+            : meeting.scheduledDate;
+        const nextStartTime = updates.startTime !== undefined ? updates.startTime : meeting.startTime;
+        const nextEndTime = updates.endTime !== undefined ? updates.endTime : meeting.endTime;
+        const nextInterval = meetingIntervalInTimeZone(
+            nextScheduledDate,
+            nextStartTime,
+            nextEndTime,
+            timeZone,
+        );
+        if (!nextInterval) {
+            return res.status(400).json({
+                success: false,
+                message: 'A valid meeting date and time range is required',
+                msg: 'A valid meeting date and time range is required',
+                code: 'VALIDATION',
+            });
+        }
+        const scheduleChanged = !oldInterval ||
+            oldInterval.start !== nextInterval.start ||
+            oldInterval.end !== nextInterval.end;
+
+        if (
+            scheduleChanged &&
+            await professionalHasBusyConflict(
+                professionalId,
+                timeZone,
+                new Date(nextInterval.start),
+                Math.max(1, Math.round((nextInterval.end - nextInterval.start) / 60000)),
+                String(meeting._id),
+            )
+        ) {
+            return res.status(409).json({
+                success: false,
+                message: 'This time overlaps another booking, meeting, or support reservation',
+                msg: 'This time overlaps another booking, meeting, or support reservation',
+                code: 'SLOT_UNAVAILABLE',
+            });
+        }
+
         // Check if meeting is being rescheduled
-        if (updates.scheduledDate && updates.scheduledDate !== meeting.scheduledDate.toISOString()) {
+        if (scheduleChanged) {
             meeting.previousScheduledDate = meeting.scheduledDate;
             meeting.rescheduledAt = new Date();
             meeting.rescheduledBy = professionalId;
@@ -376,7 +496,28 @@ export const updateMeeting = async (req: Request, res: Response) => {
             }
         });
 
-        await meeting.save();
+        if (scheduleChanged) {
+            await withCalendarTransaction(async (session) => {
+                await releaseCalendarReservations('meeting', meeting._id, session);
+                await reserveCalendarKeys(
+                    {
+                        sourceType: 'meeting',
+                        sourceId: meeting._id,
+                        keys: buildCalendarReservationKeysForInterval({
+                            role: 'professional',
+                            userId: professionalId,
+                            startAt: new Date(nextInterval.start),
+                            endAt: new Date(nextInterval.end),
+                        }),
+                    },
+                    session,
+                );
+                await meeting.save({ session });
+                return true;
+            });
+        } else {
+            await meeting.save();
+        }
 
         res.status(200).json({
             success: true,
@@ -385,11 +526,7 @@ export const updateMeeting = async (req: Request, res: Response) => {
         });
 
     } catch (error: any) {
-        console.error('Update meeting error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to update meeting. Please try again.',
-        });
+        return meetingErrorResponse(res, error, 'Failed to update meeting. Please try again.');
     }
 };
 
@@ -398,7 +535,7 @@ export const updateMeeting = async (req: Request, res: Response) => {
  */
 export const cancelMeeting = async (req: Request, res: Response) => {
     try {
-        const { professionalId } = req.user!;
+        const professionalId = String(req.user!.professionalId || req.user!._id || '');
         const { meetingId } = req.params;
         const { cancellationReason } = req.body;
 
@@ -426,7 +563,11 @@ export const cancelMeeting = async (req: Request, res: Response) => {
         meeting.cancelledBy = professionalId;
         meeting.cancellationReason = cancellationReason;
 
-        await meeting.save();
+        await withCalendarTransaction(async (session) => {
+            await meeting.save({ session });
+            await releaseCalendarReservations('meeting', meeting._id, session);
+            return true;
+        });
 
         res.status(200).json({
             success: true,
@@ -435,11 +576,7 @@ export const cancelMeeting = async (req: Request, res: Response) => {
         });
 
     } catch (error: any) {
-        console.error('Cancel meeting error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to cancel meeting. Please try again.',
-        });
+        return meetingErrorResponse(res, error, 'Failed to cancel meeting. Please try again.');
     }
 };
 
@@ -475,9 +612,33 @@ export const getAllMeetings = async (req: Request, res: Response) => {
             .sort({ scheduledDate: 1 })
             .select('-__v');
 
+        // The professional's normal calendar reader must include support
+        // meetings; otherwise blocking is enforced but invisible. Keep the
+        // existing `data` array shape and add a sibling event feed.
+        let supportEvents: Awaited<ReturnType<typeof listSupportCalendarEvents>> = [];
+        try {
+            const professional = await User.findById(professionalId).select('timeZone businessInfo');
+            const from = startDate ? new Date(startDate as string) : new Date();
+            const to = endDate
+                ? new Date(endDate as string)
+                : new Date(from.getTime() + 31 * 24 * 60 * 60 * 1000);
+            if (!Number.isNaN(from.getTime()) && !Number.isNaN(to.getTime()) && to > from) {
+                supportEvents = await listSupportCalendarEvents({
+                    viewer: 'professional',
+                    userId: professionalId,
+                    from,
+                    to,
+                    timeZone: resolveStoredCalendarTimeZone(professional),
+                });
+            }
+        } catch (error) {
+            console.error('Failed to load support events for professional calendar:', error);
+        }
+
         res.status(200).json({
             success: true,
-            data: meetings
+            data: meetings,
+            supportEvents,
         });
 
     } catch (error: any) {

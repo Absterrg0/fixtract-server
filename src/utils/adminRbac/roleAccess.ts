@@ -51,6 +51,17 @@ export async function getEffectiveAccessForUser(user: Pick<IUser, 'adminRole' | 
   return getConfiguredAccessForRole(resolvedRole);
 }
 
+/**
+ * Response-only view of effective levels. The support page needs an explicit
+ * `support` value even when a role has no configured support access; the
+ * authorization path treats a missing area as `none`.
+ */
+export function adminAccessLevelsForResponse(
+  levels: AdminPermissionLevels | undefined,
+): AdminPermissionLevels {
+  return { ...(levels || {}), support: levels?.support || 'none' };
+}
+
 export function validatePermissionMatrix(value: unknown): Partial<Record<AdminRole, AdminPermissionLevels>> | null {
   if (!value || typeof value !== 'object') return null;
   const matrix: Partial<Record<AdminRole, AdminPermissionLevels>> = {};

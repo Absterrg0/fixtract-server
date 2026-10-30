@@ -4,6 +4,17 @@ import connecToDatabase from "../../config/db";
 import { IUser } from "../../models/user";
 import { validateVATNumberFormat, normalizeVATNumberFormat } from "../../utils/vatValidation";
 import { listOdooCompanies } from "../../services/odooAccounting";
+import { resolveAdminRole } from "../../utils/adminRbac/rolePermissions";
+
+const serializePlatformSettings = (config: any) => ({
+  commissionPercent: config.commissionPercent,
+  companyVatNumber: config.companyVatNumber || '',
+  companyAddress: config.companyAddress || {},
+  eInvoicing: serializeEInvoicingSettings(config.eInvoicing),
+  supportChatEnabled: config.supportChatEnabled === true,
+  lastModified: config.lastModified,
+  version: config.version,
+});
 
 const serializeEInvoicingSettings = (eInvoicing: any = {}) => ({
   peppolEnabled: eInvoicing.peppolEnabled === true,
@@ -26,14 +37,7 @@ export const getPlatformSettings = async (req: Request, res: Response, next: Nex
 
     return res.status(200).json({
       success: true,
-      data: {
-        commissionPercent: config.commissionPercent,
-        companyVatNumber: config.companyVatNumber || '',
-        companyAddress: config.companyAddress || {},
-        eInvoicing: serializeEInvoicingSettings(config.eInvoicing),
-        lastModified: config.lastModified,
-        version: config.version,
-      }
+      data: serializePlatformSettings(config),
     });
 
   } catch (error: any) {
@@ -69,9 +73,31 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
       });
     }
 
+    if (req.body?.supportChatEnabled !== undefined && typeof req.body.supportChatEnabled !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        msg: "supportChatEnabled must be a boolean",
+        code: 'VALIDATION',
+        field: 'supportChatEnabled',
+      });
+    }
+    if (
+      req.body?.supportChatEnabled !== undefined &&
+      resolveAdminRole(adminUser.adminRole) !== 'super'
+    ) {
+      return res.status(403).json({
+        success: false,
+        msg: 'Only a super admin can change the support chat setting',
+        code: 'ADMIN_PERMISSION_DENIED',
+      });
+    }
+
     await connecToDatabase();
     const config = await PlatformSettings.getCurrentConfig();
     config.commissionPercent = commissionPercent;
+    if (req.body?.supportChatEnabled !== undefined) {
+      config.supportChatEnabled = req.body.supportChatEnabled === true;
+    }
     if (typeof companyVatNumber === 'string') {
       const trimmed = companyVatNumber.trim();
       if (trimmed && !validateVATNumberFormat(trimmed)) {
@@ -153,14 +179,7 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
 
     return res.status(200).json({
       success: true,
-      data: {
-        commissionPercent: config.commissionPercent,
-        companyVatNumber: config.companyVatNumber || '',
-        companyAddress: config.companyAddress || {},
-        eInvoicing: serializeEInvoicingSettings(config.eInvoicing),
-        lastModified: config.lastModified,
-        version: config.version,
-      }
+      data: serializePlatformSettings(config),
     });
 
   } catch (error: any) {
@@ -168,6 +187,49 @@ export const updatePlatformSettings = async (req: Request, res: Response, next: 
     return res.status(500).json({
       success: false,
       msg: "Failed to update platform settings"
+    });
+  }
+};
+
+// Superadmin-only support chat toggle. The route guard already restricts this
+// path, but the handler repeats the check so it cannot be bypassed by wiring.
+export const updateSupportChatSetting = async (req: Request, res: Response) => {
+  try {
+    const adminUser = req.admin as IUser | undefined;
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({ success: false, msg: 'Admin access required' });
+    }
+    if (resolveAdminRole(adminUser.adminRole) !== 'super') {
+      return res.status(403).json({
+        success: false,
+        msg: 'Only a super admin can change the support chat setting',
+        code: 'ADMIN_PERMISSION_DENIED',
+      });
+    }
+    if (typeof req.body?.enabled !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        msg: 'enabled must be a boolean',
+        code: 'VALIDATION',
+        field: 'enabled',
+      });
+    }
+
+    await connecToDatabase();
+    const config = await PlatformSettings.getCurrentConfig();
+    config.supportChatEnabled = req.body.enabled;
+    config.lastModifiedBy = adminUser._id as any;
+    await config.save();
+
+    return res.status(200).json({
+      success: true,
+      data: { supportChatEnabled: config.supportChatEnabled === true },
+    });
+  } catch (error: any) {
+    console.error('Update support chat setting error:', error);
+    return res.status(500).json({
+      success: false,
+      msg: "Failed to update the support chat setting",
     });
   }
 };

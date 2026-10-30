@@ -6,6 +6,7 @@ import Payment from "../../models/payment";
 import User from "../../models/user";
 import { executeRefund, RefundError } from "../Stripe/payment";
 import { releaseScheduleSlots } from "../../utils/scheduleRelease";
+import { releaseBookingCalendar } from "../../utils/support/bookingCalendar";
 import { notifyBookingCancelledAndRefunded } from "../../utils/notifications/notifyBookingCancelledAndRefunded";
 import { auditLog } from "../../utils/auditLogger";
 import { param, params } from "../../utils/requestParams";
@@ -227,6 +228,17 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
 
     releaseScheduleSlots(freshBooking, adminId);
     await freshBooking.save();
+    try {
+      await releaseBookingCalendar(freshBooking._id);
+    } catch (calendarError) {
+      // The cancellation is already effective; a failed release must not leave
+      // the request stuck in `processing`. The booking post-save hook records
+      // `calendarReleasePending` for the scheduled retry.
+      console.error(
+        "Calendar release failed after approving cancellation; retry queued",
+        calendarError instanceof Error ? calendarError.name : typeof calendarError,
+      );
+    }
 
     cancellation.status = "approved";
     cancellation.resolvedAt = new Date();

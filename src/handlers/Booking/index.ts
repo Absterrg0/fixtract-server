@@ -26,6 +26,8 @@ import ServiceConfiguration from "../../models/serviceConfiguration";
 import { sendHandlerError } from '../../utils/handlerErrors';
 import { UserFacingError } from '../../utils/appErrors';
 import { assertValidInvoiceUnit } from '../../utils/invoiceUnits';
+import { withCalendarTransaction } from '../../utils/support/calendarReservations';
+import { buildBookingCalendarKeys, reserveBookingCalendar } from '../../utils/support/bookingCalendar';
 
 /** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
 const applyProceedAtStandardVatIfRequested = (
@@ -982,12 +984,34 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     }
 
     let booking: IBooking | null = null;
+    bookingData._id = new mongoose.Types.ObjectId();
+    const calendarBooking = {
+      _id: bookingData._id,
+      professional: bookingData.professional as any,
+      assignedTeamMembers: bookingData.assignedTeamMembers as any,
+      resourcePlan: (bookingData as any).resourcePlan,
+      scheduledStartDate: bookingData.scheduledStartDate as any,
+      scheduledExecutionEndDate: bookingData.scheduledExecutionEndDate as any,
+      scheduledBufferEndDate: bookingData.scheduledBufferEndDate as any,
+    };
+    const needsCalendarLock = buildBookingCalendarKeys(calendarBooking).length > 0;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        booking = await Booking.create(bookingData);
+        if (!needsCalendarLock) {
+          booking = await Booking.create(bookingData);
+        } else {
+          // Reserve the same shared calendar keys as support/Meeting writers in
+          // the same transaction as the booking row. A booking that overlaps a
+          // support meeting (or another booking) cannot be created twice.
+          booking = await withCalendarTransaction(async (session) => {
+            await reserveBookingCalendar(calendarBooking, session);
+            const [created] = await Booking.create([bookingData], { session });
+            return created;
+          });
+        }
         break;
       } catch (err: any) {
-        if (err.code === 11000 && (err.keyPattern?.bookingNumber || err.keyPattern?.quotationNumber) && attempt < 2) {
+        if (err?.code === 11000 && (err.keyPattern?.bookingNumber || err.keyPattern?.quotationNumber) && attempt < 2) {
           continue;
         }
         throw err;

@@ -1,9 +1,12 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
+import { isUserFacingError } from '../../utils/appErrors';
 import Booking, { BookingStatus } from '../../models/booking';
 import Project from '../../models/project';
 import User from '../../models/user';
 import { buildPerResourceBlockedDays, toZonedTime, fromZonedTime, startOfDayZoned } from '../../utils/scheduleEngine';
+import { withCalendarTransactionIfConnected } from '../../utils/support/calendarReservations';
+import { findBookingCalendarConflictsForSchedule, replaceBookingCalendar } from '../../utils/support/bookingCalendar';
 
 const PLANNING_ACTIVE_STATUSES: BookingStatus[] = ['booked', 'rescheduling_requested', 'in_progress', 'professional_completed'];
 
@@ -442,12 +445,53 @@ export const updateBookingPlanning = async (req: Request, res: Response) => {
       note: `Planning updated: ${planWithDays.length} resource(s), end ${formatDayKey(newExecutionEnd)}`,
     } as any);
 
-    await booking.save({ validateModifiedOnly: true });
+    if (booking.scheduledStartDate) {
+      const calendarCandidate = {
+        _id: booking._id,
+        professional: (booking.professional as any)?._id || booking.professional,
+        assignedTeamMembers: planWithDays.map((p) => p.resourceId),
+        resourcePlan: planWithDays,
+        scheduledStartDate: booking.scheduledStartDate,
+        scheduledExecutionEndDate: newExecutionEnd,
+      };
+      const conflicts = await findBookingCalendarConflictsForSchedule({
+        bookingId: booking._id,
+        booking: calendarCandidate as any,
+      });
+      if (conflicts.length > 0) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'TEAM_CONFLICT',
+            message: 'The updated plan conflicts with another booking, meeting, or support reservation',
+            conflicts,
+          },
+        });
+      }
+      await withCalendarTransactionIfConnected(async (session) => {
+        await replaceBookingCalendar(calendarCandidate as any, session);
+        await booking.save({ validateModifiedOnly: true, ...(session ? { session } : {}) });
+        return true;
+      });
+    } else {
+      await booking.save({ validateModifiedOnly: true });
+    }
 
     const payload = await buildPlanningPayload(booking, professional, project);
 
     return res.json({ success: true, data: payload });
   } catch (error: any) {
+    // A reservation race after the pre-check surfaces as SLOT_UNAVAILABLE;
+    // report it as a conflict so the client can retry, not as a 500.
+    if (isUserFacingError(error) && error.status === 409) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: (error as any).code || 'SLOT_UNAVAILABLE',
+          message: error.message,
+        },
+      });
+    }
     console.error('Error updating booking planning:', error);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to update planning' } });
   }

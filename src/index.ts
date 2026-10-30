@@ -25,6 +25,7 @@ import stripeRouter from './routes/Stripe';
 import chatRouter from './routes/Chat';
 import warrantyClaimRouter from './routes/WarrantyClaim';
 import favoritesRouter from './routes/Favorites';
+import supportRouter from './routes/Support';
 
 const app: Express = express();
 
@@ -79,6 +80,7 @@ app.use('/api/professional', professionalPaymentRouter);
 app.use('/api/chat', chatRouter);
 app.use('/api/warranty-claims', warrantyClaimRouter);
 app.use('/api/favorites', favoritesRouter);
+app.use('/api/support', supportRouter);
 
 // Unknown API routes must return JSON, not Express' HTML 404 page.
 app.use('/api', (_req: Request, res: Response) => {

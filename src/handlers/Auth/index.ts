@@ -10,16 +10,35 @@ import { buildBookingBlockedRanges } from "../../utils/bookingBlocks";
 import { formatVATNumber, isValidVATFormat, validateVATNumber } from "../../utils/viesApi";
 import { generateReferralCode, validateReferralCode, createReferral } from "../../utils/referralSystem";
 import { sendIdExpiredEmail } from "../../utils/emailService";
-import { permissionsForLevels, permissionsForRole, resolveAdminRole } from "../../utils/adminRbac/rolePermissions";
+import {
+  permissionsForLevels,
+  permissionsForRole,
+  resolveAdminRole,
+} from "../../utils/adminRbac/rolePermissions";
+import {
+  getEffectiveAccessForUser,
+  adminAccessLevelsForResponse,
+} from "../../utils/adminRbac/roleAccess";
+import type { AdminPermissionLevels } from "../../utils/adminRbac/types";
 import { sendHandlerError } from '../../utils/handlerErrors';
 
-function adminAccessFields(user: { role?: string; adminRole?: string; adminPermissionLevels?: any; timeZone?: string }) {
-  if (user.role !== 'admin') return {};
+function adminAccessFields(
+  user: { role?: string; adminRole?: string; adminPermissionLevels?: any; timeZone?: string },
+  adminAccessLevels?: AdminPermissionLevels,
+) {
+  if (user.role !== 'admin') {
+    return { supportAccessLevel: 'none' as const };
+  }
   const adminRole = resolveAdminRole(user.adminRole);
+  const effectiveLevels = adminAccessLevels
+    ? adminAccessLevelsForResponse(adminAccessLevels)
+    : undefined;
   return {
     adminRole,
     adminPermissions: [...(user.adminPermissionLevels ? permissionsForLevels(user.adminPermissionLevels) : permissionsForRole(adminRole))],
     adminPermissionLevels: user.adminPermissionLevels,
+    adminAccessLevels: effectiveLevels,
+    supportAccessLevel: effectiveLevels?.support || 'none',
     timeZone: user.timeZone,
   };
 }
@@ -30,15 +49,20 @@ function adminAccessFields(user: { role?: string; adminRole?: string; adminPermi
  * object the client had no companyAddress/location until a hard refresh, which
  * broke VAT country resolution and Peppol recipient discovery for the whole
  * session.
+ *
+ * `adminAccessLevels` must come from getEffectiveAccessForUser (the same policy
+ * the server authorizes with), not from the legacy write-derived permission
+ * array. Callers that cannot resolve it leave it undefined rather than
+ * inventing a second policy.
  */
-export function buildUserResponse(user: any) {
+export function buildUserResponse(user: any, adminAccessLevels?: AdminPermissionLevels) {
   return {
     _id: user._id,
     name: user.name,
     email: user.email,
     phone: user.phone,
     role: user.role,
-    ...adminAccessFields(user),
+    ...adminAccessFields(user, adminAccessLevels),
     isEmailVerified: user.isEmailVerified || false,
     isPhoneVerified: user.isPhoneVerified || false,
     vatNumber: user.vatNumber,
@@ -482,12 +506,18 @@ export const LogIn = async (req: Request, res: Response, next: NextFunction) => 
     // Generate token
     const token = generateToken(userExists._id as mongoose.Types.ObjectId);
 
+    // Prepare user response (same shape as /auth/me so login hydrates the full
+    // customer/professional profile, including address fields and the effective
+    // admin/support levels the server authorizes with). Resolve access levels
+    // BEFORE setting the cookie: a failure here must not leave the client
+    // holding a token for a response that errored.
+    const adminAccessLevels = userExists.role === 'admin'
+      ? await getEffectiveAccessForUser(userExists)
+      : undefined;
+    const userResponse = buildUserResponse(userExists, adminAccessLevels);
+
     // Set httpOnly cookie
     setTokenCookie(res, token);
-
-    // Prepare user response (same shape as /auth/me so login hydrates the full
-    // customer/professional profile, including address fields).
-    const userResponse = buildUserResponse(userExists);
 
     return res.status(200).json({
       success: true,
@@ -594,8 +624,11 @@ export const getMe = async (req: Request, res: Response, next: NextFunction) => 
       bookingBlockedRanges = await buildBookingBlockedRanges(user._id as mongoose.Types.ObjectId);
     }
 
+    const adminAccessLevels = user.role === 'admin'
+      ? await getEffectiveAccessForUser(user)
+      : undefined;
     const userResponse = {
-      ...buildUserResponse(user),
+      ...buildUserResponse(user, adminAccessLevels),
       bookingBlockedRanges,
     };
 

@@ -342,6 +342,7 @@ export const ALLOWED_KEY_PREFIXES = [
   'cms/',
   'dispute-attachments/',
   'dispute-resolutions/',
+  'support-attachments/',
   'invoices/',
 ];
 

@@ -4,6 +4,7 @@ import { STRIPE_CONFIG } from "../services/stripe";
 import { VatBreakdownLine } from "../Types/stripe";
 import { PEPPOL_DISPATCH_STATUSES, type PeppolDispatchStatus } from "../constants/peppol";
 import type { InvoiceArtifactHistoryEntry } from "../Types/invoice";
+import { releaseCalendarReservations } from "../utils/support/calendarReservations";
 
 const SUPPORTED_CURRENCIES = STRIPE_CONFIG.supportedCurrencies.length
   ? STRIPE_CONFIG.supportedCurrencies
@@ -514,6 +515,8 @@ export interface IBooking extends Document {
   // Metadata
   bookingNumber: string; // Unique booking reference number (e.g., BK-2024-001234)
   notes?: string; // Internal notes
+  /** Terminal-state calendar release did not complete; retried on the next save. */
+  calendarReleasePending?: boolean;
   professionalCompletedAt?: Date;
   notificationReminders?: {
     unfinishedCheckoutLastSentAt?: Date;
@@ -1403,6 +1406,7 @@ const BookingSchema = new Schema({
   bookingNumber: {
     type: String
   },
+  calendarReleasePending: { type: Boolean, default: undefined },
   notes: {
     type: String,
     maxlength: 2000
@@ -1464,6 +1468,36 @@ BookingSchema.index({ professional: 1, project: 1, createdAt: 1 });
 BookingSchema.index({ createdAt: 1, 'location.city': 1, status: 1 });
 BookingSchema.index({ 'dispute.raisedAt': 1 }, { sparse: true });
 BookingSchema.index({ 'noShow.markedAt': 1 }, { sparse: true });
+
+// Terminal booking states no longer hold the shared calendar. This covers
+// cancellation/completion paths in payment, quotation, webhook and admin code
+// in addition to the explicit release calls.
+/**
+ * Terminal bookings must not hold shared calendar slots. Release failures are
+ * recorded as `calendarReleasePending` so the next save of the same booking
+ * retries them instead of being swallowed silently (a post-save hook cannot
+ * fail the save that already committed).
+ */
+BookingSchema.post("save", async function (doc) {
+  if (!["cancelled", "refunded", "completed"].includes(String(doc.status))) return;
+  try {
+    const session = typeof (doc as any).$session === "function" ? (doc as any).$session() : undefined;
+    await releaseCalendarReservations("booking", doc._id, session || undefined);
+    if (doc.calendarReleasePending) {
+      await Booking.updateOne({ _id: doc._id }, { $unset: { calendarReleasePending: 1 } });
+      doc.calendarReleasePending = undefined;
+    }
+  } catch (error) {
+    console.error("Failed to release booking calendar reservations; retry queued", error);
+    doc.calendarReleasePending = true;
+    await Booking.updateOne(
+      { _id: doc._id },
+      { $set: { calendarReleasePending: true } },
+    ).catch((updateError) => {
+      console.error("Failed to record pending booking calendar release", updateError);
+    });
+  }
+});
 
 // Helper to parse HH:mm to minutes for comparison
 const parseTimeToMinutes = (time: string): number => {
