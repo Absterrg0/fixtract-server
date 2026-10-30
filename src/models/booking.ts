@@ -508,7 +508,7 @@ export interface IBooking extends Document {
   actualStartDate?: Date;
   actualEndDate?: Date;
   rescheduleRequest?: {
-    status: 'pending' | 'accepted' | 'declined';
+    status: 'pending' | 'accepted' | 'declined' | 'disputed';
     requestedBy: Types.ObjectId;
     requestedAt: Date;
     reason: string;
@@ -528,7 +528,7 @@ export interface IBooking extends Document {
     note?: string;
     previousSchedule?: IBookingScheduleSnapshot;
     proposedSchedule: IBookingScheduleSnapshot;
-    status: 'accepted' | 'declined' | 'auto_cancelled';
+    status: 'accepted' | 'declined' | 'disputed' | 'auto_cancelled';
     respondedAt?: Date;
     respondedBy?: Types.ObjectId;
     responseNote?: string;
@@ -1315,7 +1315,7 @@ const BookingSchema = new Schema({
   rescheduleRequest: {
     status: {
       type: String,
-      enum: ['pending', 'accepted', 'declined'],
+      enum: ['pending', 'accepted', 'declined', 'disputed'],
     },
     requestedBy: {
       type: Schema.Types.ObjectId,
@@ -1384,7 +1384,7 @@ const BookingSchema = new Schema({
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
       assignedTeamMembers: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     },
-    status: { type: String, enum: ['accepted', 'declined', 'auto_cancelled'], required: true },
+    status: { type: String, enum: ['accepted', 'declined', 'disputed', 'auto_cancelled'], required: true },
     respondedAt: {
       type: Date,
       required: function (this: any) {
