@@ -174,7 +174,7 @@ export const getPayments = async (req: Request, res: Response) => {
     console.error('[ADMIN][PAYMENTS] Failed to fetch payments', error);
     res.status(500).json({
       success: false,
-      msg: error?.message || 'Failed to load payments'
+      msg: "We couldn't load payments. Please try again."
     });
   }
 };
@@ -250,7 +250,7 @@ export const capturePayment = async (req: Request, res: Response) => {
     console.error('[ADMIN][PAYMENTS] Failed to capture payment', error);
     res.status(500).json({
       success: false,
-      msg: error?.message || 'Failed to capture payment'
+      msg: "We couldn't release this payment. Check its current status before retrying."
     });
   }
 };
@@ -311,7 +311,7 @@ const withPaymentArtifact = async (req: Request, res: Response, options: Payment
     console.error(`[ADMIN][PAYMENTS] ${options.logLabel}`, error);
     return res.status(500).json({
       success: false,
-      msg: error?.message || options.failureMessage,
+      msg: options.failureMessage,
     });
   }
 };

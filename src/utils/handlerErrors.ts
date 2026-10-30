@@ -1,57 +1,272 @@
 import { duplicateKeyResponse } from './mongoErrors';
+import { errorCodeForStatus, isUserFacingError, type ErrorCode } from './appErrors';
+import { safeErrorSummary } from './safeErrorLog';
 
-type HandlerErrorBody = {
+export type HandlerErrorBody = {
   success: false;
   msg: string;
+  code?: ErrorCode;
   field?: string;
 };
 
-function sanitizeErrorForLog(error: unknown): { name?: string; code?: unknown; message?: string } {
-  if (!error || typeof error !== 'object') {
-    return { message: String(error) };
+type HandlerErrorResult = {
+  status: number;
+  body: HandlerErrorBody;
+};
+
+const DEFAULT_MESSAGE = 'Something went wrong on our side. Please try again in a moment.';
+
+function safeFallback(fallback: string | undefined): string {
+  const message = typeof fallback === 'string' ? fallback.trim() : '';
+  return message || DEFAULT_MESSAGE;
+}
+
+function validationErrorResult(error: unknown): HandlerErrorResult | null {
+  if (!error || typeof error !== 'object' || (error as { name?: string }).name !== 'ValidationError') {
+    return null;
   }
-  const err = error as { name?: string; code?: unknown; message?: string };
+  const validationError = error as { errors?: Record<string, { message?: unknown }> };
+  const messages = Object.values(validationError.errors || {})
+    .map((entry) => (typeof entry?.message === 'string' ? entry.message.trim() : ''))
+    .filter(Boolean);
+  if (messages.length === 0) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        msg: 'Some fields are invalid. Check the highlighted fields and try again.',
+        code: 'VALIDATION',
+      },
+    };
+  }
   return {
-    name: err.name,
-    code: err.code,
-    // Avoid dumping dup-key payloads that include raw email/phone values
-    message: typeof err.message === 'string' ? err.message.slice(0, 120) : undefined,
+    status: 400,
+    body: { success: false, msg: messages.join(', '), code: 'VALIDATION' },
   };
 }
 
-export function toHandlerError(
-  error: unknown,
-  fallback: string
-): { status: number; body: HandlerErrorBody } {
+function castErrorResult(error: unknown): HandlerErrorResult | null {
+  if (!error || typeof error !== 'object' || (error as { name?: string }).name !== 'CastError') {
+    return null;
+  }
+  const path = (error as { path?: unknown }).path;
+  const field = typeof path === 'string' && path.trim() ? path.trim() : 'value';
+  return {
+    status: 400,
+    body: { success: false, msg: `Invalid value for "${field}".`, code: 'VALIDATION' },
+  };
+}
+
+function bsonErrorResult(error: unknown): HandlerErrorResult | null {
+  if (!error || typeof error !== 'object') return null;
+  const name = (error as { name?: string }).name;
+  if (name !== 'BSONError' && name !== 'BSONTypeError') return null;
+  return {
+    status: 400,
+    body: {
+      success: false,
+      msg: 'The request contains an invalid identifier.',
+      code: 'VALIDATION',
+    },
+  };
+}
+
+function parserErrorResult(error: unknown): HandlerErrorResult | null {
+  if (!error || typeof error !== 'object') return null;
+  const type = (error as { type?: unknown }).type;
+  switch (type) {
+    case 'entity.parse.failed':
+      return {
+        status: 400,
+        body: { success: false, msg: 'The request body is not valid JSON.', code: 'VALIDATION' },
+      };
+    case 'entity.too.large':
+      return {
+        status: 413,
+        body: {
+          success: false,
+          msg: 'The request is too large. Reduce the amount of data and try again.',
+          code: 'VALIDATION',
+        },
+      };
+    case 'encoding.unsupported':
+      return {
+        status: 415,
+        body: {
+          success: false,
+          msg: 'The request uses an unsupported content encoding.',
+          code: 'VALIDATION',
+        },
+      };
+    case 'request.aborted':
+      return {
+        status: 400,
+        body: { success: false, msg: 'The request was interrupted. Please try again.', code: 'VALIDATION' },
+      };
+    default:
+      return null;
+  }
+}
+
+function infrastructureErrorResult(error: unknown): HandlerErrorResult | null {
+  if (!error || typeof error !== 'object') return null;
+  const err = error as { name?: unknown; code?: unknown; type?: unknown; cause?: unknown };
+  const name = typeof err.name === 'string' ? err.name : '';
+  const code = typeof err.code === 'string' ? err.code : '';
+  const type = typeof err.type === 'string' ? err.type : '';
+  const cause = err.cause && typeof err.cause === 'object'
+    ? (err.cause as { code?: unknown })
+    : undefined;
+  const causeCode = typeof cause?.code === 'string' ? cause.code : '';
+  const networkCodes = [code, causeCode];
+
+  if (name === 'MongooseServerSelectionError' || name === 'MongoNetworkError' || name === 'MongoNetworkTimeoutError') {
+    return {
+      status: 503,
+      body: {
+        success: false,
+        msg: 'The service is temporarily unavailable. Please try again in a moment.',
+        code: 'UNAVAILABLE',
+      },
+    };
+  }
+
+  if (networkCodes.some((entry) => ['ETIMEDOUT', 'ESOCKETTIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(entry)) || name === 'TimeoutError') {
+    return {
+      status: 504,
+      body: {
+        success: false,
+        msg: 'The service took too long to respond. Please try again.',
+        code: 'UNAVAILABLE',
+      },
+    };
+  }
+
+  if (networkCodes.some((entry) => ['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE'].includes(entry))) {
+    return {
+      status: 503,
+      body: {
+        success: false,
+        msg: 'The service is temporarily unavailable. Please try again in a moment.',
+        code: 'UNAVAILABLE',
+      },
+    };
+  }
+
+  if (type.startsWith('Stripe')) {
+    return {
+      status: 502,
+      body: {
+        success: false,
+        msg: 'The payment service is temporarily unavailable. Please try again.',
+        code: 'UNAVAILABLE',
+      },
+    };
+  }
+
+  return null;
+}
+
+function uploadErrorResult(error: unknown): HandlerErrorResult | null {
+  if (!error || typeof error !== 'object' || (error as { name?: string }).name !== 'MulterError') {
+    return null;
+  }
+  const code = (error as { code?: unknown }).code;
+  const message =
+    code === 'LIMIT_FILE_SIZE'
+      ? 'The uploaded file is too large. Choose a smaller file and try again.'
+      : code === 'LIMIT_FILE_COUNT' || code === 'LIMIT_PART_COUNT'
+        ? 'Too many files were uploaded. Reduce the number of files and try again.'
+        : code === 'LIMIT_UNEXPECTED_FILE'
+          ? 'Unexpected file field in the upload. Check the form and try again.'
+          : code === 'LIMIT_FIELD_KEY' || code === 'LIMIT_FIELD_VALUE'
+            ? 'An upload field is too long. Shorten it and try again.'
+            : 'The file upload could not be processed. Check the file and try again.';
+  return { status: 400, body: { success: false, msg: message, code: 'VALIDATION' } };
+}
+
+export function toHandlerError(error: unknown, fallback: string): HandlerErrorResult {
   const duplicate = duplicateKeyResponse(error);
   if (duplicate) {
     return {
       status: duplicate.status,
-      body: { success: false, msg: duplicate.msg, field: duplicate.field },
+      body: { success: false, msg: duplicate.msg, code: 'CONFLICT', field: duplicate.field },
     };
   }
 
-  if (error && typeof error === 'object' && (error as { name?: string }).name === 'ValidationError') {
-    const validationError = error as { errors?: Record<string, { message?: string }> };
-    const messages = Object.values(validationError.errors || {})
-      .map((entry) => entry?.message)
-      .filter((message): message is string => Boolean(message));
-    if (messages.length > 0) {
-      return {
-        status: 400,
-        body: { success: false, msg: messages.join(', ') },
-      };
-    }
+  const validation = validationErrorResult(error);
+  if (validation) return validation;
+
+  const cast = castErrorResult(error);
+  if (cast) return cast;
+
+  const bson = bsonErrorResult(error);
+  if (bson) return bson;
+
+  const parser = parserErrorResult(error);
+  if (parser) return parser;
+
+  const upload = uploadErrorResult(error);
+  if (upload) return upload;
+
+  const infrastructure = infrastructureErrorResult(error);
+  if (infrastructure) return infrastructure;
+
+  if (isUserFacingError(error)) {
+    const status = error.status >= 400 && error.status <= 599 ? error.status : 500;
+    return {
+      status,
+      body: {
+        success: false,
+        msg: error.message,
+        code: error.code || errorCodeForStatus(status),
+        ...(error.field ? { field: error.field } : {}),
+      },
+    };
   }
 
-  console.error(fallback, sanitizeErrorForLog(error));
+  const errorStatus =
+    error && typeof error === 'object'
+      ? (error as { status?: unknown; statusCode?: unknown }).status ??
+        (error as { statusCode?: unknown }).statusCode
+      : undefined;
+  const status = typeof errorStatus === 'number' ? errorStatus : 500;
+
+  // Unknown 4xx errors keep their status but never their raw text.
+  if (status >= 400 && status < 500) {
+    console.error(fallback, safeErrorSummary(error));
+    return {
+      status,
+      body: {
+        success: false,
+        msg: status === 401
+          ? 'Please sign in to continue.'
+          : status === 403
+            ? 'You do not have permission to do that.'
+            : status === 404
+              ? 'The requested item could not be found.'
+              : status === 409
+                ? 'This request conflicts with the current state. Refresh and try again.'
+                : status === 429
+                  ? 'Too many requests. Please wait a moment and try again.'
+                  : 'The request could not be processed. Check the details and try again.',
+        code: errorCodeForStatus(status),
+      },
+    };
+  }
+
+  console.error(fallback, safeErrorSummary(error));
   return {
     status: 500,
-    body: { success: false, msg: fallback },
+    body: { success: false, msg: safeFallback(fallback), code: 'INTERNAL' },
   };
 }
 
-export function sendHandlerError(res: { status: (code: number) => { json: (body: HandlerErrorBody) => unknown } }, error: unknown, fallback: string) {
+export function sendHandlerError(
+  res: { status: (code: number) => { json: (body: HandlerErrorBody) => unknown } },
+  error: unknown,
+  fallback: string,
+) {
   const { status, body } = toHandlerError(error, fallback);
   return res.status(status).json(body);
 }

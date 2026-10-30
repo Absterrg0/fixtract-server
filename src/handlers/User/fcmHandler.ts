@@ -105,7 +105,7 @@ export const registerFcmToken = async (req: Request, res: Response): Promise<voi
     res.status(200).json({ success: true, msg: 'FCM token registered' });
   } catch (err) {
     console.error('registerFcmToken error:', err);
-    res.status(500).json({ success: false, msg: 'Internal server error' });
+    res.status(500).json({ success: false, msg: "We couldn't register push notifications on this device. Please try again." });
   }
 };
 
@@ -135,7 +135,7 @@ export const unregisterFcmToken = async (req: Request, res: Response): Promise<v
     res.status(200).json({ success: true, msg: 'FCM token removed' });
   } catch (err) {
     console.error('unregisterFcmToken error:', err);
-    res.status(500).json({ success: false, msg: 'Internal server error' });
+    res.status(500).json({ success: false, msg: "We couldn't update push notification settings. Please try again." });
   }
 };
 
@@ -177,7 +177,7 @@ export const getNotificationPreferences = async (req: Request, res: Response): P
     });
   } catch (err) {
     console.error('getNotificationPreferences error:', err);
-    res.status(500).json({ success: false, msg: 'Internal server error' });
+    res.status(500).json({ success: false, msg: "We couldn't load notification preferences. Please try again." });
   }
 };
 
@@ -294,6 +294,6 @@ export const updateNotificationPreferences = async (req: Request, res: Response)
     res.status(200).json({ success: true, msg: 'Preference updated' });
   } catch (err) {
     console.error('updateNotificationPreferences error:', err);
-    res.status(500).json({ success: false, msg: 'Internal server error' });
+    res.status(500).json({ success: false, msg: "We couldn't save notification preferences. Please try again." });
   }
 };

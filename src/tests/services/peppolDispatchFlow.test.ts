@@ -82,13 +82,31 @@ describe("Peppol Odoo dispatch", () => {
     expect(mocks.call).not.toHaveBeenCalled();
   });
 
-  it("reports send rejection as failed with the actual Odoo error", async () => {
+  it("reports send rejection as failed without exposing the raw Odoo error", async () => {
     const normal = mocks.call.getMockImplementation()!;
     mocks.call.mockImplementation(async (...args) => {
       if (args[2] === "button_process_edi_web_services") throw new Error("Recipient is not registered on Peppol");
       return normal(...args);
     });
-    expect(await dispatch("supplier")).toMatchObject({ status: "failed", reason: "Recipient is not registered on Peppol" });
+    const result = await dispatch("supplier");
+    expect(result).toMatchObject({ status: "failed" });
+    expect(result.reason).toMatch(/could not request the Peppol send/i);
+    expect(result.reason).not.toContain("Recipient is not registered");
+  });
+
+  it("turns an Odoo connection failure into an actionable safe reason", async () => {
+    mocks.discover.mockRejectedValueOnce(new Error("connect ECONNREFUSED https://odoo.internal?token=provider-secret"));
+    const errored: unknown[][] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { errored.push(args); });
+    const result = await dispatch("customer");
+    errorSpy.mockRestore();
+    expect(result).toMatchObject({ status: "failed", attempts: 0 });
+    expect(result.reason).toMatch(/Odoo accounting configuration could not be loaded/i);
+    expect(result.reason).not.toContain("ECONNREFUSED");
+    expect(result.reason).not.toContain("provider-secret");
+    // The discovery-failure log must carry only the allowlisted summary.
+    expect(JSON.stringify(errored)).not.toContain("provider-secret");
+    expect(JSON.stringify(errored)).not.toContain("ECONNREFUSED");
   });
 
   it.each([["sent", "sent"], ["processing", "queued"]])("refreshes an existing %s move without sending it again", async (state, status) => {
@@ -108,9 +126,9 @@ describe("Peppol Odoo dispatch", () => {
       Object.assign(new Error(`Odoo did not answer ${call} within 120s`), { name: "OdooTimeoutError" });
 
     it.each([
-      [[], "queued", /did not answer account\.move\.button_process_edi_web_services.*still processing/],
+      [[], "queued", /timed out.*Odoo may still be processing/],
       [[{ state: "sent" }], "sent", /confirms/],
-      [[{ state: "error", error_message: "<p>Peppol Error [code=303]</p>" }], "failed", /^Peppol Error \[code=303\]$/],
+      [[{ state: "error", error_message: "<p>Peppol Error [code=303]</p>" }], "failed", /reported a Peppol delivery error/i],
     ])("reports the move's Peppol state when the send times out (%j)", async (documents, status, reason) => {
       const normal = mocks.call.getMockImplementation()!;
       mocks.call.mockImplementation(async (...args) => {
@@ -121,6 +139,59 @@ describe("Peppol Odoo dispatch", () => {
       const result = await dispatch("customer");
       expect(result.status).toBe(status);
       expect(result.reason).toMatch(reason);
+    });
+
+    it("never logs secret-bearing EDI error text on delivery paths", async () => {
+      const secretDoc = {
+        state: "error",
+        blocking_level: "error",
+        error: "EDISecret",
+        error_message: "<p>Odoo proxy rejected endpoint; token=edisecret-provider-token</p>",
+      };
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[2] === "button_process_edi_web_services") throw timeoutError("account.move.button_process_edi_web_services");
+        if (args[1] === "account.edi.document") return [secretDoc];
+        return normal(...args);
+      });
+      const logged: unknown[][] = [];
+      const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args); });
+      const errored: unknown[][] = [];
+      const errorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { errored.push(args); });
+      const result = await dispatch("customer");
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+      expect(result).toMatchObject({ status: "failed" });
+      expect(JSON.stringify(logged)).not.toContain("edisecret-provider-token");
+      expect(JSON.stringify(logged)).not.toContain("Odoo proxy rejected");
+      expect(JSON.stringify(errored)).not.toContain("edisecret-provider-token");
+      expect(JSON.stringify(errored)).not.toContain("Odoo proxy rejected");
+    });
+
+    it("never logs secret-bearing EDI error text on the normal delivery path", async () => {
+      const secretDoc = {
+        state: "error",
+        blocking_level: "error",
+        error: "EDISecret",
+        error_message: "<p>Odoo proxy rejected endpoint; token=edisecret-provider-token</p>",
+      };
+      const normal = mocks.call.getMockImplementation()!;
+      mocks.call.mockImplementation(async (...args) => {
+        if (args[1] === "account.edi.document") return [secretDoc];
+        return normal(...args);
+      });
+      const logged: unknown[][] = [];
+      const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args); });
+      const errored: unknown[][] = [];
+      const errorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { errored.push(args); });
+      const result = await dispatch("customer");
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+      expect(result).toMatchObject({ status: "failed" });
+      expect(JSON.stringify(logged)).not.toContain("edisecret-provider-token");
+      expect(JSON.stringify(logged)).not.toContain("Odoo proxy rejected");
+      expect(JSON.stringify(errored)).not.toContain("edisecret-provider-token");
+      expect(JSON.stringify(errored)).not.toContain("Odoo proxy rejected");
     });
 
     it("reuses the partner Odoo created after a slow (VIES) create timed out", async () => {
@@ -172,7 +243,7 @@ describe("Peppol Odoo dispatch", () => {
         if (args[1] === "account.move" && args[2] === "read") return [{ state: "draft", amount_untaxed: 100 }];
         return normal(...args);
       });
-      expect(await dispatch("customer")).toMatchObject({ status: "failed", reason: expect.stringMatching(/action_post/) });
+      expect(await dispatch("customer")).toMatchObject({ status: "failed", reason: expect.stringMatching(/could not be posted/i) });
       expect(mocks.call.mock.calls.some((call) => call[2] === "button_process_edi_web_services")).toBe(false);
     });
   });
@@ -383,7 +454,7 @@ describe("Peppol Odoo dispatch", () => {
         if (args[1] === "account.move" && args[2] === "create") throw new Error("Invalid tax on line 1");
         return normal(...args);
       });
-      expect(await dispatch("customer")).toMatchObject({ status: "failed", reason: expect.stringMatching(/Invalid tax/) });
+      expect(await dispatch("customer")).toMatchObject({ status: "failed", reason: expect.stringMatching(/invoice sync failed/i) });
       expect(callsOf("account.move", "create")).toHaveLength(1);
       expect(callsOf("account.move", "action_post")).toHaveLength(0);
     });
@@ -395,7 +466,7 @@ describe("Peppol Odoo dispatch", () => {
         if (args[1] === "account.move" && args[2] === "read" && args[3].fields?.includes("state")) return [{ state: "draft" }];
         return normal(...args);
       });
-      expect(await dispatch("customer")).toMatchObject({ status: "failed", reason: expect.stringMatching(/add a line/) });
+      expect(await dispatch("customer")).toMatchObject({ status: "failed", reason: expect.stringMatching(/could not be posted/i) });
       expect(callsOf("account.move", "action_post")).toHaveLength(1);
       expect(callsOf("account.move", "write")).toHaveLength(0);
     });

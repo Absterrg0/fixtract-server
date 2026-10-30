@@ -885,6 +885,6 @@ export const uploadDisputeResolutionAttachment = async (req: Request, res: Respo
     return res.json({ success: true, data: { files: uploaded } });
   } catch (error: any) {
     console.error('Failed to upload dispute resolution attachments:', error);
-    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to upload attachments' } });
+    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't upload the attachments. Please try again." } });
   }
 };

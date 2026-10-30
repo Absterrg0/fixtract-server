@@ -15,10 +15,17 @@ import { getProfessionalDisplayName } from "../../utils/displayName";
 import CancellationRequest, { ACTIVE_CANCELLATION_STATUSES, CANCELLATION_REASON_CATEGORIES, CANCELLATION_REASON_LABELS, CancellationReasonCategory } from "../../models/cancellationRequest";
 import { addBusinessDays, REFUND_RESPONSE_BUSINESS_DAYS } from "../../utils/businessDays";
 import { notify } from "../../utils/notifications/notify";
-import { filterInvoiceFieldsByRole } from "../../utils/invoiceVisibility";
+import {
+  bookingForRequest,
+  bookingForViewer,
+  sanitizePaymentForViewer,
+} from "../../utils/invoiceVisibility";
 import { IUser } from "../../models/user";
 import { applyB2BInvoiceRule, firstVatCountry, parseVatCountryCode, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
 import ServiceConfiguration from "../../models/serviceConfiguration";
+import { sendHandlerError } from '../../utils/handlerErrors';
+import { UserFacingError } from '../../utils/appErrors';
+import { assertValidInvoiceUnit } from '../../utils/invoiceUnits';
 
 /** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
 const applyProceedAtStandardVatIfRequested = (
@@ -184,7 +191,7 @@ const normalizeSelectedExtraOptionIndexes = (project: any, selectedExtraOptions:
   );
 };
 
-const buildCheckoutSnapshot = (params: {
+export const buildCheckoutSnapshot = (params: {
   project: any;
   selectedSubproject: any;
   selectedExtraOptions: unknown;
@@ -231,11 +238,17 @@ const buildCheckoutSnapshot = (params: {
 
   let unit: string | undefined;
   try {
-    const { assertValidInvoiceUnit } = require("../../utils/invoiceUnits") as typeof import("../../utils/invoiceUnits");
     const validated = assertValidInvoiceUnit(params.selectedSubproject?.pricing?.unit, "booking unit");
     unit = validated ? validated.slice(0, 50) : undefined;
   } catch (error: any) {
-    throw new Error(error?.message || "Unknown booking unit.");
+    // The unit comes from user-editable project pricing, so this is a
+    // correctable validation failure, not an unexpected server error.
+    throw new UserFacingError(
+      400,
+      error?.message || 'Unknown booking unit. Use a validated UNECE unit.',
+      'VALIDATION',
+      'unit',
+    );
   }
 
   return {
@@ -364,7 +377,6 @@ const presignBookingFiles = async (bookingDoc: any) => {
  * professionals see only the supplier self-bill (SUP). Admins see both.
  * Call after presignBookingFiles.
  */
-const filterInvoiceUrlsByRole = filterInvoiceFieldsByRole;
 
 // Create a new booking (RFQ submission)
 export const createBooking = async (req: Request, res: Response, next: NextFunction) => {
@@ -1017,21 +1029,12 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         populated.status === "quote_accepted"
           ? "Booking created. Proceed to payment."
           : "Booking request created successfully",
-      booking: populated
+      booking: bookingForRequest(populated, req.user)
     });
 
   } catch (error: any) {
     console.error('Create booking error:', error);
-
-    if (error.name === 'ValidationError') {
-      const messages = Object.values(error.errors).map((err: any) => err.message);
-      return res.status(400).json({
-        success: false,
-        msg: messages.join(', ')
-      });
-    }
-
-    next(error);
+    return sendHandlerError(res, error, "We couldn't create your booking. Please try again.");
   }
 };
 
@@ -1067,7 +1070,7 @@ export const uploadRFQAttachment = async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('RFQ attachment upload error:', error);
-    return res.status(500).json({ success: false, msg: 'Failed to upload attachment' });
+    return sendHandlerError(res, error, 'Failed to upload attachment');
   }
 };
 
@@ -1198,9 +1201,12 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       distinctServicesPromise,
     ]);
 
+    const viewerRole = user.role === 'professional' ? 'professional' : 'customer';
+    const visibleBookings = bookings.map((booking) => bookingForViewer(booking, viewerRole));
+
     return res.status(200).json({
       success: true,
-      bookings,
+      bookings: visibleBookings,
       distinctServices: distinctServices.filter(Boolean).sort(),
       pagination: {
         total,
@@ -1275,11 +1281,11 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
 
     const bookingWithSignedFiles = await presignBookingFiles(booking);
     const viewerRole = isAdmin ? 'admin' : isCustomer ? 'customer' : 'professional';
-    filterInvoiceUrlsByRole(bookingWithSignedFiles, viewerRole);
+    const visibleBooking = bookingForViewer(bookingWithSignedFiles, viewerRole);
 
     return res.status(200).json({
       success: true,
-      booking: bookingWithSignedFiles,
+      booking: visibleBooking,
       viewerRole,
     });
 
@@ -1494,7 +1500,7 @@ export const submitQuote = async (req: Request, res: Response, next: NextFunctio
     return res.status(200).json({
       success: true,
       msg: "Quote submitted successfully",
-      booking
+      booking: bookingForRequest(booking, req.user)
     });
 
   } catch (error: any) {
@@ -1554,7 +1560,7 @@ export const respondToQuote = async (req: Request, res: Response, next: NextFunc
     return res.status(200).json({
       success: true,
       msg: `Quote ${action}ed successfully`,
-      booking
+      booking: bookingForRequest(booking, req.user)
     });
 
   } catch (error: any) {
@@ -1606,7 +1612,7 @@ export const updateBookingStatus = async (req: Request, res: Response, next: Nex
     return res.status(200).json({
       success: true,
       msg: "Booking status updated successfully",
-      booking
+      booking: bookingForRequest(booking, req.user)
     });
 
   } catch (error: any) {
@@ -1829,7 +1835,11 @@ export const getMyDisputes = async (req: Request, res: Response, next: NextFunct
       .limit(100)
       .lean();
 
-    return res.json({ success: true, data: { items: bookings } });
+    const visibleBookings = bookings.map((booking: any) =>
+      bookingForRequest(booking, req.user)
+    );
+
+    return res.json({ success: true, data: { items: visibleBookings } });
   } catch (error: any) {
     console.error('Get my disputes error:', error);
     next(error);
@@ -1897,10 +1907,14 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
       if (s._id === 'partially_refunded') summary.refunded += s.total || 0;
     });
 
+    const visiblePayments = payments.map((payment: any) =>
+      sanitizePaymentForViewer(payment, 'customer')
+    );
+
     return res.status(200).json({
       success: true,
       data: {
-        payments,
+        payments: visiblePayments,
         summary,
         pagination: {
           page: pageNumber,
@@ -2139,7 +2153,7 @@ export const proceedAtStandardVatRate = async (req: Request, res: Response, next
     return res.status(200).json({
       success: true,
       msg: "Booking updated to standard VAT rate",
-      booking,
+      booking: bookingForRequest(booking, req.user),
     });
   } catch (error: any) {
     console.error("Proceed at standard VAT rate error:", error);

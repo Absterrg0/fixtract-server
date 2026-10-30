@@ -276,7 +276,7 @@ describe.each(['customer confirmation', 'automatic acceptance'] as const)('%s wi
     mocks.retrieveCharge.mockRejectedValueOnce(new Error('Stripe unavailable'));
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      await deliverSuccessWebhook('Stripe unavailable');
+      await deliverSuccessWebhook('Webhook processing failed');
     } finally {
       consoleError.mockRestore();
     }

@@ -41,6 +41,8 @@ import { calculateExtraCostBreakdown } from '../../utils/extraCostAccounting';
 import { commissionedExtraCostTotal } from '../../utils/customerPricing';
 import { getTransferStatus } from '../../utils/paymentSafety';
 import { reconcileExtraCostPayment } from '../../services/extraCostPayment';
+import { isUserFacingError } from '../../utils/appErrors';
+import { bookingForViewer } from '../../utils/invoiceVisibility';
 
 const ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
 
@@ -423,7 +425,7 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
       success: true,
       data: {
         message: 'Completion confirmed. Awaiting customer confirmation.',
-        booking: updatedBooking,
+        booking: bookingForViewer(updatedBooking, 'professional'),
         extraCostTotal,
       }
     });
@@ -434,9 +436,11 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
       attachmentKeys = [];
     }
     console.error('Error in professional completion:', error);
-    return res.status(500).json({
+    const status = isUserFacingError(error) ? error.status : 500;
+    const message = isUserFacingError(error) ? error.message : "We couldn't process completion. Please try again.";
+    return res.status(status).json({
       success: false,
-      error: { code: 'SERVER_ERROR', message: 'Failed to process completion' }
+      error: { code: 'SERVER_ERROR', message }
     });
   }
 };
@@ -800,7 +804,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
                 status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
                 timestamp: new Date(),
                 updatedBy: authUser._id,
-                note: `Completion is awaiting professional payout recovery: ${transferResult.error?.message || 'transfer failed'}`,
+                note: 'Completion is awaiting professional payout recovery.',
               },
             },
           },
@@ -810,7 +814,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
           error: {
             code: 'PAYOUT_RECOVERY_REQUIRED',
             message: 'Payment was captured, but the professional transfer failed. Completion can be retried after the transfer is recovered.',
-            cause: transferResult.error,
+            cause: transferResult.error?.code ? { code: transferResult.error.code } : undefined,
           },
           data: { transferStatus: 'failed', paymentStatus },
         });
@@ -830,7 +834,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
                 status: PROFESSIONAL_COMPLETION_PENDING_STATUS,
                 timestamp: new Date(),
                 updatedBy: authUser._id,
-                note: `Reverted completion after payment failure: ${transferResult.error?.message || 'unknown payment error'}`
+                note: 'Reverted completion after payment failure.'
               }
             }
           }
@@ -952,7 +956,7 @@ export const customerConfirmCompletion = async (req: Request, res: Response) => 
       success: true,
       data: {
         message: 'Booking completed successfully',
-        booking: finalizedBooking,
+        booking: bookingForViewer(finalizedBooking, 'customer'),
       }
     });
   } catch (error: any) {
@@ -1119,7 +1123,7 @@ export const customerDisputeExtraCosts = async (req: Request, res: Response) => 
       success: true,
       data: {
         message: 'Dispute has been raised. An admin will review your case.',
-        booking: disputedBooking,
+        booking: bookingForViewer(disputedBooking, 'customer'),
       }
     });
   } catch (error: any) {
@@ -1166,7 +1170,11 @@ export const uploadDisputeAttachments = async (req: Request, res: Response) => {
     } catch (error: any) {
       await Promise.allSettled(uploaded.map((u) => deleteFromS3(u.key)));
       console.error('Error uploading dispute attachments:', error?.message || error);
-      return res.status(500).json({ success: false, error: { code: 'UPLOAD_FAILED', message: 'Failed to upload attachments' } });
+      const status = isUserFacingError(error) ? error.status : 500;
+      const message = isUserFacingError(error)
+        ? error.message
+        : "We couldn't upload the attachments. Please try again.";
+      return res.status(status).json({ success: false, error: { code: 'UPLOAD_FAILED', message } });
     }
 
     return res.json({
@@ -1178,6 +1186,6 @@ export const uploadDisputeAttachments = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error uploading dispute attachments:', error);
-    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to upload attachments' } });
+    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: "We couldn't upload the attachments. Please try again." } });
   }
 };

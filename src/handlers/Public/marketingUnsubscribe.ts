@@ -170,6 +170,6 @@ export const unsubscribeMarketing = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('unsubscribeMarketing:', error);
-    return res.status(500).json({ success: false, msg: 'Failed to unsubscribe' });
+    return res.status(500).json({ success: false, msg: "We couldn't process your unsubscribe request. Please try again." });
   }
 };

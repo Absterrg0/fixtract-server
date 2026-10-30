@@ -73,8 +73,7 @@ export const getServiceConfigurationForProfessional = async (req: Request, res: 
     } catch (error: any) {
         res.status(500).json({
             success: false,
-            message: 'Error fetching service configuration',
-            error: error.message
+            message: "We couldn't load the service configuration. Please try again.",
         });
     }
 };
@@ -124,8 +123,7 @@ export const getDynamicFieldsForService = async (req: Request, res: Response) =>
     } catch (error: any) {
         res.status(500).json({
             success: false,
-            message: 'Error fetching dynamic fields',
-            error: error.message
+            message: "We couldn't load the service fields. Please try again.",
         });
     }
 };
@@ -150,8 +148,7 @@ export const getCategoriesForProfessional = async (req: Request, res: Response) 
     } catch (error: any) {
         res.status(500).json({
             success: false,
-            message: 'Error fetching categories',
-            error: error.message
+            message: "We couldn't load the categories. Please try again.",
         });
     }
 };
@@ -178,8 +175,7 @@ export const getServicesByCategoryForProfessional = async (req: Request, res: Re
     } catch (error: any) {
         res.status(500).json({
             success: false,
-            message: 'Error fetching services',
-            error: error.message
+            message: "We couldn't load the services. Please try again.",
         });
     }
 };
@@ -216,8 +212,7 @@ export const getAreasOfWork = async (req: Request, res: Response) => {
     } catch (error: any) {
         res.status(500).json({
             success: false,
-            message: 'Error fetching areas of work',
-            error: error.message
+            message: "We couldn't load the areas of work. Please try again.",
         });
     }
 };

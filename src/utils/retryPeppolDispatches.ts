@@ -65,3 +65,22 @@ export async function retryStuckPeppolDispatches(options: { limit?: number; now?
   console.log("[PEPPOL][retry]", JSON.stringify(results));
   return { checked: candidates.length, results };
 }
+
+/**
+ * Cron endpoints return operational status, but raw provider/DB messages stay
+ * in server logs. Keep the per-booking shape and replace only error text.
+ */
+export function sanitizePeppolRetryResultForResponse(result: {
+  checked: number;
+  results: Array<{ bookingNumber?: string; customer?: string; supplier?: string; error?: string }>;
+  skipped?: string;
+}) {
+  return {
+    ...result,
+    results: result.results.map((entry) =>
+      entry.error
+        ? { ...entry, error: "Peppol retry failed. Check server logs for details." }
+        : entry
+    ),
+  };
+}

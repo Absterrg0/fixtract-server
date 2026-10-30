@@ -80,6 +80,16 @@ app.use('/api/chat', chatRouter);
 app.use('/api/warranty-claims', warrantyClaimRouter);
 app.use('/api/favorites', favoritesRouter);
 
+// Unknown API routes must return JSON, not Express' HTML 404 page.
+app.use('/api', (_req: Request, res: Response) => {
+  res.status(404).json({
+    success: false,
+    msg: 'The requested resource could not be found.',
+    message: 'The requested resource could not be found.',
+    code: 'NOT_FOUND',
+  });
+});
+
 // Error handler (must be last)
 app.use(errorHandler);
 

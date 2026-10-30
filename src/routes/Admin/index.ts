@@ -206,7 +206,11 @@ const marketingTestSendLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => String(req.admin?._id || ipKeyGenerator(req.ip ?? 'unknown')),
-  message: { success: false, msg: 'Too many test emails, please try again later' },
+  message: {
+    success: false,
+    msg: 'Too many test emails. Please wait a few minutes and try again.',
+    code: 'RATE_LIMITED',
+  },
 });
 
 // All admin routes require authentication and admin role

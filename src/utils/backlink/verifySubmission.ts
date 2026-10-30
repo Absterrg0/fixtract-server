@@ -1,10 +1,11 @@
 import mongoose from 'mongoose';
 import BacklinkConfig from '../../models/backlinkConfig';
 import BacklinkSubmission from '../../models/backlinkSubmission';
-import { scrapePageForLinks, FirecrawlError } from '../firecrawlClient';
+import { scrapePageForLinks } from '../firecrawlClient';
 import { extractFixtractLinks } from './verification';
 import { getEffectiveAllowedDomains } from './domains';
 import { rejectSubmission, verifyAndReward, reconcileVerifiedWithoutTransaction } from './rewards';
+import { safeErrorSummary } from '../safeErrorLog';
 
 const LOG_PREFIX = '[backlink]';
 const STUCK_VERIFYING_MS = 10 * 60 * 1000;
@@ -59,10 +60,14 @@ export async function verifyBacklinkSubmission(
         config.crawlTimeoutMs,
       );
     } catch (err) {
-      const reason =
-        err instanceof FirecrawlError
-          ? `Crawl failed: ${err.message}`
-          : 'Crawl failed: unexpected error';
+      console.error(
+        `${LOG_PREFIX} Crawl failed for ${String(submission.submittedUrl || "").split("?")[0].slice(0, 200)}:`,
+        safeErrorSummary(err),
+      );
+      const timedOut = err instanceof Error && /timed out/i.test(err.message);
+      const reason = timedOut
+        ? 'We could not reach your page in time. Make sure it is publicly accessible and try again.'
+        : 'We could not verify your page right now. Make sure it is publicly accessible and try again.';
 
       await rejectSubmission(submission, reason, config);
       return;

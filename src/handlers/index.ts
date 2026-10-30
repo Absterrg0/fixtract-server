@@ -81,7 +81,7 @@ export const GetCurrentUser = async (req: Request, res: Response, next: NextFunc
     console.error('GetCurrentUser error:', error);
     return res.status(500).json({
       success: false,
-      msg: "Server error while fetching user data."
+      msg: "We couldn't load your account. Please try again."
     });
   }
 };

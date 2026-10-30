@@ -5,6 +5,7 @@ import {
   validateVideoFile,
   validateCertificationFile
 } from '../../utils/s3Upload';
+import { sendHandlerError } from '../../utils/handlerErrors';
 
 /**
  * Upload project image
@@ -40,11 +41,7 @@ export const uploadProjectImage = async (req: Request, res: Response) => {
       data: result
     });
   } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      message: 'Error uploading image',
-      error: error.message
-    });
+    return sendHandlerError(res, error, "We couldn't upload the image. Please try again.");
   }
 };
 
@@ -82,11 +79,7 @@ export const uploadProjectVideo = async (req: Request, res: Response) => {
       data: result
     });
   } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      message: 'Error uploading video',
-      error: error.message
-    });
+    return sendHandlerError(res, error, "We couldn't upload the video. Please try again.");
   }
 };
 
@@ -127,11 +120,7 @@ export const uploadCertification = async (req: Request, res: Response) => {
       }
     });
   } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      message: 'Error uploading certification',
-      error: error.message
-    });
+    return sendHandlerError(res, error, "We couldn't upload the certification. Please try again.");
   }
 };
 
@@ -163,10 +152,6 @@ export const uploadQuestionAttachment = async (req: Request, res: Response) => {
       }
     });
   } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      message: 'Error uploading attachment',
-      error: error.message
-    });
+    return sendHandlerError(res, error, "We couldn't upload the attachment. Please try again.");
   }
 };
