@@ -35,7 +35,7 @@ const getCachedLevelConfig = async (): Promise<IProfessionalLevelConfig> => {
     });
   return cachedLevelConfigPromise;
 };
-import { buildProjectScheduleProposalsWithData } from "../../utils/scheduleEngine";
+import { buildProjectScheduleProposalsWithData, resolveEffectiveScheduleTimeZone } from "../../utils/scheduleEngine";
 
 export { getPopularServices } from "./getPopularServices";
 export { getPopularProjects } from "./getPopularProjects";
@@ -53,6 +53,7 @@ import {
 import PlatformSettings from "../../models/platformSettings";
 import LoyaltyConfig from "../../models/loyaltyConfig";
 import { getCurrentTier } from "../../utils/loyaltySystem";
+import { getCountryCode } from "../../utils/geocoding";
 
 const escapeSearchRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -566,6 +567,35 @@ async function searchProjects(
     const escapeRegExp = (value: string) =>
       value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+    // Country gate shared by the geo and address-fallback branches: a
+    // noBorders project serves only its own country. The customer value may be
+    // a name ("belgium") or a code ("be"); both are accepted against the
+    // project's ISO countryCode, falling back to address matching when the
+    // project has no code recorded.
+    const projectPassesCountryGate = (distance: any, customerCountryParam: string): boolean => {
+      if (!Boolean(distance?.noBorders) || !customerCountryParam) return true;
+      const projectCountryCode = typeof distance?.countryCode === "string" ? distance.countryCode : null;
+      const customerUpper = customerCountryParam.toUpperCase();
+      if (projectCountryCode) {
+        if (projectCountryCode === customerUpper) return true;
+        const mapped = getCountryCode(customerCountryParam);
+        return mapped != null && projectCountryCode === mapped;
+      }
+      const projectAddress = normalizeValue(distance?.address);
+      return Boolean(projectAddress) && projectAddress.includes(customerCountryParam);
+    };
+
+    // Address predicate shared by the non-geo branch and the geo fallback for
+    // projects without geocoded coordinates (client bug list #20).
+    const projectMatchesCustomerAddress = (project: any, parts: string[], customerCountryParam: string): boolean => {
+      const distance = project.distance || {};
+      if (!projectPassesCountryGate(distance, customerCountryParam)) return false;
+      const projectAddress = normalizeValue(distance.address);
+      if (!projectAddress) return false;
+      if (parts.length === 0) return false;
+      return parts.some((part) => projectAddress.includes(part));
+    };
+
     const customerLatValue = parseCoordinate(customerLat);
     const customerLonValue = parseCoordinate(customerLon);
     const customerCountryValue = normalizeValue(customerCountry);
@@ -623,9 +653,16 @@ async function searchProjects(
       ];
 
       if (customerCountryValue) {
-        // Prefer matching by normalized countryCode (ISO 3166-1 alpha-2)
-        // Fall back to regex on address for backwards compatibility
+        // Prefer matching by normalized countryCode (ISO 3166-1 alpha-2).
+        // The customer value may be a name ("belgium") or a code ("be"), so
+        // both spellings are accepted. Fall back to regex on address for
+        // backwards compatibility.
         const countryCodeUpper = customerCountryValue.toUpperCase();
+        const mappedCountryCode = getCountryCode(customerCountryValue);
+        const acceptedCountryCodes =
+          mappedCountryCode && mappedCountryCode !== countryCodeUpper
+            ? [countryCodeUpper, mappedCountryCode]
+            : [countryCodeUpper];
         const countryRegex = new RegExp(escapeRegExp(customerCountryValue), "i");
         // noBorders=true means "don't cross borders" (stay in same country)
         // noBorders=false means project can serve customers across borders
@@ -640,7 +677,7 @@ async function searchProjects(
                   { "distance.noBorders": true },
                   {
                     $or: [
-                      { "distance.countryCode": countryCodeUpper },
+                      { "distance.countryCode": { $in: acceptedCountryCodes } },
                       // Fallback: match address if countryCode not set
                       {
                         $and: [
@@ -660,9 +697,12 @@ async function searchProjects(
       geoPipeline.push({
         $match: {
           $expr: {
+            // Coerce the radius defensively: a non-numeric maxKmRange on any
+            // single project must not fail the whole geo search ($multiply
+            // throws on strings), and numeric strings still match.
             $lte: [
               "$geoDistanceMeters",
-              { $multiply: ["$distance.maxKmRange", 1000] },
+              { $multiply: [{ $convert: { input: "$distance.maxKmRange", to: "double", onError: null, onNull: null } }, 1000] },
             ],
           },
         },
@@ -699,6 +739,45 @@ async function searchProjects(
 
       if (needsFullSet) {
         projects = await Project.aggregate(geoPipeline);
+        // $geoNear only sees projects with geocoded coordinates. Projects
+        // without a usable distance.location never match, whatever their
+        // radius is — fall back to the same address matching as the non-geo
+        // path so a small-radius project on the same street is still found
+        // (client bug list #20).
+        try {
+          const unlocated = await Project.find({
+            $and: [
+              filter,
+              {
+                $or: [
+                  { "distance.location": { $exists: false } },
+                  { "distance.location.coordinates.1": { $exists: false } },
+                ],
+              },
+            ],
+          }).lean();
+          const seen = new Set(projects.map((project: any) => String(project._id)));
+          // The radius of an unlocated project cannot be verified, so only a
+          // street-level address match qualifies (city alone is not enough).
+          // Without a street-level part the project stays excluded.
+          const streetPart = locationParts.length > 0 ? locationParts[0] : '';
+          const fallbackMatches = streetPart
+            ? unlocated.filter(
+              (project: any) =>
+                !seen.has(String(project._id)) &&
+                normalizeValue(project.distance?.address).includes(streetPart) &&
+                projectMatchesCustomerAddress(project, locationParts, customerCountryValue)
+            )
+            : [];
+          fallbackMatches.sort(
+            (a: any, b: any) =>
+              new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime() ||
+              String(a._id).localeCompare(String(b._id))
+          );
+          projects = [...projects, ...fallbackMatches];
+        } catch (fallbackError) {
+          console.error("Project geo address-fallback failed:", fallbackError);
+        }
         total = projects.length;
       } else {
         geoPipeline.push({
@@ -735,35 +814,9 @@ async function searchProjects(
     console.log("[SEARCH] Found", total, "projects, returning", projects.length);
 
     if (hasLocationFilter && !usedGeoSearch) {
-      filteredResults = projects.filter((project: any) => {
-        const distance = project.distance || {};
-        const projectAddress = normalizeValue(distance.address);
-        const projectCountryCode = typeof distance.countryCode === "string" ? distance.countryCode : null;
-        const noBorders = Boolean(distance.noBorders);
-
-        // noBorders=true means "don't cross borders" (stay in same country)
-        // When noBorders is true, only show to customers in matching country
-        if (noBorders && customerCountryValue) {
-          const customerCountryUpper = customerCountryValue.toUpperCase();
-          // Prefer matching by countryCode, fallback to address matching
-          const countryMatches = projectCountryCode
-            ? projectCountryCode === customerCountryUpper
-            : projectAddress?.includes(customerCountryValue);
-          if (!countryMatches) {
-            return false;
-          }
-        }
-
-        if (!projectAddress) {
-          return false;
-        }
-
-        if (locationParts.length === 0) {
-          return false;
-        }
-
-        return locationParts.some((part) => projectAddress.includes(part));
-      });
+      filteredResults = projects.filter((project: any) =>
+        projectMatchesCustomerAddress(project, locationParts, customerCountryValue)
+      );
 
       if (locationValue) {
         const exactMatches = filteredResults.filter((project: any) => {
@@ -799,7 +852,7 @@ async function searchProjects(
           const professionalId = toObjectIdString(project.professionalId);
           const professional = professionalId ? professionalMap.get(professionalId) : null;
           if (!professional) return;
-          const timezone = professional.businessInfo?.timezone || "UTC";
+          const timezone = resolveEffectiveScheduleTimeZone(professional);
           const lowerDate = startDateFrom ? DateTime.fromISO(startDateFrom.toISOString().slice(0, 10), { zone: timezone }).startOf("day") : null;
           const boundedProfessional = lowerDate && lowerDate.toMillis() > DateTime.now().setZone(timezone).startOf("day").toMillis()
             ? { ...professional, companyBlockedRanges: [...(professional.companyBlockedRanges || []), { startDate: new Date(), endDate: lowerDate.minus({ milliseconds: 1 }).toUTC().toJSDate(), reason: "search-date-lower-bound" }] }

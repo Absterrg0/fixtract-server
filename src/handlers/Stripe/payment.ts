@@ -36,10 +36,11 @@ import {
   recordBasePaymentRefund,
 } from '../../utils/paymentRefundLedger';
 import { summarizeBaseRefunds } from '../../utils/paymentRefunds';
+import { isPreCompletionStatus } from '../../utils/refundFinalization';
 import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
-import { commissionedQuoteAmount } from '../../utils/customerPricing';
+import { commissionedPricingLines, commissionedQuoteAmount } from '../../utils/customerPricing';
 import { auditLog } from '../../utils/auditLogger';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
 
@@ -48,6 +49,18 @@ const extractParticipantIds = (booking: any, professionalOverride?: any) => {
   const professionalSource = professionalOverride || booking.professional;
   const professionalId = (professionalSource as any)?._id || professionalSource || undefined;
   return { customerId, professionalId };
+};
+
+/**
+ * VAT-inclusive amount actually paid by the customer, matching what booking
+ * details and the invoice show. `payment.amount` is the pre-VAT net and must
+ * never be presented as the paid amount.
+ */
+const grossPaidAmount = (payment: any): number | undefined => {
+  const gross = Number(payment?.totalWithVat);
+  if (Number.isFinite(gross)) return gross;
+  const net = Number(payment?.amount);
+  return Number.isFinite(net) ? net : undefined;
 };
 
 const ALLOWED_PAYMENT_OVERRIDE_KEYS = new Set([
@@ -205,7 +218,7 @@ const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {
   };
 };
 
-const getQuotePricingVatCalculation = (booking: any, amount: number) => {
+const getQuotePricingVatCalculation = (booking: any, amount: number, commissionPercent: number) => {
   const quoteVersions = Array.isArray(booking.quoteVersions) ? booking.quoteVersions : [];
   const currentVersion = quoteVersions.find((version: any) => version.version === booking.currentQuoteVersion)
     || quoteVersions[quoteVersions.length - 1];
@@ -225,9 +238,25 @@ const getQuotePricingVatCalculation = (booking: any, amount: number) => {
   if (!hasCompleteVatMetadata) {
     return null;
   }
-  const originalLineNet = pricingLines.reduce((sum: number, line: any) => sum + Number(line.price), 0);
-  const discountedNet = originalLineNet > 0 && amount > 0 && amount <= originalLineNet ? amount : undefined;
-  return calculateVatFromPricingLines(pricingLines, discountedNet);
+  // VAT is calculated on the price AFTER commission is included, mirroring
+  // the recorded quote customer totals: commission each line first, then
+  // allocate VAT across the customer-facing lines.
+  const proTotal = pricingLines.reduce((sum: number, line: any) => sum + Number(line.price), 0);
+  const customerNet = commissionedQuoteAmount(proTotal, (booking as any).checkoutSnapshot, commissionPercent);
+  const commissionedLines = commissionedPricingLines(
+    pricingLines.map((line: any) => ({
+      description: String(line.description || ''),
+      price: Number(line.price),
+      vatRate: Number(line.vatRate),
+      vatCountry: line.vatCountry,
+      vatLabel: line.vatLabel,
+    })),
+    customerNet,
+    commissionPercent,
+  );
+  const commissionedNet = commissionedLines.reduce((sum, line) => sum + Number(line.price), 0);
+  const discountedNet = commissionedNet > 0 && amount > 0 && amount <= commissionedNet ? amount : undefined;
+  return calculateVatFromPricingLines(commissionedLines, discountedNet);
 };
 
 const clamp = (value: number, min: number, max: number): number => Math.min(Math.max(value, min), max);
@@ -542,7 +571,7 @@ export const createPaymentIntent = async (
     // quotation line metadata.
     const quotePricingVatCalculation = configuredVatDecision?.reverseCharge
       ? null
-      : getQuotePricingVatCalculation(booking, discountedQuoteAmount);
+      : getQuotePricingVatCalculation(booking, discountedQuoteAmount, commissionPercent);
     const vatCountry = parseVatCountryCode(
       configuredVatDecision?.country || booking.location?.country || customer.location?.country,
     );
@@ -787,7 +816,8 @@ export const confirmPayment = async (req: Request, res: Response) => {
         await notifyBookingPaymentConfirmed({
           bookingId: String(booking._id),
           paymentIntentId: typeof paymentIntentId === 'string' ? paymentIntentId : undefined,
-          amount: typeof (booking.payment as any)?.amount === 'number' ? (booking.payment as any).amount : undefined,
+          // VAT-inclusive amount actually paid, matching booking details.
+          amount: grossPaidAmount(booking.payment),
           currency: (booking.payment as any)?.currency || 'EUR',
         });
       } catch (notifyError: any) {
@@ -891,9 +921,20 @@ export const confirmPayment = async (req: Request, res: Response) => {
         await notifyBookingPaymentConfirmed({
           bookingId: String(booking._id),
           paymentIntentId: paymentIntent.id,
-          amount: typeof (booking.payment as any)?.amount === 'number' ? (booking.payment as any).amount : undefined,
+          // VAT-inclusive amount actually paid, matching booking details.
+          amount: grossPaidAmount(booking.payment),
           currency: (paymentIntent.currency || (booking.payment as any)?.currency || 'EUR').toUpperCase(),
         });
+        // A settled milestone can make the next one payable; the per-milestone
+        // delivery key dedupes this with the webhook and the reminder sweep.
+        if (typeof msIdx === 'number') {
+          try {
+            const { notifyMilestonePaymentDue } = await import('../../utils/notifications/milestonePaymentDue');
+            await notifyMilestonePaymentDue(String(booking._id));
+          } catch (milestoneDueError: any) {
+            console.error(`[PAYMENT CONFIRM] Milestone-due notify failed for booking ${booking._id}:`, milestoneDueError?.message || milestoneDueError);
+          }
+        }
       } catch (notifyError: any) {
         console.error(`[PAYMENT CONFIRM] Post-payment notify failed for booking ${booking._id}:`, notifyError?.message || notifyError);
       }
@@ -1383,6 +1424,12 @@ export const executeRefund = async (
     booking.payment.refundSource = 'platform';
     if (!isPartial) {
       booking.status = 'cancelled';
+    } else if (isPreCompletionStatus(booking.status)) {
+      // A partial refund ends the booking as well: only the remaining amount
+      // stays billable, so the booking must read 'cancelled', not 'Booked'.
+      // Paths that manage the status themselves (dispute 'refunded', already
+      // terminal states) are left untouched.
+      booking.status = 'cancelled';
     }
     await booking.save();
 
@@ -1473,6 +1520,10 @@ export const executeRefund = async (
     booking.payment.refundReason = reason;
     if (booking.payment.status === 'refunded') {
       booking.status = 'refunded';
+    } else if (isPreCompletionStatus(booking.status)) {
+      // Partial refund on a live booking: the remainder stays billable, so the
+      // booking must read 'cancelled' instead of staying open.
+      booking.status = 'cancelled';
     }
     await booking.save();
 
@@ -1698,6 +1749,18 @@ export const refundPayment = async (req: Request, res: Response) => {
     }
 
     const result = await executeRefund(bookingId, { amount, reason, actorId: userId });
+
+    // A partial refund on a live booking closes it with a billable remainder:
+    // generate the FIX/SUP invoices from the remaining amount when missing.
+    try {
+      const refreshed = await Booking.findById(bookingId).select('payment.status payment.totalWithVat');
+      if (refreshed?.payment?.status === 'partially_refunded') {
+        const { ensureRefundInvoices } = await import('../../utils/refundFinalization');
+        void ensureRefundInvoices(bookingId);
+      }
+    } catch (invoiceTriggerError: any) {
+      console.error(`Refund invoice trigger failed for booking ${bookingId}:`, invoiceTriggerError?.message || invoiceTriggerError);
+    }
 
     if (user?.role === 'admin') {
       await auditLog({
