@@ -2064,6 +2064,58 @@ export const sendPaymentFailedEmail = async (
   });
 };
 
+/** Pure content builder for the milestone-payment-due email (kept separate for tests). */
+export const buildMilestonePaymentDueHtml = (
+  custName: string,
+  bookingId: string,
+  milestoneTitle: string,
+  milestoneAmount: number | undefined,
+  currency: string = 'EUR',
+): string => {
+  const link = buildPaymentLink(bookingId);
+  const amountBlock =
+    typeof milestoneAmount === 'number' && Number.isFinite(milestoneAmount)
+      ? `
+        <div style="background: #fff; border: 2px solid #667eea; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
+          <p style="color: #666; margin: 0 0 5px 0; font-size: 14px;">Amount Due</p>
+          <p style="font-size: 28px; font-weight: bold; color: #667eea; margin: 0;">${formatCurrency(milestoneAmount, currency)}</p>
+        </div>
+      `
+      : '';
+  const content = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      ${getEmailHeader('Milestone Payment Due')}
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px;">
+        <h2 style="color: #333; margin: 0 0 20px 0;">Hello ${escapeHtml(custName)}!</h2>
+        <p style="color: #666; line-height: 1.6;">
+          A new milestone payment is due for your booking: <strong>${escapeHtml(milestoneTitle || 'Upcoming milestone')}</strong>.
+          Please complete the payment so the work can continue without interruption.
+        </p>
+        ${amountBlock}
+        ${buildEmailButton(link, 'Pay Milestone', '#667eea')}
+        ${getEmailFooter()}
+      </div>
+    </div>
+  `;
+  return content;
+};
+
+// Milestone became payable (work progressed or due date reached)
+export const sendMilestonePaymentDueEmail = async (
+  custEmail: string,
+  custName: string,
+  bookingId: string,
+  milestoneTitle: string,
+  milestoneAmount?: number,
+  currency: string = 'EUR',
+): Promise<boolean> => {
+  const content = buildMilestonePaymentDueHtml(custName, bookingId, milestoneTitle, milestoneAmount, currency);
+  return sendEmail(custEmail, 'Milestone Payment Due - Fixtract', content, {
+    template: 'milestone_payment_due',
+    relatedBooking: bookingId,
+  });
+};
+
 /** Confirmed/paid booking → professional (mail for professional.booking_created). */
 export const sendProfessionalNewBookingEmail = async (
   profEmail: string,
@@ -2631,15 +2683,14 @@ export const sendBookingCancelledPartyEmail = async (
   });
 };
 
-/** Single-recipient dispute resolved email (used by notification registry). */
-export const sendDisputeResolvedPartyEmail = async (
-  email: string,
+/** Pure content builder for the dispute-resolved email (kept separate for tests). */
+export const buildDisputeResolvedHtml = (
   partyName: string,
   resolution: string,
-  adjustedAmount: number | undefined,
+  finalAmount: number | undefined,
   bookingId: string,
   currency: string = 'EUR',
-): Promise<boolean> => {
+): string => {
   const link = buildBookingLink(bookingId);
   const safeResolution = escapeHtml(resolution || 'Closed by admin');
   const content = `
@@ -2652,13 +2703,26 @@ export const sendDisputeResolvedPartyEmail = async (
         </p>
         <div style="background: #e8f5e8; border-left: 4px solid #16a34a; padding: 15px; margin: 20px 0;">
           <p style="color: #333; margin: 0 0 8px 0;"><strong>Resolution:</strong> ${safeResolution}</p>
-          ${typeof adjustedAmount === 'number' && Number.isFinite(adjustedAmount) ? `<p style="color: #333; margin: 0;"><strong>Adjusted amount:</strong> ${formatCurrency(adjustedAmount, currency)}</p>` : ''}
+          ${typeof finalAmount === 'number' && Number.isFinite(finalAmount) ? `<p style="color: #333; margin: 0;"><strong>Final amount to be paid:</strong> ${formatCurrency(finalAmount, currency)}</p>` : ''}
         </div>
         ${buildEmailButton(link, 'View Booking', '#16a34a')}
         ${getEmailFooter()}
       </div>
     </div>
   `;
+  return content;
+};
+
+/** Single-recipient dispute resolved email (used by notification registry). */
+export const sendDisputeResolvedPartyEmail = async (
+  email: string,
+  partyName: string,
+  resolution: string,
+  adjustedAmount: number | undefined,
+  bookingId: string,
+  currency: string = 'EUR',
+): Promise<boolean> => {
+  const content = buildDisputeResolvedHtml(partyName, resolution, adjustedAmount, bookingId, currency);
   return sendEmail(email, 'Dispute Resolved - Fixtract', content, {
     template: 'dispute_resolved',
     relatedBooking: bookingId,

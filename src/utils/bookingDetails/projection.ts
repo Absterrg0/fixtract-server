@@ -1152,6 +1152,7 @@ export const buildBookingDetails = async (params: {
     scheduleSelection: {
       startDate: dateOnly(booking.scheduledStartDate),
       startTime: str(booking.scheduledStartTime),
+      endTime: str(booking.scheduledEndTime),
       executionEndDate: dateOnly(booking.scheduledExecutionEndDate),
       bufferEndDate: dateOnly(booking.scheduledBufferEndDate),
       timeZone: isValidIanaTimeZone(booking.scheduleTimeZone) ? booking.scheduleTimeZone : null,
@@ -1920,6 +1921,7 @@ export const buildBookingDetails = async (params: {
       preferredStartTime: str(captured?.schedule?.preferredStartTime),
       scheduledStartDate: dateOnly(captured?.schedule?.scheduledStartDate),
       scheduledStartTime: str(captured?.schedule?.scheduledStartTime),
+      scheduledEndTime: str(captured?.schedule?.scheduledEndTime),
       scheduledExecutionEndDate: dateOnly(captured?.schedule?.scheduledExecutionEndDate),
       scheduledBufferStartDate: dateOnly(captured?.schedule?.scheduledBufferStartDate),
       scheduledBufferEndDate: dateOnly(captured?.schedule?.scheduledBufferEndDate),

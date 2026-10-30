@@ -6,6 +6,15 @@ import CancellationRequest, { CANCELLATION_REASON_LABELS } from '../../models/ca
 import Conversation from '../../models/conversation';
 import { captureAndTransferPayment, executeRefund, RefundError } from '../Stripe/payment';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
+import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
+import { resolveDisputeEmailAmount } from '../../utils/disputeFinalCharge';
+import {
+  ensureRefundInvoices,
+  isBookingStarted,
+  leavesBillableRemainder,
+  pruneFutureResourcePlanDays,
+  retainPastBookingCalendar,
+} from '../../utils/refundFinalization';
 import { generateIdempotencyKey, convertToStripeAmount } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
@@ -393,6 +402,9 @@ export const resolveDispute = async (req: Request, res: Response) => {
 
   let resolvedBooking: any = null;
   let finalExtraCostAmount = 0;
+  // Original extra-cost total captured before the resolution write, so the
+  // post-resolution email can scale the persisted charge to the final amount.
+  let originalExtraCostTotalForEmail: number | undefined;
   let targetStatus: BookingStatus = COMPLETED_BOOKING_STATUS;
   let disputeType: string = 'extra_costs';
   let isExtraCostsDispute = true;
@@ -587,6 +599,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
     if (isExtraCostsDispute) {
       originalExtraCostStatus = (booking as any).extraCostStatus;
       originalExtraCostTotal = booking.extraCostTotal;
+      originalExtraCostTotalForEmail = Number(booking.extraCostTotal);
       originalAdminAdjustedAmount = (booking.dispute as any)?.adminAdjustedAmount;
       const originalExtraCostAmount = Number(booking.extraCostTotal || 0);
       setFields.extraCostStatus = 'confirmed';
@@ -683,7 +696,23 @@ export const resolveDispute = async (req: Request, res: Response) => {
           }
         ).catch((cancelWriteError) => console.error('Failed to record dispute refund on booking cancellation:', cancelWriteError));
         try {
-          await releaseBookingCalendar(booking._id);
+          const refundTotal = Number(resolvedBooking.payment?.totalWithVat) || 0;
+          // Partial dispute refunds keep the remainder billable: invoices are
+          // generated from the remaining amount, and on a started booking only
+          // future days are unplanned while past days stay blocked.
+          if (leavesBillableRemainder(refundTotal, refundResult.amount)) {
+            if (isBookingStarted(resolvedBooking)) {
+              pruneFutureResourcePlanDays(resolvedBooking);
+              await Booking.updateOne(
+                { _id: resolvedBooking._id },
+                { $set: { resourcePlan: resolvedBooking.resourcePlan } },
+              ).catch((pruneWriteError) => console.error('Failed to prune future planned days after dispute refund:', pruneWriteError));
+              await retainPastBookingCalendar(resolvedBooking);
+            }
+            void ensureRefundInvoices(String(resolvedBooking._id));
+          } else {
+            await releaseBookingCalendar(booking._id);
+          }
         } catch (releaseError) {
           console.error('Dispute refunded but calendar reservation release failed:', releaseError);
         }
@@ -802,6 +831,16 @@ export const resolveDispute = async (req: Request, res: Response) => {
         } else if (isExtraCostsDispute) {
           await transferResolvedExtraCostIfNeeded(resolvedBooking, finalExtraCostAmount);
         }
+        // An admin-forced completion must leave the same FIX/SUP artifacts as
+        // a customer-confirmed one. Idempotent: existing invoices are kept.
+        try {
+          await ensureBookingInvoiceArtifacts(resolvedBooking._id.toString());
+        } catch (invoiceError) {
+          console.error(
+            'Failed to generate booking invoice artifacts after dispute resolution:',
+            invoiceError instanceof Error ? invoiceError.message : invoiceError,
+          );
+        }
       }
     } catch (e) {
       console.error('Post-resolve Stripe step failed:', e);
@@ -865,13 +904,21 @@ export const resolveDispute = async (req: Request, res: Response) => {
         User.findById(resolvedBooking.customer).select('_id email name').lean(),
         proId ? User.findById(proId).select('_id email name username businessInfo').lean() : null,
       ]);
+      // The email shows the final amount to be paid (VAT, commission and
+      // discount included), never the bare net delta or a platform percentage.
+      // An uncomputable amount is omitted, never replaced by the bare net.
+      let disputeFinalAmount: number | undefined;
+      if (isExtraCostsDispute && typeof finalExtraCostAmount === 'number') {
+        disputeFinalAmount = await resolveDisputeEmailAmount(
+          resolvedBooking,
+          Number(originalExtraCostTotalForEmail) || 0,
+          finalExtraCostAmount,
+        );
+      }
       const disputeContext = {
         bookingId: String(resolvedBooking._id),
         resolution,
-        adjustedAmount:
-          isExtraCostsDispute && typeof finalExtraCostAmount === 'number'
-            ? finalExtraCostAmount
-            : undefined,
+        adjustedAmount: disputeFinalAmount,
         currency: (resolvedBooking as any).payment?.currency || 'EUR',
       };
       if (customerUser?._id) {
