@@ -28,7 +28,8 @@ const fakeRes = () => {
 
 describeDb('auto-conversion platform setting (disposable MongoDB)', () => {
   beforeAll(async () => {
-    await mongoose.connect(testUri!);
+    // Own database: other integration files run in parallel on the same server.
+    await mongoose.connect(testUri!, { dbName: `fixera_auto_conversion_it_${Date.now()}` });
   });
   afterAll(async () => {
     await mongoose.connection.db?.dropDatabase();
