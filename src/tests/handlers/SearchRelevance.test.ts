@@ -19,12 +19,54 @@ vi.mock("../../models/user", () => ({
     })),
   },
 }));
-vi.mock("../../models/project", () => ({
-  default: {
-    find: vi.fn(() => ({ sort() { return this; }, lean: async () => mocks.projects })),
-    aggregate: vi.fn(async () => []),
-  },
-}));
+vi.mock("../../models/project", () => {
+  const eligibleOwners = () => new Set(
+    mocks.professionals
+      .filter((person) =>
+        person.role === "professional"
+        && person.professionalStatus === "approved"
+        && !person.deletedAt
+        && person.isAnonymized !== true)
+      .map((person) => String(person._id)),
+  );
+  const runPipeline = (pipeline: any[]) => {
+    if (pipeline.some((stage) => stage.$geoNear)) return [];
+    let rows = [...mocks.projects];
+    const eligible = eligibleOwners();
+    for (const stage of pipeline) {
+      if (stage.$match) {
+        const match = stage.$match as Record<string, any>;
+        if (typeof match.status === "string") {
+          rows = rows.filter((row) => row.status === match.status);
+        }
+        if (match["eligibleOwner.0"]) {
+          rows = rows.filter((row) => eligible.has(String(row.professionalId)));
+        }
+      }
+      if (stage.$sort) {
+        const entries = Object.entries(stage.$sort as Record<string, number>);
+        rows.sort((a: any, b: any) => {
+          for (const [field, direction] of entries) {
+            const left = a[field];
+            const right = b[field];
+            if (left === right) continue;
+            return (left > right ? 1 : -1) * direction;
+          }
+          return 0;
+        });
+      }
+      if (typeof stage.$skip === "number") rows = rows.slice(stage.$skip);
+      if (typeof stage.$limit === "number") rows = rows.slice(0, stage.$limit);
+    }
+    return rows;
+  };
+  return {
+    default: {
+      find: vi.fn(() => ({ sort() { return this; }, lean: async () => mocks.projects })),
+      aggregate: vi.fn(async (pipeline: any[]) => runPipeline(pipeline)),
+    },
+  };
+});
 vi.mock("../../models/professionalLevelConfig", () => ({
   default: {
     getCurrentConfig: vi.fn(async () => ({
@@ -81,8 +123,8 @@ const execute = async (query: Record<string, unknown>) => {
 describe("project relevance sort (client bug list #4a)", () => {
   beforeEach(() => {
     mocks.professionals = [
-      { _id: proJunior, name: "Junior Pro", professionalLevel: "Level 1", adminTags: [], businessInfo: { timezone: "UTC" } },
-      { _id: proSenior, name: "Senior Pro", professionalLevel: "Expert", adminTags: ["Verified"], businessInfo: { timezone: "UTC" } },
+      { _id: proJunior, name: "Junior Pro", role: "professional", professionalStatus: "approved", deletedAt: null, isAnonymized: false, professionalLevel: "Level 1", adminTags: [], businessInfo: { timezone: "UTC" } },
+      { _id: proSenior, name: "Senior Pro", role: "professional", professionalStatus: "approved", deletedAt: null, isAnonymized: false, professionalLevel: "Expert", adminTags: ["Verified"], businessInfo: { timezone: "UTC" } },
     ];
     mocks.ratings = new Map([
       ["507f1f77bcf86cd799439021", { avgRating: 3, totalReviews: 1 }],
