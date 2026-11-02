@@ -25,7 +25,7 @@ import {
 } from "../../utils/invoiceVisibility";
 import { IUser } from "../../models/user";
 import { maskAnonymizedUser, maskBookingForAnonymizedParties } from "../../utils/accountAnonymity";
-import { applyB2BInvoiceRule, firstVatCountry, parseVatCountryCode, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
+import { ARTICLE_47_FIELD_NAME, applyB2BInvoiceRule, firstVatCountry, parseVatCountryCode, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
 import ServiceConfiguration from "../../models/serviceConfiguration";
 import { sendHandlerError } from '../../utils/handlerErrors';
 import { runWithEmailActor } from '../../utils/emailActorContext';
@@ -1479,8 +1479,20 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
         },
         { $unwind: { path: '$_countProject', preserveNullAndEmptyArrays: true } },
         {
+          $project: {
+            serviceValues: {
+              $setUnion: [
+                [{ $ifNull: ['$rfqData.serviceType', null] }],
+                [{ $ifNull: ['$_countProject.service', null] }],
+              ],
+            },
+          },
+        },
+        { $unwind: '$serviceValues' },
+        { $match: { serviceValues: { $ne: null } } },
+        {
           $group: {
-            _id: { $ifNull: ['$rfqData.serviceType', '$_countProject.service'] },
+            _id: '$serviceValues',
             count: { $sum: 1 },
           },
         },
@@ -2313,8 +2325,15 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
       const escaped = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const regex = new RegExp(escaped, 'i');
       const searchOr: Record<string, any>[] = [{ bookingNumber: regex }];
-      if (mongoose.Types.ObjectId.isValid(trimmedSearch)) {
+      if (/^[a-f\d]{24}$/i.test(trimmedSearch)) {
         searchOr.push({ booking: new mongoose.Types.ObjectId(trimmedSearch) });
+      }
+      // `Payment.bookingNumber` is optional; match the referenced booking too.
+      const bookingsByNumber = await Booking.find({ customer: userId, bookingNumber: regex })
+        .select('_id')
+        .lean();
+      if (bookingsByNumber.length > 0) {
+        searchOr.push({ booking: { $in: bookingsByNumber.map((b: any) => b._id) } });
       }
       const matchingProfessionals = await User.find({ role: 'professional', name: regex }).select('_id');
       if (matchingProfessionals.length > 0) {
@@ -2323,7 +2342,7 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
       query.$and = (query.$and || []).concat([{ $or: searchOr }]);
     }
 
-    if (bookingId && typeof bookingId === 'string' && mongoose.Types.ObjectId.isValid(bookingId)) {
+    if (bookingId && typeof bookingId === 'string' && /^[a-f\d]{24}$/i.test(bookingId)) {
       query.booking = new mongoose.Types.ObjectId(bookingId);
     }
 
@@ -2458,6 +2477,22 @@ export const previewVatDecision = async (req: Request, res: Response) => {
     });
     if (coverageError) return res.status(400).json({ success: false, msg: coverageError });
 
+    // A stored reserved answer survives a classification change; the current
+    // classification decides whether it may still feed a VAT rule.
+    const previewConfigId = serviceConfigurationId || project?.serviceConfigurationId;
+    let previewArticle47Classification: unknown;
+    if (previewConfigId && mongoose.Types.ObjectId.isValid(String(previewConfigId))) {
+      const previewConfig = await ServiceConfiguration.findById(previewConfigId)
+        .select("vatManagement.article47Classification")
+        .lean();
+      previewArticle47Classification = (previewConfig as any)?.vatManagement?.article47Classification;
+    }
+    const previewProfessionalAnswers = Object.fromEntries(
+      Object.entries(professionalAnswersFromProject(project)).filter(([fieldName]) =>
+        !(String(previewArticle47Classification || "").toLowerCase() !== "project_dependent"
+          && fieldName === ARTICLE_47_FIELD_NAME))
+    );
+
     const decision = await resolveVatDecisionFromConfig({
       serviceConfigurationId: serviceConfigurationId || project?.serviceConfigurationId,
       category: projectService?.category || project?.category,
@@ -2467,7 +2502,7 @@ export const previewVatDecision = async (req: Request, res: Response) => {
       bookingCountry: previewCountry,
       businessCountry: firstVatCountry(customer.companyAddress?.country, customer.location?.country),
       answers: normalizedVatAnswers,
-      professionalAnswers: professionalAnswersFromProject(project),
+      professionalAnswers: previewProfessionalAnswers,
       customerType: customer.customerType || "individual",
       vatNumber: customer.vatNumber,
       isVatVerified: customer.isVatVerified,

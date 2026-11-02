@@ -189,7 +189,12 @@ export const getTransactions = async (req: Request, res: Response) => {
       if (statusFilter === 'transfer_pending' || statusFilter === 'transfer_failed') {
         query.status = 'completed';
         query.$or = statusFilter === 'transfer_pending'
-          ? [{ transferStatus: 'pending' }, { transferStatus: null, stripeTransferId: null }]
+          ? [
+              { transferStatus: 'pending' },
+              // Legacy failed transfers also have null status/id; exclude them
+              // from "pending" so the filter matches the stats and row labels.
+              { transferStatus: null, stripeTransferId: null, 'metadata.transferFailed': { $ne: true } },
+            ]
           : [{ transferStatus: 'failed' }, { transferStatus: null, 'metadata.transferFailed': true }];
       } else {
         query.status = statusFilter;

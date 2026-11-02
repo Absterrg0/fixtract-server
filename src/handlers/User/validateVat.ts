@@ -6,11 +6,19 @@ import jwt from 'jsonwebtoken';
 import { generateUsername, isValidUsernameFormat } from "../../utils/usernameUtils";
 import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
 
-export function parsePostalCity(lastLine: string): { postalCode?: string; city: string } {
+export function parsePostalCity(
+  lastLine: string,
+  country?: string,
+): { postalCode?: string; city: string } {
   // Dutch postcodes are canonically spaceless (e.g. "5026SL TILBURG") — match
   // the 4-digit + 2-letter shape before the generic patterns, which only
   // accept spaced postcodes and would otherwise lose the postal code.
-  const dutch = lastLine.match(/^(\d{4}\s?[A-Z]{2})\s+(.+)$/i);
+  // A Belgian line such as "1300 LA HULPE" has the same shape, so only apply
+  // the Dutch rule when the country is NL or unknown.
+  const countryCode = typeof country === 'string' ? country.trim().toUpperCase() : '';
+  const dutch = countryCode === '' || countryCode === 'NL'
+    ? lastLine.match(/^(\d{4}\s?[A-Z]{2})\s+(.+)$/i)
+    : null;
   if (dutch) {
     return { postalCode: dutch[1].replace(/\s+/, '').toUpperCase(), city: dutch[2].trim() };
   }
@@ -51,7 +59,7 @@ export const validateVAT = async (req: Request, res: Response, next: NextFunctio
     if (validationResult.companyAddress) {
       const addressLines = validationResult.companyAddress.split('\n').filter(line => line.trim());
       const lastLine = addressLines[addressLines.length - 1] || '';
-      const parsed = parsePostalCity(lastLine);
+      const parsed = parsePostalCity(lastLine, formattedVAT.substring(0, 2));
       cleanedAddress = {
         fullAddress: validationResult.companyAddress,
         streetAddress: addressLines[0] || '',
@@ -162,7 +170,7 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
 
         const lastLine = addressLines[addressLines.length - 1];
         if (lastLine) {
-          const parsed = parsePostalCity(lastLine);
+          const parsed = parsePostalCity(lastLine, user.businessInfo?.country || user.companyAddress?.country);
           if (parsed.postalCode && !user.businessInfo.postalCode) {
             user.businessInfo.postalCode = parsed.postalCode;
           }
@@ -222,7 +230,7 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
 
         const lastLine = addressLines[addressLines.length - 1];
         if (lastLine) {
-          const parsed = parsePostalCity(lastLine);
+          const parsed = parsePostalCity(lastLine, formattedVAT.substring(0, 2));
           if (parsed.postalCode && !user.companyAddress.postalCode) {
             user.companyAddress.postalCode = parsed.postalCode;
           }

@@ -95,7 +95,6 @@ vi.mock('../../../utils/emailService', () => ({
   sendDisputeRaisedAdminEmail: vi.fn(),
   sendCancellationRequestAdminEmail: vi.fn(),
   sendDisputeRaisedEmail: vi.fn(),
-  sendCancellationRequestAdminEmail: vi.fn(),
 }));
 
 vi.mock('../../../utils/referralSystem', () => ({
@@ -154,6 +153,8 @@ describe('dashboard list counts and search', () => {
     mocks.userFind.mockReturnValue({ select: vi.fn(async () => []) });
     mocks.projectFind.mockReturnValue({ select: vi.fn(async () => []) });
     mocks.projectDistinct.mockResolvedValue([]);
+    // Payment search now also resolves booking numbers stored on the booking.
+    mocks.bookingFind.mockReturnValue({ select: () => ({ lean: async () => [] }) });
     mocks.bookingDistinct.mockResolvedValue([]);
   });
 

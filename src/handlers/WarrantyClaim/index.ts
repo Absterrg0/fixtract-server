@@ -915,7 +915,7 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
           ],
         };
       }
-      if (mongoose.Types.ObjectId.isValid(trimmedSearch)) {
+      if (/^[a-f\d]{24}$/i.test(trimmedSearch)) {
         const scoped = await WarrantyClaim.exists({ ...bookingScope, booking: new mongoose.Types.ObjectId(trimmedSearch) });
         if (scoped) {
           searchOr.push({ booking: new mongoose.Types.ObjectId(trimmedSearch) });
@@ -934,7 +934,7 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
       query.$and = (query.$and || []).concat([{ $or: searchOr }]);
     }
 
-    if (bookingId && typeof bookingId === "string" && mongoose.Types.ObjectId.isValid(bookingId)) {
+    if (bookingId && typeof bookingId === "string" && /^[a-f\d]{24}$/i.test(bookingId)) {
       query.booking = new mongoose.Types.ObjectId(bookingId);
     }
 

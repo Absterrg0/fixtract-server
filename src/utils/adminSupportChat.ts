@@ -89,7 +89,11 @@ export function buildSupportParticipantKpis(input: {
     completedCount: input.completedCount,
     quotedCount: input.quotedCount,
     disputeCount: input.disputeCount,
-    grossEur: !financialAccess ? null : singleEur ? grossByCurrency[0].gross : null,
+    grossEur: !financialAccess
+      ? null
+      : grossByCurrency.length === 0
+        ? 0
+        : singleEur ? grossByCurrency[0].gross : null,
     refundPercent: !financialAccess ? null : ratePercent(input.refundCount, input.bookingCount),
     financialAccess,
     grossByCurrency: financialAccess ? grossByCurrency : [],

@@ -39,9 +39,18 @@ export const saveProjectDraft = async (req: Request, res: Response) => {
     // unless the CURRENT service-config classification is project dependent.
     // All unrelated answers are preserved; historical bookings/invoices are
     // untouched (their snapshots were computed under the config then current).
-    if (projectData.serviceConfigurationId && Array.isArray((projectData as any).vatProfessionalAnswers)) {
+    let resolvedConfigurationId = projectData.serviceConfigurationId;
+    if (!resolvedConfigurationId && projectData._id) {
+      // A partial update may omit the configuration; the saved draft's config
+      // still decides whether the reserved answer is authoritative.
+      const savedDraft = await Project.findOne({ _id: projectData._id, professionalId: userId })
+        .select('serviceConfigurationId')
+        .lean();
+      resolvedConfigurationId = savedDraft?.serviceConfigurationId;
+    }
+    if (resolvedConfigurationId && Array.isArray((projectData as any).vatProfessionalAnswers)) {
       try {
-        const svcConfig = await ServiceConfiguration.findById(projectData.serviceConfigurationId)
+        const svcConfig = await ServiceConfiguration.findById(resolvedConfigurationId)
           .select('vatManagement.article47Classification')
           .lean();
         (projectData as any).vatProfessionalAnswers = pruneStaleArticle47ProfessionalAnswers(

@@ -114,6 +114,16 @@ const PRO_PAYOUT_SUMMARY_FIELDS = [
   "professionalPayout",
   "transferredAt",
   "transferStatus",
+  "transferAmount",
+  "transferCurrency",
+  "transferAttempt",
+  "transferAttemptedAt",
+  "platformCommission",
+  "extraCostPlatformFee",
+  "extraCostPlatformCommission",
+  "extraCostProfessionalPayout",
+  "extraCostTransferStatus",
+  "extraCostTransferAttemptedAt",
 ] as const;
 
 /**
@@ -229,6 +239,8 @@ export const sanitizePaymentForViewer = (
 
   if (viewerRole === "customer") {
     stripFields(clean, SUPPLIER_INVOICE_FIELDS);
+    // The pro's payout summary (amount/status/timing) is never customer data.
+    stripFields(clean, PRO_PAYOUT_SUMMARY_FIELDS);
   } else {
     stripFields(clean, CUSTOMER_INVOICE_FIELDS);
     // A client secret can confirm or capture the customer's payment. The
