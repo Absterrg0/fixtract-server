@@ -2196,14 +2196,14 @@ export const archiveProject = async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Project not found" });
     }
     if (project.status === "archived") {
-      return res.json({ success: true, project });
+      return res.json({ success: true, project: await withSignedProjectMedia(project) });
     }
 
     project.statusBeforeArchive = project.status as any;
     project.archivedAt = new Date();
     project.status = "archived" as any;
     await saveProjectWithFence(project, userId);
-    res.json({ success: true, project });
+    res.json({ success: true, project: await withSignedProjectMedia(project) });
   } catch (error) {
     res.status(500).json({ error: "Failed to archive project" });
   }
@@ -2246,7 +2246,7 @@ export const restoreProject = async (req: Request, res: Response) => {
     project.statusBeforeArchive = undefined;
     project.archivedAt = undefined;
     await saveProjectWithFence(project, userId);
-    res.json({ success: true, project });
+    res.json({ success: true, project: await withSignedProjectMedia(project) });
   } catch (error) {
     res.status(500).json({ error: "Failed to restore project" });
   }
