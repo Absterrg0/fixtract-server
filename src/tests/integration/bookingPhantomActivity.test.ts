@@ -18,7 +18,8 @@ const phantomFields = {
 
 describeDb('booking activity persistence (disposable MongoDB)', () => {
   beforeAll(async () => {
-    await mongoose.connect(testUri!);
+    // Own database: other integration files run in parallel on the same server.
+    await mongoose.connect(testUri!, { dbName: `fixera_phantom_activity_it_${Date.now()}` });
   });
   afterAll(async () => {
     await mongoose.connection.db?.dropDatabase();
