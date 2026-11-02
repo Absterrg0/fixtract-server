@@ -1,6 +1,7 @@
 import { TransactionalEmailsApi, SendSmtpEmail, TransactionalEmailsApiApiKeys } from "@getbrevo/brevo";
 import mongoose from "mongoose";
 import { logEmail } from "./emailLogger";
+import { describeEmailProviderError } from "./emailProviderError";
 import type { ChatMirrorLine } from "./notifications/chatEmailMirror";
 
 interface SendEmailMeta {
@@ -241,7 +242,7 @@ export const sendProfessionalWelcomeEmail = async (email: string, professionalNa
     await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
   } catch (error: any) {
-    console.error('Failed to send professional welcome email:', error);
+    console.error('Failed to send professional welcome email:', describeEmailProviderError(error).message);
     return false;
   }
 };
@@ -876,12 +877,8 @@ export const sendAdminStaffInvitationEmail = async (
     }).catch((err) => console.error('Failed to write EmailLog for admin_staff_invite:', err));
     return { sent: true };
   } catch (error: any) {
-    const brevoMessage =
-      error?.response?.body?.message ||
-      error?.response?.text ||
-      error?.message ||
-      'Unknown email provider error';
-    console.error(`Failed to send admin staff invite to ${masked}:`, brevoMessage, error?.response?.body || '');
+    const brevoMessage = describeEmailProviderError(error).message;
+    console.error(`Failed to send admin staff invite to ${masked}: ${brevoMessage}`);
     await logEmail({
       to: email,
       subject: 'You are invited to Fixtract admin',
@@ -966,7 +963,7 @@ export const sendProjectApprovalEmail = async (
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
   } catch (error: any) {
-    console.error('Failed to send project approval email:', error);
+    console.error('Failed to send project approval email:', describeEmailProviderError(error).message);
     return false;
   }
 };
@@ -1041,7 +1038,7 @@ export const sendProjectRejectionEmail = async (
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
   } catch (error: any) {
-    console.error('Failed to send project rejection email:', error);
+    console.error('Failed to send project rejection email:', describeEmailProviderError(error).message);
     return false;
   }
 };
@@ -1121,7 +1118,7 @@ export const sendProjectDeletedEmail = async (
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
   } catch (error: any) {
-    console.error('Failed to send project deletion email:', error);
+    console.error('Failed to send project deletion email:', describeEmailProviderError(error).message);
     return false;
   }
 };
@@ -1204,7 +1201,7 @@ export const sendProjectDeactivatedEmail = async (
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
   } catch (error: any) {
-    console.error('Failed to send project deactivation email:', error);
+    console.error('Failed to send project deactivation email:', describeEmailProviderError(error).message);
     return false;
   }
 };
@@ -1282,7 +1279,7 @@ export const sendProjectReactivatedEmail = async (
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
   } catch (error: any) {
-    console.error('Failed to send project reactivation email:', error);
+    console.error('Failed to send project reactivation email:', describeEmailProviderError(error).message);
     return false;
   }
 };
@@ -1370,7 +1367,7 @@ export const sendBookingNotificationEmail = async (
     const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
     return true;
   } catch (error: any) {
-    console.error('Failed to send booking notification email:', error);
+    console.error('Failed to send booking notification email:', describeEmailProviderError(error).message);
     return false;
   }
 };
@@ -1500,15 +1497,9 @@ export const sendEmail = async (
     }).catch(err => console.error('Failed to write EmailLog:', { to, subject, template }, err));
     return true;
   } catch (error: any) {
-    const rawErrorMessage = error?.message || String(error);
-    const safeErrorMessage = meta.redactLogUrls
-      ? redactUrlsForLog(rawErrorMessage)
-      : rawErrorMessage;
-    if (meta.redactLogUrls) {
-      console.error(`Failed to send email "${subject}" to ${to}: ${safeErrorMessage}`);
-    } else {
-      console.error(`Failed to send email "${subject}" to ${to}:`, error);
-    }
+    // Never log the raw provider error: it carries the HTTP request (API key header).
+    const safeErrorMessage = redactUrlsForLog(describeEmailProviderError(error).message);
+    console.error(`Failed to send email "${subject}" to ${to}: ${safeErrorMessage}`);
     logDevEmail('FAILED', to, subject, template, htmlContent, safeErrorMessage, meta.redactLogUrls);
     logEmail({
       to,
