@@ -2621,12 +2621,9 @@ export async function executeAccountAnonymization(input: {
       "Admin accounts cannot be anonymized through this endpoint.",
     );
   }
-  if (
-    existing.role === "employee" &&
-    !(input.initiatedBy === "self" && idString(userId) === idString(actorId))
-  ) {
-    // Self-service deletion stays available to employees; only admin-initiated
-    // anonymization is limited to customers and professionals.
+  if (existing.role === "employee") {
+    // Employee accounts are company-managed; self-service deletion is not
+    // available for them.
     throw new AnonymizationError(
       403,
       "UNSUPPORTED_ACCOUNT_ROLE",
