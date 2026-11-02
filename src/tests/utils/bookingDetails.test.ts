@@ -1915,3 +1915,56 @@ describe('legacy compatibility', () => {
     expect(details.quotation).toBeNull();
   });
 });
+
+describe('legacy schema-default activity', () => {
+  // Before the fix every saved booking stored these defaults at creation time.
+  const createdAt = new Date('2026-01-20T09:00:00.000Z');
+  const phantom = {
+    customerReview: { images: [], isHidden: false, reviewedAt: createdAt },
+    professionalReview: { reviewedAt: createdAt },
+    cancellation: { cancelledAt: createdAt },
+    dispute: { type: 'extra_costs', attachments: [], resolutionAttachments: [], raisedAt: createdAt },
+  };
+  const phantomTypes = ['review_submitted', 'dispute_opened', 'extra_costs_disputed', 'dispute_resolved'];
+
+  it.each(['customer', 'professional', 'admin'] as const)(
+    'adds no review/dispute activity or extra-cost dispute for a %s viewer',
+    async (role) => {
+      const details = await buildDetails(role, { booking: phantom });
+      const types = details.activity.items.map((item) => item.type);
+      for (const type of phantomTypes) expect(types).not.toContain(type);
+      expect(details.extraCosts.dispute).toBeNull();
+    },
+  );
+
+  it('still reports recorded disputes and reviews', async () => {
+    const raisedAt = new Date('2026-02-10T10:00:00.000Z');
+    const reviewedAt = new Date('2026-02-20T10:00:00.000Z');
+    const details = await buildDetails('admin', {
+      booking: {
+        status: 'completed',
+        customerReview: {
+          communicationLevel: 5,
+          valueOfDelivery: 4,
+          qualityOfService: 5,
+          comment: 'Great work',
+          reviewedAt,
+        },
+        dispute: {
+          raisedBy: customerId,
+          reason: 'Extra costs too high',
+          description: 'Disagree with extra cost',
+          type: 'extra_costs',
+          raisedAt,
+          resolvedAt: new Date('2026-02-12T10:00:00.000Z'),
+          resolvedBy: adminId,
+        },
+      },
+    });
+    const byType = new Map(details.activity.items.map((item) => [item.type, item]));
+    expect(byType.get('extra_costs_disputed')?.occurredAt).toBe(raisedAt.toISOString());
+    expect(byType.get('dispute_resolved')).toBeDefined();
+    expect(byType.get('review_submitted')?.occurredAt).toBe(reviewedAt.toISOString());
+    expect(details.extraCosts.dispute?.reason).toBe('Extra costs too high');
+  });
+});

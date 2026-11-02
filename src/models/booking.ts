@@ -1476,12 +1476,14 @@ const BookingSchema = new Schema({
       type: String,
       maxlength: 1000
     },
-    images: [{
-      type: String
-    }],
+    // No defaults here: a default materializes a phantom review on every
+    // booking (see utils/bookingActivity.ts). Writers set these explicitly.
+    images: {
+      type: [String],
+      default: undefined
+    },
     reviewedAt: {
-      type: Date,
-      default: Date.now
+      type: Date
     },
     reply: {
       comment: {
@@ -1493,8 +1495,7 @@ const BookingSchema = new Schema({
       }
     },
     isHidden: {
-      type: Boolean,
-      default: false
+      type: Boolean
     },
     hiddenBy: {
       type: Schema.Types.ObjectId,
@@ -1522,8 +1523,7 @@ const BookingSchema = new Schema({
       maxlength: 1000
     },
     reviewedAt: {
-      type: Date,
-      default: Date.now
+      type: Date
     }
   },
 
@@ -1542,8 +1542,7 @@ const BookingSchema = new Schema({
       maxlength: 500
     },
     cancelledAt: {
-      type: Date,
-      default: Date.now
+      type: Date
     },
     refundAmount: {
       type: Number,
@@ -1604,8 +1603,7 @@ const BookingSchema = new Schema({
       maxlength: 2000
     },
     raisedAt: {
-      type: Date,
-      default: Date.now
+      type: Date
     },
     resolvedAt: { type: Date },
     resolution: { type: String, maxlength: 2000 },
@@ -1619,10 +1617,9 @@ const BookingSchema = new Schema({
     type: {
       type: String,
       enum: ['extra_costs', 'reschedule', 'completion_request', 'warranty_claim', 'warranty_resolve', 'refund_request', 'in_progress'],
-      default: 'extra_costs',
     },
-    attachments: [{ type: String }],
-    resolutionAttachments: [{ type: String }],
+    attachments: { type: [String], default: undefined },
+    resolutionAttachments: { type: [String], default: undefined },
   },
 
   // Post-booking data

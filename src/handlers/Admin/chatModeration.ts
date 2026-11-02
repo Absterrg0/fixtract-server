@@ -21,6 +21,7 @@ import {
   assertSupportChatEnabled,
   assertSupportChatWriteAllowed,
 } from "../../utils/support/settings";
+import { RECORDED_CUSTOMER_REVIEW_EXPR, RECORDED_DISPUTE_EXPR } from "../../utils/bookingActivity";
 
 const VALID_STATUSES = ["pending", "reviewed", "dismissed"] as const;
 
@@ -678,17 +679,17 @@ export const adminGetConversationParticipant = async (req: Request, res: Respons
                 ],
               },
             },
-            disputeCount: { $sum: { $cond: [{ $ifNull: ["$dispute.raisedAt", false] }, 1, 0] } },
+            disputeCount: { $sum: { $cond: [RECORDED_DISPUTE_EXPR, 1, 0] } },
             refundCount: {
               $sum: {
                 $cond: [{ $in: ["$payment.status", ["refunded", "partially_refunded"]] }, 1, 0],
               },
             },
-            reviewCount: { $sum: { $cond: [{ $ifNull: ["$customerReview.reviewedAt", false] }, 1, 0] } },
+            reviewCount: { $sum: { $cond: [RECORDED_CUSTOMER_REVIEW_EXPR, 1, 0] } },
             avgRating: {
               $avg: {
                 $cond: [
-                  { $ifNull: ["$customerReview.reviewedAt", false] },
+                  RECORDED_CUSTOMER_REVIEW_EXPR,
                   {
                     $avg: [
                       { $ifNull: ["$customerReview.communicationLevel", null] },
