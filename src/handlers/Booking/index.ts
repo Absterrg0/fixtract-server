@@ -52,6 +52,7 @@ import { isQuestionAnswerUploadOwnedByUser, isUploadOwnedByUser } from '../../ut
 import { presignOwnedUrl, presignQuestionAnswerUrl, referenceId } from '../../utils/bookingDetails/attachments';
 import { selectedPriceModel } from "../../utils/bookingDetails/overviewRows";
 import { snapshotQuestionDefinitions } from '../../utils/bookingDetails/snapshot';
+import { RECORDED_DISPUTE_FILTER, withoutPhantomBookingActivity } from '../../utils/bookingActivity';
 
 /** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
 const applyProceedAtStandardVatIfRequested = (
@@ -331,7 +332,10 @@ const snapshotToQuoteBreakdown = (snapshot: NonNullable<ReturnType<typeof buildC
 ];
 
 const presignBookingFiles = async (bookingDoc: any) => {
-  const booking = bookingDoc?.toObject ? bookingDoc.toObject() : { ...bookingDoc };
+  // Legacy records carry schema-default review/cancellation/dispute stamps.
+  const booking = withoutPhantomBookingActivity(
+    bookingDoc?.toObject ? bookingDoc.toObject() : { ...bookingDoc },
+  );
   const customerId = referenceId(booking?.customer);
   const professionalId = referenceId(booking?.professional);
   const projectId = referenceId(booking?.project)
@@ -1537,7 +1541,7 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
         .map((owner: any) => String(owner._id)),
     );
     const visibleBookings = bookings.map((booking) => {
-      const visible: any = bookingForViewer(booking, viewerRole);
+      const visible: any = withoutPhantomBookingActivity(bookingForViewer(booking, viewerRole));
       if (visible && typeof visible === "object") visible.priceModel = selectedPriceModel(visible);
       // The shared bookings table exposes pro-only payout date/amount
       // columns. Strip the pro payout summary server-side for customers;
@@ -2292,7 +2296,7 @@ export const getMyDisputes = async (req: Request, res: Response, next: NextFunct
     const objectUserId = new mongoose.Types.ObjectId(userId);
     const bookings = await Booking.find({
       status: { $in: ['dispute', 'completed', 'cancelled', 'refunded'] },
-      'dispute.raisedAt': { $exists: true },
+      ...RECORDED_DISPUTE_FILTER,
       $or: [{ customer: objectUserId }, { professional: objectUserId }],
     })
       .select('bookingNumber status dispute customer professional project payment scheduledStartDate')

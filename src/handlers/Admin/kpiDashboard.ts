@@ -13,6 +13,7 @@ import { generateKpiPdf } from '../../utils/kpiReport';
 import { sendKpiReportEmail } from '../../utils/emailService';
 import { uploadBufferToS3 } from '../../utils/s3Upload';
 import { buildSettledTransferExpression } from '../../utils/paymentSafety';
+import { RECORDED_CUSTOMER_REVIEW_EXPR, RECORDED_CUSTOMER_REVIEW_FILTER, RECORDED_DISPUTE_EXPR, RECORDED_DISPUTE_FILTER } from '../../utils/bookingActivity';
 
 const REPORTING_CURRENCY = STRIPE_CONFIG.defaultCurrency || 'EUR';
 
@@ -144,8 +145,9 @@ const bookingMetricsProjection = (currencyField: string) => ({
   },
   rescheduleRequestAt: '$rescheduleRequest.requestedAt',
   noShowAt: '$noShow.markedAt',
-  disputeAt: '$dispute.raisedAt',
-  reviewedAt: '$customerReview.reviewedAt',
+  // Legacy schema defaults stored phantom timestamps on every booking; count recorded activity only.
+  disputeAt: { $cond: [RECORDED_DISPUTE_EXPR, '$dispute.raisedAt', null] },
+  reviewedAt: { $cond: [RECORDED_CUSTOMER_REVIEW_EXPR, '$customerReview.reviewedAt', null] },
   reviewAvg: reviewAvgExpr,
   isRfq: { $eq: ['$bookingType', 'professional'] },
   quoted: { $cond: [{ $eq: ['$bookingType', 'professional'] }, quotedExpr, false] },
@@ -345,7 +347,7 @@ export const getKpiSummary = async (req: Request, res: Response) => {
           },
         },
       ]),
-      Booking.countDocuments({ 'dispute.raisedAt': { $gte: from, $lte: to }, ...bookingCountryMatch }),
+      Booking.countDocuments({ ...RECORDED_DISPUTE_FILTER, 'dispute.raisedAt': { $gte: from, $lte: to }, ...bookingCountryMatch }),
       WarrantyClaim.aggregate([
         { $match: { openedAt: { $gte: from, $lte: to } } },
         { $lookup: { from: 'bookings', localField: 'booking', foreignField: '_id', as: 'b' } },
@@ -394,7 +396,7 @@ export const getKpiSummary = async (req: Request, res: Response) => {
         { $group: { _id: null, avgHours: { $avg: '$ttfqHours' }, count: { $sum: 1 } } },
       ]),
       Booking.aggregate([
-        { $match: { 'customerReview.reviewedAt': { $gte: from, $lte: to }, ...bookingCountryMatch } },
+        { $match: { ...RECORDED_CUSTOMER_REVIEW_FILTER, 'customerReview.reviewedAt': { $gte: from, $lte: to }, ...bookingCountryMatch } },
         {
           $project: {
             avg: {
