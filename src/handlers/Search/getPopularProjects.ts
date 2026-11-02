@@ -4,6 +4,7 @@ import User from "../../models/user";
 import { popularServiceMatch } from "../../utils/popularServiceMatch";
 import { aggregateProjectRatings } from "./aggregateRatings";
 import { eligibleProjectOwnerStages } from "./eligibleOwner";
+import { signProjectMediaUrl } from "../../utils/projectMedia";
 
 /**
  * Get popular published projects for the homepage / service carousels.
@@ -188,7 +189,15 @@ export const getPopularProjects = async (req: Request, res: Response) => {
     const projectIds = projects.map((p: any) => p._id);
     const ratingMap = await aggregateProjectRatings(projectIds);
 
-    const results = projects.map((project: any) => {
+    const signedAt = new Date();
+    const coverImages = await Promise.all(
+      projects.map((project: any) => {
+        const image = project.media?.images?.[0];
+        return image ? signProjectMediaUrl(image, project.professionalId, signedAt) : null;
+      })
+    );
+
+    const results = projects.map((project: any, index: number) => {
       const profId = project.professionalId?.toString();
       const professional = profId ? professionalMap.get(profId) : null;
       const ratings = ratingMap.get(project._id.toString()) || {
@@ -226,7 +235,7 @@ export const getPopularProjects = async (req: Request, res: Response) => {
         title: project.title,
         category: project.category,
         service: project.service,
-        image: project.media?.images?.[0] || null,
+        image: (coverImages[index] as string | null) || null,
         location: project.distance?.address || null,
         startingPrice,
         priceType,

@@ -1,5 +1,14 @@
 import { Schema, model, Document, Types } from "mongoose";
 
+/** How much the customer must be present while the work is carried out (wizard step 3). */
+export const CUSTOMER_PRESENCE_VALUES = [
+  "not_required",
+  "available",
+  "first_hour_only",
+  "present_throughout",
+] as const;
+export type CustomerPresence = (typeof CUSTOMER_PRESENCE_VALUES)[number];
+
 // Interfaces for nested schemas
 export interface ICertification {
   name: string;
@@ -218,6 +227,7 @@ export interface IProject extends Document {
   // Step 3: Extra Options
   extraOptions: IExtraOption[];
   termsConditions: ITermCondition[];
+  customerPresence?: CustomerPresence;
 
   // Step 4: FAQ
   faq: IFAQ[];
@@ -599,6 +609,19 @@ const ProjectSchema = new Schema<IProject>(
     // Step 3: Extra Options
     extraOptions: [ExtraOptionSchema],
     termsConditions: [TermConditionSchema],
+    customerPresence: {
+      type: String,
+      enum: {
+        values: CUSTOMER_PRESENCE_VALUES as unknown as string[],
+        message: "Customer presence must be one of: " + CUSTOMER_PRESENCE_VALUES.join(", "),
+      },
+      set: (value: unknown) =>
+        value === null || (typeof value === "string" && value.trim() === "")
+          ? undefined
+          : typeof value === "string"
+            ? value.trim()
+            : value,
+    },
 
     // Step 4: FAQ
     faq: [FAQSchema],

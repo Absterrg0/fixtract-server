@@ -47,6 +47,7 @@ export const NO_REAPPROVAL_FIELDS = [
   "bufferDuration",
   "minResources",
   "minOverlapPercentage",
+  "customerPresence",
 ];
 
 export function getFieldCategory(field: string): "A" | "B" | "none" {

@@ -30,6 +30,11 @@ import { computeProjectDiff, determineReapprovalType } from "../../utils/project
 import { toSlug } from "../../utils/slug";
 import { withArticle47ProfessionalQuestion } from "../../utils/vatManagement";
 import { withAnonymizationWriteFence, ACCOUNT_WRITE_FENCE_CODE } from "../../utils/support/accountGuard";
+import {
+  canonicalizeProjectMedia,
+  withSignedProjectMedia,
+  withSignedProjectMediaList,
+} from "../../utils/projectMedia";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
 const saveProjectWithFence = async (project: any, userId: string) =>
@@ -439,6 +444,18 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
 
     const professionalId = req.user?.id;
     const projectData = normalizePreparationDuration(req.body);
+    // Persist stable object URLs, never the signed display URLs we hand out.
+    if (projectData && projectData.media) {
+      projectData.media = canonicalizeProjectMedia(projectData.media);
+    }
+    // An explicitly empty presence choice clears the stored value.
+    const clearCustomerPresence =
+      !!projectData &&
+      Object.prototype.hasOwnProperty.call(projectData, "customerPresence") &&
+      (projectData.customerPresence === null ||
+        (typeof projectData.customerPresence === "string" &&
+          projectData.customerPresence.trim() === ""));
+    if (clearCustomerPresence) delete projectData.customerPresence;
 
     if (!professionalId) {
       console.log("[PROJECT] No professional ID found");
@@ -508,6 +525,9 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
       delete updateData.pendingChanges;
       delete updateData.reapprovalType;
       delete updateData.isResubmission;
+      if (clearCustomerPresence) {
+        updateData.$unset = { ...(updateData.$unset || {}), customerPresence: 1 };
+      }
 
       // If editing a published/on_hold project, take a snapshot for smart reapproval
       // but do NOT change status to pending — defer to submit time
@@ -554,7 +574,7 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
     console.log("Response project ID:", project?._id);
     console.log("Response status code: 200");
 
-    res.json(project);
+    res.json(project ? await withSignedProjectMedia(project) : project);
   } catch (error: any) {
     console.error("[PROJECT] Auto-save error:", error);
     console.error("Error stack:", error.stack);
@@ -579,7 +599,7 @@ export const getDrafts = async (req: Request, res: Response) => {
       status: "draft",
     }).sort({ autoSaveTimestamp: -1 });
 
-    res.json(drafts);
+    res.json(await withSignedProjectMediaList(drafts));
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch drafts" });
   }
@@ -594,7 +614,7 @@ export const getAllProjects = async (req: Request, res: Response) => {
       ...(includeArchived ? {} : { status: { $ne: "archived" } }),
     }).sort({ updatedAt: -1 });
 
-    res.json(projects);
+    res.json(await withSignedProjectMediaList(projects));
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch projects" });
   }
@@ -614,7 +634,7 @@ export const getProject = async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Project not found" });
     }
 
-    res.json(project);
+    res.json(await withSignedProjectMedia(project));
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch project" });
   }
@@ -666,7 +686,7 @@ export const getPublishedProject = async (req: Request, res: Response) => {
           .select("vatManagement.enabled vatManagement.rateRuleGroup vatManagement.reducedVatQuestions vatManagement.professionalVatQuestions vatManagement.article47Classification vatManagement.exemptFromBelgianReverseCharge")
           .lean()
       : null;
-    const serialized = serializePublicProject(project);
+    const serialized = await withSignedProjectMedia(serializePublicProject(project));
     res.json({
       success: true,
       project: {
@@ -1911,6 +1931,15 @@ export const submitProject = async (req: Request, res: Response) => {
       });
     }
 
+    if (!project.customerPresence) {
+      qualityChecks.push({
+        category: "content",
+        status: "failed" as const,
+        message: "Select whether the customer needs to be present during the work",
+        checkedAt: new Date(),
+      });
+    }
+
     if (!project.resources || project.resources.length === 0) {
       qualityChecks.push({
         category: "resources",
@@ -2068,7 +2097,7 @@ export const duplicateProject = async (req: Request, res: Response) => {
     if (!duplicated) {
       return res.status(404).json({ error: "Project not found" });
     }
-    res.json(duplicated);
+    res.json(await withSignedProjectMedia(duplicated));
   } catch (error) {
     if ((error as { code?: string })?.code === ACCOUNT_WRITE_FENCE_CODE) {
       return res.status(409).json({
@@ -2350,7 +2379,7 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
     }));
 
     res.json({
-      items: itemsWithTeam,
+      items: await withSignedProjectMediaList(itemsWithTeam),
       meta: {
         total,
         page,
