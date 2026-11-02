@@ -2214,6 +2214,14 @@ export const sendBookingScheduledProfessionalEmail = async (
   });
 };
 
+/** Optional free-text description a party added to a reschedule request. */
+const rescheduleDescriptionRow = (description?: string): string => {
+  const text = typeof description === 'string' ? description.trim() : '';
+  return text
+    ? `<p style="color: #333; margin: 8px 0 0 0; white-space: pre-line;"><strong>Details:</strong> ${escapeHtml(text)}</p>`
+    : '';
+};
+
 // Reschedule requested → customer
 export const sendRescheduleRequestedEmail = async (
   custEmail: string,
@@ -2222,7 +2230,8 @@ export const sendRescheduleRequestedEmail = async (
   oldDate: Date | string | null | undefined,
   newDate: Date | string | null | undefined,
   reason: string,
-  bookingId: string
+  bookingId: string,
+  description?: string
 ): Promise<boolean> => {
   const content = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
@@ -2235,7 +2244,7 @@ export const sendRescheduleRequestedEmail = async (
         <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
           <p style="color: #333; margin: 0 0 8px 0;"><strong>Original Start:</strong> ${escapeHtml(formatDateTime(oldDate))}</p>
           <p style="color: #333; margin: 0 0 8px 0;"><strong>Proposed Start:</strong> ${escapeHtml(formatDateTime(newDate))}</p>
-          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${escapeHtml(reason)}</p>
+          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${escapeHtml(reason)}</p>${rescheduleDescriptionRow(description)}
         </div>
         <p style="color: #666; line-height: 1.6;">
           Please review and accept or decline this request from your booking page.
@@ -2898,6 +2907,7 @@ export const sendRescheduleRequestedByCustomerEmail = async (
   newDate: Date | string | null | undefined,
   reason: string,
   bookingId: string,
+  description?: string,
 ): Promise<boolean> => {
   const content = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
@@ -2910,7 +2920,7 @@ export const sendRescheduleRequestedByCustomerEmail = async (
         <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
           <p style="color: #333; margin: 0 0 8px 0;"><strong>Original Start:</strong> ${escapeHtml(formatDateTime(oldDate))}</p>
           <p style="color: #333; margin: 0 0 8px 0;"><strong>Proposed Start:</strong> ${escapeHtml(formatDateTime(newDate))}</p>
-          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${escapeHtml(reason)}</p>
+          <p style="color: #333; margin: 0;"><strong>Reason:</strong> ${escapeHtml(reason)}</p>${rescheduleDescriptionRow(description)}
         </div>
         ${buildEmailButton(buildBookingLink(bookingId), 'Review Request', '#ffc107')}
         ${getEmailFooter()}

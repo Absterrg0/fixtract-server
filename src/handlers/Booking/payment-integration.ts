@@ -1620,6 +1620,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
             oldDate,
             newDate,
             reason: normalizedReason,
+            ...(normalizedDescription ? { description: normalizedDescription } : {}),
           },
         });
       } else if (isCustomer && professionalId) {
@@ -1635,6 +1636,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
             oldDate,
             newDate,
             reason: normalizedReason,
+            ...(normalizedDescription ? { description: normalizedDescription } : {}),
           },
         });
       }
