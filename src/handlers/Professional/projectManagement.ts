@@ -5,6 +5,11 @@ import Favorite from '../../models/favorite';
 import { invalidateFavoritesOverviewCache } from '../Admin/favoritesAdmin';
 import { normalizePreparationDuration } from '../../utils/projectDurations';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
+import {
+  canonicalizeProjectMedia,
+  withSignedProjectMedia,
+  withSignedProjectMediaList,
+} from '../../utils/projectMedia';
 
 /**
  * Save project draft (create or update)
@@ -14,6 +19,9 @@ export const saveProjectDraft = async (req: Request, res: Response) => {
   try {
     const userId = String(req.user?._id);
     const projectData = normalizePreparationDuration(req.body);
+    if (projectData && projectData.media) {
+      projectData.media = canonicalizeProjectMedia(projectData.media);
+    }
     const professional = await User.findById(userId).select('role professionalStatus');
 
     if (!professional || professional.role !== 'professional') {
@@ -56,7 +64,7 @@ export const saveProjectDraft = async (req: Request, res: Response) => {
 
     res.status(200).json({
       success: true,
-      data: project
+      data: project ? await withSignedProjectMedia(project) : project
     });
   } catch (error: any) {
     res.status(500).json({
@@ -105,7 +113,7 @@ export const getProject = async (req: Request, res: Response) => {
 
     res.status(200).json({
       success: true,
-      data: project
+      data: await withSignedProjectMedia(project)
     });
   } catch (error: any) {
     res.status(500).json({
@@ -148,7 +156,7 @@ export const getAllProjects = async (req: Request, res: Response) => {
 
     res.status(200).json({
       success: true,
-      data: projects
+      data: await withSignedProjectMediaList(projects)
     });
   } catch (error: any) {
     res.status(500).json({

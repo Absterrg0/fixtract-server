@@ -13,11 +13,12 @@ import {
 import { notifyAsync } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { getPresignedUrl, parseS3KeyFromUrl } from '../../utils/s3Upload';
+import { withSignedProjectMedia } from '../../utils/projectMedia';
 import { denyUnlessPermission } from '../../utils/adminRbac/assertPermission';
 
 // Helper: presign all file URLs (certifications and attachments) for admin viewing
 const presignProjectFiles = async (projectObj: any) => {
-    const clone = { ...projectObj };
+    const clone = await withSignedProjectMedia({ ...projectObj });
 
     // Certifications
     if (Array.isArray(clone.certifications)) {
@@ -417,10 +418,27 @@ export const getProjectChanges = async (req: Request, res: Response) => {
             return res.status(404).json({ error: 'Project not found' });
         }
 
+        // Media diffs carry stored object URLs; sign them so admins can compare previews.
+        const changes = await Promise.all(
+            ((project.pendingChanges || []) as any[]).map(async (change: any) => {
+                const plain = typeof change?.toObject === 'function' ? change.toObject() : change;
+                if (plain?.field !== 'media') return plain;
+                const signMedia = async (value: any) =>
+                    value && typeof value === 'object'
+                        ? (await withSignedProjectMedia({ media: value, professionalId: project.professionalId })).media
+                        : value;
+                return {
+                    ...plain,
+                    oldValue: await signMedia(plain.oldValue),
+                    newValue: await signMedia(plain.newValue),
+                };
+            })
+        );
+
         res.json({
             isResubmission: project.isResubmission || false,
             reapprovalType: project.reapprovalType || null,
-            changes: project.pendingChanges || [],
+            changes,
         });
     } catch (error) {
         console.error('Failed to fetch project changes:', error);

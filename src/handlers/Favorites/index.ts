@@ -5,6 +5,7 @@ import User from "../../models/user";
 import Project from "../../models/project";
 import connectToDatabase from "../../config/db";
 import { invalidateFavoritesOverviewCache } from "../Admin/favoritesAdmin";
+import { withSignedProjectMediaList } from "../../utils/projectMedia";
 
 const VALID_TARGET_TYPES: FavoriteTargetType[] = ["professional", "project"];
 
@@ -139,7 +140,8 @@ export const listUserFavorites = async (req: Request, res: Response) => {
     ]);
 
     const profMap = new Map(profs.map((p: any) => [p._id.toString(), p]));
-    const projectMap = new Map(projects.map((p: any) => [p._id.toString(), p]));
+    const signedProjects = await withSignedProjectMediaList(projects as any[]);
+    const projectMap = new Map(signedProjects.map((p: any) => [p._id.toString(), p]));
 
     const professionalIdsForProjects = Array.from(
       new Set(

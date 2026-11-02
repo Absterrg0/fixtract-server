@@ -6,6 +6,27 @@ import {
   validateCertificationFile
 } from '../../utils/s3Upload';
 import { sendHandlerError } from '../../utils/handlerErrors';
+import { projectMediaSignatureExpiresAt, signProjectMediaUrl } from '../../utils/projectMedia';
+
+/** Upload keys embed the project id as one path segment; reject anything else. */
+const safeProjectFolder = (value: unknown): string =>
+  typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value) ? value : 'temp';
+
+/**
+ * Project media is private. `url` is the stable object URL to store in
+ * `media.images` / `media.videos`; `signedUrl` is a time-limited URL for
+ * previewing the upload right away.
+ */
+const withPreviewUrl = async (result: { url: string; key: string }, userId: string) => {
+  const now = new Date();
+  const signed = await signProjectMediaUrl(result.url, userId, now);
+  const signedUrl = typeof signed === 'string' && signed !== result.url ? signed : null;
+  return {
+    ...result,
+    signedUrl,
+    signedUrlExpiresAt: signedUrl ? projectMediaSignatureExpiresAt(now).toISOString() : null,
+  };
+};
 
 /**
  * Upload project image
@@ -34,11 +55,11 @@ export const uploadProjectImage = async (req: Request, res: Response) => {
     }
 
     // Upload to S3
-    const result = await uploadProjectFile(file, userId, projectId || 'temp', 'image');
+    const result = await uploadProjectFile(file, userId, safeProjectFolder(projectId), 'image');
 
     res.status(200).json({
       success: true,
-      data: result
+      data: await withPreviewUrl(result, userId)
     });
   } catch (error: any) {
     return sendHandlerError(res, error, "We couldn't upload the image. Please try again.");
@@ -72,11 +93,11 @@ export const uploadProjectVideo = async (req: Request, res: Response) => {
     }
 
     // Upload to S3
-    const result = await uploadProjectFile(file, userId, projectId || 'temp', 'video');
+    const result = await uploadProjectFile(file, userId, safeProjectFolder(projectId), 'video');
 
     res.status(200).json({
       success: true,
-      data: result
+      data: await withPreviewUrl(result, userId)
     });
   } catch (error: any) {
     return sendHandlerError(res, error, "We couldn't upload the video. Please try again.");
