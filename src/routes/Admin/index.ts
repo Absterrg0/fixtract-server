@@ -68,6 +68,7 @@ import {
   getPlatformSettings,
   updatePlatformSettings,
   updateSupportChatSetting,
+  updateAutoConversionSetting,
 } from "../../handlers/Admin/platformSettings";
 import {
   getAdminReviews,
@@ -334,6 +335,7 @@ adminRouter.route('/favorites/:id').delete(deleteFavorite);
 // Platform settings routes
 adminRouter.route('/platform-settings').get(getPlatformSettings).put(updatePlatformSettings);
 adminRouter.route('/platform-settings/support-chat').patch(updateSupportChatSetting);
+adminRouter.route('/platform-settings/auto-conversion').patch(updateAutoConversionSetting);
 adminRouter.route('/platform-settings/odoo-companies').get(getOdooCompanies);
 
 // Site settings (social media links etc)
