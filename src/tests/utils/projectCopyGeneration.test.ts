@@ -97,10 +97,21 @@ describe('OpenAI Responses API generation', () => {
     expect(payload.input[0].content[0].text).not.toContain('contactEmail');
   });
 
-  it('requests no reasoning for reasoning-model families', async () => {
+  it('uses the lowest supported reasoning effort for o-series models', async () => {
     const fetchMock = vi.fn(async () => response(titleOutput));
     await generateProjectCopy(request('title') as any, {
       env: { OPENAI_API_KEY: 'test-key', OPENAI_MODEL: 'o3-mini' },
+      fetchImpl: fetchMock as any,
+    });
+    const payload = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);
+    // o-series reject `none`; `low` is the cheapest supported effort.
+    expect(payload.reasoning).toEqual({ effort: 'low' });
+  });
+
+  it('requests no reasoning for gpt-5.1+ models', async () => {
+    const fetchMock = vi.fn(async () => response(titleOutput));
+    await generateProjectCopy(request('title') as any, {
+      env: { OPENAI_API_KEY: 'test-key', OPENAI_MODEL: 'gpt-5.1' },
       fetchImpl: fetchMock as any,
     });
     const payload = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);

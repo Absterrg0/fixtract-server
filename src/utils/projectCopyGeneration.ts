@@ -249,9 +249,14 @@ export const generateProjectCopy = async (request: ProjectCopyRequest, options: 
   // configured model may be one (OPENAI_MODEL is overridable), so ask for no
   // reasoning when the family supports the option.
   const isReasoningModel = /^(gpt-5|o[1-4])/i.test(model);
+  // `none` only exists from gpt-5.1 onward; gpt-5/5-mini/nano and the o-series
+  // reject it (400), so they get the lowest supported effort instead.
+  const supportsNoReasoning = /^gpt-5\.\d/i.test(model);
   const payload = {
     model,
-    ...(isReasoningModel ? { reasoning: { effort: 'none' } } : {}),
+    ...(isReasoningModel
+      ? { reasoning: { effort: supportsNoReasoning ? 'none' : 'low' } }
+      : {}),
     instructions: instructionsFor(request.kind, request.locale),
     input: [{ role: 'user', content: [{ type: 'input_text', text: JSON.stringify(request.context) }] }],
     max_output_tokens: request.kind === 'title' ? 240 : 900,

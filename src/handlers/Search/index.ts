@@ -149,8 +149,10 @@ export const search = async (req: Request, res: Response) => {
       if (config.globalSettings?.isEnabled && tiers.length > 0) {
         const preferred = req.user.manualCustomerLevelOverride || req.user.loyaltyLevel;
         const tier = tiers.find(tier => tier.name === preferred) || getCurrentTier(tiers, req.user.totalSpent || 0);
-        loyaltyPercentValue = tier.discountPercentage || 0;
-        loyaltyMaxValue = tier.maxDiscountAmount;
+        // `getCurrentTier` can return nothing for an unmatched or inactive
+        // lowest tier; that must not 500 the public route.
+        loyaltyPercentValue = tier?.discountPercentage || 0;
+        loyaltyMaxValue = tier?.maxDiscountAmount;
       }
     }
     const sortByValue = typeof sortBy === "string" ? sortBy : undefined;
@@ -821,8 +823,11 @@ async function searchProjects(
             return buildProjectScheduleProposalsWithData(project, boundedProfessional, subprojectIndex, undefined, undefined, quantity);
           };
           const mainIndex = !project.executionDuration?.value && packages.length > 0 ? 0 : undefined;
-          const main = await proposalsFor(mainIndex);
           const subprojectProposals = await Promise.all(packages.map((_subproject: any, index: number) => proposalsFor(index)));
+          // Reuse the subproject proposal for `main` when it is the same call.
+          const main = typeof mainIndex === "number"
+            ? subprojectProposals[mainIndex]
+            : await proposalsFor(mainIndex);
           const availableDates = packages.length ? subprojectProposals : [main];
           const matchesDate = availableDates.some((proposal: any) => {
             if (!proposal?.earliestBookableDate) return false;
