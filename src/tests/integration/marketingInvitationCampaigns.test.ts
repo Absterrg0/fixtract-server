@@ -378,7 +378,7 @@ describeDb('invitation campaigns and lead audiences', () => {
       cookie: adminCookie,
     });
     expect(filtered.body.data.campaigns.map((campaign: any) => campaign._id).sort()).toEqual(
-      [String(invitation.insertedId), String(unknown.insertedId)].sort(),
+      [String(invitation.insertedId), String(unknown.insertedId), String(stillUnknown.insertedId)].sort(),
     );
 
     const legacyUpdate = await request('PATCH', `/api/admin/marketing-campaigns/${legacy.insertedId}`, {
