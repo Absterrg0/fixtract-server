@@ -41,6 +41,9 @@ vi.mock("../../models/project", () => {
       .map((person) => String(person._id)),
   );
   const runPipeline = (pipeline: any[]) => {
+    // $geoNear cannot be emulated in memory; an unhandled geo pipeline behaves
+    // like an empty result so the handler's address fallback is exercised.
+    if (pipeline.some((stage) => stage.$geoNear)) return [];
     let rows = [...mocks.projects];
     const eligible = eligibleOwners();
     for (const stage of pipeline) {
