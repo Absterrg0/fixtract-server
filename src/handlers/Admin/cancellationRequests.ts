@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import mongoose from "mongoose";
-import CancellationRequest from "../../models/cancellationRequest";
+import CancellationRequest, { ADMIN_ACTIONABLE_CANCELLATION_STATUSES } from "../../models/cancellationRequest";
 import Booking from "../../models/booking";
 import Payment from "../../models/payment";
 import User from "../../models/user";
@@ -21,7 +21,7 @@ import {
 } from "../../utils/refundFinalization";
 
 const VALID_STATUSES = ["pending", "processing", "negotiating", "escalated", "approved", "denied"] as const;
-const ADMIN_ACTIONABLE_STATUSES = ["pending", "escalated"];
+const ADMIN_ACTIONABLE_STATUSES = ADMIN_ACTIONABLE_CANCELLATION_STATUSES;
 
 const parsePagination = (query: any) => {
   const page = Math.max(1, Math.floor(Number(query.page) || 1));
