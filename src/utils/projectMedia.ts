@@ -50,8 +50,10 @@ export const projectMediaKeyFor = (url: unknown, ownerId: unknown): string | nul
   } catch {
     return null;
   }
-  const segments = decoded.split("/").filter(Boolean);
-  if (segments.length < 3) return null;
+  // Decoding turns %2F into "/", so check every decoded segment: an empty,
+  // "." or ".." segment never belongs to a key this module signs.
+  const segments = decoded.split("/");
+  if (segments.length < 3 || segments.some((s) => !s || s === "." || s === "..")) return null;
   const [root] = segments;
   if (root === "projects") {
     // projects/<projectId|temp>/<image|video>/<uploaderId>/<file>

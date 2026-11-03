@@ -92,3 +92,47 @@ describe("project media read contract", () => {
     );
   });
 });
+
+describe("project media key boundary", () => {
+  it("rejects decoded keys with empty, '.' or '..' segments before the owner check", async () => {
+    const traversal = [
+      // Percent-encoded slashes survive URL parsing and decode into '..' segments.
+      `${BUCKET}/projects/temp/image/${OWNER}/..%2F..%2F..%2F..%2Fid-proof%2F${OWNER}%2Fx.png`,
+      `${BUCKET}/projects/temp/image/${OWNER}/..%2Fcertification%2F${OWNER}%2Fa.pdf`,
+      `${BUCKET}/projects/temp/image/${OWNER}/.%2Fa.png`,
+      `${BUCKET}/projects/temp/image/${OWNER}/a%2F..%2Fb.png`,
+      `${BUCKET}/projects/temp/video/${OWNER}/..%2F..%2Fattachment%2F${OWNER}%2Fa.pdf`,
+      // Empty segments were hidden by filter(Boolean).
+      `${BUCKET}/projects/temp//image/${OWNER}/a.png`,
+      `${BUCKET}/projects//image/${OWNER}/a.png`,
+      `${BUCKET}/projects/temp/image/${OWNER}//a.png`,
+      `${BUCKET}/projects/temp/image/${OWNER}%2F%2Fa.png`,
+      `${BUCKET}/projects/temp/image/${OWNER}/a.png/`,
+      `${BUCKET}/project-images/${OWNER}/..%2F..%2Fid-proof%2Fx.png`,
+      `${BUCKET}/project-images//${OWNER}/a.png`,
+      `${BUCKET}/project-videos/${OWNER}/.%2Fa.mp4`,
+    ];
+    for (const url of traversal) {
+      expect(projectMediaKeyFor(url, OWNER), url).toBeNull();
+      expect(await signProjectMediaUrl(url, OWNER, DAY)).toBe(url);
+    }
+  });
+
+  it("keeps returning the key for valid modern and legacy media", () => {
+    expect(projectMediaKeyFor(IMAGE, OWNER)).toBe(
+      `projects/temp/image/${OWNER}/1730000000000-aabbccddeeff0011.png`,
+    );
+    expect(projectMediaKeyFor(VIDEO, OWNER)).toBe(
+      `projects/6650aa/video/${OWNER}/1730000000001-aabbccddeeff0012.mp4`,
+    );
+    expect(projectMediaKeyFor(`${BUCKET}/project-images/${OWNER}/a.png`, OWNER)).toBe(
+      `project-images/${OWNER}/a.png`,
+    );
+    expect(projectMediaKeyFor(`${BUCKET}/project-videos/${OWNER}/clip.mp4`, OWNER)).toBe(
+      `project-videos/${OWNER}/clip.mp4`,
+    );
+    expect(projectMediaKeyFor(`${BUCKET}/project-images/${OWNER}/2024/a%20b.png`, OWNER)).toBe(
+      `project-images/${OWNER}/2024/a b.png`,
+    );
+  });
+});
