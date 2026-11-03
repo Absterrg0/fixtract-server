@@ -181,7 +181,7 @@ export const handleWebhook = async (req: Request, res: Response) => {
     // acknowledged as an unknown event.
     switch (event.type as string) {
       case 'payment_intent.succeeded':
-        await handlePaymentIntentSucceeded(event.data.object as Stripe.PaymentIntent);
+        await handlePaymentIntentSucceeded(event.data.object as Stripe.PaymentIntent, event.id);
         break;
 
       case 'payment_intent.payment_failed':
@@ -255,9 +255,68 @@ export const handleWebhook = async (req: Request, res: Response) => {
 };
 
 /**
+ * Durable manual-reconciliation marker for a succeeded PaymentIntent that is
+ * no longer the booking's current intent (for example the cancel in
+ * createPaymentIntent failed because the old intent was already processing).
+ * The stale success is never applied to the current payment; this only makes
+ * the possible charge operator-queryable on the event's StripeEvent record
+ * (exempt from its TTL). No refund, retry or provider call is made here.
+ *
+ * An intent the booking already recorded as settled (its per-payment ledger
+ * entry exists) is a redelivery of an applied payment, not a new charge, so it
+ * needs no marker. Idempotent per PaymentIntent: a redelivery, or another
+ * event for the same intent, keeps the first marker. Returns true when this
+ * call wrote the marker.
+ */
+async function recordSupersededIntentReconciliation(
+  eventId: string,
+  bookingId: mongoose.Types.ObjectId,
+  paymentIntent: Stripe.PaymentIntent,
+  currentIntentId: string,
+): Promise<boolean> {
+  const alreadyApplied = await Booking.exists({
+    _id: bookingId,
+    'paymentDiscountLedger.paymentIntentId': paymentIntent.id,
+  });
+  if (alreadyApplied) return false;
+  const alreadyMarked = await StripeEvent.exists({
+    'reconciliation.required': true,
+    'reconciliation.paymentIntentId': paymentIntent.id,
+  });
+  if (alreadyMarked) return false;
+  const currency = (paymentIntent.currency || '').toUpperCase() || undefined;
+  const amount = typeof paymentIntent.amount === 'number'
+    ? convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency || 'eur')
+    : undefined;
+  const latestCharge = paymentIntent.latest_charge;
+  const chargeId = typeof latestCharge === 'string' ? latestCharge : latestCharge?.id;
+  const result = await StripeEvent.updateOne(
+    { eventId, reconciliation: { $exists: false } },
+    {
+      $set: {
+        reconciliation: {
+          required: true,
+          reason: 'superseded_payment_intent_succeeded',
+          bookingId,
+          paymentIntentId: paymentIntent.id,
+          currentPaymentIntentId: currentIntentId,
+          ...(chargeId ? { chargeId } : {}),
+          ...(amount !== undefined ? { amount } : {}),
+          ...(currency ? { currency } : {}),
+          detectedAt: new Date(),
+          resolvedAt: null,
+        },
+      },
+      $unset: { expiresAt: 1 },
+    },
+  );
+  return result.modifiedCount === 1;
+}
+
+/**
  * Handle payment_intent.succeeded event
  */
-async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent) {
+async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent, eventId: string) {
   if (paymentIntent.metadata.type === 'extra_cost') {
     await handleExtraCostPaymentSucceeded(paymentIntent);
     return;
@@ -273,8 +332,17 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
   // current milestone paid or stamp its charge on the current payment.
   const currentIntentId = booking.payment.stripePaymentIntentId;
   if (currentIntentId && currentIntentId !== paymentIntent.id) {
+    // Persist the operator marker before acknowledging: if this write fails
+    // the event is marked failed and Stripe retries it.
+    const marked = await recordSupersededIntentReconciliation(
+      eventId,
+      booking._id as mongoose.Types.ObjectId,
+      paymentIntent,
+      currentIntentId,
+    );
     console.error(
-      `[WEBHOOK] payment_intent.succeeded ${paymentIntent.id} is not booking ${bookingId}'s current intent ${currentIntentId}; not applied, reconcile manually`,
+      `[WEBHOOK] payment_intent.succeeded ${paymentIntent.id} is not booking ${bookingId}'s current intent ${currentIntentId}; not applied`
+        + (marked ? `, reconciliation marker recorded on StripeEvent ${eventId}` : ''),
     );
     return;
   }
