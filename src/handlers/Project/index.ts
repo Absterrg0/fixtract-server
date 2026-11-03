@@ -31,29 +31,27 @@ import { withArticle47ProfessionalQuestion } from "../../utils/vatManagement";
 import { pruneDraftArticle47Answers } from "../../utils/projectDraftVatAnswers";
 import { withAnonymizationWriteFence, ACCOUNT_WRITE_FENCE_CODE } from "../../utils/support/accountGuard";
 import { denyUnlessPermission } from "../../utils/adminRbac/assertPermission";
+import {
+  isLostProjectTransition,
+  PROJECT_STATUS_CONFLICT,
+  projectTransitionGuard,
+  saveProjectWithFence,
+} from "../../utils/projectConditionalSave";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
 /**
- * Document save inside the anonymization write fence (model save hooks run).
- * `expected` adds conditions to the save's own update filter (Mongoose
- * `doc.$where`), so a transition read earlier writes only if the stored
- * project still matches; otherwise the save throws DocumentNotFoundError (or
- * VersionError when it also bumps the version) and nothing is written.
+ * 409 for a lifecycle transition whose conditional save lost a race (see
+ * `saveProjectWithFence`). `currentStatus` is read with the caller's own
+ * scope, so it is omitted when the project is no longer visible to them.
  */
-const saveProjectWithFence = async (project: any, userId: string, expected?: Record<string, unknown>) =>
-  withAnonymizationWriteFence(
-    [userId, (project as any).professionalId?._id || (project as any).professionalId],
-    async (session) => {
-      const previousWhere = project.$where;
-      if (expected) project.$where = { ...(previousWhere || {}), ...expected };
-      try {
-        await project.save(session ? { session } : undefined);
-      } finally {
-        if (expected) project.$where = previousWhere;
-      }
-      return project;
-    },
-  );
+const sendProjectStatusConflict = async (res: Response, scope: Record<string, unknown>) => {
+  const latest = await Project.findOne(scope).select("status").lean();
+  return res.status(409).json({
+    error: "Project status changed while updating; reload and try again",
+    code: PROJECT_STATUS_CONFLICT,
+    ...(latest ? { currentStatus: (latest as any).status } : {}),
+  });
+};
 
 let cachedWindowFieldsSupport: boolean | null = null;
 const mongoHasWindowFields = async (): Promise<boolean> => {
@@ -1912,6 +1910,11 @@ export const submitProject = async (req: Request, res: Response) => {
         .json({ error: "Project cannot be submitted in current status" });
     }
 
+    // Every write below (failed checks, auto-approval, admin review, first
+    // submission) applies only to the status and owner read above: an archive
+    // (or any other transition) committed meanwhile wins with a 409.
+    const expected = projectTransitionGuard(project);
+
     console.log("[PROJECT] Project validation passed, running quality checks...");
 
     const qualityChecks = [];
@@ -1958,7 +1961,7 @@ export const submitProject = async (req: Request, res: Response) => {
 
     if (failedChecks.length > 0) {
       project.qualityChecks = qualityChecks;
-      await saveProjectWithFence(project, professionalId);
+      await saveProjectWithFence(project, professionalId, expected);
       return res.status(400).json({
         error: "Quality checks failed",
         qualityChecks: failedChecks,
@@ -1998,7 +2001,7 @@ export const submitProject = async (req: Request, res: Response) => {
         project.reapprovalType = undefined;
         project.isResubmission = false;
 
-        await saveProjectWithFence(project, professionalId);
+        await saveProjectWithFence(project, professionalId, expected);
         return res.json({
           message: "Changes approved automatically",
           id: project._id,
@@ -2016,7 +2019,7 @@ export const submitProject = async (req: Request, res: Response) => {
       project.approvedAt = undefined;
       project.approvedBy = undefined;
 
-      await saveProjectWithFence(project, professionalId);
+      await saveProjectWithFence(project, professionalId, expected);
       console.log(`[PROJECT] Resubmission sent to admin for review (type: ${reapprovalType})`);
       return res.json({
         message: "Changes submitted for admin review",
@@ -2036,7 +2039,7 @@ export const submitProject = async (req: Request, res: Response) => {
       project.adminFeedback = undefined;
     }
 
-    await saveProjectWithFence(project, professionalId);
+    await saveProjectWithFence(project, professionalId, expected);
 
     const message = isResubmission
       ? "Project resubmitted for approval"
@@ -2046,6 +2049,9 @@ export const submitProject = async (req: Request, res: Response) => {
 
     res.json({ message, id: project._id, status: project.status, submittedAt: project.submittedAt });
   } catch (error: any) {
+    if (isLostProjectTransition(error)) {
+      return sendProjectStatusConflict(res, { _id: req.params.id, professionalId: req.user?.id });
+    }
     console.error("[PROJECT] Submit project error:", error);
     console.error("Error stack:", error.stack);
     res.status(500).json({ error: "Failed to submit project. Please try again." });
@@ -2162,6 +2168,7 @@ export const updateProjectStatus = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Status transition not allowed" });
     }
 
+    const expected = projectTransitionGuard(project);
     project.onHoldAt = status === "on_hold" ? new Date() : undefined;
     project.status = status as any;
     try {
@@ -2169,18 +2176,10 @@ export const updateProjectStatus = async (req: Request, res: Response) => {
       // was read from and still owned by the caller: a concurrent archive (or
       // another hold/resume) that committed after the read wins, and the stale
       // transition is reported instead of overwriting it.
-      await saveProjectWithFence(project, professionalId, { status: currentStatus, professionalId: project.professionalId });
+      await saveProjectWithFence(project, professionalId, expected);
     } catch (error) {
-      // No stored document matched the save filter. Mongoose reports that as
-      // DocumentNotFoundError, or as VersionError when the save also bumps
-      // the document version (array paths changed).
-      if (error instanceof mongoose.Error.DocumentNotFoundError || error instanceof mongoose.Error.VersionError) {
-        const latest = await Project.findById(id).select("status").lean();
-        return res.status(409).json({
-          error: "Project status changed while updating; reload and try again",
-          code: "PROJECT_STATUS_CONFLICT",
-          ...(latest ? { currentStatus: (latest as any).status } : {}),
-        });
+      if (isLostProjectTransition(error)) {
+        return sendProjectStatusConflict(res, { _id: id });
       }
       throw error;
     }
@@ -2230,10 +2229,27 @@ export const archiveProject = async (req: Request, res: Response) => {
       return res.json({ success: true, project });
     }
 
+    // Archive only the status and owner it was decided from: a hold/resume,
+    // submission, restore or owner change committed after this read wins,
+    // and the stale archive is reported instead of recording the wrong
+    // pre-archive status.
+    const expected = projectTransitionGuard(project);
     project.statusBeforeArchive = project.status as any;
     project.archivedAt = new Date();
     project.status = "archived" as any;
-    await saveProjectWithFence(project, userId);
+    try {
+      await saveProjectWithFence(project, userId, expected);
+    } catch (error) {
+      if (!isLostProjectTransition(error)) throw error;
+      const scope = isAdmin ? { _id: id } : { _id: id, professionalId: userId };
+      // A concurrent archive already reached the requested state: keep the
+      // endpoint idempotent and return the stored (winning) archive.
+      const latest = await Project.findOne({ ...scope, status: "archived" });
+      if (latest) {
+        return res.json({ success: true, project: latest });
+      }
+      return sendProjectStatusConflict(res, scope);
+    }
     res.json({ success: true, project });
   } catch (error) {
     res.status(500).json({ error: "Failed to archive project" });
@@ -2282,11 +2298,25 @@ export const restoreProject = async (req: Request, res: Response) => {
     // draft so the publish/approval flow runs again. Other verified states
     // restore to their recorded pre-archive status.
     const previous = project.statusBeforeArchive;
+    // Restore only the archive this decision was read from: same owner, and
+    // the same archive episode (pre-archive status and archive time), so a
+    // concurrent restore, or a restore followed by a new archive, is never
+    // undone with a stale pre-archive status. `null` matches a missing field.
+    const expected = {
+      ...projectTransitionGuard(project),
+      statusBeforeArchive: previous ?? null,
+      archivedAt: project.archivedAt ?? null,
+    };
     const restorable = ["draft", "pending", "rejected", "on_hold", "suspended"];
     project.status = (previous && restorable.includes(previous) ? previous : "draft") as any;
     project.statusBeforeArchive = undefined;
     project.archivedAt = undefined;
-    await saveProjectWithFence(project, userId);
+    try {
+      await saveProjectWithFence(project, userId, expected);
+    } catch (error) {
+      if (!isLostProjectTransition(error)) throw error;
+      return sendProjectStatusConflict(res, isAdmin ? { _id: id } : { _id: id, professionalId: userId });
+    }
     res.json({ success: true, project });
   } catch (error) {
     res.status(500).json({ error: "Failed to restore project" });

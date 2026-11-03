@@ -6,6 +6,12 @@ import Favorite from '../../models/favorite';
 import { invalidateFavoritesOverviewCache } from '../Admin/favoritesAdmin';
 import { normalizePreparationDuration } from '../../utils/projectDurations';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
+import {
+  isLostProjectTransition,
+  PROJECT_STATUS_CONFLICT,
+  projectTransitionGuard,
+  saveProjectWithFence,
+} from '../../utils/projectConditionalSave';
 
 /**
  * Save project draft (create or update)
@@ -235,12 +241,24 @@ export const submitProject = async (req: Request, res: Response) => {
     // Perform quality checks here
     const qualityChecks = performQualityChecks(project);
 
+    // Submit only the draft read above: an archive (or other transition)
+    // committed meanwhile wins with a 409 instead of being reopened.
+    const expected = projectTransitionGuard(project);
     project.status = 'pending';
     project.submittedAt = new Date();
     project.qualityChecks = qualityChecks;
-    await withAnonymizationWriteFence([userId], async (session) => {
-      await project.save(session ? { session } : undefined);
-    });
+    try {
+      await saveProjectWithFence(project, userId, expected);
+    } catch (error) {
+      if (!isLostProjectTransition(error)) throw error;
+      const latest = await Project.findOne({ _id: id, professionalId: userId }).select('status').lean();
+      return res.status(409).json({
+        success: false,
+        message: 'Project status changed while submitting; reload and try again',
+        code: PROJECT_STATUS_CONFLICT,
+        ...(latest ? { currentStatus: (latest as any).status } : {}),
+      });
+    }
 
     res.status(200).json({
       success: true,
