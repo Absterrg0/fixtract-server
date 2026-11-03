@@ -2,26 +2,49 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Types } from "mongoose";
 
 /**
- * Cooperative cancellation of the real schedule day search. Only the
- * database reads are stand-ins (no team blocks, no bookings, no shared
- * calendar), so the 181-day search itself runs for real.
+ * Cooperative cancellation and the wall-clock budget of the real schedule
+ * day search. Only the database reads are stand-ins (no team blocks, no
+ * bookings; shared-calendar intervals per test), so the search itself runs
+ * for real. `Date` is pinned for every test; timers and `performance.now()`
+ * stay real.
  */
 
+const db = vi.hoisted(() => ({
+  busy: new Map<string, Array<{ start: Date; end: Date }>>(),
+  project: null as any,
+  professional: null as any,
+}));
+
 vi.mock("../../models/user", () => ({
-  default: { find: () => ({ select: async () => [] }), findById: () => ({ select: async () => null }) },
+  default: {
+    find: () => ({ select: async () => [] }),
+    findById: () => ({
+      select: () => {
+        const result: any = Promise.resolve(db.professional);
+        result.lean = async () => db.professional;
+        return result;
+      },
+    }),
+  },
 }));
 vi.mock("../../models/booking", () => ({
   default: { find: () => ({ select: async () => [] }) },
 }));
-vi.mock("../../models/project", () => ({ default: { findOne: async () => null } }));
+vi.mock("../../models/project", () => ({
+  default: { findOne: async () => null, findById: () => ({ lean: async () => db.project }) },
+}));
 vi.mock("../../utils/support/calendarBusy", () => ({
-  loadSharedCalendarBusy: async () => ({ byUser: new Map(), sources: [] }),
+  loadSharedCalendarBusy: async (ids: string[]) => ({
+    byUser: new Map(ids.filter((id) => db.busy.has(id)).map((id) => [id, db.busy.get(id)!])),
+    sources: [],
+  }),
 }));
 
 import {
   ScheduleSearchAbortedError,
   buildProjectScheduleProposalsWithData,
 } from "../../utils/scheduleEngine";
+import { computeQuoteFirstPossibleStartBounded } from "../../utils/bookingDetails/quoteFirstStart";
 
 const NOW = new Date("2026-11-03T09:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -60,8 +83,12 @@ const countingSignal = (isAborted: () => boolean) => {
 
 describe("schedule search cooperative cancellation", () => {
   beforeEach(() => {
+    // Only Date is faked: setTimeout, setImmediate and performance.now() are real.
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(NOW);
+    db.busy.clear();
+    db.project = null;
+    db.professional = null;
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -110,7 +137,10 @@ describe("schedule search cooperative cancellation", () => {
   });
 
   it("lets a caller timer fire during the synchronous search and abort it", async () => {
-    vi.useRealTimers();
+    // The pinned clock stays in force (the 181-day window must stay inside
+    // the fixed blocked range whatever today's real date is); only timers
+    // are real.
+    expect(Date.now()).toBe(NOW.getTime());
     const controller = new AbortController();
     const { signal, state } = countingSignal(() => controller.signal.aborted);
     const search = buildProjectScheduleProposalsWithData(
@@ -130,5 +160,79 @@ describe("schedule search cooperative cancellation", () => {
     const readsAtAbort = state.reads;
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(state.reads).toBe(readsAtAbort);
+  });
+  describe("multi-resource worst case within one day", () => {
+    // 14 resources, minResources 7: C(14,7) = 3,432 subsets. Every member is
+    // free on the first search day (so it passes the start-day check) and
+    // busy for the next 2,000 days, so no subset can complete a 2-day
+    // execution and each one scans the full 1,830-day overlap guard. All of
+    // it is synchronous work inside the first searched day.
+    const members = Array.from({ length: 14 }, () => new Types.ObjectId().toHexString());
+    const blockedProject = () => ({
+      _id: new Types.ObjectId(),
+      professionalId: new Types.ObjectId(),
+      resources: members,
+      minResources: 7,
+      minOverlapPercentage: 100,
+    });
+    const utcProfessional = () => ({ _id: new Types.ObjectId(), businessInfo: { timezone: "UTC" } });
+    const blockAfterFirstDay = () => {
+      const start = new Date("2026-11-04T00:00:00.000Z");
+      const end = new Date(start.getTime() + 2000 * DAY_MS);
+      for (const member of members) db.busy.set(member, [{ start, end }]);
+    };
+
+    it("stops at the wall-clock deadline inside the first day's subset search", async () => {
+      blockAfterFirstDay();
+      const started = performance.now();
+      const error = await buildProjectScheduleProposalsWithData(
+        blockedProject(), utcProfessional(), undefined, daysOverride, undefined, 1, { deadlineAt: started + 50 },
+      ).then(() => null, (caught) => caught);
+      const elapsed = performance.now() - started;
+      expect(error).toBeInstanceOf(ScheduleSearchAbortedError);
+      expect(error.reason).toBe("deadline");
+      // Stopped inside day 0, i.e. inside the subset/overlap loops, not at a
+      // later per-day check.
+      expect(error.dayOffset).toBe(0);
+      // Generous bound: the unbounded day takes many seconds of CPU.
+      expect(elapsed).toBeLessThan(2000);
+      expect(Date.now()).toBe(NOW.getTime());
+    });
+
+    it("bounds the quote first-start call even though its timer cannot fire during the day", async () => {
+      blockAfterFirstDay();
+      db.project = blockedProject();
+      db.professional = utcProfessional();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const booking = { _id: new Types.ObjectId(), project: String(db.project._id) };
+      const durations = { executionDuration: { value: 2, unit: "days" } };
+      const started = performance.now();
+      await expect(computeQuoteFirstPossibleStartBounded(booking, durations, 50)).resolves.toBeNull();
+      const elapsed = performance.now() - started;
+      // The race's timer can only run once the synchronous day work ends, so
+      // returning this early means the engine itself stopped at the
+      // forwarded deadline.
+      expect(elapsed).toBeLessThan(2000);
+      // A deadline stop is not logged as a failure.
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it("returns identical multi-resource proposals with and without a generous budget", async () => {
+      const team = members.slice(0, 4);
+      // Partial personal blocks so subset selection and overlap matter.
+      db.busy.set(team[0], [{ start: new Date("2026-11-04T00:00:00.000Z"), end: new Date("2026-11-10T00:00:00.000Z") }]);
+      db.busy.set(team[1], [{ start: new Date("2026-11-03T00:00:00.000Z"), end: new Date("2026-11-06T00:00:00.000Z") }]);
+      for (const [override, minOverlapPercentage] of [[daysOverride, 100], [daysOverride, 50], [hoursOverride, 100]] as const) {
+        const proj = { ...blockedProject(), resources: team, minResources: 2, minOverlapPercentage };
+        const pro = utcProfessional();
+        const baseline = await buildProjectScheduleProposalsWithData(proj, pro, undefined, override, undefined, 1);
+        const withBudget = await buildProjectScheduleProposalsWithData(
+          proj, pro, undefined, override, undefined, 1, { deadlineAt: performance.now() + 60_000 },
+        );
+        expect(baseline?.earliestProposal).toBeTruthy();
+        expect(withBudget).toEqual(baseline);
+      }
+    });
   });
 });

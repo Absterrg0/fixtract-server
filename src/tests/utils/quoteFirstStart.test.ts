@@ -205,9 +205,15 @@ describe("bounded first-start wait for quote saves", () => {
   it("aborts the schedule search when the deadline passes and leaves it live otherwise", async () => {
     vi.useFakeTimers();
     try {
+      const before = performance.now();
       await computeQuoteFirstPossibleStartBounded(booking(), durations);
+      const after = performance.now();
       const onTime = mocks.proposalsCalls.at(-1)[6];
       expect(onTime.signal.aborted).toBe(false);
+      // The same budget is forwarded as a wall-clock deadline, which the
+      // engine checks inside its synchronous loops.
+      expect(onTime.deadlineAt).toBeGreaterThanOrEqual(before + QUOTE_FIRST_START_TIMEOUT_MS);
+      expect(onTime.deadlineAt).toBeLessThanOrEqual(after + QUOTE_FIRST_START_TIMEOUT_MS);
 
       let release!: () => void;
       mocks.proposalsGate = new Promise<void>((resolve) => { release = resolve; });
