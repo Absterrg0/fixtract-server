@@ -199,18 +199,42 @@ const transferResolvedExtraCostIfNeeded = async (resolvedBooking: any, finalExtr
   }
 };
 
+// Warranty claims and escalated customer refund requests are their own
+// records with their own admin queues (/admin/warranty-claims,
+// /admin/cancellation-requests). The dispute page previews the active ones so
+// they can be actioned there, but they are never booking disputes: the booking
+// dispute list, its pagination and the analytics totals exclude them, and
+// their own counts are reported separately (`separateQueues`).
+const ACTIVE_WARRANTY_CLAIM_FILTER = { status: { $in: ['open', 'proposal_sent', 'proposal_accepted', 'escalated'] } };
+const ESCALATED_REFUND_REQUEST_FILTER = { requestedRole: 'customer', status: 'escalated' };
+const WARRANTY_QUEUE_HREF = '/admin/warranty-claims';
+const REFUND_QUEUE_HREF = '/admin/cancellation-requests?status=escalated';
+
+export const countSeparateDisputeQueues = async () => {
+  const [activeWarrantyClaims, escalatedRefundRequests] = await Promise.all([
+    WarrantyClaim.countDocuments(ACTIVE_WARRANTY_CLAIM_FILTER),
+    CancellationRequest.countDocuments(ESCALATED_REFUND_REQUEST_FILTER),
+  ]);
+  return {
+    activeWarrantyClaims,
+    escalatedRefundRequests,
+    warrantyClaimsHref: WARRANTY_QUEUE_HREF,
+    refundRequestsHref: REFUND_QUEUE_HREF,
+  };
+};
+
 const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> => {
   if (statusFilter === 'resolved') return [];
 
   const [warrantyClaims, refundRequests] = await Promise.all([
-    WarrantyClaim.find({ status: { $in: ['open', 'proposal_sent', 'proposal_accepted', 'escalated'] } })
+    WarrantyClaim.find(ACTIVE_WARRANTY_CLAIM_FILTER)
       .populate({ path: 'booking', select: '_id bookingNumber status payment project warrantyCoverage actualEndDate', populate: { path: 'project', select: 'title category service' } })
       .populate('customer', 'name email isAnonymized deletedAt')
       .populate('professional', 'name email username isAnonymized deletedAt')
       .sort({ openedAt: -1 })
       .limit(50)
       .lean(),
-    CancellationRequest.find({ requestedRole: 'customer', status: 'escalated' })
+    CancellationRequest.find(ESCALATED_REFUND_REQUEST_FILTER)
       .populate({ path: 'booking', select: '_id bookingNumber status payment project professional actualStartDate scheduledStartDate cancellation', populate: { path: 'project', select: 'title category service' } })
       .populate('requestedBy', 'name email isAnonymized deletedAt')
       .sort({ escalatedAt: -1 })
@@ -226,7 +250,7 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
       _id: `warranty:${claim._id}`,
       source: 'warranty',
       readOnly: true,
-      resolveHref: '/admin/warranty-claims',
+      resolveHref: WARRANTY_QUEUE_HREF,
       bookingId: booking._id ? String(booking._id) : undefined,
       claimStatus: claim.status,
       claimNumber: claim.claimNumber,
@@ -262,7 +286,7 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
       _id: `refund:${request._id}`,
       source: 'refund',
       readOnly: true,
-      resolveHref: '/admin/cancellation-requests',
+      resolveHref: REFUND_QUEUE_HREF,
       bookingId: booking._id ? String(booking._id) : undefined,
       bookingNumber: booking.bookingNumber || '(refund request)',
       status: booking.status || '',
@@ -319,6 +343,8 @@ export const getDisputes = async (req: Request, res: Response) => {
       Booking.countDocuments(filter),
     ]);
 
+    // Preview of the separate warranty/refund queues, page 1 only. They are not
+    // part of `disputes` or `pagination` (booking disputes only).
     const externalRows = pageNum === 1 ? await buildExternalDisputeRows(typeof status === 'string' ? status : undefined) : [];
 
     await Promise.all(disputes.map((d: any) => presignBookingAttachments(d)));
@@ -976,14 +1002,20 @@ export const resolveDispute = async (req: Request, res: Response) => {
 
 export const getDisputeAnalytics = async (_req: Request, res: Response) => {
   try {
+    // totalOpen / totalResolved / totalDisputes count booking disputes only,
+    // with exactly the filters of the Open / Resolved / All list views.
+    // Warranty claims and refund requests are reported separately and are
+    // never added into these totals.
     const [
       totalOpen,
       totalResolved,
       totalDisputes,
+      separateQueues,
     ] = await Promise.all([
       Booking.countDocuments(buildDisputeFilter('open')),
       Booking.countDocuments(buildDisputeFilter('resolved')),
       Booking.countDocuments(buildDisputeFilter()),
+      countSeparateDisputeQueues(),
     ]);
 
     return res.json({
@@ -992,6 +1024,7 @@ export const getDisputeAnalytics = async (_req: Request, res: Response) => {
         totalOpen,
         totalResolved,
         totalDisputes,
+        separateQueues,
       }
     });
   } catch (error: any) {
