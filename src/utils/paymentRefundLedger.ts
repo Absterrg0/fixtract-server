@@ -1,8 +1,13 @@
+import { Types } from 'mongoose';
 import Payment from '../models/payment';
 import {
   basePaymentRowDefaults,
   basePaymentRowFilter,
 } from './paymentRefunds';
+import {
+  overviewLedgerFromPaymentRows,
+  type OverviewRefundLedger,
+} from './bookingDetails/overviewRows';
 
 const str = (value: unknown): string | null =>
   typeof value === 'string' && value.trim() ? value : null;
@@ -33,6 +38,36 @@ export const loadBasePaymentRows = async (
     // base row only when it is not a milestone row (already filtered above).
     return !rowIntent || rowIntent === intent;
   });
+};
+
+/**
+ * Refund ledger facts for a page of already-authorized bookings, in one query
+ * (no per-row reads). Reads only the booking-level Payment rows (the refund
+ * ledger; milestone rows hold no refunds) and only the refund amount, kind,
+ * status and provider id needed to deduplicate. Every requested id gets an
+ * entry: a booking without stored rows has a loaded, empty ledger.
+ */
+export const loadOverviewRefundLedgers = async (
+  bookingIds: Array<Types.ObjectId | string>,
+): Promise<Map<string, OverviewRefundLedger>> => {
+  const ids = [...new Set(bookingIds.map((id) => String(id)))].filter((id) => Types.ObjectId.isValid(id));
+  const ledgers = new Map<string, OverviewRefundLedger>();
+  if (ids.length === 0) return ledgers;
+  const rows = await Payment.find({
+    booking: { $in: ids.map((id) => new Types.ObjectId(id)) },
+    milestoneIndex: null,
+  })
+    .select('_id booking refunds.amount refunds.kind refunds.status refunds.refundId refunds.refundedAt')
+    .lean();
+  const byBooking = new Map<string, any[]>();
+  for (const row of rows as any[]) {
+    const key = String(row.booking);
+    const list = byBooking.get(key) || [];
+    list.push(row);
+    byBooking.set(key, list);
+  }
+  for (const id of ids) ledgers.set(id, overviewLedgerFromPaymentRows(byBooking.get(id) || []));
+  return ledgers;
 };
 
 /**
