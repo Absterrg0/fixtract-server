@@ -13,6 +13,7 @@ import User from '../../models/user';
 import StripeEvent from '../../models/stripeEvent';
 import DiscountCode from '../../models/discountCode';
 import DiscountCodeUsage from '../../models/discountCodeUsage';
+import { recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger';
 import { convertFromStripeAmount } from '../../utils/payment';
 import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
 import { deductPoints } from '../../utils/pointsSystem';
@@ -267,6 +268,17 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
   const booking = await Booking.findById(bookingId);
   if (!booking || !booking.payment) return;
 
+  // A late event for a superseded intent (e.g. milestone 1 delivered after
+  // the milestone 2 checkout replaced booking.payment) must not mark the
+  // current milestone paid or stamp its charge on the current payment.
+  const currentIntentId = booking.payment.stripePaymentIntentId;
+  if (currentIntentId && currentIntentId !== paymentIntent.id) {
+    console.error(
+      `[WEBHOOK] payment_intent.succeeded ${paymentIntent.id} is not booking ${bookingId}'s current intent ${currentIntentId}; not applied, reconcile manually`,
+    );
+    return;
+  }
+
   const now = new Date();
   const msIdx = (booking.payment as any).milestoneIndex;
   const isMilestone = typeof msIdx === 'number'
@@ -335,6 +347,9 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
           currency: (paymentIntent.currency || 'EUR').toUpperCase(),
         });
       }
+      // The other writer may have stopped before the ledger write; this is
+      // idempotent and only matches while booking.payment is this intent.
+      await recordPaymentDiscountSnapshot(booking._id, booking.payment, paymentIntent.id, now);
       return;
     }
 
@@ -443,6 +458,11 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
         currency,
       });
     }
+
+    // Keep this payment's discount after a later milestone checkout replaces
+    // booking.payment. A failure here fails the event so Stripe retries; the
+    // retry takes the branch below, which records the entry idempotently.
+    await recordPaymentDiscountSnapshot(booking._id, booking.payment, paymentIntent.id, now);
   } else {
     // confirmPayment (sync frontend call) may have already flipped
     // pending->authorized before this webhook ran. Ensure the post-payment
@@ -465,6 +485,9 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
         currency,
       });
     }
+    // Duplicate delivery, Stripe retry or confirmPayment won the race: record
+    // the discount snapshot if it is still missing (idempotent).
+    await recordPaymentDiscountSnapshot(booking._id, booking.payment, paymentIntent.id, now);
   }
 }
 

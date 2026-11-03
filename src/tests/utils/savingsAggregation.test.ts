@@ -150,3 +150,143 @@ it('keeps earlier paid milestones visible after the next milestone payment repla
   expect(singlePaid.complete).toBe(true);
   expect(singlePaid.groups[0].totalRecorded).toBe(8);
 });
+
+describe('per-payment discount ledger', () => {
+  const entry = (paymentIntentId: string, milestoneIndex: number | undefined, loyaltyAmount: number, originalAmount = 100) => ({
+    paymentIntentId,
+    ...(milestoneIndex === undefined ? {} : { milestoneIndex }),
+    currency: 'EUR',
+    loyaltyAmount,
+    repeatBuyerAmount: 0,
+    pointsDiscountAmount: 0,
+    codeDiscountAmount: 0,
+    originalAmount,
+    totalDiscount: loyaltyAmount,
+  });
+
+  it('keeps a paid milestone discount while the next milestone checkout is pending', () => {
+    const summary = aggregateRecordedSavings([{
+      status: 'in_progress',
+      payment: {
+        status: 'pending', currency: 'EUR', stripePaymentIntentId: 'pi_2', milestoneIndex: 1,
+        discount: { loyaltyAmount: 4, originalAmount: 60 },
+      },
+      milestonePayments: [{ status: 'paid' }, { status: 'pending' }],
+      paymentDiscountLedger: [entry('pi_1', 0, 10)],
+    }]);
+    expect(summary.complete).toBe(true);
+    expect(summary.settledPaymentCount).toBe(1);
+    expect(summary.groups[0].totalRecorded).toBe(10);
+    expect(summary.groups[0].byType.loyalty).toBe(10);
+  });
+
+  it('adds the second milestone once, whether it comes from the ledger or the legacy snapshot', () => {
+    const base = {
+      status: 'in_progress',
+      payment: {
+        status: 'authorized', currency: 'EUR', stripePaymentIntentId: 'pi_2', milestoneIndex: 1,
+        discount: { loyaltyAmount: 4, originalAmount: 60 },
+      },
+      milestonePayments: [{ status: 'paid' }, { status: 'paid' }],
+    };
+    const both = aggregateRecordedSavings([{ ...base, paymentDiscountLedger: [entry('pi_1', 0, 10), entry('pi_2', 1, 4, 60)] }]);
+    expect(both.groups[0].totalRecorded).toBe(14);
+    expect(both.settledPaymentCount).toBe(2);
+    expect(both.complete).toBe(true);
+    expect(both.groups[0].bookingCount).toBe(1);
+    // Ledger write for milestone 2 still missing: the current snapshot is its own source.
+    const legacySecond = aggregateRecordedSavings([{ ...base, paymentDiscountLedger: [entry('pi_1', 0, 10)] }]);
+    expect(legacySecond.groups[0].totalRecorded).toBe(14);
+    expect(legacySecond.complete).toBe(true);
+  });
+
+  it('ignores duplicated ledger rows for the same intent or milestone', () => {
+    const summary = aggregateRecordedSavings([{
+      payment: { status: 'authorized', currency: 'EUR', stripePaymentIntentId: 'pi_2', milestoneIndex: 1 },
+      milestonePayments: [{ status: 'paid' }, { status: 'pending' }],
+      paymentDiscountLedger: [entry('pi_1', 0, 10), entry('pi_1', 0, 10), entry('pi_x', 0, 99)],
+    }]);
+    expect(summary.groups[0].totalRecorded).toBe(10);
+    expect(summary.settledPaymentCount).toBe(1);
+  });
+
+  it('never counts ledger rows for milestones that are not paid', () => {
+    const summary = aggregateRecordedSavings([{
+      payment: { status: 'pending', currency: 'EUR', stripePaymentIntentId: 'pi_2', milestoneIndex: 1 },
+      milestonePayments: [{ status: 'pending' }, { status: 'pending' }],
+      paymentDiscountLedger: [entry('pi_2', 1, 10)],
+    }]);
+    expect(summary.groups).toEqual([]);
+    expect(summary.settledBookingCount).toBe(0);
+  });
+
+  it('treats a zero-discount ledger row as a recorded zero, not unknown', () => {
+    const summary = aggregateRecordedSavings([{
+      payment: { status: 'completed', currency: 'EUR', stripePaymentIntentId: 'pi_1' },
+      paymentDiscountLedger: [entry('pi_1', undefined, 0, 0)],
+    }]);
+    expect(summary.complete).toBe(true);
+    expect(summary.unrecordedPaymentCount).toBe(0);
+    expect(summary.groups[0].totalRecorded).toBe(0);
+  });
+
+  it('prefers the ledger row over the current snapshot for the same intent (no double count)', () => {
+    const summary = aggregateRecordedSavings([{
+      payment: {
+        status: 'completed', currency: 'EUR', stripePaymentIntentId: 'pi_1',
+        discount: { loyaltyAmount: 10, originalAmount: 100 },
+      },
+      paymentDiscountLedger: [entry('pi_1', undefined, 10)],
+    }]);
+    expect(summary.groups[0].totalRecorded).toBe(10);
+  });
+
+  it('keeps pre-ledger milestones replaced by a later checkout explicitly unrecorded', () => {
+    const summary = aggregateRecordedSavings([{
+      payment: {
+        status: 'authorized', currency: 'EUR', stripePaymentIntentId: 'pi_3', milestoneIndex: 2,
+        discount: { loyaltyAmount: 3, originalAmount: 30 },
+      },
+      milestonePayments: [{ status: 'paid' }, { status: 'paid' }, { status: 'paid' }],
+      paymentDiscountLedger: [entry('pi_2', 1, 5, 50)],
+    }]);
+    expect(summary.settledPaymentCount).toBe(3);
+    expect(summary.unrecordedPaymentCount).toBe(1);
+    expect(summary.unrecordedBookingCount).toBe(1);
+    expect(summary.complete).toBe(false);
+    expect(summary.groups[0].coverage).toBe('partial');
+    expect(summary.groups[0].totalRecorded).toBe(8);
+  });
+
+  it('classifies refunds and disputes on milestone bookings as uncertain, never summed', () => {
+    const milestones = [{ status: 'paid' }, { status: 'paid' }];
+    const ledger = [entry('pi_1', 0, 10), entry('pi_2', 1, 4, 60)];
+    for (const input of [
+      { payment: { status: 'refunded', currency: 'EUR', stripePaymentIntentId: 'pi_2', milestoneIndex: 1 } },
+      { payment: { status: 'partially_refunded', currency: 'EUR', stripePaymentIntentId: 'pi_2', milestoneIndex: 1 } },
+      { payment: { status: 'disputed', currency: 'EUR', stripePaymentIntentId: 'pi_2', milestoneIndex: 1 } },
+      { status: 'dispute', payment: { status: 'authorized', currency: 'EUR', stripePaymentIntentId: 'pi_2', milestoneIndex: 1 } },
+    ]) {
+      const summary = aggregateRecordedSavings([{ ...input, milestonePayments: milestones, paymentDiscountLedger: ledger }]);
+      expect(summary.excludedUncertainCount).toBe(1);
+      expect(summary.complete).toBe(false);
+      expect(summary.groups[0].totalRecorded).toBe(0);
+    }
+    // A fully refunded single payment is simply not a saving.
+    const single = aggregateRecordedSavings([{
+      payment: { status: 'refunded', currency: 'EUR', stripePaymentIntentId: 'pi_1' },
+      paymentDiscountLedger: [entry('pi_1', undefined, 10)],
+    }]);
+    expect(single.groups).toEqual([]);
+    expect(single.complete).toBe(true);
+  });
+
+  it('does not count an authorized non-milestone payment before completion', () => {
+    const summary = aggregateRecordedSavings([{
+      payment: { status: 'authorized', currency: 'EUR', stripePaymentIntentId: 'pi_1' },
+      paymentDiscountLedger: [entry('pi_1', undefined, 10)],
+    }]);
+    expect(summary.settledBookingCount).toBe(0);
+    expect(summary.groups).toEqual([]);
+  });
+});

@@ -75,6 +75,26 @@ export interface IBookingMilestone extends IQuotationMilestone {
   paidAt?: Date;
 }
 
+/**
+ * Immutable discount snapshot of one captured payment (a milestone or the
+ * whole booking). Written once per PaymentIntent when the payment succeeds,
+ * so a later milestone checkout that replaces `booking.payment` cannot erase
+ * it. Amounts are copied from that payment's own checkout snapshot; zero is a
+ * recorded zero, never a guess.
+ */
+export interface IPaymentDiscountLedgerEntry {
+  paymentIntentId: string;
+  milestoneIndex?: number;
+  currency?: string;
+  originalAmount: number;
+  loyaltyAmount: number;
+  repeatBuyerAmount: number;
+  pointsDiscountAmount: number;
+  codeDiscountAmount: number;
+  totalDiscount: number;
+  recordedAt: Date;
+}
+
 export interface IQuoteMaterial {
   name: string;
   quantity?: number;
@@ -283,6 +303,8 @@ export interface IBooking extends Document {
   lastReminderSentAt?: Date;
   customerRejectionReason?: string;
   milestonePayments?: IBookingMilestone[];
+  /** Per-payment discount snapshots (see IPaymentDiscountLedgerEntry). Not selected by default. */
+  paymentDiscountLedger?: IPaymentDiscountLedgerEntry[];
   selectedSubprojectIndex?: number;
   selectedExtraOptions?: { extraOptionId: string; bookedPrice: number }[];
   checkoutSnapshot?: {
@@ -1024,6 +1046,26 @@ const BookingSchema = new Schema({
     completedAt: { type: Date },
     paidAt: { type: Date }
   }],
+  // Customer-only financial history: excluded from default reads so booking
+  // payloads never carry it; the savings read model selects it explicitly.
+  // No default, so loading a booking without it and saving never rewrites it.
+  paymentDiscountLedger: {
+    type: [{
+      paymentIntentId: { type: String, required: true },
+      milestoneIndex: { type: Number, min: 0 },
+      currency: { type: String },
+      originalAmount: { type: Number, default: 0 },
+      loyaltyAmount: { type: Number, default: 0 },
+      repeatBuyerAmount: { type: Number, default: 0 },
+      pointsDiscountAmount: { type: Number, default: 0 },
+      codeDiscountAmount: { type: Number, default: 0 },
+      totalDiscount: { type: Number, default: 0 },
+      recordedAt: { type: Date, required: true },
+      _id: false,
+    }],
+    select: false,
+    default: undefined,
+  },
   selectedSubprojectIndex: {
     type: Number,
     min: 0,

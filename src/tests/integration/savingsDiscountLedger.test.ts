@@ -1,0 +1,455 @@
+import mongoose, { Types } from 'mongoose';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+/**
+ * Real-Mongo coverage for the per-payment discount ledger: milestone
+ * checkouts run through the real createPaymentIntent, the real webhook and
+ * confirm handlers, and the real savings summary handler. Only Stripe and
+ * notifications are stand-ins; no provider is called.
+ */
+
+const testUri = process.env.FIXERA_TEST_MONGODB_URI;
+const hasDisposableMongo = Boolean(testUri && /test/i.test(testUri));
+const describeDb = hasDisposableMongo ? describe : describe.skip;
+
+vi.hoisted(() => {
+  process.env.S3_BUCKET_NAME = process.env.S3_BUCKET_NAME || 'fixera-uploads';
+  process.env.AWS_REGION = process.env.AWS_REGION || 'us-east-1';
+  process.env.AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID || 'test-key';
+  process.env.AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY || 'test-secret';
+  process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+  process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_savings_ledger';
+  process.env.STRIPE_PLATFORM_COMMISSION_PERCENT = '0';
+});
+
+const stripeMocks = vi.hoisted(() => ({
+  intentCreate: vi.fn(),
+  intentRetrieve: vi.fn(),
+  intentCancel: vi.fn(),
+  constructEvent: vi.fn(),
+}));
+
+vi.mock('../../services/stripe', () => ({
+  stripe: {
+    paymentIntents: {
+      create: stripeMocks.intentCreate,
+      retrieve: stripeMocks.intentRetrieve,
+      cancel: stripeMocks.intentCancel,
+    },
+    refunds: { create: vi.fn(), list: vi.fn(async () => ({ data: [] })), retrieve: vi.fn() },
+    transfers: { create: vi.fn(), createReversal: vi.fn() },
+    charges: { retrieve: vi.fn() },
+    balanceTransactions: { retrieve: vi.fn() },
+    webhooks: { constructEvent: stripeMocks.constructEvent },
+  },
+  STRIPE_CONFIG: {
+    environment: 'test',
+    defaultCurrency: 'EUR',
+    supportedCurrencies: ['EUR', 'USD', 'GBP', 'CAD', 'AUD'],
+    commissionPercent: 0,
+    webhookSecret: 'whsec_test',
+    frontendUrl: 'http://localhost:3000',
+  },
+}));
+
+vi.mock('../../utils/notifications/bookingPaymentNotify', () => ({
+  notifyBookingPaymentConfirmed: vi.fn(async () => undefined),
+}));
+vi.mock('../../utils/notifications/notify', () => ({
+  notify: vi.fn(async () => ({})),
+  notifyAsync: vi.fn(),
+}));
+
+import Booking from '../../models/booking';
+import Payment from '../../models/payment';
+import User from '../../models/user';
+import DiscountCode from '../../models/discountCode';
+import DiscountCodeUsage from '../../models/discountCodeUsage';
+import PlatformSettings from '../../models/platformSettings';
+import { createPaymentIntent, confirmPayment } from '../../handlers/Stripe/payment';
+import { handleWebhook } from '../../handlers/Stripe/webhooks';
+import { getSavingsSummary } from '../../handlers/User/savingsSummary';
+import { recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger';
+import { bookingForRequest } from '../../utils/invoiceVisibility';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const response = () => {
+  const res: any = { statusCode: 200, body: undefined };
+  res.status = vi.fn((code: number) => { res.statusCode = code; return res; });
+  res.json = vi.fn((body: any) => { res.body = body; return res; });
+  res.send = vi.fn((body: any) => { res.body = body; return res; });
+  return res;
+};
+
+const location = {
+  type: 'Point',
+  coordinates: [4.35, 50.85],
+  address: 'Main street 1',
+  city: 'Brussels',
+  country: 'BE',
+  postalCode: '1000',
+};
+
+const createUser = async (overrides: Record<string, any>) => User.create({
+  name: 'U',
+  email: `u-${new Types.ObjectId()}@example.com`,
+  phone: `+32${String(new Types.ObjectId()).slice(-9)}`,
+  password: 'hashed-password',
+  role: 'customer',
+  accountStatus: 'active',
+  location,
+  ...overrides,
+});
+
+const createCode = (code: string, type: 'percentage' | 'fixed', value: number) => DiscountCode.create({
+  code,
+  type,
+  value,
+  isActive: true,
+  perUserLimit: 1,
+  validFrom: new Date(Date.now() - DAY_MS),
+  validUntil: new Date(Date.now() + 30 * DAY_MS),
+  createdBy: new Types.ObjectId(),
+});
+
+let customerId: Types.ObjectId;
+let otherCustomerId: Types.ObjectId;
+let professionalId: Types.ObjectId;
+let intentCounter = 0;
+
+const seedMilestoneBooking = async () => Booking.create({
+  customer: customerId,
+  professional: professionalId,
+  bookingType: 'professional',
+  status: 'quote_accepted',
+  location,
+  rfqData: { serviceType: 'Bathroom', description: 'Y', answers: [] },
+  quote: { amount: 200, currency: 'EUR', description: 'Quote' },
+  vatDecision: { action: 'standard_rate', country: 'BE', standardRate: 21, appliedRate: 21, answers: [] },
+  milestonePayments: [
+    { title: 'Deposit', amount: 100, dueCondition: 'on_start', order: 0 },
+    { title: 'Final', amount: 100, dueCondition: 'on_start', order: 1 },
+  ],
+  statusHistory: [{ status: 'quote_accepted', timestamp: new Date(), updatedBy: customerId, note: 'seed' }],
+});
+
+const deliverEvent = async (event: { id: string; type: string; data: { object: any } }) => {
+  stripeMocks.constructEvent.mockReturnValue({ created: Math.floor(Date.now() / 1000), ...event });
+  const res = response();
+  await handleWebhook({ headers: { 'stripe-signature': 'sig' }, body: Buffer.from('{}') } as any, res as any);
+  return res;
+};
+
+const succeededEvent = (bookingId: string, intentId: string, eventId = `evt_${new Types.ObjectId()}`) => ({
+  id: eventId,
+  type: 'payment_intent.succeeded',
+  data: {
+    object: {
+      id: intentId,
+      object: 'payment_intent',
+      amount: 10000,
+      currency: 'eur',
+      status: 'succeeded',
+      latest_charge: `ch_${intentId}`,
+      metadata: { bookingId },
+    },
+  },
+});
+
+const summaryFor = async (user: any) => {
+  const res = response();
+  await getSavingsSummary({ user } as any, res as any, vi.fn());
+  return res;
+};
+
+const snapshotTotal = (discount: any) => Math.round((
+  (discount?.loyaltyAmount || 0)
+  + (discount?.repeatBuyerAmount || 0)
+  + (discount?.pointsDiscountAmount || 0)
+  + (discount?.codeDiscountAmount || 0)
+) * 100) / 100;
+
+const readLedger = async (bookingId: any): Promise<any[]> => {
+  const raw = await Booking.findById(bookingId).select('+paymentDiscountLedger').lean();
+  return ((raw as any)?.paymentDiscountLedger || []) as any[];
+};
+
+describeDb('per-payment savings ledger (disposable Mongo)', () => {
+  beforeAll(async () => {
+    await mongoose.connect(testUri!, { dbName: 'fixera_savings_ledger_test' });
+    await mongoose.connection.dropDatabase();
+    await PlatformSettings.deleteMany({});
+    // Loyalty/points configs default-create themselves attributed to an admin.
+    await createUser({ role: 'admin' });
+    customerId = (await createUser({ role: 'customer' }))._id;
+    otherCustomerId = (await createUser({ role: 'customer' }))._id;
+    professionalId = (await createUser({
+      role: 'professional',
+      professionalStatus: 'approved',
+      stripe: { accountId: 'acct_savings_ledger', chargesEnabled: true, payoutsEnabled: true },
+      businessInfo: { country: 'BE' },
+    }))._id;
+    await Promise.all([Payment.syncIndexes(), DiscountCodeUsage.syncIndexes()]);
+  });
+
+  afterAll(async () => {
+    await mongoose.connection.dropDatabase();
+    await mongoose.disconnect();
+  });
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    await Promise.all([
+      Booking.deleteMany({}),
+      Payment.deleteMany({}),
+      DiscountCode.deleteMany({}),
+      DiscountCodeUsage.deleteMany({}),
+      mongoose.connection.collection('stripeevents').deleteMany({}),
+    ]);
+    stripeMocks.intentCreate.mockImplementation(async () => {
+      intentCounter += 1;
+      const id = `pi_ledger_${intentCounter}`;
+      return { id, client_secret: `${id}_secret`, status: 'requires_payment_method' };
+    });
+    stripeMocks.intentCancel.mockResolvedValue({});
+    stripeMocks.intentRetrieve.mockImplementation(async (id: string) => ({
+      id,
+      status: 'succeeded',
+      latest_charge: `ch_${id}`,
+      currency: 'eur',
+    }));
+  });
+
+  it('keeps milestone 1 savings through the milestone 2 checkout and adds milestone 2 exactly once', async () => {
+    await createCode('FIRST10', 'percentage', 10);
+    await createCode('SECOND6', 'fixed', 6);
+    const booking = await seedMilestoneBooking();
+    const bookingId = String(booking._id);
+    const customer = { _id: customerId, role: 'customer' };
+
+    // Milestone 1 checkout with a discount code.
+    const first = await createPaymentIntent(bookingId, String(customerId), 0, 0, 'FIRST10');
+    expect(first.success).toBe(true);
+    const afterFirstCheckout: any = await Booking.findById(bookingId).lean();
+    const firstDiscount = afterFirstCheckout.payment.discount;
+    const firstTotal = snapshotTotal(firstDiscount);
+    expect(firstDiscount.codeDiscountAmount).toBeGreaterThan(0);
+    expect(await readLedger(bookingId)).toHaveLength(0);
+
+    // Pending milestone 1: nothing settled yet.
+    let summary = (await summaryFor(customer)).body.data;
+    expect(summary.settledPaymentCount).toBe(0);
+    expect(summary.groups).toEqual([]);
+
+    // Milestone 1 succeeds; duplicate deliveries, a Stripe retry under a new
+    // event id and the confirm endpoint all leave one entry.
+    const firstEvent = succeededEvent(bookingId, first.paymentIntentId!);
+    expect((await deliverEvent(firstEvent)).statusCode).toBe(200);
+    await deliverEvent(firstEvent);
+    await deliverEvent(succeededEvent(bookingId, first.paymentIntentId!));
+    const confirmRes = response();
+    await confirmPayment({
+      user: customer,
+      body: { bookingId, paymentIntentId: first.paymentIntentId },
+    } as any, confirmRes as any);
+    expect(confirmRes.statusCode).toBe(200);
+
+    let ledger = await readLedger(bookingId);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]).toMatchObject({
+      paymentIntentId: first.paymentIntentId,
+      milestoneIndex: 0,
+      currency: 'EUR',
+      codeDiscountAmount: firstDiscount.codeDiscountAmount,
+      originalAmount: firstDiscount.originalAmount,
+    });
+    // The code usage is recorded once (existing behaviour kept).
+    expect(await DiscountCodeUsage.countDocuments({ booking: booking._id })).toBe(1);
+
+    summary = (await summaryFor(customer)).body.data;
+    expect(summary.complete).toBe(true);
+    expect(summary.settledPaymentCount).toBe(1);
+    expect(summary.groups[0].totalRecorded).toBe(firstTotal);
+
+    // Milestone 2 checkout replaces booking.payment with a pending payment.
+    const second = await createPaymentIntent(bookingId, String(customerId), 0, 1, 'SECOND6');
+    expect(second.success).toBe(true);
+    expect(second.paymentIntentId).not.toBe(first.paymentIntentId);
+    const afterSecondCheckout: any = await Booking.findById(bookingId).lean();
+    expect(afterSecondCheckout.payment.stripePaymentIntentId).toBe(second.paymentIntentId);
+    expect(afterSecondCheckout.payment.status).toBe('pending');
+    const secondDiscount = afterSecondCheckout.payment.discount;
+    const secondTotal = snapshotTotal(secondDiscount);
+    expect(secondTotal).toBeGreaterThan(0);
+    // booking.payment replacement did not drop the earlier ledger entry.
+    expect(await readLedger(bookingId)).toHaveLength(1);
+
+    summary = (await summaryFor(customer)).body.data;
+    expect(summary.complete).toBe(true);
+    expect(summary.settledPaymentCount).toBe(1);
+    expect(summary.groups[0].totalRecorded).toBe(firstTotal);
+
+    // A late milestone 1 event after the replacement neither marks milestone
+    // 2 paid nor attributes milestone 2's pending snapshot to milestone 1.
+    await deliverEvent(succeededEvent(bookingId, first.paymentIntentId!));
+    expect(await readLedger(bookingId)).toHaveLength(1);
+    const afterStale: any = await Booking.findById(bookingId).lean();
+    expect(afterStale.payment.status).toBe('pending');
+    expect(afterStale.payment.stripeChargeId).toBeUndefined();
+    expect(afterStale.milestonePayments.map((milestone: any) => milestone.status)).toEqual(['paid', 'pending']);
+
+    // Milestone 2 settles: added once, across duplicates and confirm.
+    const secondEvent = succeededEvent(bookingId, second.paymentIntentId!);
+    await deliverEvent(secondEvent);
+    await deliverEvent(secondEvent);
+    await deliverEvent(succeededEvent(bookingId, second.paymentIntentId!));
+    await confirmPayment({
+      user: customer,
+      body: { bookingId, paymentIntentId: second.paymentIntentId },
+    } as any, response() as any);
+
+    ledger = await readLedger(bookingId);
+    expect(ledger.map((entry) => [entry.paymentIntentId, entry.milestoneIndex])).toEqual([
+      [first.paymentIntentId, 0],
+      [second.paymentIntentId, 1],
+    ]);
+    const paid: any = await Booking.findById(bookingId).lean();
+    expect(paid.payment.stripeChargeId).toBe(`ch_${second.paymentIntentId}`);
+    expect(paid.milestonePayments.map((milestone: any) => milestone.status)).toEqual(['paid', 'paid']);
+
+    summary = (await summaryFor(customer)).body.data;
+    expect(summary.complete).toBe(true);
+    expect(summary.settledPaymentCount).toBe(2);
+    expect(summary.unrecordedPaymentCount).toBe(0);
+    expect(summary.groups).toHaveLength(1);
+    expect(summary.groups[0].bookingCount).toBe(1);
+    expect(summary.groups[0].totalRecorded).toBe(Math.round((firstTotal + secondTotal) * 100) / 100);
+    expect(summary.groups[0].byType.discountCode).toBe(
+      Math.round((firstDiscount.codeDiscountAmount + secondDiscount.codeDiscountAmount) * 100) / 100,
+    );
+
+    // The ledger is never part of booking payloads, even for the customer.
+    const plain: any = await Booking.findById(bookingId).lean();
+    expect(plain.paymentDiscountLedger).toBeUndefined();
+    const doc = await Booking.findById(bookingId);
+    expect((bookingForRequest(doc, { _id: professionalId, role: 'professional' }) as any).paymentDiscountLedger).toBeUndefined();
+
+    // Saving a document loaded without the ledger keeps the ledger intact.
+    doc!.notes = 'touched';
+    await doc!.save();
+    expect(await readLedger(bookingId)).toHaveLength(2);
+
+    // Dispute on the current charge: the booking becomes uncertain and is not
+    // summed. Winning the dispute restores the recorded total.
+    await deliverEvent({
+      id: `evt_${new Types.ObjectId()}`,
+      type: 'charge.dispute.created',
+      data: { object: { id: 'dp_1', charge: `ch_${second.paymentIntentId}`, amount: 5000, currency: 'eur', reason: 'fraudulent', status: 'needs_response' } },
+    });
+    summary = (await summaryFor(customer)).body.data;
+    expect(summary.excludedUncertainCount).toBe(1);
+    expect(summary.complete).toBe(false);
+    expect(summary.groups[0].totalRecorded).toBe(0);
+    expect(await readLedger(bookingId)).toHaveLength(2);
+
+    await deliverEvent({
+      id: `evt_${new Types.ObjectId()}`,
+      type: 'charge.dispute.closed',
+      data: { object: { id: 'dp_1', charge: `ch_${second.paymentIntentId}`, amount: 5000, currency: 'eur', reason: 'fraudulent', status: 'won' } },
+    });
+    summary = (await summaryFor(customer)).body.data;
+    expect(summary.complete).toBe(true);
+    expect(summary.groups[0].totalRecorded).toBe(Math.round((firstTotal + secondTotal) * 100) / 100);
+
+    // Access scope: customer-only, own bookings only.
+    expect((await summaryFor({ _id: professionalId, role: 'professional' })).statusCode).toBe(403);
+    expect((await summaryFor(undefined)).statusCode).toBe(401);
+    const other = (await summaryFor({ _id: otherCustomerId, role: 'customer' })).body.data;
+    expect(other.groups).toEqual([]);
+    expect(other.settledPaymentCount).toBe(0);
+  });
+
+  it('classifies a refunded milestone booking as uncertain and keeps legacy milestones unrecorded', async () => {
+    const legacy = await Booking.create({
+      customer: customerId,
+      professional: professionalId,
+      bookingType: 'professional',
+      status: 'in_progress',
+      location,
+      rfqData: { serviceType: 'Bathroom', description: 'Y', answers: [] },
+      quote: { amount: 200, currency: 'EUR', description: 'Quote' },
+      vatDecision: { action: 'standard_rate', country: 'BE', standardRate: 21, appliedRate: 21, answers: [] },
+      milestonePayments: [
+        { title: 'Deposit', amount: 100, dueCondition: 'on_start', order: 0, status: 'paid' },
+        { title: 'Final', amount: 100, dueCondition: 'on_start', order: 1, status: 'paid' },
+      ],
+      // Pre-ledger data: milestone 1's snapshot was replaced by milestone 2's.
+      payment: {
+        status: 'authorized',
+        currency: 'EUR',
+        amount: 95,
+        stripePaymentIntentId: 'pi_legacy_2',
+        milestoneIndex: 1,
+        discount: { loyaltyAmount: 5, totalDiscount: 5, originalAmount: 100 },
+      },
+    });
+    const customer = { _id: customerId, role: 'customer' };
+
+    let summary = (await summaryFor(customer)).body.data;
+    expect(summary.settledPaymentCount).toBe(2);
+    expect(summary.unrecordedPaymentCount).toBe(1);
+    expect(summary.complete).toBe(false);
+    expect(summary.groups[0].coverage).toBe('partial');
+    expect(summary.groups[0].totalRecorded).toBe(5);
+
+    // A late ledger write for the current payment replaces the legacy source,
+    // never adds to it; the earlier milestone stays unknown.
+    expect(await recordPaymentDiscountSnapshot(legacy._id, legacy.payment, 'pi_legacy_2')).toBe(true);
+    summary = (await summaryFor(customer)).body.data;
+    expect(summary.groups[0].totalRecorded).toBe(5);
+    expect(summary.unrecordedPaymentCount).toBe(1);
+
+    // Concurrent writers for the same intent add one entry.
+    const results = await Promise.all([
+      recordPaymentDiscountSnapshot(legacy._id, legacy.payment, 'pi_legacy_2'),
+      recordPaymentDiscountSnapshot(legacy._id, legacy.payment, 'pi_legacy_2'),
+    ]);
+    expect(results).toEqual([false, false]);
+    expect(await readLedger(legacy._id)).toHaveLength(1);
+    // A different intent cannot claim an already-recorded milestone.
+    expect(await recordPaymentDiscountSnapshot(
+      legacy._id,
+      { ...legacy.toObject().payment, stripePaymentIntentId: 'pi_other' },
+      'pi_other',
+    )).toBe(false);
+
+    await Booking.updateOne({ _id: legacy._id }, { $set: { 'payment.status': 'refunded', status: 'refunded' } });
+    summary = (await summaryFor(customer)).body.data;
+    expect(summary.excludedUncertainCount).toBe(1);
+    expect(summary.groups[0].totalRecorded).toBe(0);
+    expect(summary.complete).toBe(false);
+  });
+
+  it('records concurrent first writes for a fresh intent exactly once', async () => {
+    const booking = await seedMilestoneBooking();
+    await Booking.updateOne({ _id: booking._id }, {
+      $set: {
+        payment: {
+          status: 'authorized',
+          currency: 'EUR',
+          amount: 90,
+          stripePaymentIntentId: 'pi_race',
+          milestoneIndex: 0,
+          discount: { loyaltyAmount: 10, totalDiscount: 10, originalAmount: 100 },
+        },
+        'milestonePayments.0.status': 'paid',
+      },
+    });
+    const fresh: any = await Booking.findById(booking._id).lean();
+    const results = await Promise.all(Array.from({ length: 5 }, () =>
+      recordPaymentDiscountSnapshot(booking._id, fresh.payment, 'pi_race')));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await readLedger(booking._id)).toHaveLength(1);
+  });
+});
