@@ -953,6 +953,9 @@ const isMemberDayBlocked = (
 
   const workingRange = getWorkingRangeUtc(availability, zonedDate, timeZone);
   if (!workingRange) return true;
+  // A working schedule shorter than MIN_FREE_HOURS_FOR_DAY_AVAILABILITY can
+  // never leave enough free time, even with nothing booked or blocked.
+  if (isDayBlockedByCoveredMinutes(0, getWorkingRangeMinutes(workingRange))) return true;
 
   const dayStartUtc = fromZonedTime(startOfDayZoned(zonedDate), timeZone);
   const dayEndUtc = fromZonedTime(addDaysZoned(startOfDayZoned(zonedDate), 1), timeZone);
@@ -998,8 +1001,7 @@ const isMemberDayBlocked = (
   }
 
   totalMinutes += (currentEnd - currentStart) / (1000 * 60);
-  const scheduleMinutes = (workingRange.endUtc.getTime() - workingRange.startUtc.getTime()) / (1000 * 60);
-  return isDayBlockedByCoveredMinutes(totalMinutes, scheduleMinutes);
+  return isDayBlockedByCoveredMinutes(totalMinutes, getWorkingRangeMinutes(workingRange));
 };
 
 /**
@@ -1795,6 +1797,24 @@ export const getWorkingRangeUtc = (
   return { startUtc, endUtc };
 };
 
+/** Length of a working range (from getWorkingRangeUtc) in minutes. */
+export const getWorkingRangeMinutes = (workingRange: { startUtc: Date; endUtc: Date }) =>
+  (workingRange.endUtc.getTime() - workingRange.startUtc.getTime()) / (1000 * 60);
+
+/**
+ * Day-mode availability for a day with nothing booked or blocked: false for
+ * non-working days and for working schedules shorter than
+ * MIN_FREE_HOURS_FOR_DAY_AVAILABILITY (e.g. Saturday 09:00-11:00).
+ */
+export const hasMinimumFreeWorkingSchedule = (
+  availability: Record<string, any>,
+  zonedDate: Date,
+  timeZone: string
+): boolean => {
+  const workingRange = getWorkingRangeUtc(availability, zonedDate, timeZone);
+  return Boolean(workingRange) && !isDayBlockedByCoveredMinutes(0, getWorkingRangeMinutes(workingRange!));
+};
+
 const isWorkingDay = (availability: Record<string, any>, zonedDate: Date) => {
   const hours = getWorkingHoursForDate(availability, zonedDate);
   return hours.available;
@@ -1821,6 +1841,12 @@ const isDayBlocked = (
 
   const workingRange = getWorkingRangeUtc(availability, zonedDate, timeZone);
   if (!workingRange) return true;
+  // Day-mode rule applies to untouched days too: a schedule shorter than
+  // MIN_FREE_HOURS_FOR_DAY_AVAILABILITY is never an available day. The legacy
+  // hours-mode buffer accumulation keeps its own threshold unchanged.
+  if (!useLegacyThreshold && isDayBlockedByCoveredMinutes(0, getWorkingRangeMinutes(workingRange))) {
+    return true;
+  }
 
   const dayStartUtc = fromZonedTime(startOfDayZoned(zonedDate), timeZone);
   const dayEndUtc = fromZonedTime(addDaysZoned(startOfDayZoned(zonedDate), 1), timeZone);
@@ -1870,8 +1896,7 @@ const isDayBlocked = (
   if (useLegacyThreshold) {
     return totalMinutes / 60 >= PARTIAL_BLOCK_THRESHOLD_HOURS;
   }
-  const scheduleMinutes = (workingRange.endUtc.getTime() - workingRange.startUtc.getTime()) / (1000 * 60);
-  return isDayBlockedByCoveredMinutes(totalMinutes, scheduleMinutes);
+  return isDayBlockedByCoveredMinutes(totalMinutes, getWorkingRangeMinutes(workingRange));
 };
 
 /**

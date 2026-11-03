@@ -18,6 +18,7 @@ import {
   getResourcePolicy,
   getUnbookableStartDates,
   getWorkingRangeUtc,
+  hasMinimumFreeWorkingSchedule,
   isDayBlockedByCoveredMinutes,
   normalizeRangeEndInclusive,
   startOfDayZoned,
@@ -351,6 +352,34 @@ const buildNonWorkingDates = (
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   return nonWorking;
+};
+
+/**
+ * Working days whose schedule is shorter than MIN_FREE_HOURS_FOR_DAY_AVAILABILITY
+ * (client bug list #2). They can never be available in day mode, even with no
+ * booking or block, so they are blocked up front instead of only once touched.
+ */
+const buildShortScheduleDates = (
+  rangeStart: Date,
+  rangeEnd: Date,
+  timeZone: string,
+  availability: Record<string, any>
+) => {
+  const shortDays: string[] = [];
+  const cursor = new Date(rangeStart);
+  while (cursor <= rangeEnd) {
+    const zonedDay = startOfDayZoned(toZonedTime(cursor, timeZone));
+    const dayAvailability = availability[DAY_KEYS[zonedDay.getUTCDay()]];
+    if (
+      dayAvailability &&
+      dayAvailability.available !== false &&
+      !hasMinimumFreeWorkingSchedule(availability, zonedDay, timeZone)
+    ) {
+      shortDays.push(toLocalMidnightUtc(cursor, timeZone).toISOString());
+    }
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return shortDays;
 };
 
 /**
@@ -1049,6 +1078,9 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 
     // Company blocked dates/ranges block ALL resources - add directly to allBlockedDates
     const allBlockedDates = new Set<string>(nonWorkingDates);
+    buildShortScheduleDates(rangeStart, rangeEnd, timeZone, availability).forEach((dateIso) =>
+      allBlockedDates.add(dateIso)
+    );
     const allBlockedRanges: TeamBookingRange[] = [];
 
     if (professional?.companyBlockedDates) {

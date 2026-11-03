@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   findCoveringAssignmentForDays,
+  hasMinimumFreeWorkingSchedule,
   isDayBlockedByCoveredMinutes,
   MIN_FREE_HOURS_FOR_DAY_AVAILABILITY,
   type PerMemberBlockedData,
@@ -112,6 +113,29 @@ describe('day-mode 3-hour free threshold (client bug list #2)', () => {
     // 4h schedule, 1h blocked -> 3h free -> available.
     const shortAvailable = memberWithRanges([{ start: day(2026, 11, 4, 9), end: day(2026, 11, 4, 10) }]);
     expect(cover(shortAvailable, availability, wednesday)?.assignment[0].dayKey).toBe('2026-11-04');
+  });
+});
+
+describe('short working schedules with nothing booked (client bug list #2)', () => {
+  const availability = fullWeek({
+    saturday: { available: true, startTime: '09:00', endTime: '11:00' },
+    sunday: { available: true, startTime: '09:00', endTime: '12:00' },
+  });
+
+  it('treats an empty 2 h schedule as unavailable and an empty 3 h schedule as available', () => {
+    expect(hasMinimumFreeWorkingSchedule(availability, day(2026, 11, 7), TIME_ZONE)).toBe(false);
+    expect(hasMinimumFreeWorkingSchedule(availability, day(2026, 11, 8), TIME_ZONE)).toBe(true);
+    expect(hasMinimumFreeWorkingSchedule(availability, day(2026, 11, 2), TIME_ZONE)).toBe(true);
+    expect(hasMinimumFreeWorkingSchedule(fullWeek(), day(2026, 11, 7), TIME_ZONE)).toBe(false);
+  });
+
+  it('skips an untouched 2 h Saturday instead of reporting it available', () => {
+    const empty = memberWithRanges([]);
+    // Saturday (2 h) is skipped even though nothing is booked; Sunday (3 h) is used.
+    expect(cover(empty, availability, day(2026, 11, 7))?.assignment[0].dayKey).toBe('2026-11-08');
+    // Same outcome as when one minute is booked on Saturday (consistent with touched days).
+    const oneMinute = memberWithRanges([{ start: day(2026, 11, 7, 9), end: day(2026, 11, 7, 9, 1) }]);
+    expect(cover(oneMinute, availability, day(2026, 11, 7))?.assignment[0].dayKey).toBe('2026-11-08');
   });
 });
 
