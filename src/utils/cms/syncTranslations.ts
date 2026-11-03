@@ -60,12 +60,6 @@ const COPYABLE_TOP_LEVEL_FIELDS = [
 /** Non-text SEO fields mirrored from the source (canonical is per-locale, never copied). */
 const COPYABLE_SEO_FIELDS = ["ogImage", "noindex"] as const;
 
-/**
- * Publication/visibility controls. Unlike text, these are never "manual copy":
- * a translation must stop being public when its source is unpublished or its
- * country targeting changes, even when an admin replaced the machine text.
- */
-const CONTROL_FIELDS = ["status", "publishedAt", "activeCountries"] as const;
 
 /**
  * Hash inputs that define whether translated text fields are stale. Only
@@ -143,11 +137,34 @@ function copiedFields(source: Record<string, any>): Record<string, unknown> {
   return fields;
 }
 
-/** Source publication/visibility controls as a flat path → value map. */
-function controlFields(source: Record<string, any>): Record<string, unknown> {
-  const fields: Record<string, unknown> = {};
-  for (const field of CONTROL_FIELDS) fields[field] = source[field];
-  return fields;
+/**
+ * Source safety controls for a linked MANUAL translation. Unlike text, these
+ * are never "manual copy", but they only ever restrict:
+ *
+ * - `activeCountries` always mirrors the source, so geo-restricting the source
+ *   restricts the translation too.
+ * - Publication can only be taken away, never granted. When the source is not
+ *   published, a published manual translation is demoted to the source's
+ *   status and its `publishedAt` cleared (the model's draft invariant). When
+ *   the source is published, the manual translation keeps its own `status`
+ *   and `publishedAt`: an editor who left it as a draft decides when it goes
+ *   live, and a published one keeps its own publication date.
+ *
+ * Machine translations are different: they follow the source's publication
+ * status and date through {@link copiedFields}.
+ */
+export function manualTranslationControlUpdate(
+  source: Record<string, any>,
+  translation: Record<string, any>
+): { $set: Record<string, unknown>; $unset: Record<string, unknown> } {
+  const countries = buildUpdate({ activeCountries: source.activeCountries });
+  const $set: Record<string, unknown> = { ...countries.$set };
+  const $unset: Record<string, unknown> = { ...countries.$unset };
+  if (source.status !== "published" && translation.status === "published") {
+    $set.status = source.status || "draft";
+    $unset.publishedAt = 1;
+  }
+  return { $set, $unset };
 }
 
 /**
@@ -220,9 +237,17 @@ export function isTranslationSource(
  * - A same-slug machine translation managed by another live original is left
  *   alone (reported skipped_manual), even with force.
  * - Manual translations (autoTranslated: false) always win for text, unless
- *   force=true. Publication controls (status, publishedAt, activeCountries)
- *   are still mirrored from the source when the translation is linked to it,
- *   so unpublishing/geo-restricting the source hides the translation too.
+ *   force=true. A manual translation LINKED to this source (translatedFrom)
+ *   still receives the restricting source controls
+ *   ({@link manualTranslationControlUpdate}): country targeting is mirrored
+ *   and an unpublished source demotes it to draft, but publishing the source
+ *   never publishes it or changes its own publishedAt. These controls apply
+ *   before the force/translator checks, so they hold even when the provider
+ *   is unconfigured or fails.
+ * - Machine translations follow the source's status and publishedAt.
+ * - force=true replaces a manual translation's text with machine text and
+ *   turns it into a machine translation, which from then on follows the
+ *   source's publication like any other machine translation.
  * - Unchanged sourceHash → sync non-text fields only; no translator call.
  * - New/stale → translate and upsert with the SAME type/slug as the source
  *   (the frontend switches language on one URL, so slugs stay identical).
@@ -286,25 +311,28 @@ export async function syncCmsTranslations(
         continue;
       }
 
-      if (sibling && sibling.autoTranslated !== true && !options.force) {
-        // Manual translations keep their human-written text, but publication
-        // and country visibility are source controls: unpublishing or
-        // geo-restricting the source must hide the translation too. Only a
-        // sibling explicitly linked to this source is managed; a same-slug
-        // independent manual original is left completely untouched.
-        if (
-          sibling.translatedFrom &&
-          String(sibling.translatedFrom) === String(source._id)
-        ) {
-          const controls = buildUpdate(controlFields(source));
-          await CmsContent.updateOne(
-            { _id: sibling._id },
-            {
-              $set: { ...controls.$set, translatedFrom: source._id },
-              ...(Object.keys(controls.$unset).length ? { $unset: controls.$unset } : {}),
-            }
-          );
-        }
+      const isManual = Boolean(sibling) && sibling!.autoTranslated !== true;
+      if (
+        isManual &&
+        sibling!.translatedFrom &&
+        String(sibling!.translatedFrom) === String(source._id)
+      ) {
+        // A linked manual translation keeps its human-written text, but the
+        // restricting source controls always apply (countries mirrored; an
+        // unpublished source demotes it). A source publish never promotes it.
+        // Only a sibling explicitly linked to this source is managed; a
+        // same-slug independent manual original is left untouched here.
+        const controls = manualTranslationControlUpdate(source, sibling!);
+        await CmsContent.updateOne(
+          { _id: sibling!._id },
+          {
+            $set: { ...controls.$set, translatedFrom: source._id },
+            ...(Object.keys(controls.$unset).length ? { $unset: controls.$unset } : {}),
+          }
+        );
+      }
+
+      if (isManual && !options.force) {
         results.push({ locale, status: "skipped_manual" });
         continue;
       }

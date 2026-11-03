@@ -153,10 +153,16 @@ describe('syncCmsTranslations', () => {
     expect(update.$set.excerpt).toBeUndefined();
   });
 
-  it("mirrors a republished source's date and country targeting onto manual translations", async () => {
+  // Behaviour change (T6): a published source used to copy its status and
+  // publishedAt onto linked manual translations, so publishing the source
+  // published a manual draft an editor had deliberately held back, and
+  // rewrote a published manual translation's own publication date. Source
+  // publication now only ever restricts a manual translation.
+  it("mirrors country targeting but keeps a published manual translation's own publishedAt", async () => {
+    const ownDate = new Date("2026-02-15T00:00:00.000Z");
     siblings = [
-      manualSibling("nl", { translatedFrom: "source-1" }),
-      manualSibling("fr", { translatedFrom: "source-1" }),
+      manualSibling("nl", { translatedFrom: "source-1", publishedAt: ownDate }),
+      manualSibling("fr", { translatedFrom: "source-1", publishedAt: ownDate }),
     ];
 
     const publishedAt = new Date("2026-03-01T00:00:00.000Z");
@@ -169,13 +175,69 @@ describe('syncCmsTranslations', () => {
       { locale: "fr", status: "skipped_manual" },
     ]);
     const [, update] = updateOne.mock.calls[0];
-    expect(update.$set).toEqual({
-      status: "published",
-      publishedAt,
-      activeCountries: ["NL"],
-      translatedFrom: "source-1",
-    });
+    expect(update.$set).toEqual({ activeCountries: ["NL"], translatedFrom: "source-1" });
     expect(update.$unset).toBeUndefined();
+  });
+
+  it("never publishes a linked manual draft when the source is published", async () => {
+    siblings = [
+      manualSibling("nl", { translatedFrom: "source-1", status: "draft", publishedAt: undefined }),
+      manualSibling("fr", { translatedFrom: "source-1", status: "published" }),
+    ];
+
+    const results = await syncCmsTranslations(makeSource({ activeCountries: ["BE"] }));
+
+    expect(results).toEqual([
+      { locale: "nl", status: "skipped_manual" },
+      { locale: "fr", status: "skipped_manual" },
+    ]);
+    expect(translateTexts).not.toHaveBeenCalled();
+    for (const [, update] of updateOne.mock.calls) {
+      expect(update.$set.status).toBeUndefined();
+      expect(update.$set.publishedAt).toBeUndefined();
+      expect(update.$unset).toBeUndefined();
+      expect(update.$set.activeCountries).toEqual(["BE"]);
+    }
+  });
+
+  it("clears a manual translation's countries when the source becomes global", async () => {
+    siblings = [manualSibling("nl", { translatedFrom: "source-1", activeCountries: ["BE"] })];
+    await syncCmsTranslations(makeSource({ activeCountries: undefined }));
+    const [, update] = updateOne.mock.calls[0];
+    expect(update.$unset).toEqual({ activeCountries: 1 });
+    expect(update.$set).toEqual({ translatedFrom: "source-1" });
+  });
+
+  it("applies the restricting controls to a linked manual translation even with force and no translator", async () => {
+    isTranslatorConfigured.mockReturnValue(false);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    siblings = [manualSibling("nl", { translatedFrom: "source-1", title: "Handmatig" })];
+
+    const results = await syncCmsTranslations(
+      makeSource({ status: "draft", publishedAt: undefined, activeCountries: ["NL"] }),
+      { force: true }
+    );
+
+    expect(results).toEqual([
+      { locale: "nl", status: "disabled" },
+      { locale: "fr", status: "disabled" },
+    ]);
+    expect(updateOne).toHaveBeenCalledTimes(1);
+    const [query, update] = updateOne.mock.calls[0];
+    expect(query).toEqual({ _id: "nl-manual-1" });
+    expect(update.$set).toEqual({ status: "draft", activeCountries: ["NL"], translatedFrom: "source-1" });
+    expect(update.$unset).toEqual({ publishedAt: 1 });
+    warn.mockRestore();
+  });
+
+  it("machine translations still follow the source's publication status and date", async () => {
+    const source = makeSource();
+    siblings = [
+      autoSibling("nl", computeSourceHash(source), { status: "draft", publishedAt: undefined }),
+    ];
+    await syncCmsTranslations(source);
+    const [, update] = updateOne.mock.calls[0];
+    expect(update.$set).toMatchObject({ status: "published", publishedAt: source.publishedAt });
   });
 
   it("leaves an independent same-slug manual original untouched", async () => {

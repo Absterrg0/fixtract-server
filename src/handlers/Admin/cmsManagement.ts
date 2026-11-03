@@ -119,6 +119,90 @@ async function loadCmsDocForResponse(
   }
 }
 
+/** One other-locale document of a translation family, as the admin UI links it. */
+export interface CmsLocaleVariantSummary {
+  _id: string;
+  locale: string;
+  slug: string;
+  title: string;
+  status: string;
+  autoTranslated: boolean;
+  translatedFrom?: string;
+  updatedAt?: Date;
+}
+
+const refIdOf = (value: unknown): string | undefined => {
+  if (!value) return undefined;
+  if (typeof value === "object" && value !== null && "_id" in (value as Record<string, unknown>)) {
+    return String((value as Record<string, unknown>)._id);
+  }
+  return String(value);
+};
+
+/**
+ * The other-locale documents of `doc`'s translation family, found by the
+ * actual `translatedFrom` link (not by slug), so a manual translation saved
+ * under its own slug stays discoverable. The family is the origin
+ * (`translatedFrom ?? _id`) plus every same-type doc translated from it.
+ * Never includes `doc` itself or another doc in `doc`'s own locale; one entry
+ * per locale, the origin first, then the most recently updated.
+ *
+ * Best-effort: on a read failure the field is omitted and the admin UI falls
+ * back to its slug search, so the save/read itself never fails because of it.
+ */
+export async function loadCmsLocaleVariants(
+  doc: Record<string, any>
+): Promise<CmsLocaleVariantSummary[] | undefined> {
+  try {
+    const selfId = refIdOf(doc._id);
+    const originId = refIdOf(doc.translatedFrom) ?? selfId;
+    if (!selfId || !originId || !isValidObjectId(originId)) return undefined;
+    const rows = (await CmsContent.find({
+      type: doc.type,
+      _id: { $ne: selfId },
+      $or: [{ _id: originId }, { translatedFrom: originId }],
+    })
+      .select("locale slug title status autoTranslated translatedFrom updatedAt")
+      .sort({ updatedAt: -1 })
+      .limit(50)
+      .lean()) as Array<Record<string, any>>;
+
+    const selfLocale = String(doc.locale || "");
+    const byLocale = new Map<string, CmsLocaleVariantSummary>();
+    const ordered = [
+      ...rows.filter((row) => String(row._id) === originId),
+      ...rows.filter((row) => String(row._id) !== originId),
+    ];
+    for (const row of ordered) {
+      const locale = String(row.locale || "");
+      if (!locale || locale === selfLocale || byLocale.has(locale)) continue;
+      byLocale.set(locale, {
+        _id: String(row._id),
+        locale,
+        slug: String(row.slug || ""),
+        title: String(row.title || ""),
+        status: String(row.status || "draft"),
+        autoTranslated: row.autoTranslated === true,
+        ...(row.translatedFrom ? { translatedFrom: String(row.translatedFrom) } : {}),
+        ...(row.updatedAt ? { updatedAt: row.updatedAt } : {}),
+      });
+    }
+    return CMS_LOCALES.flatMap((locale) => {
+      const variant = byLocale.get(locale);
+      return variant ? [variant] : [];
+    });
+  } catch (err) {
+    console.error("CMS locale variant lookup failed; omitting localeVariants:", err);
+    return undefined;
+  }
+}
+
+/** Adds `localeVariants` to an admin response doc when the lookup succeeded. */
+async function withLocaleVariants(doc: Record<string, any>): Promise<Record<string, any>> {
+  const localeVariants = await loadCmsLocaleVariants(doc);
+  return localeVariants ? { ...doc, localeVariants } : doc;
+}
+
 export const listFaqCategories = async (_req: Request, res: Response) => {
   return res.status(200).json({ success: true, data: FAQ_CATEGORIES });
 };
@@ -341,7 +425,7 @@ export const getCmsContentById = async (req: Request, res: Response) => {
     }
 
     const presigned = await presignCmsDoc(doc);
-    return res.status(200).json({ success: true, data: presigned });
+    return res.status(200).json({ success: true, data: await withLocaleVariants(presigned) });
   } catch (error) {
     console.error("Get CMS content error:", error);
     return res.status(500).json({ success: false, msg: "Failed to fetch content" });
@@ -637,7 +721,9 @@ export const updateCmsContent = async (req: Request, res: Response) => {
     const fallback = doc.toObject() as Record<string, any>;
     const populated = await loadCmsDocForResponse(doc._id, fallback);
     const presigned = await presignCmsDoc(populated);
-    return res.status(200).json({ success: true, translations, data: presigned });
+    return res
+      .status(200)
+      .json({ success: true, translations, data: await withLocaleVariants(presigned) });
   } catch (error: any) {
     if (error?.code === 11000) {
       return res.status(409).json({ success: false, msg: "Slug already exists for this type and locale" });
