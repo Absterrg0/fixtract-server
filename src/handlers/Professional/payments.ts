@@ -224,7 +224,15 @@ export const getTransactions = async (req: Request, res: Response) => {
       if (/^[a-f\d]{24}$/i.test(search)) {
         alternatives.push({ booking: new mongoose.Types.ObjectId(search) });
       }
-      const matchingBookings = await Booking.find({ professional: userId, bookingNumber: regex }).select('_id').lean();
+      // Payment.bookingNumber is optional, so the number may only be on the
+      // booking. Project bookings can identify their owner only through the
+      // project (Booking.professional is required for direct bookings only),
+      // so ownership matches getPaymentStats/getMyBookings.
+      const ownedProjectIds = await Project.find({ professionalId: userId }).distinct('_id');
+      const matchingBookings = await Booking.find({
+        bookingNumber: regex,
+        $or: [{ professional: userId }, { project: { $in: ownedProjectIds } }],
+      }).select('_id').lean();
       if (matchingBookings.length) alternatives.push({ booking: { $in: matchingBookings.map(b => b._id) } });
       query.$and = [{ $or: alternatives }];
     }

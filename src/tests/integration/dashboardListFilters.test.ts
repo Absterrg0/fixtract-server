@@ -346,5 +346,40 @@ describeDb('dashboard list filters (real Mongo)', () => {
       const all = await transactions({ status: 'all' });
       expect(all.pagination.total).toBe(7);
     });
+
+    it('resolves a booking-only number for a project-owned booking without Booking.professional', async () => {
+      const ownedProject = new Types.ObjectId();
+      const otherProject = new Types.ObjectId();
+      const projectBooking = new Types.ObjectId();
+      const otherProjectBooking = new Types.ObjectId();
+      await Project.collection.insertMany([
+        // Stored as the schema's ObjectId type.
+        { _id: ownedProject, professionalId: PRO, title: 'Owned' },
+        { _id: otherProject, professionalId: OTHER_PRO, title: 'Other' },
+      ]);
+      // Project bookings may carry no Booking.professional; the owner is the project's.
+      await Booking.collection.insertMany([
+        { _id: projectBooking, bookingNumber: 'BK-PROJ-000201', bookingType: 'project', customer: CUSTOMER, project: ownedProject },
+        { _id: otherProjectBooking, bookingNumber: 'BK-PROJ-000202', bookingType: 'project', customer: CUSTOMER, project: otherProject },
+      ]);
+      // Payment rows without their own bookingNumber (the field is optional).
+      await Payment.collection.insertMany([
+        { _id: new Types.ObjectId(), professional: PRO, booking: projectBooking, status: 'authorized', currency: 'EUR', professionalPayout: 50, createdAt: new Date() },
+        // A row mislinked to another pro's project booking stays invisible to its number.
+        { _id: new Types.ObjectId(), professional: PRO, booking: otherProjectBooking, status: 'authorized', currency: 'EUR', professionalPayout: 60, createdAt: new Date() },
+      ]);
+
+      const found = await transactions({ q: 'proj-000201' });
+      expect(found.pagination.total).toBe(1);
+      expect(found.data).toHaveLength(1);
+      expect(found.data[0]).toMatchObject({ bookingNumber: 'BK-PROJ-000201', amount: 50 });
+      expect(String(found.data[0].bookingId)).toBe(String(projectBooking));
+
+      // Another professional's project booking number never resolves for PRO.
+      const foreign = await transactions({ q: 'BK-PROJ-000202' });
+      expect(foreign.pagination.total).toBe(0);
+      // Search still composes with the status filter.
+      expect((await transactions({ q: 'BK-PROJ-000201', status: 'completed' })).pagination.total).toBe(0);
+    });
   });
 });

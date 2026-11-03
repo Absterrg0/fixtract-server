@@ -332,8 +332,14 @@ describe('dashboard list counts and search', () => {
     mocks.paymentFind.mockReturnValue(chain);
     mocks.paymentCountDocuments.mockResolvedValue(0);
     mocks.bookingFind.mockReturnValue({ select: () => ({ lean: async () => [{ _id: 'b1' }] }) });
+    mocks.projectFind.mockReturnValue({ distinct: vi.fn(async () => ['proj1']) });
     const res = mockRes();
     await getTransactions({ user: { _id: PRO_ID }, query: { q: 'BK-.*', status: 'transfer_failed' } } as unknown as Request, res);
+    // Booking-number fallback covers project-owned bookings too.
+    expect(mocks.projectFind).toHaveBeenCalledWith({ professionalId: PRO_ID });
+    const bookingLookup = mocks.bookingFind.mock.calls[0][0];
+    expect(bookingLookup.$or).toEqual([{ professional: PRO_ID }, { project: { $in: ['proj1'] } }]);
+    expect(bookingLookup.bookingNumber.test('BK-.*')).toBe(true);
     expect(res.statusCode).toBe(200);
     const query = mocks.paymentFind.mock.calls[0][0];
     expect(query.professional).toBe(PRO_ID);
