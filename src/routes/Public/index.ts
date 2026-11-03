@@ -60,6 +60,13 @@ export const SCHEDULING_RATE_LIMIT = 60;
  */
 export const ANNOUNCEMENT_LIST_RATE_LIMIT = 300;
 export const ANNOUNCEMENT_EVENT_RATE_LIMIT = 600;
+/**
+ * Display-only tier/level colour metadata is fetched once per full page load
+ * (Navbar). Each endpoint gets its own per-IP budget so page loads never spend
+ * the booking calendar budget, and a burst on one cannot starve the other.
+ */
+export const LOYALTY_TIERS_RATE_LIMIT = 300;
+export const PROFESSIONAL_LEVELS_RATE_LIMIT = 300;
 
 const createPublicRateLimiter = (limit: number) =>
   rateLimit({
@@ -77,6 +84,8 @@ const createPublicRateLimiter = (limit: number) =>
 const schedulingRateLimiter = createPublicRateLimiter(SCHEDULING_RATE_LIMIT);
 const announcementListRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_LIST_RATE_LIMIT);
 const announcementEventRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_EVENT_RATE_LIMIT);
+const loyaltyTiersRateLimiter = createPublicRateLimiter(LOYALTY_TIERS_RATE_LIMIT);
+const professionalLevelsRateLimiter = createPublicRateLimiter(PROFESSIONAL_LEVELS_RATE_LIMIT);
 
 // Google Maps configuration (public endpoint)
 publicRouter.route("/google-maps-config").get(getGoogleMapsConfig);
@@ -153,10 +162,10 @@ publicRouter
 // Tier/level tag colours (public, display-safe fields only)
 publicRouter
   .route("/loyalty-tiers")
-  .get(schedulingRateLimiter, getPublicLoyaltyTiers);
+  .get(loyaltyTiersRateLimiter, getPublicLoyaltyTiers);
 publicRouter
   .route("/professional-levels")
-  .get(schedulingRateLimiter, getPublicProfessionalLevels);
+  .get(professionalLevelsRateLimiter, getPublicProfessionalLevels);
 
 // CMS public endpoints
 publicRouter.route("/cms/sitemap").get(listCmsSitemapEntries);
