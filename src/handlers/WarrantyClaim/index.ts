@@ -874,7 +874,8 @@ export const getWarrantyClaimById = async (req: Request, res: Response) => {
 /**
  * GET /api/warranty-claims/my — the viewer's own claims (customer or
  * professional scope) with status, escaped literal search, bookingId and
- * service filters, paginated. Every filter resolves inside the role scope.
+ * service filters, paginated. Every filter resolves inside the role scope;
+ * any other role is rejected with 403 before a query runs.
  */
 export const listMyWarrantyClaims = async (req: Request, res: Response) => {
   try {
@@ -882,6 +883,12 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
     const role = getUserRole(req);
     if (!userId || !role) {
       return res.status(401).json({ success: false, msg: "Authentication required" });
+    }
+    // Only claim participants have a "my claims" scope. Any other role
+    // (admin, employee, visitor, unknown) would otherwise get an unscoped
+    // query; admins use /admin/list with its own permission checks.
+    if (role !== "customer" && role !== "professional") {
+      return res.status(403).json({ success: false, msg: "Only customers and professionals have warranty claims" });
     }
 
     const { status, page = "1", limit = "20", q, search, bookingId, service } = req.query;

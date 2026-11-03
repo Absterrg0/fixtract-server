@@ -96,6 +96,66 @@ describe('warranty claim search and filters', () => {
     expect(mocks.bookingFind).not.toHaveBeenCalled();
   });
 
+  const anyClaimQuery = () => [
+    mocks.claimFind,
+    mocks.claimCount,
+    mocks.claimExists,
+    mocks.claimDistinct,
+    mocks.claimAggregate,
+    mocks.bookingFind,
+    mocks.projectFind,
+  ].some((fn) => fn.mock.calls.length > 0);
+
+  it.each(['admin', 'employee', 'visitor', 'superuser'])(
+    'rejects role %s with 403 before any database query (plain and filtered)',
+    async (role) => {
+      for (const query of [{}, { q: 'BK-2026', service: 'Plumbing', status: 'open' }]) {
+        const res = mockRes();
+        await listMyWarrantyClaims(
+          { user: { _id: CUSTOMER_ID, role }, query } as unknown as Request,
+          res,
+        );
+        expect(res.statusCode).toBe(403);
+        expect(res.body.success).toBe(false);
+      }
+      expect(anyClaimQuery()).toBe(false);
+    },
+  );
+
+  it('keeps 401 for a missing user or role, without a query', async () => {
+    for (const user of [undefined, { role: 'customer' }, { _id: CUSTOMER_ID }]) {
+      const res = mockRes();
+      await listMyWarrantyClaims({ user, query: {} } as unknown as Request, res);
+      expect(res.statusCode).toBe(401);
+    }
+    expect(anyClaimQuery()).toBe(false);
+  });
+
+  it('scopes a professional to their own claims in both the plain and the joined path', async () => {
+    const PRO_ID = '507f1f77bcf86cd799439022';
+    const plain = mockRes();
+    await listMyWarrantyClaims(
+      { user: { _id: PRO_ID, role: 'professional' }, query: {} } as unknown as Request,
+      plain,
+    );
+    expect(plain.statusCode).toBe(200);
+    const plainQuery = mocks.claimFind.mock.calls[0][0];
+    expect(String(plainQuery.professional)).toBe(PRO_ID);
+    expect(plainQuery.customer).toBeUndefined();
+    expect(String(mocks.claimCount.mock.calls[0][0].professional)).toBe(PRO_ID);
+
+    const joined = mockRes();
+    await listMyWarrantyClaims(
+      { user: { _id: PRO_ID, role: 'professional' }, query: { service: 'Plumbing', page: '2', limit: '10' } } as unknown as Request,
+      joined,
+    );
+    expect(joined.statusCode).toBe(200);
+    const pipeline = pipelineOf();
+    expect(String(pipeline[0].$match.professional)).toBe(PRO_ID);
+    expect(pipeline[0].$match.customer).toBeUndefined();
+    expect(pipeline.at(-1).$facet.page.slice(0, 2)).toEqual([{ $skip: 10 }, { $limit: 10 }]);
+  });
+
   it('keeps the plain paginated query when no booking-dependent filter is set', async () => {
     const res = mockRes();
     await listMyWarrantyClaims(

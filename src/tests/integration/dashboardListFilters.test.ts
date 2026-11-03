@@ -207,6 +207,40 @@ describeDb('dashboard list filters (real Mongo)', () => {
       expect(otherPro.body.data.pagination.total).toBe(1);
     });
 
+    it('rejects non-participant roles before any claim query, even with stored claims', async () => {
+      await WarrantyClaim.collection.insertMany([
+        claim(ids.bSnapshot),
+        claim(ids.bOtherPro, { customer: OTHER_CUSTOMER, professional: OTHER_PRO }),
+      ]);
+      const findSpy = vi.spyOn(WarrantyClaim, 'find');
+      const countSpy = vi.spyOn(WarrantyClaim, 'countDocuments');
+      const aggregateSpy = vi.spyOn(WarrantyClaim, 'aggregate');
+      try {
+        for (const role of ['admin', 'employee', 'visitor', 'unknown-role']) {
+          for (const query of [{}, { service: 'Plumbing' }, { q: 'BK-2026' }]) {
+            const res = response();
+            await listMyWarrantyClaims(claimsRequest({ _id: new Types.ObjectId(), role }, query), res);
+            expect(res.statusCode).toBe(403);
+            expect(res.body.data).toBeUndefined();
+          }
+        }
+        expect(findSpy).not.toHaveBeenCalled();
+        expect(countSpy).not.toHaveBeenCalled();
+        expect(aggregateSpy).not.toHaveBeenCalled();
+      } finally {
+        findSpy.mockRestore();
+        countSpy.mockRestore();
+        aggregateSpy.mockRestore();
+      }
+      // Participants still see exactly their own claim (plain path).
+      const own = response();
+      await listMyWarrantyClaims(claimsRequest({ _id: CUSTOMER, role: 'customer' }, {}), own);
+      expect(own.body.data.claims.map((c: any) => String(c.booking._id))).toEqual([ids.bSnapshot.toHexString()]);
+      const ownPro = response();
+      await listMyWarrantyClaims(claimsRequest({ _id: OTHER_PRO, role: 'professional' }, {}), ownPro);
+      expect(ownPro.body.data.claims.map((c: any) => String(c.booking._id))).toEqual([ids.bOtherPro.toHexString()]);
+    });
+
     it('resolves booking-number text through the viewer booking scope, with escaped literal matching', async () => {
       const rows = [
         claim(ids.bSnapshot),
