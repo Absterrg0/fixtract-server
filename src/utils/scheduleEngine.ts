@@ -2253,9 +2253,37 @@ const calculateBufferEnd = (
 };
 
 /**
+ * Cooperative cancellation for a schedule search. The day search is
+ * synchronous CPU work, so a caller's timer alone (Promise.race) cannot stop
+ * it. With a signal, the search yields to the event loop once per searched day
+ * (letting the caller's timer run) and stops at the next check once the
+ * signal is aborted. Without a signal the search runs exactly as before: no
+ * yields, no checks.
+ */
+export type ScheduleSearchOptions = {
+  signal?: { readonly aborted: boolean };
+};
+
+/** Thrown when a schedule search stops because its signal was aborted. */
+export class ScheduleSearchAbortedError extends Error {
+  constructor() {
+    super("Schedule search aborted");
+    this.name = "ScheduleSearchAbortedError";
+  }
+}
+
+const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+const throwIfScheduleSearchAborted = (options?: ScheduleSearchOptions) => {
+  if (options?.signal?.aborted) throw new ScheduleSearchAbortedError();
+};
+
+/**
  * Build schedule proposals using pre-loaded project and professional data.
  * This avoids N+1 queries when called in bulk.
  * Supports resource policy mode when project has resources.
+ * `options.signal` makes the search cooperatively cancellable (see
+ * ScheduleSearchOptions); results are unchanged when it is not aborted.
  */
 export const buildProjectScheduleProposalsWithData = async (
   project: any,
@@ -2263,11 +2291,13 @@ export const buildProjectScheduleProposalsWithData = async (
   subprojectIndex?: number,
   durationOverride?: DurationOverride,
   excludeBookingId?: string,
-  quantity = 1
+  quantity = 1,
+  options?: ScheduleSearchOptions
 ): Promise<ScheduleProposals | null> => {
   if (!project || !professional) {
     return null;
   }
+  throwIfScheduleSearchAborted(options);
 
   const durations = getProjectDurations(project, subprojectIndex, durationOverride, quantity);
   if (!durations || !durations.execution?.value) {
@@ -2298,6 +2328,8 @@ export const buildProjectScheduleProposalsWithData = async (
     excludeBookingId
   );
 
+  throwIfScheduleSearchAborted(options);
+
   // Collect company-only blocked dates and ranges for multi-resource start date validation
   // Personal/customer blocks should not veto multi-resource start dates - only company-level blocks should
   const { companyBlockedDates, companyBlockedRanges } = collectCompanyBlocks(professional, timeZone);
@@ -2315,6 +2347,7 @@ export const buildProjectScheduleProposalsWithData = async (
       undefined,
       excludeBookingId
     );
+    throwIfScheduleSearchAborted(options);
   }
 
   const prepEnd = calculatePrepEnd(
@@ -2351,7 +2384,13 @@ export const buildProjectScheduleProposalsWithData = async (
   let shortestProposal: ProposalWindow | undefined;
   let shortestThroughput: number | null = null;
 
+  const cancellable = Boolean(options?.signal);
   for (let dayOffset = 0; dayOffset <= maxDays; dayOffset += 1) {
+    if (cancellable) {
+      // Bounded budget per yield: one searched day of synchronous work.
+      await yieldToEventLoop();
+      throwIfScheduleSearchAborted(options);
+    }
     const currentDay = addDaysZoned(searchStart, dayOffset);
 
     if (executionMode === "hours") {

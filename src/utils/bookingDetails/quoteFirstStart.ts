@@ -1,7 +1,11 @@
 import mongoose from "mongoose";
 import Project from "../../models/project";
 import User from "../../models/user";
-import { buildProjectScheduleProposalsWithData } from "../scheduleEngine";
+import {
+  ScheduleSearchAbortedError,
+  buildProjectScheduleProposalsWithData,
+  type ScheduleSearchOptions,
+} from "../scheduleEngine";
 
 export type QuoteDurationInput = {
   value: number;
@@ -64,6 +68,8 @@ export async function computeQuoteFirstPossibleStart(args: {
   preparationDuration?: unknown;
   bufferDuration?: unknown;
   excludeBookingId?: string | null;
+  /** Cooperative cancellation for the schedule search (see ScheduleSearchOptions). */
+  signal?: ScheduleSearchOptions["signal"];
 }): Promise<Date | null> {
   try {
     const projectId = typeof args.projectId === "string" ? args.projectId : null;
@@ -77,6 +83,7 @@ export async function computeQuoteFirstPossibleStart(args: {
         ? args.quantity
         : 1;
 
+    if (args.signal?.aborted) return null;
     const project = await Project.findById(projectId).lean();
     if (!project) return null;
     const professionalId = String((project as any).professionalId || "");
@@ -85,6 +92,7 @@ export async function computeQuoteFirstPossibleStart(args: {
       "companyAvailability companyBlockedDates companyBlockedRanges businessInfo.timezone"
     ).lean();
     if (!professional) return null;
+    if (args.signal?.aborted) return null;
 
     const subprojectIndex =
       typeof args.subprojectIndex === "number" && Number.isInteger(args.subprojectIndex) && args.subprojectIndex >= 0
@@ -102,10 +110,12 @@ export async function computeQuoteFirstPossibleStart(args: {
       typeof args.excludeBookingId === "string" && mongoose.isValidObjectId(args.excludeBookingId)
         ? args.excludeBookingId
         : undefined,
-      quantity
+      quantity,
+      args.signal ? { signal: args.signal } : undefined
     );
     return resolveQuoteFirstStartFromProposals(proposals);
   } catch (error) {
+    if (error instanceof ScheduleSearchAbortedError) return null;
     console.warn("computeQuoteFirstPossibleStart failed, leaving unknown:", (error as Error)?.message || error);
     return null;
   }
@@ -118,7 +128,8 @@ export async function computeQuoteFirstPossibleStart(args: {
  */
 export async function computeQuoteFirstPossibleStartForBooking(
   booking: any,
-  durations: QuoteFirstStartDurations
+  durations: QuoteFirstStartDurations,
+  options: ScheduleSearchOptions = {}
 ): Promise<Date | null> {
   const rawProject = (booking as any)?.project;
   const projectId =
@@ -150,6 +161,7 @@ export async function computeQuoteFirstPossibleStartForBooking(
     preparationDuration: durations?.preparationDuration,
     bufferDuration: durations?.bufferDuration,
     excludeBookingId,
+    signal: options.signal,
   });
 }
 
@@ -162,9 +174,11 @@ export const QUOTE_FIRST_START_TIMEOUT_MS = 2500;
 
 /**
  * Bounded wait for computeQuoteFirstPossibleStartForBooking: resolves the
- * computed start, or null on error or once `timeoutMs` elapses. A timeout
- * bounds only the caller's wait; the read-only computation is not cancelled
- * and its late result or error is discarded.
+ * computed start, or null on error or once `timeoutMs` elapses. On timeout
+ * the search is also cancelled: the schedule engine yields once per searched
+ * day, so the timer fires during a long synchronous day search, and the
+ * aborted signal stops it at the next day (no further CPU work, no late
+ * result). An in-flight database read finishes, but its result is discarded.
  */
 export async function computeQuoteFirstPossibleStartBounded(
   booking: any,
@@ -172,12 +186,16 @@ export async function computeQuoteFirstPossibleStartBounded(
   timeoutMs: number = QUOTE_FIRST_START_TIMEOUT_MS
 ): Promise<Date | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const controller = new AbortController();
   const computation = Promise.resolve()
-    .then(() => computeQuoteFirstPossibleStartForBooking(booking, durations))
+    .then(() => computeQuoteFirstPossibleStartForBooking(booking, durations, { signal: controller.signal }))
     .then((value) => value ?? null)
     .catch(() => null);
   const timeout = new Promise<null>((resolve) => {
-    timer = setTimeout(() => resolve(null), timeoutMs);
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(null);
+    }, timeoutMs);
   });
   try {
     return await Promise.race([computation, timeout]);

@@ -202,6 +202,29 @@ describe("bounded first-start wait for quote saves", () => {
     }
   });
 
+  it("aborts the schedule search when the deadline passes and leaves it live otherwise", async () => {
+    vi.useFakeTimers();
+    try {
+      await computeQuoteFirstPossibleStartBounded(booking(), durations);
+      const onTime = mocks.proposalsCalls.at(-1)[6];
+      expect(onTime.signal.aborted).toBe(false);
+
+      let release!: () => void;
+      mocks.proposalsGate = new Promise<void>((resolve) => { release = resolve; });
+      const pending = computeQuoteFirstPossibleStartBounded(booking(), durations);
+      await vi.advanceTimersByTimeAsync(QUOTE_FIRST_START_TIMEOUT_MS);
+      await expect(pending).resolves.toBeNull();
+      const late = mocks.proposalsCalls.at(-1)[6];
+      // The engine receives an aborted signal, so its day loop stops instead
+      // of finishing in the background.
+      expect(late.signal.aborted).toBe(true);
+      release();
+      await vi.runAllTimersAsync();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stores null when the computation throws", async () => {
     mocks.proposalsError = new Error("calendar down");
     await expect(computeQuoteFirstPossibleStartBounded(booking(), durations, 50)).resolves.toBeNull();
