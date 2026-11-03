@@ -87,6 +87,7 @@ const filterMilestonePaymentsForAdminArea = (milestones: unknown, canReadPayment
     const copy = { ...milestone };
     delete copy.stripeClientSecret;
     delete copy.stripePaymentIntentId;
+    delete copy.paidStripePaymentIntentId;
     return copy;
   });
 };

@@ -13,12 +13,21 @@ export interface IStripeEvent extends Document {
   processedAt?: Date;
   lastError?: string;
   /**
-   * Durable manual-reconciliation marker. Set when a handled event was
+   * Durable manual-reconciliation item. Set when a handled event was
    * deliberately not applied but may represent money that needs an operator
    * (for example a superseded PaymentIntent that still succeeded). Records
-   * carrying it are exempt from the 90-day TTL. Operators query open items
-   * with `{ "reconciliation.required": true, "reconciliation.resolvedAt": null }`
+   * carrying it have no `expiresAt`, so the 90-day TTL never removes them.
+   * Operators query open items with
+   * `{ "reconciliation.required": true, "reconciliation.resolvedAt": null }`
    * and close one by setting `resolvedAt` (and optionally `resolvedBy`/`note`).
+   *
+   * Current items are their own record, one per PaymentIntent, with
+   * `eventId = "reconciliation:<reason>:<paymentIntentId>"`; the unique
+   * `eventId` index makes the item idempotent across concurrent deliveries.
+   * `sourceEventId` names the Stripe event that raised it. Items written by
+   * the earlier per-event version sit on the delivered event's own record
+   * (no `sourceEventId`) and are kept as they are; see
+   * `npm run check:stripe-reconciliation` (read-only).
    */
   reconciliation?: IStripeEventReconciliation;
   expiresAt?: Date;
@@ -34,6 +43,8 @@ export interface IStripeEventReconciliation {
   /** Major currency units, as charged by the provider. */
   amount?: number;
   currency?: string;
+  /** Stripe event that raised the item (absent on legacy per-event items). */
+  sourceEventId?: string;
   detectedAt: Date;
   resolvedAt?: Date | null;
   resolvedBy?: Types.ObjectId;
@@ -67,6 +78,7 @@ const StripeEventSchema = new Schema<IStripeEvent>(
           chargeId: { type: String },
           amount: { type: Number },
           currency: { type: String },
+          sourceEventId: { type: String },
           detectedAt: { type: Date, required: true },
           resolvedAt: { type: Date, default: null },
           resolvedBy: { type: Schema.Types.ObjectId, ref: "User" },
@@ -91,6 +103,9 @@ StripeEventSchema.index(
   { "reconciliation.required": 1, "reconciliation.resolvedAt": 1, "reconciliation.detectedAt": 1 },
   { partialFilterExpression: { "reconciliation.required": true } },
 );
+// Lookup by intent (legacy-item check, operator search). Deliberately not
+// unique: legacy per-event items may already hold duplicates, and uniqueness
+// per intent comes from the deterministic item `eventId` instead.
 StripeEventSchema.index(
   { "reconciliation.paymentIntentId": 1 },
   { partialFilterExpression: { "reconciliation.required": true } },

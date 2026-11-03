@@ -49,6 +49,7 @@ const INTERNAL_PAYMENT_METADATA_KEYS = [
  */
 const PARTICIPANT_PROVIDER_FIELDS = [
   "stripePaymentIntentId",
+  "paidStripePaymentIntentId",
   "stripeChargeId",
   "stripeTransferId",
   "stripeDestinationPayment",

@@ -68,7 +68,8 @@ import DiscountCodeUsage from '../../models/discountCodeUsage';
 import PlatformSettings from '../../models/platformSettings';
 import StripeEvent from '../../models/stripeEvent';
 import { createPaymentIntent, confirmPayment } from '../../handlers/Stripe/payment';
-import { handleWebhook } from '../../handlers/Stripe/webhooks';
+import { handleWebhook, reconciliationItemEventId } from '../../handlers/Stripe/webhooks';
+import { inspectStripeReconciliationItems } from '../../scripts/migrate/checkStripeReconciliationItems';
 import { getSavingsSummary } from '../../handlers/User/savingsSummary';
 import { recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger';
 import { bookingForRequest } from '../../utils/invoiceVisibility';
@@ -403,11 +404,18 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
     expect(await readLedger(bookingId)).toHaveLength(0);
     expect(await DiscountCodeUsage.countDocuments({ booking: booking._id })).toBe(0);
 
-    // The marker is durable (no TTL), queryable and identifies the money.
-    const record: any = await StripeEvent.findOne({ eventId: staleEvent.id }).lean();
+    // The delivered event keeps its ordinary dedup record (processed, TTL).
+    const delivered: any = await StripeEvent.findOne({ eventId: staleEvent.id }).lean();
+    expect(delivered.status).toBe('processed');
+    expect(delivered.expiresAt).toBeInstanceOf(Date);
+    expect(delivered.reconciliation).toBeUndefined();
+    // The item is its own durable (no TTL) record, queryable, and identifies the money.
+    const itemEventId = reconciliationItemEventId(oldIntent.paymentIntentId!);
+    const record: any = await StripeEvent.findOne({ eventId: itemEventId }).lean();
     expect(record.status).toBe('processed');
     expect(record.expiresAt).toBeUndefined();
     expect(record.reconciliation).toMatchObject({
+      sourceEventId: staleEvent.id,
       required: true,
       reason: 'superseded_payment_intent_succeeded',
       paymentIntentId: oldIntent.paymentIntentId,
@@ -420,7 +428,7 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
     expect(String(record.reconciliation.bookingId)).toBe(bookingId);
     expect(new Date(record.reconciliation.detectedAt).getTime()).toBeGreaterThanOrEqual(before - 1000);
     const openQueue = await StripeEvent.find({ 'reconciliation.required': true, 'reconciliation.resolvedAt': null }).lean();
-    expect(openQueue.map((item: any) => item.eventId)).toEqual([staleEvent.id]);
+    expect(openQueue.map((item: any) => item.eventId)).toEqual([itemEventId]);
 
     // The operator queue query is served by the partial index.
     const plan: any = await StripeEvent.find({ 'reconciliation.required': true, 'reconciliation.resolvedAt': null })
@@ -437,7 +445,11 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
     expect(stripeMocks.intentCreate).toHaveBeenCalledTimes(2);
 
     // Resolving the item takes it out of the open queue.
-    await StripeEvent.updateOne({ eventId: staleEvent.id }, { $set: { 'reconciliation.resolvedAt': new Date(), 'reconciliation.note': 'refunded in dashboard' } });
+    await StripeEvent.updateOne({ eventId: itemEventId }, { $set: { 'reconciliation.resolvedAt': new Date(), 'reconciliation.note': 'refunded in dashboard' } });
+    expect(await StripeEvent.countDocuments({ 'reconciliation.required': true, 'reconciliation.resolvedAt': null })).toBe(0);
+    // A later delivery for the resolved intent neither reopens nor duplicates it.
+    await deliverEvent(succeededEvent(bookingId, oldIntent.paymentIntentId!));
+    expect(await StripeEvent.countDocuments({ 'reconciliation.paymentIntentId': oldIntent.paymentIntentId })).toBe(1);
     expect(await StripeEvent.countDocuments({ 'reconciliation.required': true, 'reconciliation.resolvedAt': null })).toBe(0);
 
     // The current intent still settles normally afterwards.
@@ -446,6 +458,134 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
     expect(paid.payment.status).toBe('authorized');
     expect(paid.milestonePayments[0].status).toBe('paid');
     expect((await readLedger(bookingId)).map((entry) => entry.paymentIntentId)).toEqual([newIntent.paymentIntentId]);
+  });
+
+  it('records one item when different events for one superseded intent are delivered concurrently', async () => {
+    const booking = await seedMilestoneBooking();
+    const bookingId = String(booking._id);
+    const oldIntent = await createPaymentIntent(bookingId, String(customerId), 0, 0);
+    stripeMocks.intentCancel.mockRejectedValueOnce(Object.assign(new Error('processing'), { code: 'payment_intent_unexpected_state' }));
+    const newIntent = await createPaymentIntent(bookingId, String(customerId), 0, 0);
+
+    // Stripe can deliver the same success under distinct event ids at once.
+    const events = Array.from({ length: 4 }, () => succeededEvent(bookingId, oldIntent.paymentIntentId!));
+    expect(new Set(events.map((event) => event.id)).size).toBe(4);
+    const responses = await Promise.all(events.map((event) => deliverEvent(event)));
+    expect(responses.map((res) => res.statusCode)).toEqual([200, 200, 200, 200]);
+
+    const items: any[] = await StripeEvent.find({ 'reconciliation.required': true }).lean();
+    expect(items).toHaveLength(1);
+    expect(items[0].eventId).toBe(reconciliationItemEventId(oldIntent.paymentIntentId!));
+    expect(items[0].reconciliation.currentPaymentIntentId).toBe(newIntent.paymentIntentId);
+    expect(events.map((event) => event.id)).toContain(items[0].reconciliation.sourceEventId);
+    // Every delivered event keeps normal dedup: processed, not failed, own TTL.
+    const delivered: any[] = await StripeEvent.find({ eventId: { $in: events.map((event) => event.id) } }).lean();
+    expect(delivered).toHaveLength(4);
+    expect(delivered.every((record) => record.status === 'processed' && record.expiresAt instanceof Date)).toBe(true);
+    expect(delivered.every((record) => record.reconciliation === undefined)).toBe(true);
+
+    // Redelivering all of them again (also concurrently) changes nothing.
+    await Promise.all(events.map((event) => deliverEvent(event)));
+    expect(await StripeEvent.countDocuments({ 'reconciliation.required': true })).toBe(1);
+    const current: any = await Booking.findById(bookingId).lean();
+    expect(current.payment.stripePaymentIntentId).toBe(newIntent.paymentIntentId);
+    expect(current.payment.status).toBe('pending');
+  });
+
+  it('persists the settling intent on the paid milestone in the confirm and webhook paths', async () => {
+    const booking = await seedMilestoneBooking();
+    const bookingId = String(booking._id);
+    const customer = { _id: customerId, role: 'customer' };
+    // Confirm endpoint settles milestone 1 first.
+    const first = await createPaymentIntent(bookingId, String(customerId), 0, 0);
+    const confirmRes = response();
+    await confirmPayment({ user: customer, body: { bookingId, paymentIntentId: first.paymentIntentId } } as any, confirmRes as any);
+    expect(confirmRes.statusCode).toBe(200);
+    let stored: any = await Booking.findById(bookingId).lean();
+    expect(stored.milestonePayments[0]).toMatchObject({ status: 'paid', paidStripePaymentIntentId: first.paymentIntentId });
+    // Webhook settles milestone 2.
+    const second = await createPaymentIntent(bookingId, String(customerId), 0, 1);
+    await deliverEvent(succeededEvent(bookingId, second.paymentIntentId!));
+    stored = await Booking.findById(bookingId).lean();
+    expect(stored.milestonePayments[1]).toMatchObject({ status: 'paid', paidStripePaymentIntentId: second.paymentIntentId });
+    // The settlement field is never part of a participant payload.
+    const doc = await Booking.findById(bookingId);
+    const visible: any = bookingForRequest(doc, customer as any);
+    expect(visible.milestonePayments.every((milestone: any) => milestone.paidStripePaymentIntentId === undefined)).toBe(true);
+  });
+
+  it('treats a paid milestone as applied only from its recorded settling intent, never from a checkout id', async () => {
+    const seedPaidLegacy = async (milestone: Record<string, any>) => Booking.create({
+      customer: customerId,
+      professional: professionalId,
+      bookingType: 'professional',
+      status: 'in_progress',
+      location,
+      rfqData: { serviceType: 'Bathroom', description: 'Y', answers: [] },
+      quote: { amount: 200, currency: 'EUR', description: 'Quote' },
+      vatDecision: { action: 'standard_rate', country: 'BE', standardRate: 21, appliedRate: 21, answers: [] },
+      milestonePayments: [
+        { title: 'Deposit', amount: 100, dueCondition: 'on_start', order: 0, status: 'paid', ...milestone },
+        { title: 'Final', amount: 100, dueCondition: 'on_start', order: 1 },
+      ],
+      // Pre-ledger booking: no paymentDiscountLedger entry for milestone 1.
+      payment: { status: 'pending', currency: 'EUR', amount: 100, stripePaymentIntentId: 'pi_current_m2', milestoneIndex: 1 },
+    });
+
+    // Recorded settlement fact: a late redelivery is not a new charge.
+    const settled = await seedPaidLegacy({ stripePaymentIntentId: 'pi_m1_paid', paidStripePaymentIntentId: 'pi_m1_paid' });
+    expect((await deliverEvent(succeededEvent(String(settled._id), 'pi_m1_paid'))).statusCode).toBe(200);
+    expect(await StripeEvent.countDocuments({ 'reconciliation.required': true })).toBe(0);
+
+    // Only the checkout id is known (it is written before payment), so the
+    // charge is not assumed applied: the operator gets an item.
+    const unknown = await seedPaidLegacy({ stripePaymentIntentId: 'pi_m1_checkout' });
+    expect((await deliverEvent(succeededEvent(String(unknown._id), 'pi_m1_checkout'))).statusCode).toBe(200);
+    const items: any[] = await StripeEvent.find({ 'reconciliation.required': true }).lean();
+    expect(items.map((item) => item.reconciliation.paymentIntentId)).toEqual(['pi_m1_checkout']);
+    // Neither booking was changed by the stale successes.
+    for (const id of [settled._id, unknown._id]) {
+      const stored: any = await Booking.findById(id).lean();
+      expect(stored.payment.status).toBe('pending');
+      expect(stored.milestonePayments.map((milestone: any) => milestone.status)).toEqual(['paid', 'pending']);
+    }
+  });
+
+  it('keeps legacy per-event items authoritative and reports them in the read-only preflight', async () => {
+    const booking = await seedMilestoneBooking();
+    const bookingId = String(booking._id);
+    await createPaymentIntent(bookingId, String(customerId), 0, 0);
+    const oldIntentId = 'pi_legacy_marked';
+    // Two open items for one intent from the earlier per-event version.
+    const legacyItem = (eventId: string) => ({
+      eventId,
+      eventType: 'payment_intent.succeeded',
+      status: 'processed',
+      attempts: 1,
+      firstSeenAt: new Date(),
+      lastAttemptAt: new Date(),
+      reconciliation: {
+        required: true,
+        reason: 'superseded_payment_intent_succeeded',
+        bookingId: booking._id,
+        paymentIntentId: oldIntentId,
+        detectedAt: new Date('2026-11-01T00:00:00.000Z'),
+        resolvedAt: null,
+      },
+    });
+    await mongoose.connection.collection('stripeevents').insertMany([legacyItem('evt_legacy_a'), legacyItem('evt_legacy_b')]);
+    const before = await inspectStripeReconciliationItems(mongoose.connection.db!);
+    expect(before).toMatchObject({ eventIdIndexUnique: true, openItems: 2, openLegacyItems: 2, safe: true });
+    expect(before.duplicateOpenIntents).toEqual([{ paymentIntentId: oldIntentId, eventIds: ['evt_legacy_a', 'evt_legacy_b'] }]);
+
+    // A new delivery for that intent counts as already marked: no third item,
+    // and the legacy records are not rewritten or deleted.
+    await deliverEvent(succeededEvent(bookingId, oldIntentId));
+    const items: any[] = await StripeEvent.find({ 'reconciliation.paymentIntentId': oldIntentId }).sort({ eventId: 1 }).lean();
+    expect(items.map((item) => item.eventId)).toEqual(['evt_legacy_a', 'evt_legacy_b']);
+    expect(items.every((item) => item.reconciliation.sourceEventId === undefined)).toBe(true);
+    const after = await inspectStripeReconciliationItems(mongoose.connection.db!);
+    expect(after).toEqual(before);
   });
 
   it('classifies a refunded milestone booking as uncertain and keeps legacy milestones unrecorded', async () => {

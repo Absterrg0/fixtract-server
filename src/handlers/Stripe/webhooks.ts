@@ -255,62 +255,101 @@ export const handleWebhook = async (req: Request, res: Response) => {
 };
 
 /**
- * Durable manual-reconciliation marker for a succeeded PaymentIntent that is
- * no longer the booking's current intent (for example the cancel in
+ * Durable manual-reconciliation item for a succeeded PaymentIntent that is no
+ * longer the booking's current intent (for example the cancel in
  * createPaymentIntent failed because the old intent was already processing).
  * The stale success is never applied to the current payment; this only makes
- * the possible charge operator-queryable on the event's StripeEvent record
- * (exempt from its TTL). No refund, retry or provider call is made here.
+ * the possible charge operator-queryable. No refund, retry or provider call is
+ * made here.
  *
- * An intent the booking already recorded as settled (its per-payment ledger
- * entry exists) is a redelivery of an applied payment, not a new charge, so it
- * needs no marker. Idempotent per PaymentIntent: a redelivery, or another
- * event for the same intent, keeps the first marker. Returns true when this
- * call wrote the marker.
+ * Applied-intent check: an intent the booking already recorded as settled is
+ * a redelivery of an applied payment, not a new charge, and needs no item.
+ * The recorded facts are the per-payment ledger entry for the intent, or a
+ * paid milestone that stores this intent id (both success paths persist it).
+ * Older paid milestones without a stored intent id are not guessed: they get
+ * an item, and the operator confirms the charge against the provider.
+ *
+ * One item per PaymentIntent, enforced by the database: the item is its own
+ * StripeEvent document keyed by `reconciliationItemEventId(intent)` and
+ * upserted under the existing unique `eventId` index, so concurrent
+ * deliveries with different Stripe event ids cannot create two items (the
+ * losing upsert is a no-op or a duplicate-key error, both "already marked").
+ * The delivered event's own StripeEvent record keeps its normal dedup, status
+ * and TTL. Items written before this keying (on the delivered event's own
+ * record) still count as already marked and are never rewritten.
+ * Returns true when this call created the item.
  */
+export const reconciliationItemEventId = (paymentIntentId: string) =>
+  `reconciliation:superseded_payment_intent_succeeded:${paymentIntentId}`;
+
 async function recordSupersededIntentReconciliation(
   eventId: string,
+  eventType: string,
   bookingId: mongoose.Types.ObjectId,
   paymentIntent: Stripe.PaymentIntent,
   currentIntentId: string,
 ): Promise<boolean> {
   const alreadyApplied = await Booking.exists({
     _id: bookingId,
-    'paymentDiscountLedger.paymentIntentId': paymentIntent.id,
+    $or: [
+      { 'paymentDiscountLedger.paymentIntentId': paymentIntent.id },
+      { milestonePayments: { $elemMatch: { paidStripePaymentIntentId: paymentIntent.id, status: 'paid' } } },
+    ],
   });
   if (alreadyApplied) return false;
-  const alreadyMarked = await StripeEvent.exists({
+  const itemEventId = reconciliationItemEventId(paymentIntent.id);
+  // Legacy items (written on the delivered event's record) are no longer
+  // created, so this read cannot race a new legacy write.
+  const legacyItem = await StripeEvent.exists({
+    eventId: { $ne: itemEventId },
     'reconciliation.required': true,
     'reconciliation.paymentIntentId': paymentIntent.id,
   });
-  if (alreadyMarked) return false;
+  if (legacyItem) return false;
   const currency = (paymentIntent.currency || '').toUpperCase() || undefined;
   const amount = typeof paymentIntent.amount === 'number'
     ? convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency || 'eur')
     : undefined;
   const latestCharge = paymentIntent.latest_charge;
   const chargeId = typeof latestCharge === 'string' ? latestCharge : latestCharge?.id;
-  const result = await StripeEvent.updateOne(
-    { eventId, reconciliation: { $exists: false } },
-    {
-      $set: {
-        reconciliation: {
-          required: true,
-          reason: 'superseded_payment_intent_succeeded',
-          bookingId,
-          paymentIntentId: paymentIntent.id,
-          currentPaymentIntentId: currentIntentId,
-          ...(chargeId ? { chargeId } : {}),
-          ...(amount !== undefined ? { amount } : {}),
-          ...(currency ? { currency } : {}),
-          detectedAt: new Date(),
-          resolvedAt: null,
+  const now = new Date();
+  try {
+    const result = await StripeEvent.updateOne(
+      { eventId: itemEventId },
+      {
+        $setOnInsert: {
+          eventId: itemEventId,
+          eventType,
+          status: 'processed',
+          attempts: 1,
+          firstSeenAt: now,
+          lastAttemptAt: now,
+          processedAt: now,
+          reconciliation: {
+            required: true,
+            reason: 'superseded_payment_intent_succeeded',
+            bookingId,
+            paymentIntentId: paymentIntent.id,
+            currentPaymentIntentId: currentIntentId,
+            ...(chargeId ? { chargeId } : {}),
+            ...(amount !== undefined ? { amount } : {}),
+            ...(currency ? { currency } : {}),
+            sourceEventId: eventId,
+            detectedAt: now,
+            resolvedAt: null,
+          },
         },
       },
-      $unset: { expiresAt: 1 },
-    },
-  );
-  return result.modifiedCount === 1;
+      // No schema defaults on insert: the item must not get the 90-day
+      // `expiresAt` that ordinary event records carry.
+      { upsert: true, setDefaultsOnInsert: false },
+    );
+    return result.upsertedCount === 1;
+  } catch (error: any) {
+    // A concurrent delivery inserted the same item first.
+    if (error?.code === 11000) return false;
+    throw error;
+  }
 }
 
 /**
@@ -336,13 +375,14 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent,
     // the event is marked failed and Stripe retries it.
     const marked = await recordSupersededIntentReconciliation(
       eventId,
+      'payment_intent.succeeded',
       booking._id as mongoose.Types.ObjectId,
       paymentIntent,
       currentIntentId,
     );
     console.error(
       `[WEBHOOK] payment_intent.succeeded ${paymentIntent.id} is not booking ${bookingId}'s current intent ${currentIntentId}; not applied`
-        + (marked ? `, reconciliation marker recorded on StripeEvent ${eventId}` : ''),
+        + (marked ? `, reconciliation item ${reconciliationItemEventId(paymentIntent.id)} recorded` : ''),
     );
     return;
   }
@@ -373,6 +413,10 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent,
     if (isMilestone) {
       updateFields[`milestonePayments.${msIdx}.status`] = 'paid';
       updateFields[`milestonePayments.${msIdx}.paidAt`] = now;
+      // The paying intent is the milestone's settlement fact (read by the
+      // superseded-intent reconciliation check).
+      updateFields[`milestonePayments.${msIdx}.stripePaymentIntentId`] = paymentIntent.id;
+      updateFields[`milestonePayments.${msIdx}.paidStripePaymentIntentId`] = paymentIntent.id;
       filter[`milestonePayments.${msIdx}.status`] = { $ne: 'paid' };
     }
 

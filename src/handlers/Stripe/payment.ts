@@ -852,6 +852,9 @@ export const confirmPayment = async (req: Request, res: Response) => {
       if (typeof msIdx === 'number' && Array.isArray(booking.milestonePayments) && booking.milestonePayments[msIdx]) {
         updateFields[`milestonePayments.${msIdx}.status`] = 'paid';
         updateFields[`milestonePayments.${msIdx}.paidAt`] = now;
+        // Same settlement fact as the webhook path: the intent that paid.
+        updateFields[`milestonePayments.${msIdx}.stripePaymentIntentId`] = paymentIntent.id;
+        updateFields[`milestonePayments.${msIdx}.paidStripePaymentIntentId`] = paymentIntent.id;
       }
 
       const milestoneFilter: Record<string, any> = { _id: booking._id };

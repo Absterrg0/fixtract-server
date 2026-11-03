@@ -69,6 +69,13 @@ export interface IQuotationMilestone {
 export interface IBookingMilestone extends IQuotationMilestone {
   workStatus?: 'pending' | 'in_progress' | 'completed';
   stripePaymentIntentId?: string;
+  /**
+   * The PaymentIntent that actually settled this milestone. Written only by
+   * the payment-success paths (unlike `stripePaymentIntentId`, which the
+   * checkout also sets), so it is a settlement fact; absent on milestones
+   * paid before it existed.
+   */
+  paidStripePaymentIntentId?: string;
   stripeClientSecret?: string;
   startedAt?: Date;
   completedAt?: Date;
@@ -1041,6 +1048,7 @@ const BookingSchema = new Schema({
     status: { type: String, enum: ['pending', 'invoiced', 'paid', 'overdue'], default: 'pending' },
     workStatus: { type: String, enum: ['pending', 'in_progress', 'completed'], default: 'pending' },
     stripePaymentIntentId: { type: String },
+    paidStripePaymentIntentId: { type: String },
     stripeClientSecret: { type: String },
     startedAt: { type: Date },
     completedAt: { type: Date },
