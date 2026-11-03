@@ -236,6 +236,10 @@ export function isTranslationSource(
  *   overwrite the locale it came from.
  * - A same-slug machine translation managed by another live original is left
  *   alone (reported skipped_manual), even with force.
+ * - A same-slug MANUAL document not linked to this source (no translatedFrom,
+ *   or translatedFrom pointing elsewhere) is never touched, even with force
+ *   (reported skipped_manual). Only machine rows without a live owner may be
+ *   adopted.
  * - Manual translations (autoTranslated: false) always win for text, unless
  *   force=true. A manual translation LINKED to this source (translatedFrom)
  *   still receives the restricting source controls
@@ -245,8 +249,8 @@ export function isTranslationSource(
  *   before the force/translator checks, so they hold even when the provider
  *   is unconfigured or fails.
  * - Machine translations follow the source's status and publishedAt.
- * - force=true replaces a manual translation's text with machine text and
- *   turns it into a machine translation, which from then on follows the
+ * - force=true replaces a LINKED manual translation's text with machine text
+ *   and turns it into a machine translation, which from then on follows the
  *   source's publication like any other machine translation.
  * - Unchanged sourceHash → sync non-text fields only; no translator call.
  * - New/stale → translate and upsert with the SAME type/slug as the source
@@ -312,16 +316,26 @@ export async function syncCmsTranslations(
       }
 
       const isManual = Boolean(sibling) && sibling!.autoTranslated !== true;
-      if (
-        isManual &&
-        sibling!.translatedFrom &&
-        String(sibling!.translatedFrom) === String(source._id)
-      ) {
+      const linkedToSource =
+        Boolean(sibling?.translatedFrom) &&
+        String(sibling!.translatedFrom) === String(source._id);
+
+      // A same-slug MANUAL document that is not explicitly linked to this
+      // source (an independent original, another original's manual
+      // translation, or a manual row with a dangling link) is someone else's
+      // human-written content. It is never managed from here, even with
+      // force: no text, publication, country, cover or hash change, no
+      // re-link and no provider call. The force confirmation only names this
+      // source's linked translations, so only those may be overwritten.
+      if (isManual && !linkedToSource) {
+        results.push({ locale, status: "skipped_manual" });
+        continue;
+      }
+
+      if (isManual) {
         // A linked manual translation keeps its human-written text, but the
         // restricting source controls always apply (countries mirrored; an
         // unpublished source demotes it). A source publish never promotes it.
-        // Only a sibling explicitly linked to this source is managed; a
-        // same-slug independent manual original is left untouched here.
         const controls = manualTranslationControlUpdate(source, sibling!);
         await CmsContent.updateOne(
           { _id: sibling!._id },

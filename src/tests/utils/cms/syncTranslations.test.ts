@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { findOne, updateOne, create, find, deleteMany, updateMany } = vi.hoisted(() => ({
+const { findOne, updateOne, create, find, deleteMany, updateMany, exists } = vi.hoisted(() => ({
+  exists: vi.fn(),
   findOne: vi.fn(),
   updateOne: vi.fn(),
   create: vi.fn(),
@@ -15,7 +16,7 @@ const { translateTexts, isTranslatorConfigured } = vi.hoisted(() => ({
 }));
 
 vi.mock('../../../models/cmsContent', () => ({
-  default: { findOne, updateOne, create, find, deleteMany, updateMany },
+  default: { findOne, updateOne, create, find, deleteMany, updateMany, exists },
 }));
 
 vi.mock('../../../utils/cms/azureTranslator', () => ({
@@ -120,6 +121,7 @@ beforeEach(() => {
   find.mockReturnValue({ lean: async () => [] });
   deleteMany.mockResolvedValue({ deletedCount: 0 });
   updateMany.mockResolvedValue({ modifiedCount: 0 });
+  exists.mockResolvedValue(null);
 });
 
 describe('syncCmsTranslations', () => {
@@ -429,8 +431,15 @@ describe('syncCmsTranslations', () => {
     expect(results[1]).toEqual({ locale: 'fr', status: 'created' });
   });
 
-  it('force overwrites manual translations', async () => {
-    siblings = [manualSibling('nl'), manualSibling('fr')];
+  // Replaced 2026-11-03: the old "force overwrites manual translations" case
+  // used UNLINKED same-slug manual siblings, i.e. it asserted that force
+  // overwrote independent originals. Force now only replaces this source's
+  // linked manual translations.
+  it('force overwrites linked manual translations', async () => {
+    siblings = [
+      manualSibling('nl', { translatedFrom: 'source-1' }),
+      manualSibling('fr', { translatedFrom: 'source-1' }),
+    ];
 
     const results = await syncCmsTranslations(makeSource(), { force: true });
 
@@ -439,10 +448,66 @@ describe('syncCmsTranslations', () => {
       { locale: 'fr', status: 'updated' },
     ]);
     expect(translateTexts).toHaveBeenCalled();
-    expect(updateOne).toHaveBeenCalledTimes(2);
-    const [, update] = updateOne.mock.calls[0];
-    expect(update.$set.autoTranslated).toBe(true);
+    const machineWrites = updateOne.mock.calls.filter(([, update]) => update.$set.autoTranslated === true);
+    expect(machineWrites).toHaveLength(2);
+    const [query, update] = machineWrites[0];
+    expect(query).toEqual({ _id: 'nl-manual-1' });
     expect(update.$set.title).toBe('[nl] Solar guide');
+  });
+
+  it('force never overwrites an independent same-slug manual original, while a linked one is replaced', async () => {
+    siblings = [
+      manualSibling('nl', { title: 'Zonne-gids (eigen origineel)' }),
+      manualSibling('fr', { translatedFrom: 'source-1' }),
+    ];
+
+    const results = await syncCmsTranslations(makeSource(), { force: true });
+
+    expect(results).toEqual([
+      { locale: 'nl', status: 'skipped_manual' },
+      { locale: 'fr', status: 'updated' },
+    ]);
+    // No write of any kind reaches the independent original, and no provider call is made for it.
+    expect(updateOne.mock.calls.some(([query]) => query._id === 'nl-manual-1')).toBe(false);
+    expect(translateTexts.mock.calls.every(([, opts]) => opts.to === 'fr')).toBe(true);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('force never overwrites a manual translation linked to ANOTHER original or with a dangling link', async () => {
+    siblings = [
+      manualSibling('nl', { translatedFrom: 'other-original' }),
+      manualSibling('fr', { translatedFrom: 'deleted-original' }),
+    ];
+    exists.mockImplementation(async (query: Record<string, any>) =>
+      String(query._id) === 'other-original' ? { _id: 'other-original' } : null
+    );
+
+    for (const force of [false, true]) {
+      updateOne.mockClear();
+      translateTexts.mockClear();
+      const results = await syncCmsTranslations(makeSource(), { force });
+      expect(results).toEqual([
+        { locale: 'nl', status: 'skipped_manual' },
+        { locale: 'fr', status: 'skipped_manual' },
+      ]);
+      expect(updateOne).not.toHaveBeenCalled();
+      expect(translateTexts).not.toHaveBeenCalled();
+    }
+  });
+
+  it('force still adopts an orphan same-slug MACHINE row whose original is gone', async () => {
+    siblings = [autoSibling('nl', 'stale', { translatedFrom: 'deleted-original' })];
+    exists.mockResolvedValue(null);
+
+    const results = await syncCmsTranslations(makeSource(), { force: true });
+
+    expect(results).toEqual([
+      { locale: 'nl', status: 'updated' },
+      { locale: 'fr', status: 'created' },
+    ]);
+    const [query, update] = updateOne.mock.calls[0];
+    expect(query).toEqual({ _id: 'nl-auto-1' });
+    expect(update.$set).toMatchObject({ translatedFrom: 'source-1', autoTranslated: true, title: '[nl] Solar guide' });
   });
 
   it('never translates from a manual translation (translatedFrom set)', async () => {

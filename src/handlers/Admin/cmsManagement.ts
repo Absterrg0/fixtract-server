@@ -777,7 +777,9 @@ export const deleteCmsContent = async (req: Request, res: Response) => {
  * POST /api/admin/cms/:id/translate — re-run the translation sync for a doc.
  * body { force?: boolean }:
  * - default: sync the doc as usual (manual translations preserved).
- * - force: also overwrite manual translations.
+ * - force: also overwrite this source's LINKED manual translations
+ *   (translatedFrom = source). A same-slug manual document that is not
+ *   linked to the source is never overwritten (skipped_manual).
  *
  * Only originals are translation sources. When the id points at a translation
  * (translatedFrom set), the sync is re-run from its origin instead, so force
