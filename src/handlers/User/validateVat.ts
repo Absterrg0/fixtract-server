@@ -34,7 +34,12 @@ export function parsePostalCity(
   if (dutch) {
     return { postalCode: dutch[1].replace(/\s+/, '').toUpperCase(), city: dutch[2].trim() };
   }
-  const match = lastLine.match(/^(\d[\dA-Z]{1,4}(?:[\s-][\dA-Z]{2,5})?)\s+(.+)$/i)
+  // A digit-led postcode's separated second part is numeric (CZ/SK/SE/GR
+  // "110 00", PL/PT "00-950"/"1000-001"); the only lettered one is the Dutch
+  // shape handled above. Allowing letters here would swallow the first city
+  // word for non-Dutch lines: "1300 LA HULPE" (BE) became "1300 LA"/"HULPE"
+  // and "75001 PARIS CEDEX" became "75001 PARIS"/"CEDEX".
+  const match = lastLine.match(/^(\d[\dA-Z]{1,4}(?:[\s-]\d{2,5})?)\s+(.+)$/i)
     || lastLine.match(/^([A-Z]\d[\dA-Z](?:\s[\dA-Z]{2,4})?)\s+(.+)$/i);
   if (match) {
     return { postalCode: match[1].trim(), city: match[2].trim() };
