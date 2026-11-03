@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import http from "node:http";
 import jwt from "jsonwebtoken";
@@ -184,7 +184,19 @@ describe("project search handler", () => {
     expect(noServiceMatch.json.mock.calls[0][0].pagination.total).toBe(0);
   });
 
+  // The handler blocks days before a FUTURE lower bound (it compares the bound
+  // with the professional's local "today"), so date-window cases must run at a
+  // fixed instant. Only Date is faked; timers and promises stay real.
+  const pinClock = (instant: string) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(instant));
+  };
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("filters availability by inclusive date-only bounds before paging", async () => {
+    pinClock("2026-11-01T12:00:00.000Z"); // both bounds are in the future
     const earlier = project("507f1f77bcf86cd799439041");
     const inside = project("507f1f77bcf86cd799439042");
     const endBoundary = project("507f1f77bcf86cd799439044");
