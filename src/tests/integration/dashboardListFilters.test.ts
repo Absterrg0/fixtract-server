@@ -40,6 +40,9 @@ const claimsRequest = (user: { _id: Types.ObjectId; role: string }, query: Recor
 describeDb('dashboard list filters (real Mongo)', () => {
   beforeAll(async () => {
     await mongoose.connect(testUri!, { dbName: 'fixera_dashboard_list_filters_test' });
+    // Let the background index builds finish first, so none of them
+    // recreates a collection after the final drop.
+    await Promise.all([WarrantyClaim, Booking, Project, Payment, User].map((model) => model.init()));
     await mongoose.connection.dropDatabase();
   });
 
