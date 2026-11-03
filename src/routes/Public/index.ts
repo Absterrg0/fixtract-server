@@ -50,7 +50,10 @@ import { optionalProtect } from "../../middlewares/auth";
 const publicRouter = Router();
 
 const PUBLIC_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
-/** Per-IP budget shared by the booking calendar and other low-volume public reads. */
+/**
+ * Per-IP budget for the booking calendar/scheduling reads, shared on purpose
+ * with public referral-code validation. Page-display traffic never spends it.
+ */
 export const SCHEDULING_RATE_LIMIT = 60;
 /**
  * Marketing announcements get their own per-IP budgets, so that ordinary browsing
@@ -67,6 +70,19 @@ export const ANNOUNCEMENT_EVENT_RATE_LIMIT = 600;
  */
 export const LOYALTY_TIERS_RATE_LIMIT = 300;
 export const PROFESSIONAL_LEVELS_RATE_LIMIT = 300;
+/**
+ * Ordinary project/professional page browsing: one per-IP budget for the
+ * public review lists and favorite counts, and a separate one for the
+ * (deduplicated) view-tracking writes, so page views never spend the calendar
+ * budget above and a burst on one cannot starve the other.
+ */
+export const PUBLIC_DISPLAY_RATE_LIMIT = 300;
+export const VIEW_TRACKING_RATE_LIMIT = 300;
+/**
+ * Marketing unsubscribe/preference-language calls keep the same 60 cap they
+ * always had, on their own instance, so they never spend the calendar budget.
+ */
+export const MARKETING_PREFERENCES_RATE_LIMIT = 60;
 
 const createPublicRateLimiter = (limit: number) =>
   rateLimit({
@@ -86,6 +102,9 @@ const announcementListRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_LIST_RA
 const announcementEventRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_EVENT_RATE_LIMIT);
 const loyaltyTiersRateLimiter = createPublicRateLimiter(LOYALTY_TIERS_RATE_LIMIT);
 const professionalLevelsRateLimiter = createPublicRateLimiter(PROFESSIONAL_LEVELS_RATE_LIMIT);
+const publicDisplayRateLimiter = createPublicRateLimiter(PUBLIC_DISPLAY_RATE_LIMIT);
+const viewTrackingRateLimiter = createPublicRateLimiter(VIEW_TRACKING_RATE_LIMIT);
+const marketingPreferencesRateLimiter = createPublicRateLimiter(MARKETING_PREFERENCES_RATE_LIMIT);
 
 // Google Maps configuration (public endpoint)
 publicRouter.route("/google-maps-config").get(getGoogleMapsConfig);
@@ -122,30 +141,30 @@ publicRouter.route("/referral/validate/:code").get(schedulingRateLimiter, valida
 // Professional profile and reviews (public)
 publicRouter
   .route("/professionals/:professionalId/reviews")
-  .get(schedulingRateLimiter, getProfessionalReviews);
+  .get(publicDisplayRateLimiter, getProfessionalReviews);
 
 // Project-specific reviews (public)
 publicRouter
   .route("/projects/:projectId/reviews")
-  .get(schedulingRateLimiter, getProjectReviews);
+  .get(publicDisplayRateLimiter, getProjectReviews);
 
 // Profile view tracking (public, rate-limited, dedup per visitor/day)
 publicRouter
   .route("/professionals/:id/view")
-  .post(schedulingRateLimiter, optionalProtect, recordProfessionalView);
+  .post(viewTrackingRateLimiter, optionalProtect, recordProfessionalView);
 
 // Service-page view tracking (public, rate-limited, dedup per visitor/day)
 publicRouter
   .route("/services/:serviceId/view")
-  .post(schedulingRateLimiter, optionalProtect, recordServiceView);
+  .post(viewTrackingRateLimiter, optionalProtect, recordServiceView);
 
 // Public favorite counts (social proof)
 publicRouter
   .route("/professionals/:id/favorites-count")
-  .get(schedulingRateLimiter, getPublicProfessionalFavoriteCount);
+  .get(publicDisplayRateLimiter, getPublicProfessionalFavoriteCount);
 publicRouter
   .route("/projects/:id/favorites-count")
-  .get(schedulingRateLimiter, getPublicProjectFavoriteCount);
+  .get(publicDisplayRateLimiter, getPublicProjectFavoriteCount);
 
 // Public site settings (social links etc)
 publicRouter.route("/site-settings").get(getPublicSiteSettings);
@@ -177,9 +196,9 @@ publicRouter.route("/cms/:type/:slug").get(getPublicCmsContentBySlug);
 // Marketing unsubscribe (public) — GET preview/verify only; POST mutates
 publicRouter
   .route("/marketing/unsubscribe")
-  .get(schedulingRateLimiter, unsubscribeMarketing)
-  .post(schedulingRateLimiter, unsubscribeMarketing);
-publicRouter.route("/marketing/languages").get(schedulingRateLimiter, getMarketingLanguages);
+  .get(marketingPreferencesRateLimiter, unsubscribeMarketing)
+  .post(marketingPreferencesRateLimiter, unsubscribeMarketing);
+publicRouter.route("/marketing/languages").get(marketingPreferencesRateLimiter, getMarketingLanguages);
 
 // Cron entrypoints (secured via CRON_SECRET bearer token)
 publicRouter.route("/cron/notification-reminders").get(runNotificationRemindersCron);
