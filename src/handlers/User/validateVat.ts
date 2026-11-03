@@ -182,7 +182,9 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
 
         const lastLine = addressLines[addressLines.length - 1];
         if (lastLine) {
-          const parsed = parsePostalCity(lastLine, user.businessInfo?.country || user.companyAddress?.country);
+          // The VIES address belongs to the VAT registration, so its country
+          // (the VAT prefix) decides the postcode rule, not the stored profile.
+          const parsed = parsePostalCity(lastLine, formattedVAT.substring(0, 2));
           if (parsed.postalCode && !user.businessInfo.postalCode) {
             user.businessInfo.postalCode = parsed.postalCode;
           }

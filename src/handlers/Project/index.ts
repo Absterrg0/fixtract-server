@@ -2056,6 +2056,9 @@ export const duplicateProject = async (req: Request, res: Response) => {
         pendingChanges: undefined,
         reapprovalType: undefined,
         isResubmission: false,
+        // A copy of an archived project is a fresh draft, not an archive.
+        archivedAt: undefined,
+        statusBeforeArchive: undefined,
         autoSaveTimestamp: new Date(),
         createdAt: undefined,
         updatedAt: undefined,

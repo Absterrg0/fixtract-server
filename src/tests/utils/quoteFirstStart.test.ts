@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   proposals: null as any,
   proposalsError: null as any,
   proposalsCalls: [] as any[],
+  proposalsGate: null as Promise<unknown> | null,
 }));
 
 vi.mock("../../models/project", () => ({
@@ -21,6 +22,7 @@ vi.mock("../../utils/scheduleEngine", async (importOriginal) => {
     ...actual,
     buildProjectScheduleProposalsWithData: async (...args: any[]) => {
       mocks.proposalsCalls.push(args);
+      if (mocks.proposalsGate) await mocks.proposalsGate;
       if (mocks.proposalsError) throw mocks.proposalsError;
       return mocks.proposals;
     },
@@ -28,7 +30,9 @@ vi.mock("../../utils/scheduleEngine", async (importOriginal) => {
 });
 
 import {
+  QUOTE_FIRST_START_TIMEOUT_MS,
   computeQuoteFirstPossibleStart,
+  computeQuoteFirstPossibleStartBounded,
   computeQuoteFirstPossibleStartForBooking,
   resolveQuoteFirstStartFromProposals,
 } from "../../utils/bookingDetails/quoteFirstStart";
@@ -148,6 +152,59 @@ describe("computeQuoteFirstPossibleStart writer seam", () => {
     await expect(
       computeQuoteFirstPossibleStart({ projectId, executionDuration: { value: 8, unit: "hours" } })
     ).resolves.toBeNull();
+  });
+});
+
+describe("bounded first-start wait for quote saves", () => {
+  const booking = () => ({ _id: bookingId, bookingType: "project", project: projectId });
+  const durations = { executionDuration: { value: 1, unit: "days" as const } };
+
+  beforeEach(() => {
+    mocks.project = { _id: projectId, professionalId };
+    mocks.professional = { _id: professionalId };
+    mocks.proposalsError = null;
+    mocks.proposalsGate = null;
+    mocks.proposals = { earliestProposal: { start: "2026-05-04T08:00:00.000Z" }, _debug: { usedFallback: false } };
+  });
+
+  it("returns the computed start when the engine answers in time and leaves no timer behind", async () => {
+    vi.useFakeTimers();
+    try {
+      const result = await computeQuoteFirstPossibleStartBounded(booking(), durations);
+      expect(result?.toISOString()).toBe("2026-05-04T08:00:00.000Z");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stores null once the timeout elapses while the engine is still running", async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    mocks.proposalsGate = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      let settled: Date | null | undefined;
+      const pending = computeQuoteFirstPossibleStartBounded(booking(), durations).then((value) => {
+        settled = value;
+        return value;
+      });
+      await vi.advanceTimersByTimeAsync(QUOTE_FIRST_START_TIMEOUT_MS - 1);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+      // The late engine result is discarded without an unhandled rejection.
+      mocks.proposalsError = new Error("late failure");
+      release();
+      await vi.runAllTimersAsync();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stores null when the computation throws", async () => {
+    mocks.proposalsError = new Error("calendar down");
+    await expect(computeQuoteFirstPossibleStartBounded(booking(), durations, 50)).resolves.toBeNull();
   });
 });
 

@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   claimCount: vi.fn(),
   claimExists: vi.fn(),
   claimDistinct: vi.fn(),
+  claimAggregate: vi.fn(),
   bookingFind: vi.fn(),
   projectFind: vi.fn(),
 }));
@@ -18,15 +19,16 @@ vi.mock('../../../models/warrantyClaim', () => ({
     countDocuments: mocks.claimCount,
     exists: mocks.claimExists,
     distinct: mocks.claimDistinct,
+    aggregate: mocks.claimAggregate,
   },
 }));
 
 vi.mock('../../../models/booking', () => ({
-  default: { find: mocks.bookingFind },
+  default: { find: mocks.bookingFind, collection: { collectionName: 'bookings' } },
 }));
 
 vi.mock('../../../models/project', () => ({
-  default: { find: mocks.projectFind },
+  default: { find: mocks.projectFind, collection: { collectionName: 'projects' } },
 }));
 
 vi.mock('../../../models/conversation', () => ({ default: {} }));
@@ -60,88 +62,74 @@ const claimChain = (rows: any[]) => {
   return chain;
 };
 
+// Booking-number search and the service filter run as one aggregation over
+// the role-scoped claims; their data behavior (snapshot service, booking
+// scope, pagination, counts) is covered on real Mongo in
+// tests/integration/dashboardListFilters.test.ts.
 describe('warranty claim search and filters', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.claimFind.mockReturnValue(claimChain([]));
     mocks.claimCount.mockResolvedValue(0);
-    mocks.bookingFind.mockReturnValue({ select: vi.fn(() => ({ lean: vi.fn(async () => []) })) });
-    mocks.projectFind.mockReturnValue({ select: vi.fn(() => ({ lean: vi.fn(async () => []) })) });
+    mocks.claimAggregate.mockResolvedValue([{ page: [], total: [] }]);
   });
 
-  it('searches by escaped claim number without regex injection', async () => {
+  const pipelineOf = () => mocks.claimAggregate.mock.calls[0][0] as any[];
+
+  it('searches by escaped claim number without regex injection, inside the role scope', async () => {
     const res = mockRes();
     await listMyWarrantyClaims(
       { user: { _id: CUSTOMER_ID, role: 'customer' }, query: { q: 'WC-2026.1 (x)' } } as unknown as Request,
       res,
     );
     expect(res.statusCode).toBe(200);
-    const query = mocks.claimFind.mock.calls[0][0];
-    const searchOr = query.$and[0].$or;
-    expect(String(searchOr[0].claimNumber)).toContain('WC-2026\\.1 \\(x\\)');
-    // Role scoping preserved.
-    expect(String(query.customer)).toContain(CUSTOMER_ID.slice(-6));
-  });
-
-  it('resolves booking-number text through the viewer own bookings', async () => {
-    mocks.bookingFind.mockReturnValue({
-      select: vi.fn(() => ({ lean: vi.fn(async () => [{ _id: 'b9' }]) })),
-    });
-    const res = mockRes();
-    await listMyWarrantyClaims(
-      { user: { _id: CUSTOMER_ID, role: 'customer' }, query: { q: 'BK-9' } } as unknown as Request,
-      res,
-    );
-    expect(res.statusCode).toBe(200);
-    const query = mocks.claimFind.mock.calls[0][0];
-    const bookingClause = query.$and[0].$or.find((clause: any) => clause.booking);
-    expect(bookingClause).toBeTruthy();
-    const bookingScope = mocks.bookingFind.mock.calls[0][0];
-    expect(String(bookingScope.customer)).toContain(CUSTOMER_ID.slice(-6));
-  });
-
-  it('scopes the service filter to the viewer claims without global id lists', async () => {
-    mocks.claimDistinct.mockResolvedValue(['b1', 'b2', 'b3']);
-    const bookingLean = vi.fn(async () => [
-      { _id: 'b1', rfqData: { serviceType: 'Cleaning' } },
-      { _id: 'b2', project: 'p2' },
-      { _id: 'b3', project: 'p3' },
-    ]);
-    const bookingSelect = vi.fn(() => ({ lean: bookingLean }));
-    mocks.bookingFind.mockReturnValue({ select: bookingSelect });
-    mocks.projectFind.mockReturnValue({ select: vi.fn(() => ({ lean: vi.fn(async () => [{ _id: 'p2' }]) })) });
-    const res = mockRes();
-    await listMyWarrantyClaims(
-      { user: { _id: CUSTOMER_ID, role: 'customer' }, query: { service: 'Cleaning' } } as unknown as Request,
-      res,
-    );
-    expect(res.statusCode).toBe(200);
-    // Candidate bookings come from the customer's own claims.
-    const claimScope = mocks.claimDistinct.mock.calls[0];
-    expect(claimScope[0]).toBe('booking');
-    expect(String(claimScope[1].customer)).toBe(CUSTOMER_ID);
-    expect(mocks.bookingFind.mock.calls[0][0]).toEqual({ _id: { $in: ['b1', 'b2', 'b3'] } });
-    // Project service lookup is limited to the candidates' own projects.
-    expect(mocks.projectFind.mock.calls[0][0]).toEqual({ _id: { $in: ['p2', 'p3'] }, service: 'Cleaning' });
-    const query = mocks.claimFind.mock.calls[0][0];
-    expect(query.booking).toEqual({ $in: ['b1', 'b2'] });
-    expect(String(query.customer)).toBe(CUSTOMER_ID);
-  });
-
-  it('narrows the service filter to a requested bookingId before any lookup', async () => {
-    const BOOKING_ID = '507f1f77bcf86cd799439099';
-    mocks.bookingFind.mockReturnValue({
-      select: vi.fn(() => ({ lean: vi.fn(async () => [{ _id: BOOKING_ID, rfqData: { serviceType: 'Plumbing' } }]) })),
-    });
-    const res = mockRes();
-    await listMyWarrantyClaims(
-      { user: { _id: CUSTOMER_ID, role: 'customer' }, query: { service: 'Cleaning', bookingId: BOOKING_ID } } as unknown as Request,
-      res,
-    );
-    expect(res.statusCode).toBe(200);
+    expect(res.body.data.pagination).toEqual({ total: 0, page: 1, limit: 20, totalPages: 0 });
+    const pipeline = pipelineOf();
+    // Role scoping is the first stage.
+    expect(String(pipeline[0].$match.customer)).toBe(CUSTOMER_ID);
+    const searchStage = pipeline.find((stage) => stage.$match?.$or);
+    const [claimClause, bookingClause] = searchStage.$match.$or;
+    expect(String(claimClause.claimNumber)).toContain('WC-2026\\.1 \\(x\\)');
+    // Booking-number text only matches bookings of the viewer.
+    expect(String(bookingClause.$and[1]['_claimBooking.customer'])).toBe(CUSTOMER_ID);
     expect(mocks.claimDistinct).not.toHaveBeenCalled();
-    expect(String(mocks.bookingFind.mock.calls[0][0]._id.$in[0])).toBe(BOOKING_ID);
-    expect(mocks.projectFind).not.toHaveBeenCalled();
-    expect(mocks.claimFind.mock.calls[0][0].booking).toEqual({ $in: [] });
+    expect(mocks.bookingFind).not.toHaveBeenCalled();
+  });
+
+  it('keeps the plain paginated query when no booking-dependent filter is set', async () => {
+    const res = mockRes();
+    await listMyWarrantyClaims(
+      { user: { _id: CUSTOMER_ID, role: 'customer' }, query: { status: 'open', page: '2', limit: '5' } } as unknown as Request,
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(mocks.claimAggregate).not.toHaveBeenCalled();
+    const query = mocks.claimFind.mock.calls[0][0];
+    expect(query.status).toBe('open');
+    expect(String(query.customer)).toBe(CUSTOMER_ID);
+    const chain = mocks.claimFind.mock.results[0].value;
+    expect(chain.skip).toHaveBeenCalledWith(5);
+    expect(chain.limit).toHaveBeenCalledWith(5);
+  });
+
+  it('pages the service filter in the database and hydrates only the page ids', async () => {
+    const PAGE_ID = '507f1f77bcf86cd799439055';
+    mocks.claimAggregate.mockResolvedValue([{ page: [{ _id: PAGE_ID }], total: [{ count: 41 }] }]);
+    mocks.claimFind.mockReturnValue({
+      populate: vi.fn(function (this: any) { return this; }),
+      then: (resolve: (rows: any[]) => unknown) => resolve([{ _id: PAGE_ID, claimNumber: 'WC-1' }]),
+    });
+    const res = mockRes();
+    await listMyWarrantyClaims(
+      { user: { _id: CUSTOMER_ID, role: 'customer' }, query: { service: 'Cleaning', page: '3', limit: '20' } } as unknown as Request,
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    const pipeline = pipelineOf();
+    const facet = pipeline.at(-1).$facet;
+    expect(facet.page.slice(0, 2)).toEqual([{ $skip: 40 }, { $limit: 20 }]);
+    expect(mocks.claimFind.mock.calls[0][0]).toEqual({ _id: { $in: [PAGE_ID] } });
+    expect(res.body.data.claims.map((c: any) => c.claimNumber)).toEqual(['WC-1']);
+    expect(res.body.data.pagination).toEqual({ total: 41, page: 3, limit: 20, totalPages: 3 });
   });
 });

@@ -206,6 +206,12 @@ export const getTransactions = async (req: Request, res: Response) => {
           : [{ transferStatus: 'failed' }, { transferStatus: null, 'metadata.transferFailed': true }];
       } else {
         query.status = statusFilter;
+        if (statusFilter === 'completed') {
+          // "Completed" means a settled transfer, the same rule as the stats
+          // bucket and the row label; captured payments still awaiting or
+          // failing payout belong to the transfer_* filters.
+          query.$expr = buildSettledTransferExpression();
+        }
       }
     }
 

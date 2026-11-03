@@ -152,3 +152,36 @@ export async function computeQuoteFirstPossibleStartForBooking(
     excludeBookingId,
   });
 }
+
+/**
+ * Longest a quote save waits for the first-possible-start computation. The
+ * value is advisory (read-only, null means unknown), so a slow calendar or
+ * database read must never hold up submitQuotation/editQuotation.
+ */
+export const QUOTE_FIRST_START_TIMEOUT_MS = 2500;
+
+/**
+ * Bounded wait for computeQuoteFirstPossibleStartForBooking: resolves the
+ * computed start, or null on error or once `timeoutMs` elapses. A timeout
+ * bounds only the caller's wait; the read-only computation is not cancelled
+ * and its late result or error is discarded.
+ */
+export async function computeQuoteFirstPossibleStartBounded(
+  booking: any,
+  durations: QuoteFirstStartDurations,
+  timeoutMs: number = QUOTE_FIRST_START_TIMEOUT_MS
+): Promise<Date | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const computation = Promise.resolve()
+    .then(() => computeQuoteFirstPossibleStartForBooking(booking, durations))
+    .then((value) => value ?? null)
+    .catch(() => null);
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
+  });
+  try {
+    return await Promise.race([computation, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
