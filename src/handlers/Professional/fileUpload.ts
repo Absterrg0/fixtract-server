@@ -131,7 +131,7 @@ export const uploadCertification = async (req: Request, res: Response) => {
     }
 
     // Upload to S3
-    const result = await uploadProjectFile(file, userId, projectId || 'temp', 'certification');
+    const result = await uploadProjectFile(file, userId, safeProjectFolder(projectId), 'certification');
 
     res.status(200).json({
       success: true,
@@ -163,7 +163,7 @@ export const uploadQuestionAttachment = async (req: Request, res: Response) => {
     }
 
     // Upload to S3
-    const result = await uploadProjectFile(file, userId, projectId || 'temp', 'attachment');
+    const result = await uploadProjectFile(file, userId, safeProjectFolder(projectId), 'attachment');
 
     res.status(200).json({
       success: true,
