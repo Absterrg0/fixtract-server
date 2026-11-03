@@ -50,7 +50,13 @@ import {
 } from '../../utils/bookingDetails/capture';
 import { isQuestionAnswerUploadOwnedByUser, isUploadOwnedByUser } from '../../utils/bookingDetails/attachments';
 import { presignOwnedUrl, presignQuestionAnswerUrl, referenceId } from '../../utils/bookingDetails/attachments';
-import { selectedPriceModel } from "../../utils/bookingDetails/overviewRows";
+import {
+  OVERVIEW_LEDGER_NOT_LOADED,
+  buildBookingListOverview,
+  selectedPriceModel,
+} from "../../utils/bookingDetails/overviewRows";
+import { loadOverviewRefundLedgers } from "../../utils/paymentRefundLedger";
+import { safeErrorSummary } from "../../utils/safeErrorLog";
 import { snapshotQuestionDefinitions } from '../../utils/bookingDetails/snapshot';
 
 /** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
@@ -1534,6 +1540,15 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
         .filter((owner: any) => owner.isAnonymized || owner.deletedAt)
         .map((owner: any) => String(owner._id)),
     );
+    // Refund facts live on the stored Payment ledger, not on booking.payment.
+    // One batched read for this page's already-authorized bookings only. If
+    // it fails the rows still load, with ledger-dependent money unknown.
+    let refundLedgers: Awaited<ReturnType<typeof loadOverviewRefundLedgers>> | null = null;
+    try {
+      refundLedgers = await loadOverviewRefundLedgers(bookings.map((booking) => booking._id as any));
+    } catch (ledgerError) {
+      console.error('Get bookings: refund ledger read failed; overview money left unknown:', safeErrorSummary(ledgerError));
+    }
     const visibleBookings = bookings.map((booking) => {
       const visible: any = bookingForViewer(booking, viewerRole);
       if (visible && typeof visible === "object") visible.priceModel = selectedPriceModel(visible);
@@ -1544,14 +1559,24 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       if (viewerRole === 'customer' && visible && typeof visible === 'object' && visible.payment) {
         visible.payment = stripProPayoutSummaryForCustomer(visible.payment);
       }
+      // Computed, viewer-safe overview money (paid price, settled completion
+      // addition) from the sanitized payload plus the ledger facts.
+      const overview = visible && typeof visible === 'object'
+        ? buildBookingListOverview(
+            visible,
+            viewerRole,
+            refundLedgers?.get(String(booking._id)) ?? OVERVIEW_LEDGER_NOT_LOADED,
+          )
+        : null;
       const projectOwnerId = referenceId((booking.project as any)?.professionalId);
-      if (projectOwnerId && anonymizedProjectOwners.has(projectOwnerId)) {
-        return maskBookingForAnonymizedParties(visible, {
-          professional: true,
-          professionalId: projectOwnerId,
-        });
-      }
-      return visible;
+      const result = projectOwnerId && anonymizedProjectOwners.has(projectOwnerId)
+        ? maskBookingForAnonymizedParties(visible, {
+            professional: true,
+            professionalId: projectOwnerId,
+          })
+        : visible;
+      if (overview && result && typeof result === 'object') (result as any).overview = overview;
+      return result;
     });
 
     const statusCounts: Record<string, number> = {};

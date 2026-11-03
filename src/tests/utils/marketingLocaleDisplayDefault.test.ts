@@ -64,4 +64,18 @@ describe('notification marketing-locale display default', () => {
       resolveSubscriberLocale(user, subscriberCountryFromUser(user)).locale,
     ).toBe('fr');
   });
+
+  it('normalizes stored country names like subscriber synchronization does', () => {
+    const user = { location: { country: 'Netherlands' } };
+    expect(subscriberCountryFromUser(user)).toBe('NL');
+    expect(resolveSubscriberLocale(user, subscriberCountryFromUser(user))).toEqual({
+      locale: 'nl',
+      source: 'country_default',
+    });
+  });
+
+  it('skips country candidates that cannot be normalized', () => {
+    const user = { location: { country: 'Atlantis' }, businessInfo: { country: 'Belgium' } };
+    expect(subscriberCountryFromUser(user)).toBe('BE');
+  });
 });

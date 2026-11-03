@@ -6,6 +6,7 @@
 import { Request, Response } from 'express';
 import Booking from '../../models/booking';
 import Payment from '../../models/payment';
+import Project from '../../models/project';
 import mongoose from 'mongoose';
 import { buildSettledTransferExpression, getTransferStatus } from '../../utils/paymentSafety';
 
@@ -22,6 +23,10 @@ export const getPaymentStats = async (req: Request, res: Response) => {
         error: { code: 'UNAUTHORIZED', message: 'Authentication required' },
       });
     }
+
+    // Project bookings may identify the owner only through the project, so the
+    // review aggregate uses the same ownership condition as getMyBookings.
+    const professionalProjectIds = await Project.find({ professionalId: userId }).distinct('_id');
 
     const [completedStats, pendingStats, reviewStats] = await Promise.all([
       Payment.aggregate([
@@ -69,7 +74,10 @@ export const getPaymentStats = async (req: Request, res: Response) => {
       // this professional. Never derived from payment rows.
       Booking.aggregate([
         { $match: {
-          professional: userId,
+          $or: [
+            { professional: userId },
+            { project: { $in: professionalProjectIds } },
+          ],
           'customerReview.communicationLevel': { $exists: true, $ne: null },
         } },
         {
@@ -198,6 +206,12 @@ export const getTransactions = async (req: Request, res: Response) => {
           : [{ transferStatus: 'failed' }, { transferStatus: null, 'metadata.transferFailed': true }];
       } else {
         query.status = statusFilter;
+        if (statusFilter === 'completed') {
+          // "Completed" means a settled transfer, the same rule as the stats
+          // bucket and the row label; captured payments still awaiting or
+          // failing payout belong to the transfer_* filters.
+          query.$expr = buildSettledTransferExpression();
+        }
       }
     }
 
@@ -205,10 +219,20 @@ export const getTransactions = async (req: Request, res: Response) => {
     if (search) {
       const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       const alternatives: Record<string, unknown>[] = [{ bookingNumber: regex }];
-      if (mongoose.Types.ObjectId.isValid(search)) {
+      // Strict 24-hex check: ObjectId.isValid also accepts any 12-character
+      // string, which would turn a booking-number search into an id lookup.
+      if (/^[a-f\d]{24}$/i.test(search)) {
         alternatives.push({ booking: new mongoose.Types.ObjectId(search) });
       }
-      const matchingBookings = await Booking.find({ professional: userId, bookingNumber: regex }).select('_id').lean();
+      // Payment.bookingNumber is optional, so the number may only be on the
+      // booking. Project bookings can identify their owner only through the
+      // project (Booking.professional is required for direct bookings only),
+      // so ownership matches getPaymentStats/getMyBookings.
+      const ownedProjectIds = await Project.find({ professionalId: userId }).distinct('_id');
+      const matchingBookings = await Booking.find({
+        bookingNumber: regex,
+        $or: [{ professional: userId }, { project: { $in: ownedProjectIds } }],
+      }).select('_id').lean();
       if (matchingBookings.length) alternatives.push({ booking: { $in: matchingBookings.map(b => b._id) } });
       query.$and = [{ $or: alternatives }];
     }

@@ -40,6 +40,7 @@ import { isPreCompletionStatus } from '../../utils/refundFinalization';
 import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
+import { recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger';
 import { commissionedPricingLines, commissionedQuoteAmount } from '../../utils/customerPricing';
 import { auditLog } from '../../utils/auditLogger';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
@@ -762,6 +763,19 @@ export const createPaymentIntent = async (
 };
 
 /**
+ * Record the succeeded payment's discount snapshot from the confirm endpoint.
+ * The webhook is the durable writer (it fails and retries); here a ledger
+ * error must not turn a successful payment into a failed confirmation.
+ */
+const recordDiscountSnapshotSafely = async (booking: any, paymentIntentId: string) => {
+  try {
+    await recordPaymentDiscountSnapshot(booking._id, booking.payment, paymentIntentId);
+  } catch (ledgerError: any) {
+    console.error(`[PAYMENT CONFIRM] Discount ledger write failed for booking ${booking._id}:`, ledgerError?.message || ledgerError);
+  }
+};
+
+/**
  * Confirm payment after customer completes payment on frontend
  * POST /api/stripe/payment/confirm
  */
@@ -823,6 +837,7 @@ export const confirmPayment = async (req: Request, res: Response) => {
       } catch (notifyError: any) {
         console.error(`[PAYMENT CONFIRM] Post-payment notify failed for booking ${booking._id}:`, notifyError?.message || notifyError);
       }
+      await recordDiscountSnapshotSafely(booking, paymentIntentId);
       return res.json({
         success: true,
         data: {
@@ -867,6 +882,9 @@ export const confirmPayment = async (req: Request, res: Response) => {
       if (typeof msIdx === 'number' && Array.isArray(booking.milestonePayments) && booking.milestonePayments[msIdx]) {
         updateFields[`milestonePayments.${msIdx}.status`] = 'paid';
         updateFields[`milestonePayments.${msIdx}.paidAt`] = now;
+        // Same settlement fact as the webhook path: the intent that paid.
+        updateFields[`milestonePayments.${msIdx}.stripePaymentIntentId`] = paymentIntent.id;
+        updateFields[`milestonePayments.${msIdx}.paidStripePaymentIntentId`] = paymentIntent.id;
       }
 
       const milestoneFilter: Record<string, any> = { _id: booking._id };
@@ -914,6 +932,7 @@ export const confirmPayment = async (req: Request, res: Response) => {
       );
 
       console.log(`✅ Payment authorized for booking ${booking._id}`);
+      await recordDiscountSnapshotSafely(booking, paymentIntent.id);
 
       // Notify both sides exactly once after payment (idempotent with webhook
       // via per-booking deliveryKey — never on checkout-page forward).

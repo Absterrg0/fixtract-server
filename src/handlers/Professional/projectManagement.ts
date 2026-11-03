@@ -1,12 +1,17 @@
 import { Request, Response } from 'express';
 import Project from '../../models/project';
 import User from '../../models/user';
-import ServiceConfiguration from '../../models/serviceConfiguration';
-import { pruneStaleArticle47ProfessionalAnswers } from '../../utils/vatManagement';
+import { pruneDraftArticle47Answers } from '../../utils/projectDraftVatAnswers';
 import Favorite from '../../models/favorite';
 import { invalidateFavoritesOverviewCache } from '../Admin/favoritesAdmin';
 import { normalizePreparationDuration } from '../../utils/projectDurations';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
+import {
+  isLostProjectTransition,
+  PROJECT_STATUS_CONFLICT,
+  projectTransitionGuard,
+  saveProjectWithFence,
+} from '../../utils/projectConditionalSave';
 
 /**
  * Save project draft (create or update)
@@ -35,41 +40,49 @@ export const saveProjectDraft = async (req: Request, res: Response) => {
 
     let project;
 
-    // Write boundary for reserved VAT answers: drop a stale article47 answer
-    // unless the CURRENT service-config classification is project dependent.
-    // All unrelated answers are preserved; historical bookings/invoices are
-    // untouched (their snapshots were computed under the config then current).
-    let resolvedConfigurationId = projectData.serviceConfigurationId;
-    if (!resolvedConfigurationId && projectData._id) {
+    // Write boundary for reserved VAT answers (shared with POST
+    // /api/projects/draft): see pruneDraftArticle47Answers.
+    let savedConfigurationId: unknown;
+    if (projectData._id) {
+      const savedDraft = await Project.findOne({ _id: projectData._id, professionalId: userId })
+        .select('status serviceConfigurationId')
+        .lean();
+      // Archived projects are read-only until restored: a draft save must not
+      // rewrite their status or content behind the archive metadata.
+      if (savedDraft?.status === 'archived') {
+        return res.status(400).json({
+          success: false,
+          message: 'Archived projects must be restored before editing',
+          code: 'PROJECT_ARCHIVED',
+        });
+      }
       // A partial update may omit the configuration; the saved draft's config
       // still decides whether the reserved answer is authoritative.
-      const savedDraft = await Project.findOne({ _id: projectData._id, professionalId: userId })
-        .select('serviceConfigurationId')
-        .lean();
-      resolvedConfigurationId = savedDraft?.serviceConfigurationId;
+      savedConfigurationId = savedDraft?.serviceConfigurationId;
     }
-    if (resolvedConfigurationId && Array.isArray((projectData as any).vatProfessionalAnswers)) {
-      try {
-        const svcConfig = await ServiceConfiguration.findById(resolvedConfigurationId)
-          .select('vatManagement.article47Classification')
-          .lean();
-        (projectData as any).vatProfessionalAnswers = pruneStaleArticle47ProfessionalAnswers(
-          (projectData as any).vatProfessionalAnswers,
-          svcConfig?.vatManagement?.article47Classification,
-        );
-      } catch {
-        // Lookup failure must never destroy draft data: leave answers as-is.
-      }
-    }
+    // Archive bookkeeping is owned by the archive/restore endpoints.
+    delete (projectData as any).archivedAt;
+    delete (projectData as any).statusBeforeArchive;
+    await pruneDraftArticle47Answers(projectData as any, savedConfigurationId);
 
     if (projectData._id) {
       // Update existing draft
+      // The archived check above is a read; the status predicate makes it
+      // part of the write so an archive committed in between is never
+      // reopened or overwritten.
       project = await withAnonymizationWriteFence([userId], async (session) =>
         Project.findOneAndUpdate(
-          { _id: projectData._id, professionalId: userId },
+          { _id: projectData._id, professionalId: userId, status: { $ne: 'archived' } },
           { ...projectData, autoSaveTimestamp: new Date() },
           { new: true, runValidators: true, ...(session ? { session } : {}) },
         ));
+      if (!project && await Project.exists({ _id: projectData._id, professionalId: userId, status: 'archived' })) {
+        return res.status(409).json({
+          success: false,
+          message: 'This project was archived while you were editing. Restore it before editing.',
+          code: 'PROJECT_ARCHIVED',
+        });
+      }
     } else {
       // Create new draft
       project = await withAnonymizationWriteFence([userId], async (session) => {
@@ -228,12 +241,24 @@ export const submitProject = async (req: Request, res: Response) => {
     // Perform quality checks here
     const qualityChecks = performQualityChecks(project);
 
+    // Submit only the draft read above: an archive (or other transition)
+    // committed meanwhile wins with a 409 instead of being reopened.
+    const expected = projectTransitionGuard(project);
     project.status = 'pending';
     project.submittedAt = new Date();
     project.qualityChecks = qualityChecks;
-    await withAnonymizationWriteFence([userId], async (session) => {
-      await project.save(session ? { session } : undefined);
-    });
+    try {
+      await saveProjectWithFence(project, userId, expected);
+    } catch (error) {
+      if (!isLostProjectTransition(error)) throw error;
+      const latest = await Project.findOne({ _id: id, professionalId: userId }).select('status').lean();
+      return res.status(409).json({
+        success: false,
+        message: 'Project status changed while submitting; reload and try again',
+        code: PROJECT_STATUS_CONFLICT,
+        ...(latest ? { currentStatus: (latest as any).status } : {}),
+      });
+    }
 
     res.status(200).json({
       success: true,

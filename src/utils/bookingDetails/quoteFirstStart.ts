@@ -1,7 +1,11 @@
 import mongoose from "mongoose";
 import Project from "../../models/project";
 import User from "../../models/user";
-import { buildProjectScheduleProposalsWithData } from "../scheduleEngine";
+import {
+  ScheduleSearchAbortedError,
+  buildProjectScheduleProposalsWithData,
+  type ScheduleSearchOptions,
+} from "../scheduleEngine";
 
 export type QuoteDurationInput = {
   value: number;
@@ -64,6 +68,10 @@ export async function computeQuoteFirstPossibleStart(args: {
   preparationDuration?: unknown;
   bufferDuration?: unknown;
   excludeBookingId?: string | null;
+  /** Cooperative cancellation for the schedule search (see ScheduleSearchOptions). */
+  signal?: ScheduleSearchOptions["signal"];
+  /** Wall-clock deadline (`performance.now()` timestamp) for the whole computation. */
+  deadlineAt?: ScheduleSearchOptions["deadlineAt"];
 }): Promise<Date | null> {
   try {
     const projectId = typeof args.projectId === "string" ? args.projectId : null;
@@ -77,6 +85,9 @@ export async function computeQuoteFirstPossibleStart(args: {
         ? args.quantity
         : 1;
 
+    const stopped = () => Boolean(args.signal?.aborted)
+      || (typeof args.deadlineAt === "number" && performance.now() >= args.deadlineAt);
+    if (stopped()) return null;
     const project = await Project.findById(projectId).lean();
     if (!project) return null;
     const professionalId = String((project as any).professionalId || "");
@@ -85,6 +96,7 @@ export async function computeQuoteFirstPossibleStart(args: {
       "companyAvailability companyBlockedDates companyBlockedRanges businessInfo.timezone"
     ).lean();
     if (!professional) return null;
+    if (stopped()) return null;
 
     const subprojectIndex =
       typeof args.subprojectIndex === "number" && Number.isInteger(args.subprojectIndex) && args.subprojectIndex >= 0
@@ -102,10 +114,17 @@ export async function computeQuoteFirstPossibleStart(args: {
       typeof args.excludeBookingId === "string" && mongoose.isValidObjectId(args.excludeBookingId)
         ? args.excludeBookingId
         : undefined,
-      quantity
+      quantity,
+      // No request zone here: the stored professional zone (or its country)
+      // decides, as for every server-side schedule read.
+      undefined,
+      args.signal || args.deadlineAt !== undefined
+        ? { signal: args.signal, deadlineAt: args.deadlineAt }
+        : undefined
     );
     return resolveQuoteFirstStartFromProposals(proposals);
   } catch (error) {
+    if (error instanceof ScheduleSearchAbortedError) return null;
     console.warn("computeQuoteFirstPossibleStart failed, leaving unknown:", (error as Error)?.message || error);
     return null;
   }
@@ -118,7 +137,8 @@ export async function computeQuoteFirstPossibleStart(args: {
  */
 export async function computeQuoteFirstPossibleStartForBooking(
   booking: any,
-  durations: QuoteFirstStartDurations
+  durations: QuoteFirstStartDurations,
+  options: ScheduleSearchOptions = {}
 ): Promise<Date | null> {
   const rawProject = (booking as any)?.project;
   const projectId =
@@ -150,5 +170,52 @@ export async function computeQuoteFirstPossibleStartForBooking(
     preparationDuration: durations?.preparationDuration,
     bufferDuration: durations?.bufferDuration,
     excludeBookingId,
+    signal: options.signal,
+    deadlineAt: options.deadlineAt,
   });
+}
+
+/**
+ * Longest a quote save waits for the first-possible-start computation. The
+ * value is advisory (read-only, null means unknown), so a slow calendar or
+ * database read must never hold up submitQuotation/editQuotation.
+ */
+export const QUOTE_FIRST_START_TIMEOUT_MS = 2500;
+
+/**
+ * Bounded wait for computeQuoteFirstPossibleStartForBooking: resolves the
+ * computed start, or null on error or once `timeoutMs` elapses. The same
+ * budget bounds the work itself, twice over:
+ * - a wall-clock deadline (`performance.now() + timeoutMs`) is forwarded to
+ *   the schedule engine, which checks it inside its hot subset/overlap loops,
+ *   so even one long synchronous multi-resource day stops at the deadline
+ *   when no timer can fire;
+ * - on timeout the signal is aborted, and the engine (which yields once per
+ *   searched day) stops at its next check.
+ * Either way there is no further CPU work and no late result. An in-flight
+ * database read finishes, but its result is discarded.
+ */
+export async function computeQuoteFirstPossibleStartBounded(
+  booking: any,
+  durations: QuoteFirstStartDurations,
+  timeoutMs: number = QUOTE_FIRST_START_TIMEOUT_MS
+): Promise<Date | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const controller = new AbortController();
+  const deadlineAt = performance.now() + timeoutMs;
+  const computation = Promise.resolve()
+    .then(() => computeQuoteFirstPossibleStartForBooking(booking, durations, { signal: controller.signal, deadlineAt }))
+    .then((value) => value ?? null)
+    .catch(() => null);
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(null);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([computation, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }

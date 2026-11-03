@@ -49,6 +49,7 @@ const INTERNAL_PAYMENT_METADATA_KEYS = [
  */
 const PARTICIPANT_PROVIDER_FIELDS = [
   "stripePaymentIntentId",
+  "paidStripePaymentIntentId",
   "stripeChargeId",
   "stripeTransferId",
   "stripeDestinationPayment",
@@ -127,11 +128,13 @@ const PRO_PAYOUT_SUMMARY_FIELDS = [
 ] as const;
 
 /**
- * Strip the pro-specific payout summary (transfer date/amount/status) from a
- * booking.payment payload before it reaches a customer. Applied to the new
- * shared bookings-table list payload only; existing payment-history and
- * details endpoints keep their established shapes so legitimate
- * customer-own refund details are never removed.
+ * Strip the pro-specific payout summary (transfer date/amount/status,
+ * commission and extra-cost payout fields) and the supplier invoice from a
+ * booking.payment payload before it reaches a customer. Used for the shared
+ * bookings-table list payload. Customer payment payloads serialized by
+ * `sanitizePaymentForViewer(payment, "customer")` (payment history, booking
+ * details, data export) omit the same payout set. Customer-own totals,
+ * statuses and refund details are not in that set and stay intact.
  */
 export const stripProPayoutSummaryForCustomer = <T extends Record<string, any>>(
   payment: T

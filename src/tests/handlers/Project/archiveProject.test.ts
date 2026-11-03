@@ -3,19 +3,29 @@ import type { Request, Response } from 'express';
 
 const mocks = vi.hoisted(() => ({
   userFindById: vi.fn(),
+  userFind: vi.fn(),
   projectFindOne: vi.fn(),
   projectFindById: vi.fn(),
+  projectFind: vi.fn(),
+  projectFindOneAndUpdate: vi.fn(),
+  projectCountDocuments: vi.fn(),
+  projectDistinct: vi.fn(),
+  projectAggregate: vi.fn(),
 }));
 
 vi.mock('../../../models/user', () => ({
-  default: { findById: mocks.userFindById },
+  default: { findById: mocks.userFindById, find: mocks.userFind },
 }));
 
 vi.mock('../../../models/project', () => ({
   default: {
     findOne: mocks.projectFindOne,
     findById: mocks.projectFindById,
-    find: vi.fn(),
+    find: mocks.projectFind,
+    findOneAndUpdate: mocks.projectFindOneAndUpdate,
+    countDocuments: mocks.projectCountDocuments,
+    distinct: mocks.projectDistinct,
+    aggregate: mocks.projectAggregate,
   },
 }));
 
@@ -28,7 +38,13 @@ vi.mock('../../../utils/support/accountGuard', () => ({
   ACCOUNT_WRITE_FENCE_CODE: 'ACCOUNT_WRITE_FENCE',
 }));
 
-import { archiveProject, restoreProject, updateProjectStatus } from '../../../handlers/Project';
+import {
+  archiveProject,
+  createOrUpdateDraft,
+  getProjectsMaster,
+  restoreProject,
+  updateProjectStatus,
+} from '../../../handlers/Project';
 
 const mockRes = () => {
   const res: any = {
@@ -134,6 +150,113 @@ describe('project archive and restore', () => {
     expect(res.body.success).toBe(true);
     expect(doc.status).toBe('archived');
     expect(mocks.projectFindOne).not.toHaveBeenCalled();
+  });
+
+  it('lets an admin with projects.approve archive any project', async () => {
+    actorAs({ role: 'admin', adminRole: 'operations' });
+    const doc = projectDoc({ status: 'published' });
+    mocks.projectFindById.mockResolvedValue(doc);
+
+    const res = mockRes();
+    await archiveProject(
+      { user: { id: 'admin1' }, params: { id: 'proj1' } } as unknown as Request,
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(doc.status).toBe('archived');
+  });
+
+  it('denies archive and restore to an admin without projects.approve', async () => {
+    actorAs({ role: 'admin', adminRole: 'marketing' });
+    const doc = projectDoc({ status: 'archived', statusBeforeArchive: 'draft' });
+    mocks.projectFindById.mockResolvedValue(doc);
+
+    const archiveRes = mockRes();
+    await archiveProject(
+      { user: { id: 'admin1' }, params: { id: 'proj1' } } as unknown as Request,
+      archiveRes,
+    );
+    expect(archiveRes.statusCode).toBe(403);
+    expect(archiveRes.body.code).toBe('ADMIN_PERMISSION_DENIED');
+
+    const restoreRes = mockRes();
+    await restoreProject(
+      { user: { id: 'admin1' }, params: { id: 'proj1' } } as unknown as Request,
+      restoreRes,
+    );
+    expect(restoreRes.statusCode).toBe(403);
+    expect(restoreRes.body.code).toBe('ADMIN_PERMISSION_DENIED');
+    expect(mocks.projectFindById).not.toHaveBeenCalled();
+    expect(doc.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('archived projects stay read-only through the draft endpoint', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('rejects a draft update that would reopen an archived project', async () => {
+    mocks.userFindById.mockReturnValue({
+      select: vi.fn(async () => ({
+        role: 'professional',
+        professionalStatus: 'approved',
+        stripe: { accountId: 'acct_1', onboardingCompleted: true },
+      })),
+    });
+    mocks.projectFindOne.mockResolvedValue({ _id: 'proj1', status: 'archived', title: 'Old' });
+
+    const res = mockRes();
+    await createOrUpdateDraft(
+      { user: { id: 'pro1' }, body: { id: 'proj1', status: 'published', title: 'Reopened' } } as unknown as Request,
+      res,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(res.body.code).toBe('PROJECT_ARCHIVED');
+    expect(mocks.projectFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe('project master team names', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('resolves resource names only for the professional and their own employees', async () => {
+    const PRO_ID = '507f1f77bcf86cd799439011';
+    const EMPLOYEE_ID = '507f1f77bcf86cd799439012';
+    const FOREIGN_ID = '507f1f77bcf86cd799439013';
+    const findChain: any = {};
+    findChain.sort = vi.fn(() => findChain);
+    findChain.skip = vi.fn(() => findChain);
+    findChain.limit = vi.fn(() => findChain);
+    findChain.lean = vi.fn(async () => [{ _id: 'proj1', resources: [PRO_ID, EMPLOYEE_ID, FOREIGN_ID] }]);
+    mocks.projectFind.mockReturnValue(findChain);
+    mocks.projectCountDocuments.mockResolvedValue(1);
+    mocks.projectDistinct.mockResolvedValue([]);
+    mocks.projectAggregate.mockResolvedValue([]);
+    const userLean = vi.fn(async () => [
+      { _id: PRO_ID, name: 'Owner' },
+      { _id: EMPLOYEE_ID, name: 'Employee' },
+    ]);
+    mocks.userFind.mockReturnValue({ select: vi.fn(() => ({ lean: userLean })) });
+
+    const res = mockRes();
+    await getProjectsMaster(
+      { user: { id: PRO_ID }, query: {} } as unknown as Request,
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    const lookup = mocks.userFind.mock.calls[0][0];
+    expect(lookup.$or).toEqual([
+      { _id: PRO_ID },
+      { role: 'employee', 'employee.companyId': PRO_ID },
+    ]);
+    expect(res.body.items[0].teamMembers).toEqual([
+      { id: PRO_ID, name: 'Owner' },
+      { id: EMPLOYEE_ID, name: 'Employee' },
+      { id: FOREIGN_ID, name: null },
+    ]);
   });
 });
 

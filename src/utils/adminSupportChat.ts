@@ -58,6 +58,11 @@ export interface SupportParticipantKpis {
   grossByCurrency: Array<{ currency: string; gross: number }>;
 }
 
+/**
+ * Support-panel KPIs for a chat participant. Financial fields are null when
+ * access is withheld, and `grossEur` is only reported when every recorded
+ * bucket is EUR (0 when there are no buckets) — never a cross-currency sum.
+ */
 export function buildSupportParticipantKpis(input: {
   professionalLevel?: string | null;
   reviewCount: number;

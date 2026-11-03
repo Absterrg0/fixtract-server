@@ -13,6 +13,8 @@
  *   no capturedAt fallback: a capture is not a pay-out fact.
  */
 
+import { collectBaseRefunds } from "../paymentRefunds";
+
 export type OverviewMoney = {
   amount: number | null;
   currency: string | null;
@@ -138,36 +140,162 @@ export function resolveSnapshotTitles(booking: any): {
   return { projectId: asId(booking?.project), projectTitle: null, subprojectTitle: null, titleSource: "not_recorded" };
 }
 
+const UNPAID_BOOKING_STATUSES = new Set(["quote_accepted", "payment_pending"]);
+const UNPAID_PAYMENT_STATUSES = new Set(["pending", "failed"]);
+
+/**
+ * True unless `booking.payment` only carries an amount due: awaiting-payment
+ * bookings and pending/failed payments (including a later milestone's open
+ * checkout) never present their amount as paid.
+ */
+export function hasRecordedPaidAmount(booking: any, payment: any): boolean {
+  if (UNPAID_BOOKING_STATUSES.has(String(booking?.status))) return false;
+  return !UNPAID_PAYMENT_STATUSES.has(String(payment?.status));
+}
+
+/**
+ * Refund facts for one booking from the stored Payment ledger
+ * (`Payment.refunds[]` on the booking-level rows). `booking.payment` carries
+ * no refund rows, so callers load these first (see
+ * `loadOverviewRefundLedgers`) and pass them in. `loaded: false` means the
+ * ledger was not read (or the read failed): figures that depend on it stay
+ * unknown. `loaded: true` with no rows means the ledger is known to be empty.
+ */
+export type OverviewRefundFact = {
+  amount: number;
+  kind: "booking" | "extra_cost";
+  /**
+   * null on legacy rows without a status (an actual refund). `unknown` for a
+   * status this read model does not recognise: never counted as returned.
+   */
+  status: "pending" | "requires_action" | "succeeded" | "failed" | "canceled" | "unknown" | null;
+};
+
+export type OverviewRefundLedger =
+  | { loaded: true; refunds: OverviewRefundFact[] }
+  | { loaded: false };
+
+export const OVERVIEW_LEDGER_NOT_LOADED: OverviewRefundLedger = Object.freeze({ loaded: false as const });
+
+const REFUND_STATUSES = new Set(["pending", "requires_action", "succeeded", "failed", "canceled"]);
+
+/**
+ * Ledger facts from stored base-payment rows (deduplicated by provider refund
+ * id, as the refund paths do). Only amount, kind and status are kept: no
+ * provider ids, notes or actors leave this function.
+ */
+export function overviewLedgerFromPaymentRows(rows: any[]): OverviewRefundLedger {
+  const refunds: OverviewRefundFact[] = [];
+  for (const refund of collectBaseRefunds(rows)) {
+    const status: OverviewRefundFact["status"] = refund.status == null || refund.status === ""
+      ? null
+      : typeof refund.status === "string" && REFUND_STATUSES.has(refund.status)
+        ? refund.status as OverviewRefundFact["status"]
+        : "unknown";
+    refunds.push({
+      amount: Number(refund.amount),
+      kind: refund.kind === "extra_cost" ? "extra_cost" : "booking",
+      status,
+    });
+  }
+  return { loaded: true, refunds };
+}
+
+/** Legacy rows (no status) and `succeeded` rows returned money. */
+const isReturned = (refund: OverviewRefundFact): boolean =>
+  (refund.status === null || refund.status === "succeeded")
+  && Number.isFinite(refund.amount) && refund.amount > 0;
+
+/** Pending/requires_action (or unrecognised) rows have not settled either way. */
+const isInFlight = (refund: OverviewRefundFact): boolean =>
+  refund.status === "pending" || refund.status === "requires_action" || refund.status === "unknown";
+
+const roundMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+
+/**
+ * Settled completion addition, VAT-inclusive as the customer was charged or
+ * refunded, from recorded facts only:
+ * - The separate extra-cost charge `payment.extraCostAmount` counts once it
+ *   settled: `extraCostStatus` `succeeded`, or `refunded` (it was charged and
+ *   later refunded; the refund is in the ledger).
+ * - Returned `kind: "extra_cost"` ledger rows are subtracted. They cover a
+ *   negative adjustment refunded against the base charge and a refund of the
+ *   extra-cost charge itself, so a charge of 121 with a returned refund of
+ *   121 nets to 0, a partial refund nets to the remainder, and a refund with
+ *   no settled charge is a negative-only credit.
+ * - Failed/canceled refund rows returned nothing and are ignored.
+ * Unknown (null) when the ledger was not loaded, when a charge or extra-cost
+ * refund is still in flight (charge `pending`, refund pending or
+ * requires_action), when a `refunded` charge has no returned refund recorded
+ * (the refunded amount is not known), or when nothing settled is recorded.
+ * `extraCosts[]` entries carry no status and are pre-commission, pre-VAT
+ * professional amounts, so they are never summed.
+ */
+export function settledCompletionAddition(payment: any, ledger: OverviewRefundLedger): number | null {
+  if (!ledger.loaded) return null;
+  const chargeStatus = payment && typeof payment === "object" ? payment.extraCostStatus : undefined;
+  if (chargeStatus === "pending") return null;
+  const extraCostRefunds = ledger.refunds.filter((refund) => refund.kind === "extra_cost");
+  if (extraCostRefunds.some(isInFlight)) return null;
+  const returned = extraCostRefunds.filter(isReturned);
+  const chargeSettled = chargeStatus === "succeeded" || chargeStatus === "refunded";
+  const chargeAmount = chargeSettled
+    && typeof payment.extraCostAmount === "number" && Number.isFinite(payment.extraCostAmount)
+    ? payment.extraCostAmount
+    : null;
+  if (chargeSettled && chargeAmount === null) return null;
+  if (chargeStatus === "refunded" && returned.length === 0) return null;
+  if (chargeAmount === null && returned.length === 0) return null;
+  const returnedTotal = returned.reduce((sum, refund) => sum + refund.amount, 0);
+  return roundMoney((chargeAmount ?? 0) - returnedTotal);
+}
+
+/**
+ * Booking-price money returned to the customer. `payment.refundAmount` is
+ * the authoritative aggregate when recorded; otherwise the returned
+ * booking-price ledger rows are summed (extra-cost rows belong to the
+ * completion addition). Null when the ledger was not loaded or holds no
+ * returned booking-price row: a failed/canceled or still pending refund alone
+ * is not a recorded refund.
+ */
+export function recordedBookingRefund(payment: any, ledger: OverviewRefundLedger): number | null {
+  if (payment && typeof payment === "object"
+    && typeof payment.refundAmount === "number" && Number.isFinite(payment.refundAmount)) {
+    return payment.refundAmount;
+  }
+  if (!ledger.loaded) return null;
+  const returned = ledger.refunds.filter((refund) => refund.kind === "booking" && isReturned(refund));
+  if (returned.length === 0) return null;
+  return roundMoney(returned.reduce((sum, refund) => sum + refund.amount, 0));
+}
+
 /**
  * Derive the shared bookings-table row from a viewer-sanitized booking
- * payload (i.e. AFTER bookingForViewer + pro-payout stripping). Unknown
- * stays null; same-currency recorded sources only.
+ * payload (i.e. AFTER bookingForViewer + pro-payout stripping) and the
+ * booking's stored refund ledger facts. Unknown stays null; same-currency
+ * recorded sources only.
  */
-export function buildSharedBookingsRow(booking: any, viewerRole: "customer" | "professional" | "admin"): SharedBookingsRow {
+export function buildSharedBookingsRow(
+  booking: any,
+  viewerRole: "customer" | "professional" | "admin",
+  ledger: OverviewRefundLedger = OVERVIEW_LEDGER_NOT_LOADED,
+): SharedBookingsRow {
   const titles = resolveSnapshotTitles(booking);
   const payment = booking?.payment && typeof booking.payment === "object" ? booking.payment : null;
   const currency = typeof payment?.currency === "string" && payment.currency ? payment.currency : "EUR";
-  const paidSource = payment?.totalWithVat ?? payment?.amount ?? null;
-  const extraCosts = Array.isArray(booking?.extraCosts)
-    ? booking.extraCosts
-    : booking?.extraCosts && typeof booking.extraCosts === "object"
-      ? [booking.extraCosts]
-      : [];
-  const completedAddition = extraCosts
-    .filter((entry: any) => entry && typeof entry === "object" && ["approved", "completed", "succeeded", "paid"].includes(String(entry.status)))
-    .reduce((sum: number, entry: any) => sum + (typeof entry.total === "number" ? entry.total : typeof entry.amount === "number" ? entry.amount : 0), 0);
-  const hasCompletedAddition = extraCosts.some((entry: any) =>
-    entry && typeof entry === "object" && ["approved", "completed", "succeeded", "paid"].includes(String(entry.status)));
+  // VAT-inclusive recorded total only. `payment.amount` is the pre-VAT net
+  // (createPaymentIntent stores netAmount there), so it is never presented as
+  // the paid price; a payment without totalWithVat renders as not recorded.
+  const paidSource = hasRecordedPaidAmount(booking, payment)
+    ? payment?.totalWithVat ?? null
+    : null;
+  const completedAddition = settledCompletionAddition(payment, ledger);
   const isProSide = viewerRole !== "customer";
   const payoutAmount = isProSide ? asMoney(payment?.professionalPayout ?? null, currency) : { amount: null, currency: null, source: "not_recorded" as const };
-  const refundAmount = isProSide
-    ? asMoney(payment?.refundAmount ?? (Array.isArray(payment?.refunds)
-      ? payment.refunds.reduce((sum: number, refund: any) => sum + (typeof refund?.amount === "number" ? refund.amount : 0), 0)
-      : null), currency)
+  const bookingRefund = recordedBookingRefund(payment, ledger);
+  const refundAmount = isProSide && bookingRefund != null
+    ? asMoney(bookingRefund, currency)
     : { amount: null, currency: null, source: "not_recorded" as const };
-  // Refund unknown is distinct from zero: only report a figure when a refund
-  // status or record exists.
-  const refundKnown = payment && (payment.status === "refunded" || payment.status === "partially_refunded" || (Array.isArray(payment.refunds) && payment.refunds.length > 0) || typeof payment.refundAmount === "number");
   return {
     id: asId(booking?._id) || "",
     bookingNumber: typeof booking?.bookingNumber === "string" ? booking.bookingNumber : null,
@@ -182,7 +310,7 @@ export function buildSharedBookingsRow(booking: any, viewerRole: "customer" | "p
       ? booking.priceModel
       : typeof selectedPriceModel(booking) === "string" ? selectedPriceModel(booking) : null,
     paidPrice: asMoney(paidSource, currency),
-    completionAddition: hasCompletedAddition
+    completionAddition: completedAddition != null
       ? { amount: completedAddition, currency, source: "recorded" }
       : { amount: null, currency: null, source: "not_recorded" },
     status: typeof booking?.status === "string" ? booking.status : "unknown",
@@ -194,8 +322,25 @@ export function buildSharedBookingsRow(booking: any, viewerRole: "customer" | "p
     // never a capturedAt/createdAt fallback presented as paid-out fact.
     payoutDate: isProSide ? asDate(payment?.transferredAt ?? null) : null,
     payoutAmount,
-    refundAmount: refundKnown ? refundAmount : { amount: null, currency: null, source: "not_recorded" },
+    refundAmount,
   };
+}
+
+/**
+ * Viewer-safe overview money attached to each `GET /api/bookings/my-bookings`
+ * row as `booking.overview`. Only computed scalars: no ledger rows, provider
+ * ids or payout facts. The dashboard bookings table treats each present
+ * field as authoritative, including `source: "not_recorded"` (unknown).
+ */
+export type BookingListOverview = Pick<SharedBookingsRow, "paidPrice" | "completionAddition">;
+
+export function buildBookingListOverview(
+  booking: any,
+  viewerRole: "customer" | "professional",
+  ledger: OverviewRefundLedger,
+): BookingListOverview {
+  const row = buildSharedBookingsRow(booking, viewerRole, ledger);
+  return { paidPrice: row.paidPrice, completionAddition: row.completionAddition };
 }
 
 export const selectedPriceModel = (booking: any): string | null => {
@@ -256,10 +401,15 @@ export function pinnedVersionMoney(booking: any): OverviewMoney {
     }
     return { amount: null, currency: null, source: "not_recorded" };
   }
-  return asMoney(
-    pinned.customerTotals?.totalWithVat ?? pinned.totalWithVat ?? pinned.totalAmount ?? pinned.amount ?? null,
-    pinned.currency ?? booking?.quote?.currency,
-  );
+  const recordedGross = pinned.customerTotals?.totalWithVat ?? pinned.totalWithVat ?? null;
+  if (recordedGross != null) return asMoney(recordedGross, pinned.currency ?? booking?.quote?.currency);
+  // `totalAmount` is the pre-VAT net. It stands in for the gross only for
+  // legacy versions without pricingLines (treated as 0% VAT); a priced
+  // version without a recorded VAT-inclusive total stays unknown.
+  if (Array.isArray(pinned.pricingLines) && pinned.pricingLines.length > 0) {
+    return { amount: null, currency: null, source: "not_recorded" };
+  }
+  return asMoney(pinned.totalAmount ?? pinned.amount ?? null, pinned.currency ?? booking?.quote?.currency);
 }
 
 export function buildSharedQuoteRow(booking: any): SharedQuoteRow {

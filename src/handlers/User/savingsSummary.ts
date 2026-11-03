@@ -5,7 +5,7 @@ import { aggregateRecordedSavings } from "../../utils/savingsAggregation";
 /**
  * GET /api/user/savings/summary
  * Customer-only read-model: recorded savings from the customer's own settled
- * bookings. userId comes from the auth session — never a query param.
+ * payments (whole bookings and paid milestones). userId comes from the auth session — never a query param.
  * Pure aggregation lives in `utils/savingsAggregation` (unit-tested); this
  * handler only scopes the base set to the authenticated customer.
  */
@@ -22,7 +22,10 @@ export const getSavingsSummary = async (req: Request, res: Response, next: NextF
     }
 
     const bookings = await Booking.find({ customer: userId })
-      .select('payment.status payment.currency payment.discount')
+      // Booking status classifies open disputes; paid milestones are settled
+      // payments; the ledger keeps each succeeded payment's discount snapshot
+      // after a later milestone checkout replaced booking.payment.
+      .select('status payment.status payment.currency payment.discount payment.stripePaymentIntentId payment.milestoneIndex milestonePayments.status +paymentDiscountLedger')
       .lean();
 
     const summary = aggregateRecordedSavings(bookings || []);
