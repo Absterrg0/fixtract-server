@@ -33,11 +33,24 @@ import { withAnonymizationWriteFence, ACCOUNT_WRITE_FENCE_CODE } from "../../uti
 import { denyUnlessPermission } from "../../utils/adminRbac/assertPermission";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
-const saveProjectWithFence = async (project: any, userId: string) =>
+/**
+ * Document save inside the anonymization write fence (model save hooks run).
+ * `expected` adds conditions to the save's own update filter (Mongoose
+ * `doc.$where`), so a transition read earlier writes only if the stored
+ * project still matches; otherwise the save throws DocumentNotFoundError (or
+ * VersionError when it also bumps the version) and nothing is written.
+ */
+const saveProjectWithFence = async (project: any, userId: string, expected?: Record<string, unknown>) =>
   withAnonymizationWriteFence(
     [userId, (project as any).professionalId?._id || (project as any).professionalId],
     async (session) => {
-      await project.save(session ? { session } : undefined);
+      const previousWhere = project.$where;
+      if (expected) project.$where = { ...(previousWhere || {}), ...expected };
+      try {
+        await project.save(session ? { session } : undefined);
+      } finally {
+        if (expected) project.$where = previousWhere;
+      }
       return project;
     },
   );
@@ -2151,7 +2164,26 @@ export const updateProjectStatus = async (req: Request, res: Response) => {
 
     project.onHoldAt = status === "on_hold" ? new Date() : undefined;
     project.status = status as any;
-    await saveProjectWithFence(project, professionalId);
+    try {
+      // Write only while the project is still in the status this transition
+      // was read from and still owned by the caller: a concurrent archive (or
+      // another hold/resume) that committed after the read wins, and the stale
+      // transition is reported instead of overwriting it.
+      await saveProjectWithFence(project, professionalId, { status: currentStatus, professionalId: project.professionalId });
+    } catch (error) {
+      // No stored document matched the save filter. Mongoose reports that as
+      // DocumentNotFoundError, or as VersionError when the save also bumps
+      // the document version (array paths changed).
+      if (error instanceof mongoose.Error.DocumentNotFoundError || error instanceof mongoose.Error.VersionError) {
+        const latest = await Project.findById(id).select("status").lean();
+        return res.status(409).json({
+          error: "Project status changed while updating; reload and try again",
+          code: "PROJECT_STATUS_CONFLICT",
+          ...(latest ? { currentStatus: (latest as any).status } : {}),
+        });
+      }
+      throw error;
+    }
     res.json({ success: true, project });
   } catch (error) {
     res.status(500).json({ error: "Failed to update project status" });
