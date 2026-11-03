@@ -217,6 +217,8 @@ export function isTranslationSource(
  * - Only originals (autoTranslated !== true and no translatedFrom) are sources;
  *   every other doc returns [] (even with force), so a translation can never
  *   overwrite the locale it came from.
+ * - A same-slug machine translation managed by another live original is left
+ *   alone (reported skipped_manual), even with force.
  * - Manual translations (autoTranslated: false) always win for text, unless
  *   force=true. Publication controls (status, publishedAt, activeCountries)
  *   are still mirrored from the source when the translation is linked to it,
@@ -266,6 +268,23 @@ export async function syncCmsTranslations(
           locale,
           slug: source.slug,
         }).lean());
+
+      // A same-slug machine translation managed by ANOTHER live original
+      // (e.g. a legacy manual nl original and the en original share a slug)
+      // belongs to that original. Never re-translate or re-link it from here,
+      // even with force: otherwise each save of either original would flip
+      // its text and its publication/country controls between the two.
+      if (
+        !managed &&
+        sibling &&
+        sibling.autoTranslated === true &&
+        sibling.translatedFrom &&
+        String(sibling.translatedFrom) !== String(source._id) &&
+        (await CmsContent.exists({ _id: sibling.translatedFrom }))
+      ) {
+        results.push({ locale, status: "skipped_manual" });
+        continue;
+      }
 
       if (sibling && sibling.autoTranslated !== true && !options.force) {
         // Manual translations keep their human-written text, but publication
