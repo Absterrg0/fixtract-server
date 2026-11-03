@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import http from "node:http";
 import jwt from "jsonwebtoken";
@@ -188,7 +188,19 @@ describe("project search handler", () => {
     expect(noServiceMatch.json.mock.calls[0][0].pagination.total).toBe(0);
   });
 
+  // The handler blocks days before a FUTURE lower bound (it compares the bound
+  // with the professional's local "today"), so date-window cases must run at a
+  // fixed instant. Only Date is faked; timers and promises stay real.
+  const pinClock = (instant: string) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(instant));
+  };
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("filters availability by inclusive date-only bounds before paging", async () => {
+    pinClock("2026-11-01T12:00:00.000Z"); // both bounds are in the future
     const earlier = project("507f1f77bcf86cd799439041");
     const inside = project("507f1f77bcf86cd799439042");
     const endBoundary = project("507f1f77bcf86cd799439044");
@@ -208,6 +220,17 @@ describe("project search handler", () => {
     const oneSided = await execute({ startDateFrom: "2026-11-04" });
     expect(oneSided.json.mock.calls[0][0].pagination.total).toBe(2);
     expect(oneSided.json.mock.calls[0][0].results[0]._id.toString()).toBe(later._id.toString());
+  });
+
+  it("adds no lower-bound block when the lower bound is the professional's local today", async () => {
+    pinClock("2026-11-03T08:00:00.000Z");
+    const today = project("507f1f77bcf86cd799439045");
+    mocks.projects = [today];
+    mocks.schedules = new Map([[today._id.toString(), "2026-11-03T10:00:00.000Z"]]);
+    const response = await execute({ startDateFrom: "2026-11-03" });
+    expect(response.json.mock.calls[0][0].pagination.total).toBe(1);
+    expect(mocks.scheduleCalls[0].professional.companyBlockedRanges ?? []).toHaveLength(0);
+    expect(Date.now()).toBe(Date.parse("2026-11-03T08:00:00.000Z"));
   });
 
   it("does not truncate rating-filtered projects at the previous 500-row cap", async () => {
