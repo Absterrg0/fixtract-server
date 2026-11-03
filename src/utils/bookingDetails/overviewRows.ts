@@ -152,6 +152,71 @@ export function hasRecordedPaidAmount(booking: any, payment: any): boolean {
 }
 
 /**
+ * Refund ledger rows (`IPaymentRefund`) that actually returned money: legacy
+ * rows without a status, or `succeeded`. Failed/canceled rows returned
+ * nothing, and pending/requires_action rows have not returned money yet.
+ */
+const isReturnedRefund = (refund: any): boolean =>
+  Boolean(refund) && typeof refund === "object"
+  && (refund.status == null || refund.status === "succeeded")
+  && typeof refund.amount === "number" && Number.isFinite(refund.amount) && refund.amount > 0;
+
+const roundMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+
+/**
+ * Settled completion addition, VAT-inclusive as the customer was charged or
+ * refunded, from the recorded payment facts only:
+ * - A positive addition is the separate extra-cost PaymentIntent. It counts
+ *   only once `payment.extraCostStatus` is `succeeded`, with the recorded
+ *   customer charge `payment.extraCostAmount`.
+ * - A negative adjustment is refunded against the base charge as
+ *   `kind: "extra_cost"` refund rows; only returned rows count (negative).
+ * `extraCosts[]` entries carry no status and are pre-commission, pre-VAT
+ * professional amounts, so they are never summed as a settled addition. Null
+ * when nothing settled is recorded.
+ */
+export function settledCompletionAddition(payment: any): number | null {
+  if (!payment || typeof payment !== "object") return null;
+  let recorded = false;
+  let total = 0;
+  if (payment.extraCostStatus === "succeeded"
+    && typeof payment.extraCostAmount === "number" && Number.isFinite(payment.extraCostAmount)) {
+    recorded = true;
+    total += payment.extraCostAmount;
+  }
+  const returnedExtraCostRefunds = Array.isArray(payment.refunds)
+    ? payment.refunds.filter((refund: any) => isReturnedRefund(refund) && refund.kind === "extra_cost")
+    : [];
+  if (returnedExtraCostRefunds.length > 0) {
+    recorded = true;
+    total -= returnedExtraCostRefunds.reduce((sum: number, refund: any) => sum + refund.amount, 0);
+  }
+  return recorded ? roundMoney(total) : null;
+}
+
+/**
+ * Booking-price money returned to the customer. `payment.refundAmount` is
+ * the authoritative aggregate when recorded; otherwise the returned
+ * booking-price refund rows are summed (extra-cost rows belong to the
+ * completion addition). Null when no refund status, aggregate or returned
+ * row exists: a failed/canceled refund alone is not a recorded refund.
+ */
+export function recordedBookingRefund(payment: any): number | null {
+  if (!payment || typeof payment !== "object") return null;
+  if (typeof payment.refundAmount === "number" && Number.isFinite(payment.refundAmount)) {
+    return payment.refundAmount;
+  }
+  const returned = Array.isArray(payment.refunds)
+    ? payment.refunds.filter((refund: any) => isReturnedRefund(refund) && refund.kind !== "extra_cost")
+    : [];
+  if (returned.length > 0) {
+    return roundMoney(returned.reduce((sum: number, refund: any) => sum + refund.amount, 0));
+  }
+  // A refunded status without an amount is a refund whose figure is unknown.
+  return null;
+}
+
+/**
  * Derive the shared bookings-table row from a viewer-sanitized booking
  * payload (i.e. AFTER bookingForViewer + pro-payout stripping). Unknown
  * stays null; same-currency recorded sources only.
@@ -160,29 +225,19 @@ export function buildSharedBookingsRow(booking: any, viewerRole: "customer" | "p
   const titles = resolveSnapshotTitles(booking);
   const payment = booking?.payment && typeof booking.payment === "object" ? booking.payment : null;
   const currency = typeof payment?.currency === "string" && payment.currency ? payment.currency : "EUR";
+  // VAT-inclusive recorded total only. `payment.amount` is the pre-VAT net
+  // (createPaymentIntent stores netAmount there), so it is never presented as
+  // the paid price; a payment without totalWithVat renders as not recorded.
   const paidSource = hasRecordedPaidAmount(booking, payment)
-    ? payment?.totalWithVat ?? payment?.amount ?? null
+    ? payment?.totalWithVat ?? null
     : null;
-  const extraCosts = Array.isArray(booking?.extraCosts)
-    ? booking.extraCosts
-    : booking?.extraCosts && typeof booking.extraCosts === "object"
-      ? [booking.extraCosts]
-      : [];
-  const completedAddition = extraCosts
-    .filter((entry: any) => entry && typeof entry === "object" && ["approved", "completed", "succeeded", "paid"].includes(String(entry.status)))
-    .reduce((sum: number, entry: any) => sum + (typeof entry.total === "number" ? entry.total : typeof entry.amount === "number" ? entry.amount : 0), 0);
-  const hasCompletedAddition = extraCosts.some((entry: any) =>
-    entry && typeof entry === "object" && ["approved", "completed", "succeeded", "paid"].includes(String(entry.status)));
+  const completedAddition = settledCompletionAddition(payment);
   const isProSide = viewerRole !== "customer";
   const payoutAmount = isProSide ? asMoney(payment?.professionalPayout ?? null, currency) : { amount: null, currency: null, source: "not_recorded" as const };
-  const refundAmount = isProSide
-    ? asMoney(payment?.refundAmount ?? (Array.isArray(payment?.refunds)
-      ? payment.refunds.reduce((sum: number, refund: any) => sum + (typeof refund?.amount === "number" ? refund.amount : 0), 0)
-      : null), currency)
+  const bookingRefund = recordedBookingRefund(payment);
+  const refundAmount = isProSide && bookingRefund != null
+    ? asMoney(bookingRefund, currency)
     : { amount: null, currency: null, source: "not_recorded" as const };
-  // Refund unknown is distinct from zero: only report a figure when a refund
-  // status or record exists.
-  const refundKnown = payment && (payment.status === "refunded" || payment.status === "partially_refunded" || (Array.isArray(payment.refunds) && payment.refunds.length > 0) || typeof payment.refundAmount === "number");
   return {
     id: asId(booking?._id) || "",
     bookingNumber: typeof booking?.bookingNumber === "string" ? booking.bookingNumber : null,
@@ -197,7 +252,7 @@ export function buildSharedBookingsRow(booking: any, viewerRole: "customer" | "p
       ? booking.priceModel
       : typeof selectedPriceModel(booking) === "string" ? selectedPriceModel(booking) : null,
     paidPrice: asMoney(paidSource, currency),
-    completionAddition: hasCompletedAddition
+    completionAddition: completedAddition != null
       ? { amount: completedAddition, currency, source: "recorded" }
       : { amount: null, currency: null, source: "not_recorded" },
     status: typeof booking?.status === "string" ? booking.status : "unknown",
@@ -209,7 +264,7 @@ export function buildSharedBookingsRow(booking: any, viewerRole: "customer" | "p
     // never a capturedAt/createdAt fallback presented as paid-out fact.
     payoutDate: isProSide ? asDate(payment?.transferredAt ?? null) : null,
     payoutAmount,
-    refundAmount: refundKnown ? refundAmount : { amount: null, currency: null, source: "not_recorded" },
+    refundAmount,
   };
 }
 

@@ -202,3 +202,77 @@ it('never presents an amount due as the paid price', () => {
   expect(buildSharedBookingsRow({ _id: 'b1', status: 'in_progress', payment: due }, 'customer').paidPrice.amount).toBeNull();
   expect(buildSharedBookingsRow({ _id: 'b1', status: 'booked', payment: { ...due, status: 'authorized' } }, 'customer').paidPrice.amount).toBe(1210);
 });
+
+describe('recorded money on the shared bookings row', () => {
+  it('never presents the pre-VAT payment.amount as the paid price', () => {
+    // createPaymentIntent stores the net in payment.amount and the charge in totalWithVat.
+    const payment = { amount: 110, netAmount: 110, vatAmount: 21, totalWithVat: 131, currency: 'EUR', status: 'authorized' };
+    expect(buildSharedBookingsRow({ _id: 'b1', status: 'booked', payment }, 'customer').paidPrice)
+      .toEqual({ amount: 131, currency: 'EUR', source: 'recorded' });
+    const { totalWithVat: _omit, ...withoutTotal } = payment;
+    expect(buildSharedBookingsRow({ _id: 'b1', status: 'booked', payment: withoutTotal }, 'customer').paidPrice)
+      .toEqual({ amount: null, currency: null, source: 'not_recorded' });
+  });
+
+  it('reports the settled extra-cost charge from the payment, not unrecorded entry statuses', () => {
+    const booking = {
+      _id: 'b1',
+      status: 'completed',
+      extraCostStatus: 'confirmed',
+      extraCostTotal: 20,
+      // Real IExtraCost entries: no status, pre-commission/pre-VAT amounts.
+      extraCosts: [{ type: 'other', name: 'Extra tile', justification: 'x', amount: 20 }],
+      payment: {
+        totalWithVat: 1210,
+        currency: 'EUR',
+        status: 'completed',
+        extraCostAmount: 26.62,
+        extraCostStatus: 'succeeded',
+        extraCostPaymentSucceeded: true,
+      },
+    };
+    expect(buildSharedBookingsRow(booking, 'customer').completionAddition)
+      .toEqual({ amount: 26.62, currency: 'EUR', source: 'recorded' });
+    // Pending, failed or refunded extra-cost payments are not a settled addition,
+    // even with confirmed booking-level extra costs.
+    for (const extraCostStatus of ['pending', 'failed', 'refunded', undefined]) {
+      expect(buildSharedBookingsRow({ ...booking, payment: { ...booking.payment, extraCostStatus } }, 'professional').completionAddition)
+        .toEqual({ amount: null, currency: null, source: 'not_recorded' });
+    }
+    // A legacy invented entry status is ignored.
+    expect(buildSharedBookingsRow({ _id: 'b2', status: 'completed', extraCosts: [{ status: 'paid', total: 50, amount: 50 }], payment: { totalWithVat: 10, currency: 'EUR', status: 'completed' } }, 'customer').completionAddition.amount)
+      .toBeNull();
+  });
+
+  it('reports a returned negative adjustment as a negative addition, excluding failed rows', () => {
+    const payment = {
+      totalWithVat: 500,
+      currency: 'EUR',
+      status: 'partially_refunded',
+      refunds: [
+        { amount: 30, kind: 'extra_cost', status: 'succeeded' },
+        { amount: 99, kind: 'extra_cost', status: 'failed' },
+      ],
+    };
+    const row = buildSharedBookingsRow({ _id: 'b1', status: 'completed', payment }, 'professional');
+    expect(row.completionAddition).toEqual({ amount: -30, currency: 'EUR', source: 'recorded' });
+    // Extra-cost rows are not booking-price refunds.
+    expect(row.refundAmount).toEqual({ amount: null, currency: null, source: 'not_recorded' });
+  });
+
+  it('counts only refunds that returned money', () => {
+    const row = (refunds: any[], extra: Record<string, unknown> = {}) => buildSharedBookingsRow({
+      _id: 'b1',
+      status: 'completed',
+      payment: { totalWithVat: 500, currency: 'EUR', status: 'completed', refunds, ...extra },
+    }, 'professional').refundAmount;
+    expect(row([{ amount: 100, status: 'failed' }])).toEqual({ amount: null, currency: null, source: 'not_recorded' });
+    expect(row([{ amount: 100, status: 'canceled' }, { amount: 40, status: 'pending' }])).toEqual({ amount: null, currency: null, source: 'not_recorded' });
+    expect(row([{ amount: 100, status: 'failed' }, { amount: 40, status: 'succeeded' }, { amount: 10 }]))
+      .toEqual({ amount: 50, currency: 'EUR', source: 'recorded' });
+    // The recorded aggregate stays authoritative.
+    expect(row([{ amount: 100, status: 'failed' }], { refundAmount: 25 }).amount).toBe(25);
+    // Customers never get the pro-side refund column.
+    expect(buildSharedBookingsRow({ _id: 'b1', status: 'completed', payment: { refundAmount: 25, currency: 'EUR' } }, 'customer').refundAmount.amount).toBeNull();
+  });
+});
