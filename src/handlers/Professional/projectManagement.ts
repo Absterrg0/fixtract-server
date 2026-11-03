@@ -1,8 +1,7 @@
 import { Request, Response } from 'express';
 import Project from '../../models/project';
 import User from '../../models/user';
-import ServiceConfiguration from '../../models/serviceConfiguration';
-import { pruneStaleArticle47ProfessionalAnswers } from '../../utils/vatManagement';
+import { pruneDraftArticle47Answers } from '../../utils/projectDraftVatAnswers';
 import Favorite from '../../models/favorite';
 import { invalidateFavoritesOverviewCache } from '../Admin/favoritesAdmin';
 import { normalizePreparationDuration } from '../../utils/projectDurations';
@@ -35,11 +34,9 @@ export const saveProjectDraft = async (req: Request, res: Response) => {
 
     let project;
 
-    // Write boundary for reserved VAT answers: drop a stale article47 answer
-    // unless the CURRENT service-config classification is project dependent.
-    // All unrelated answers are preserved; historical bookings/invoices are
-    // untouched (their snapshots were computed under the config then current).
-    let resolvedConfigurationId = projectData.serviceConfigurationId;
+    // Write boundary for reserved VAT answers (shared with POST
+    // /api/projects/draft): see pruneDraftArticle47Answers.
+    let savedConfigurationId: unknown;
     if (projectData._id) {
       const savedDraft = await Project.findOne({ _id: projectData._id, professionalId: userId })
         .select('status serviceConfigurationId')
@@ -55,37 +52,31 @@ export const saveProjectDraft = async (req: Request, res: Response) => {
       }
       // A partial update may omit the configuration; the saved draft's config
       // still decides whether the reserved answer is authoritative.
-      if (!resolvedConfigurationId) resolvedConfigurationId = savedDraft?.serviceConfigurationId;
+      savedConfigurationId = savedDraft?.serviceConfigurationId;
     }
     // Archive bookkeeping is owned by the archive/restore endpoints.
     delete (projectData as any).archivedAt;
     delete (projectData as any).statusBeforeArchive;
-    if (resolvedConfigurationId && Array.isArray((projectData as any).vatProfessionalAnswers)) {
-      try {
-        const svcConfig = await ServiceConfiguration.findById(resolvedConfigurationId)
-          .select('vatManagement.article47Classification')
-          .lean();
-        // Prune only against an established classification: a missing config
-        // record is not evidence that the reserved answer is stale.
-        if (svcConfig) {
-          (projectData as any).vatProfessionalAnswers = pruneStaleArticle47ProfessionalAnswers(
-            (projectData as any).vatProfessionalAnswers,
-            svcConfig.vatManagement?.article47Classification,
-          );
-        }
-      } catch {
-        // Lookup failure must never destroy draft data: leave answers as-is.
-      }
-    }
+    await pruneDraftArticle47Answers(projectData as any, savedConfigurationId);
 
     if (projectData._id) {
       // Update existing draft
+      // The archived check above is a read; the status predicate makes it
+      // part of the write so an archive committed in between is never
+      // reopened or overwritten.
       project = await withAnonymizationWriteFence([userId], async (session) =>
         Project.findOneAndUpdate(
-          { _id: projectData._id, professionalId: userId },
+          { _id: projectData._id, professionalId: userId, status: { $ne: 'archived' } },
           { ...projectData, autoSaveTimestamp: new Date() },
           { new: true, runValidators: true, ...(session ? { session } : {}) },
         ));
+      if (!project && await Project.exists({ _id: projectData._id, professionalId: userId, status: 'archived' })) {
+        return res.status(409).json({
+          success: false,
+          message: 'This project was archived while you were editing. Restore it before editing.',
+          code: 'PROJECT_ARCHIVED',
+        });
+      }
     } else {
       // Create new draft
       project = await withAnonymizationWriteFence([userId], async (session) => {

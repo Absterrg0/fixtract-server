@@ -28,6 +28,7 @@ import { normalizePreparationDuration } from "../../utils/projectDurations";
 import { computeProjectDiff, determineReapprovalType } from "../../utils/projectDiff";
 import { toSlug } from "../../utils/slug";
 import { withArticle47ProfessionalQuestion } from "../../utils/vatManagement";
+import { pruneDraftArticle47Answers } from "../../utils/projectDraftVatAnswers";
 import { withAnonymizationWriteFence, ACCOUNT_WRITE_FENCE_CODE } from "../../utils/support/accountGuard";
 import { denyUnlessPermission } from "../../utils/adminRbac/assertPermission";
 // import { seedServiceCategories } from '../../scripts/seedProject';
@@ -483,6 +484,10 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         });
       }
 
+      // Same reserved-answer write boundary as POST /api/user/projects; the
+      // saved config decides when a partial update omits it.
+      await pruneDraftArticle47Answers(projectData, existingProject.serviceConfigurationId);
+
       // Log what fields are being updated
       console.log("[PROJECT] Fields being updated:");
       console.log("- Title:", projectData.title);
@@ -527,12 +532,27 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
       console.log("[PROJECT] Update query:", { _id: projectData.id, professionalId });
       console.log("[PROJECT] Update data keys:", Object.keys(updateData));
 
+      // The archived check above is a read; the status predicate makes it
+      // part of the write so an archive committed in between is never
+      // reopened (status) or overwritten (content) by an in-flight autosave.
       project = await withAnonymizationWriteFence([professionalId], async (session) =>
         Project.findOneAndUpdate(
-          { _id: projectData.id, professionalId },
+          { _id: projectData.id, professionalId, status: { $ne: "archived" } },
           updateData,
           { new: true, runValidators: true, ...(session ? { session } : {}) },
         ));
+      if (!project) {
+        const current = await Project.findOne({ _id: projectData.id, professionalId })
+          .select("status")
+          .lean();
+        if (current?.status === "archived") {
+          return res.status(409).json({
+            error: "This project was archived while you were editing. Restore it before editing.",
+            code: "PROJECT_ARCHIVED",
+          });
+        }
+        return res.status(404).json({ error: "Project not found" });
+      }
 
       console.log("[PROJECT] Project updated successfully");
       console.log("Updated project ID:", project?._id);
@@ -540,6 +560,7 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
       console.log("Updated project status:", project?.status);
     } else {
       console.log("[PROJECT] Creating new project");
+      await pruneDraftArticle47Answers(projectData);
       project = new Project({
         ...projectData,
         professionalId,
