@@ -151,7 +151,7 @@ describe('dashboard list counts and search', () => {
     vi.clearAllMocks();
     mocks.userFindById.mockResolvedValue({ _id: CUSTOMER_ID, role: 'customer' });
     mocks.userFind.mockReturnValue({ select: vi.fn(async () => []) });
-    mocks.projectFind.mockReturnValue({ select: vi.fn(async () => []) });
+    mocks.projectFind.mockReturnValue({ select: vi.fn(async () => []), distinct: vi.fn(async () => []) });
     mocks.projectDistinct.mockResolvedValue([]);
     // Payment search now also resolves booking numbers stored on the booking.
     mocks.bookingFind.mockReturnValue({ select: () => ({ lean: async () => [] }) });
@@ -343,16 +343,35 @@ describe('dashboard list counts and search', () => {
     expect(query.$and[0].$or[0].bookingNumber.test('BK-.*')).toBe(true);
     expect(query.$and[0].$or[1].booking.$in).toEqual(['b1']);
   });
-  it('counts only canonical recorded customer reviews', async () => {
+  it('counts only canonical recorded customer reviews, including project-owned bookings', async () => {
     mocks.paymentAggregate.mockResolvedValue([]);
-    mocks.bookingAggregate.mockResolvedValue([]);
+    mocks.bookingAggregate.mockResolvedValue([{ _id: null, reviewCount: 2, avgRating: 4.5 }]);
+    const projectDistinct = vi.fn(async () => ['proj1']);
+    mocks.projectFind.mockReturnValue({ distinct: projectDistinct });
     const res = mockRes();
     await getPaymentStats({ user: { _id: PRO_ID } } as unknown as Request, res);
     expect(res.statusCode).toBe(200);
+    expect(mocks.projectFind).toHaveBeenCalledWith({ professionalId: PRO_ID });
+    expect(projectDistinct).toHaveBeenCalledWith('_id');
     expect(mocks.bookingAggregate.mock.calls[0][0][0].$match).toEqual({
-      professional: PRO_ID, 'customerReview.communicationLevel': { $exists: true, $ne: null },
+      $or: [{ professional: PRO_ID }, { project: { $in: ['proj1'] } }],
+      'customerReview.communicationLevel': { $exists: true, $ne: null },
     });
-    expect(res.body.data.reviewCount).toBe(0);
+    expect(res.body.data.reviewCount).toBe(2);
+  });
+  it('treats a 12-character booking number as text, never as an ObjectId', async () => {
+    const chain: any = chainFor([]);
+    chain.select = vi.fn(() => chain);
+    chain.limit = vi.fn(() => chain);
+    mocks.paymentFind.mockReturnValue(chain);
+    mocks.paymentCountDocuments.mockResolvedValue(0);
+    mocks.bookingFind.mockReturnValue({ select: () => ({ lean: async () => [] }) });
+    const res = mockRes();
+    await getTransactions({ user: { _id: PRO_ID }, query: { q: 'BK-123456789' } } as unknown as Request, res);
+    expect(res.statusCode).toBe(200);
+    const alternatives = mocks.paymentFind.mock.calls[0][0].$and[0].$or;
+    expect(alternatives).toHaveLength(1);
+    expect(alternatives[0].bookingNumber).toBeInstanceOf(RegExp);
   });
 
 });

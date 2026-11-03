@@ -106,3 +106,47 @@ it('does not infer unrecorded booking discounts from unsupported milestone field
   const summary = aggregateRecordedSavings([{ payment: { status: 'completed', currency: 'EUR' }, milestonePayments: [{ discount: { loyaltyAmount: 10 } }] }]);
   expect(summary.unrecordedBookingCount).toBe(1);
 });
+it('excludes a disputed booking whose payment is still completed', () => {
+  const summary = aggregateRecordedSavings([
+    { status: 'dispute', payment: { status: 'completed', currency: 'EUR', discount: { loyaltyAmount: 40, originalAmount: 200 } } },
+    { status: 'completed', ...settled({ loyaltyAmount: 5, originalAmount: 100 }) },
+  ]);
+  expect(summary.settledBookingCount).toBe(1);
+  expect(summary.excludedUncertainCount).toBe(1);
+  expect(summary.complete).toBe(false);
+  const eur = summary.groups[0];
+  expect(eur.totalRecorded).toBe(5);
+  expect(eur.excludedUncertain).toBe(1);
+  expect(eur.coverage).toBe('partial');
+});
+it('keeps earlier paid milestones visible after the next milestone payment replaced the snapshot', () => {
+  const pendingNext = aggregateRecordedSavings([{
+    status: 'in_progress',
+    payment: { status: 'pending', currency: 'EUR', discount: { loyaltyAmount: 8, originalAmount: 80 } },
+    milestonePayments: [{ status: 'paid' }, { status: 'pending' }],
+  }]);
+  // The first milestone settled: the booking is settled but its discount is unknown.
+  expect(pendingNext.settledBookingCount).toBe(1);
+  expect(pendingNext.unrecordedBookingCount).toBe(1);
+  expect(pendingNext.complete).toBe(false);
+  expect(pendingNext.groups[0].totalRecorded).toBe(0);
+
+  const secondPaid = aggregateRecordedSavings([{
+    status: 'in_progress',
+    payment: { status: 'completed', currency: 'EUR', discount: { loyaltyAmount: 8, originalAmount: 80 } },
+    milestonePayments: [{ status: 'paid' }, { status: 'paid' }],
+  }]);
+  // Only the latest milestone's snapshot is counted, once, as a lower bound.
+  expect(secondPaid.settledBookingCount).toBe(1);
+  expect(secondPaid.unrecordedBookingCount).toBe(1);
+  expect(secondPaid.complete).toBe(false);
+  expect(secondPaid.groups[0].totalRecorded).toBe(8);
+  expect(secondPaid.groups[0].bookingCount).toBe(1);
+
+  const singlePaid = aggregateRecordedSavings([{
+    payment: { status: 'completed', currency: 'EUR', discount: { loyaltyAmount: 8, originalAmount: 80 } },
+    milestonePayments: [{ status: 'paid' }, { status: 'pending' }],
+  }]);
+  expect(singlePaid.complete).toBe(true);
+  expect(singlePaid.groups[0].totalRecorded).toBe(8);
+});

@@ -22,7 +22,9 @@ export const getSavingsSummary = async (req: Request, res: Response, next: NextF
     }
 
     const bookings = await Booking.find({ customer: userId })
-      .select('payment.status payment.currency payment.discount')
+      // Booking status classifies open disputes; milestone statuses reveal
+      // earlier settled milestones whose snapshot a later checkout replaced.
+      .select('status payment.status payment.currency payment.discount milestonePayments.status')
       .lean();
 
     const summary = aggregateRecordedSavings(bookings || []);

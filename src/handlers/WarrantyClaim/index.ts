@@ -871,6 +871,11 @@ export const getWarrantyClaimById = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * GET /api/warranty-claims/my — the viewer's own claims (customer or
+ * professional scope) with status, escaped literal search, bookingId and
+ * service filters, paginated. Every filter resolves inside the role scope.
+ */
 export const listMyWarrantyClaims = async (req: Request, res: Response) => {
   try {
     const userId = getRequestUserId(req);
@@ -938,34 +943,39 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
       query.booking = new mongoose.Types.ObjectId(bookingId);
     }
 
-    // Service filter resolves through the viewer's own bookings.
+    // Service filter resolves through the viewer's own claims: candidate
+    // bookings are the ones the role-scoped claims reference (or the single
+    // requested bookingId), so no global project/booking id list is built
+    // before pagination.
     if (service && typeof service === "string" && service !== "all") {
-      const serviceProjectIds = await Project.find({ service }).select("_id").lean();
-      const serviceOr: Record<string, any>[] = [{ "rfqData.serviceType": service }];
-      if (serviceProjectIds.length > 0) {
-        serviceOr.push({ project: { $in: serviceProjectIds.map((p: any) => p._id) } });
+      const claimScope: Record<string, any> = query.customer
+        ? { customer: query.customer }
+        : { professional: query.professional };
+      const candidateBookingIds: any[] = query.booking
+        ? [query.booking]
+        : await WarrantyClaim.distinct("booking", claimScope);
+      const matchedBookingIds: any[] = [];
+      if (candidateBookingIds.length > 0) {
+        const candidates = await Booking.find({ _id: { $in: candidateBookingIds } })
+          .select("_id rfqData.serviceType project")
+          .lean();
+        const projectIds = candidates
+          .filter((b: any) => b?.rfqData?.serviceType !== service && b?.project)
+          .map((b: any) => b.project);
+        const serviceProjects = projectIds.length > 0
+          ? await Project.find({ _id: { $in: projectIds }, service }).select("_id").lean()
+          : [];
+        const serviceProjectIds = new Set(serviceProjects.map((p: any) => String(p._id)));
+        for (const booking of candidates as any[]) {
+          if (booking?.rfqData?.serviceType === service
+            || (booking?.project && serviceProjectIds.has(String(booking.project)))) {
+            matchedBookingIds.push(booking._id);
+          }
+        }
       }
-      // Preserve the role scope ($or for professionals) under $and so the
-      // service $or cannot clobber it.
-      const serviceBookingFilter: Record<string, any> = { $and: [{ $or: serviceOr }] };
-      if (query.customer) {
-        serviceBookingFilter.$and.push({ customer: query.customer });
-      } else if (query.professional) {
-        const ownedProjectIds = await Project.find({ professionalId: query.professional }).select("_id").lean();
-        serviceBookingFilter.$and.push({
-          $or: [
-            { professional: query.professional },
-            { project: { $in: ownedProjectIds.map((p: any) => p._id) } },
-          ],
-        });
-      }
-      const serviceBookings = await Booking.find(serviceBookingFilter).select("_id").lean();
-      const serviceIdSet = new Set(serviceBookings.map((b: any) => String(b._id)));
-      if (query.booking) {
-        query.booking = serviceIdSet.has(String(query.booking)) ? query.booking : { $in: [] };
-      } else {
-        query.booking = { $in: Array.from(serviceIdSet) };
-      }
+      // The claim query keeps its customer/professional scope, so a matched
+      // booking can only surface the viewer's own claims.
+      query.booking = { $in: matchedBookingIds };
     }
 
     const [claims, total] = await Promise.all([

@@ -185,3 +185,20 @@ it('uses the recorded customer VAT-inclusive total for the pinned quote', () => 
 it('preserves a recorded zero refund and unknown when absent', () => {
   expect(buildSharedBookingsRow({ payment: { refundAmount: 0, currency: 'EUR' } }, 'professional').refundAmount.amount).toBe(0);
 });
+it('never shows the pre-VAT net for a priced version without a recorded VAT-inclusive total', () => {
+  const priced = { version: 2, totalAmount: 300, currency: 'EUR', pricingLines: [{ description: 'Work', price: 300, vatRate: 21 }] };
+  expect(pinnedVersionMoney({ currentQuoteVersion: 2, quoteVersions: [priced] })).toEqual({ amount: null, currency: null, source: 'not_recorded' });
+  expect(pinnedVersionMoney({ currentQuoteVersion: 2, quoteVersions: [{ ...priced, totalWithVat: 363 }] }).amount).toBe(363);
+  // Legacy versions without pricingLines keep the totalAmount fallback (0% VAT).
+  expect(pinnedVersionMoney({ currentQuoteVersion: 2, quoteVersions: [{ version: 2, totalAmount: 300, currency: 'EUR' }] }).amount).toBe(300);
+});
+it('never presents an amount due as the paid price', () => {
+  const due = { totalWithVat: 1210, currency: 'EUR', status: 'pending' };
+  for (const status of ['quote_accepted', 'payment_pending']) {
+    expect(buildSharedBookingsRow({ _id: 'b1', status, payment: { ...due, status: 'authorized' } }, 'customer').paidPrice)
+      .toEqual({ amount: null, currency: null, source: 'not_recorded' });
+  }
+  // A later milestone's open checkout replaced booking.payment.
+  expect(buildSharedBookingsRow({ _id: 'b1', status: 'in_progress', payment: due }, 'customer').paidPrice.amount).toBeNull();
+  expect(buildSharedBookingsRow({ _id: 'b1', status: 'booked', payment: { ...due, status: 'authorized' } }, 'customer').paidPrice.amount).toBe(1210);
+});

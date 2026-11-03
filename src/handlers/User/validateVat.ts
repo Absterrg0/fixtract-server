@@ -6,17 +6,29 @@ import jwt from 'jsonwebtoken';
 import { generateUsername, isValidUsernameFormat } from "../../utils/usernameUtils";
 import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
 
+// Stored profile countries can be names rather than ISO codes.
+const DUTCH_COUNTRY_VALUES = new Set(['NL', 'NETHERLANDS', 'THE NETHERLANDS', 'NEDERLAND', 'PAYS-BAS']);
+
+/**
+ * Split a VIES address line such as "5026SL TILBURG" or "1000 Brussel" into
+ * postal code and city. The Dutch 4-digit + 2-letter rule applies only for
+ * NL (or an unknown country); otherwise the generic patterns are used, and a
+ * line without a recognizable postal code becomes the city.
+ */
 export function parsePostalCity(
-  lastLine: string,
+  rawLine: string,
   country?: string,
 ): { postalCode?: string; city: string } {
+  // VIES lines can carry leading/trailing whitespace; the anchored patterns
+  // below would otherwise miss the postal code and keep the whole line as city.
+  const lastLine = typeof rawLine === 'string' ? rawLine.trim() : '';
   // Dutch postcodes are canonically spaceless (e.g. "5026SL TILBURG") — match
   // the 4-digit + 2-letter shape before the generic patterns, which only
   // accept spaced postcodes and would otherwise lose the postal code.
   // A Belgian line such as "1300 LA HULPE" has the same shape, so only apply
   // the Dutch rule when the country is NL or unknown.
   const countryCode = typeof country === 'string' ? country.trim().toUpperCase() : '';
-  const dutch = countryCode === '' || countryCode === 'NL'
+  const dutch = countryCode === '' || DUTCH_COUNTRY_VALUES.has(countryCode)
     ? lastLine.match(/^(\d{4}\s?[A-Z]{2})\s+(.+)$/i)
     : null;
   if (dutch) {

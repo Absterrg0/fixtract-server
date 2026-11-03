@@ -138,6 +138,19 @@ export function resolveSnapshotTitles(booking: any): {
   return { projectId: asId(booking?.project), projectTitle: null, subprojectTitle: null, titleSource: "not_recorded" };
 }
 
+const UNPAID_BOOKING_STATUSES = new Set(["quote_accepted", "payment_pending"]);
+const UNPAID_PAYMENT_STATUSES = new Set(["pending", "failed"]);
+
+/**
+ * True unless `booking.payment` only carries an amount due: awaiting-payment
+ * bookings and pending/failed payments (including a later milestone's open
+ * checkout) never present their amount as paid.
+ */
+export function hasRecordedPaidAmount(booking: any, payment: any): boolean {
+  if (UNPAID_BOOKING_STATUSES.has(String(booking?.status))) return false;
+  return !UNPAID_PAYMENT_STATUSES.has(String(payment?.status));
+}
+
 /**
  * Derive the shared bookings-table row from a viewer-sanitized booking
  * payload (i.e. AFTER bookingForViewer + pro-payout stripping). Unknown
@@ -147,7 +160,9 @@ export function buildSharedBookingsRow(booking: any, viewerRole: "customer" | "p
   const titles = resolveSnapshotTitles(booking);
   const payment = booking?.payment && typeof booking.payment === "object" ? booking.payment : null;
   const currency = typeof payment?.currency === "string" && payment.currency ? payment.currency : "EUR";
-  const paidSource = payment?.totalWithVat ?? payment?.amount ?? null;
+  const paidSource = hasRecordedPaidAmount(booking, payment)
+    ? payment?.totalWithVat ?? payment?.amount ?? null
+    : null;
   const extraCosts = Array.isArray(booking?.extraCosts)
     ? booking.extraCosts
     : booking?.extraCosts && typeof booking.extraCosts === "object"
@@ -256,10 +271,15 @@ export function pinnedVersionMoney(booking: any): OverviewMoney {
     }
     return { amount: null, currency: null, source: "not_recorded" };
   }
-  return asMoney(
-    pinned.customerTotals?.totalWithVat ?? pinned.totalWithVat ?? pinned.totalAmount ?? pinned.amount ?? null,
-    pinned.currency ?? booking?.quote?.currency,
-  );
+  const recordedGross = pinned.customerTotals?.totalWithVat ?? pinned.totalWithVat ?? null;
+  if (recordedGross != null) return asMoney(recordedGross, pinned.currency ?? booking?.quote?.currency);
+  // `totalAmount` is the pre-VAT net. It stands in for the gross only for
+  // legacy versions without pricingLines (treated as 0% VAT); a priced
+  // version without a recorded VAT-inclusive total stays unknown.
+  if (Array.isArray(pinned.pricingLines) && pinned.pricingLines.length > 0) {
+    return { amount: null, currency: null, source: "not_recorded" };
+  }
+  return asMoney(pinned.totalAmount ?? pinned.amount ?? null, pinned.currency ?? booking?.quote?.currency);
 }
 
 export function buildSharedQuoteRow(booking: any): SharedQuoteRow {

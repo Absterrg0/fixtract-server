@@ -19,6 +19,11 @@
  *   `unrecorded` (display "unknown"), never 0.
  * - Per booking, parts are capped at `originalAmount` (double-count guard).
  * - Milestones have no independent discount snapshot and are never added.
+ *   Each milestone checkout replaces `booking.payment` (and its snapshot), so
+ *   only the latest settled payment's discount survives. Earlier paid
+ *   milestones are surfaced as unrecorded (lower-bound total), never inferred.
+ * - Bookings under an unresolved dispute (`booking.status === 'dispute'`) are
+ *   excluded as uncertain even when `payment.status` is still `completed`.
  */
 
 export type SavingsCoverage = 'complete' | 'partial';
@@ -34,6 +39,8 @@ export interface RecordedDiscountSnapshot {
 }
 
 export interface SavingsBookingInput {
+  /** Booking lifecycle status; `dispute` makes the booking uncertain. */
+  status?: unknown;
   payment?: {
     status?: unknown;
     currency?: unknown;
@@ -78,6 +85,14 @@ export interface RecordedSavingsSummary {
 
 const SETTLED_PAYMENT_STATUS = 'completed';
 const EXCLUDED_UNCERTAIN_STATUSES = new Set(['partially_refunded', 'disputed']);
+
+const DISPUTED_BOOKING_STATUS = 'dispute';
+
+/** Number of milestone rows already marked paid (0 for non-milestone bookings). */
+const paidMilestoneCount = (milestonePayments: unknown): number =>
+  Array.isArray(milestonePayments)
+    ? milestonePayments.filter((milestone) => (milestone as { status?: unknown } | null)?.status === 'paid').length
+    : 0;
 
 const toAmount = (value: unknown): number => {
   const amount = typeof value === 'string' ? Number(value) : (value as number);
@@ -130,14 +145,38 @@ export function aggregateRecordedSavings(
     return group;
   };
 
+  const markUncertain = (currency: unknown) => {
+    excludedUncertainCount += 1;
+    const group = groupFor(normalizeCurrency(currency));
+    group.excludedUncertain += 1;
+    group.coverage = 'partial';
+  };
+  const markUnrecorded = (group: SavingsCurrencyGroup) => {
+    unrecordedBookingCount += 1;
+    group.unrecorded += 1;
+    group.coverage = 'partial';
+  };
+
   for (const booking of bookings || []) {
     const status = booking?.payment?.status;
+    const paidMilestones = paidMilestoneCount(booking?.milestonePayments);
+    const isUncertainPayment = typeof status === 'string' && EXCLUDED_UNCERTAIN_STATUSES.has(status);
+    const hasSettledValue = status === SETTLED_PAYMENT_STATUS || paidMilestones > 0;
+
+    // An open dispute leaves payment.status untouched, but the settlement is
+    // no longer certain: exclude it from totals and mark coverage partial.
+    if (booking?.status === DISPUTED_BOOKING_STATUS && (hasSettledValue || isUncertainPayment)) {
+      markUncertain(booking?.payment?.currency);
+      continue;
+    }
     if (status !== SETTLED_PAYMENT_STATUS) {
-      if (typeof status === 'string' && EXCLUDED_UNCERTAIN_STATUSES.has(status)) {
-        excludedUncertainCount += 1;
-        const group = groupFor(normalizeCurrency(booking?.payment?.currency));
-        group.excludedUncertain += 1;
-        group.coverage = 'partial';
+      if (isUncertainPayment) {
+        markUncertain(booking?.payment?.currency);
+      } else if (paidMilestones > 0) {
+        // Earlier milestones were paid, but the next milestone's pending
+        // payment replaced their discount snapshot: settled, value unknown.
+        settledBookingCount += 1;
+        markUnrecorded(groupFor(normalizeCurrency(booking?.payment?.currency)));
       }
       continue;
     }
@@ -145,11 +184,12 @@ export function aggregateRecordedSavings(
     const group = groupFor(normalizeCurrency(booking?.payment?.currency));
     const snapshot = booking.payment?.discount;
     if (!hasSnapshot(snapshot)) {
-      unrecordedBookingCount += 1;
-      group.unrecorded += 1;
-      group.coverage = 'partial';
+      markUnrecorded(group);
       continue;
     }
+    // Only the latest settled milestone's snapshot is recorded; any earlier
+    // paid milestone makes this booking's total a lower bound.
+    if (paidMilestones > 1) markUnrecorded(group);
     const parts = partsOf(snapshot!);
     const original = toAmount(snapshot!.originalAmount);
     const keys = Object.keys(parts) as (keyof SavingsByType)[];

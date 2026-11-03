@@ -29,6 +29,7 @@ import { computeProjectDiff, determineReapprovalType } from "../../utils/project
 import { toSlug } from "../../utils/slug";
 import { withArticle47ProfessionalQuestion } from "../../utils/vatManagement";
 import { withAnonymizationWriteFence, ACCOUNT_WRITE_FENCE_CODE } from "../../utils/support/accountGuard";
+import { denyUnlessPermission } from "../../utils/adminRbac/assertPermission";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
 const saveProjectWithFence = async (project: any, userId: string) =>
@@ -472,6 +473,16 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         return res.status(404).json({ error: "Project not found" });
       }
 
+      // Archived projects are read-only until restored; an update here could
+      // otherwise reopen them (e.g. status: "published") while the archive
+      // metadata stays populated.
+      if (existingProject.status === "archived") {
+        return res.status(400).json({
+          error: "Archived projects must be restored before editing",
+          code: "PROJECT_ARCHIVED",
+        });
+      }
+
       // Log what fields are being updated
       console.log("[PROJECT] Fields being updated:");
       console.log("- Title:", projectData.title);
@@ -494,6 +505,9 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
       delete updateData.pendingChanges;
       delete updateData.reapprovalType;
       delete updateData.isResubmission;
+      // Archive bookkeeping is owned by the archive/restore endpoints.
+      delete updateData.archivedAt;
+      delete updateData.statusBeforeArchive;
 
       // If editing a published/on_hold project, take a snapshot for smart reapproval
       // but do NOT change status to pending — defer to submit time
@@ -2120,12 +2134,14 @@ export const updateProjectStatus = async (req: Request, res: Response) => {
   }
 };
 
-// Soft archive / restore for the Project Dashboard (group 15a). Archive
-// unpublishes + hides the project from the professional overview, public
-// search, and new bookings. It is never a delete: existing bookings,
-// details, and snapshots stay readable. Restore returns the project to
-// draft, or to its verified pre-archive status for non-published states —
-// never straight back to published (re-approval flow stays authoritative).
+/**
+ * POST /api/projects/:id/archive — soft archive for the Project Dashboard.
+ * Archive unpublishes and hides the project from the professional overview,
+ * public search, and new bookings. It is never a delete: existing bookings,
+ * details, and snapshots stay readable. Owners must be approved
+ * professionals; admins need `projects.approve`. Idempotent for an already
+ * archived project.
+ */
 export const archiveProject = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -2133,15 +2149,19 @@ export const archiveProject = async (req: Request, res: Response) => {
     if (!userId) {
       return res.status(401).json({ error: "Unauthorized" });
     }
-    const actor = await User.findById(userId).select("role professionalStatus");
+    const actor = await User.findById(userId).select("role professionalStatus adminRole adminPermissionLevels");
     if (!actor) {
       return res.status(401).json({ error: "Unauthorized" });
     }
     const isAdmin = actor.role === "admin";
-    if (!isAdmin) {
-      if (actor.role !== "professional" || actor.professionalStatus !== "approved") {
-        return res.status(403).json({ error: "Only approved professionals can archive projects" });
+    if (isAdmin) {
+      // Same RBAC gate as the other project-administration handlers.
+      const denied = denyUnlessPermission(actor as any, "projects.approve");
+      if (denied) {
+        return res.status(denied.status).json(denied.body);
       }
+    } else if (actor.role !== "professional" || actor.professionalStatus !== "approved") {
+      return res.status(403).json({ error: "Only approved professionals can archive projects" });
     }
 
     const project = isAdmin
@@ -2164,6 +2184,12 @@ export const archiveProject = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * POST /api/projects/:id/restore — undo an archive. Restores to draft, or to
+ * the verified pre-archive status for non-published states — never straight
+ * back to published (the re-approval flow stays authoritative). Same actor
+ * rules as archiveProject.
+ */
 export const restoreProject = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -2171,15 +2197,19 @@ export const restoreProject = async (req: Request, res: Response) => {
     if (!userId) {
       return res.status(401).json({ error: "Unauthorized" });
     }
-    const actor = await User.findById(userId).select("role professionalStatus");
+    const actor = await User.findById(userId).select("role professionalStatus adminRole adminPermissionLevels");
     if (!actor) {
       return res.status(401).json({ error: "Unauthorized" });
     }
     const isAdmin = actor.role === "admin";
-    if (!isAdmin) {
-      if (actor.role !== "professional" || actor.professionalStatus !== "approved") {
-        return res.status(403).json({ error: "Only approved professionals can restore projects" });
+    if (isAdmin) {
+      // Same RBAC gate as the other project-administration handlers.
+      const denied = denyUnlessPermission(actor as any, "projects.approve");
+      if (denied) {
+        return res.status(denied.status).json(denied.body);
       }
+    } else if (actor.role !== "professional" || actor.professionalStatus !== "approved") {
+      return res.status(403).json({ error: "Only approved professionals can restore projects" });
     }
 
     const project = isAdmin
@@ -2207,7 +2237,12 @@ export const restoreProject = async (req: Request, res: Response) => {
   }
 };
 
-// Master listing with search and filters for Manage Projects screen
+/**
+ * GET /api/projects/master — the professional's own projects for the Manage
+ * Projects screen: search/category/service/status filters (archived hidden
+ * unless requested), pagination, status counts, and team member names
+ * resolved only for the professional and their own employees.
+ */
 export const getProjectsMaster = async (req: Request, res: Response) => {
   try {
     const professionalId = req.user?.id;
@@ -2323,8 +2358,16 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
       items.flatMap((item: any) => Array.isArray(item?.resources) ? item.resources : [])
         .filter((id: unknown) => typeof id === "string" && mongoose.Types.ObjectId.isValid(id)),
     )];
+    // Resource ids are client-supplied on draft saves, so names resolve only
+    // for the professional and their own company employees.
     const teamRows = teamIds.length > 0
-      ? await User.find({ _id: { $in: teamIds } }).select("_id name").lean()
+      ? await User.find({
+          _id: { $in: teamIds },
+          $or: [
+            { _id: professionalId },
+            { role: "employee", "employee.companyId": String(professionalId) },
+          ],
+        }).select("_id name").lean()
       : [];
     const teamNames = new Map(teamRows.map((row: any) => [String(row._id), row.name || null]));
     const itemsWithTeam = items.map((item: any) => ({

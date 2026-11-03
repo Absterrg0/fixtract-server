@@ -10,6 +10,15 @@ describe('parsePostalCity', () => {
     expect(parsePostalCity('5026 SL TILBURG')).toEqual({ postalCode: '5026SL', city: 'TILBURG' });
   });
 
+  it('trims surrounding whitespace before matching the postal code', () => {
+    expect(parsePostalCity(' 5026SL TILBURG ')).toEqual({ postalCode: '5026SL', city: 'TILBURG' });
+    expect(parsePostalCity('  1000 BRUSSELS', 'BE')).toEqual({ postalCode: '1000', city: 'BRUSSELS' });
+  });
+
+  it('accepts a stored Dutch country name for the Dutch postcode rule', () => {
+    expect(parsePostalCity('5026SL TILBURG', 'Netherlands')).toEqual({ postalCode: '5026SL', city: 'TILBURG' });
+  });
+
   it('keeps existing BE/FR/UK shapes intact', () => {
     expect(parsePostalCity('1000 BRUSSELS')).toEqual({ postalCode: '1000', city: 'BRUSSELS' });
     expect(parsePostalCity('75001 PARIS')).toEqual({ postalCode: '75001', city: 'PARIS' });
