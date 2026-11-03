@@ -216,6 +216,9 @@ describeDb('project lifecycle transitions vs concurrent writes (disposable Mongo
     const res = await setStatus(projectId, 'published');
 
     expect(res.statusCode).toBe(409);
+    expect(res.body.code).toBe('PROJECT_STATUS_CONFLICT');
+    // The former owner must not learn the new owner's status from the 409.
+    expect(res.body.currentStatus).toBeUndefined();
     const stored: any = await Project.collection.findOne({ _id: projectId });
     expect(stored.status).toBe('on_hold');
     expect(String(stored.professionalId)).toBe(String(OTHER_PRO));

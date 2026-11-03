@@ -2179,7 +2179,7 @@ export const updateProjectStatus = async (req: Request, res: Response) => {
       await saveProjectWithFence(project, professionalId, expected);
     } catch (error) {
       if (isLostProjectTransition(error)) {
-        return sendProjectStatusConflict(res, { _id: id });
+        return sendProjectStatusConflict(res, { _id: id, professionalId });
       }
       throw error;
     }
