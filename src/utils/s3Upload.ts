@@ -194,14 +194,21 @@ export const deleteFromS3 = async (key: string): Promise<void> => {
 };
 
 // Generate presigned URL for secure file viewing
-export const getPresignedUrl = async (key: string, expiresIn: number = 3600): Promise<string> => {
+export const getPresignedUrl = async (
+  key: string,
+  expiresIn: number = 3600,
+  options: { signingDate?: Date } = {},
+): Promise<string> => {
   try {
     const command = new GetObjectCommand({
       Bucket: BUCKET_NAME,
       Key: key,
     });
 
-    const signedUrl = await getSignedUrl(s3Client, command, { expiresIn });
+    const signedUrl = await getSignedUrl(s3Client, command, {
+      expiresIn,
+      ...(options.signingDate ? { signingDate: options.signingDate } : {}),
+    });
     return signedUrl;
   } catch (error) {
     console.error('❌ S3: Failed to generate presigned URL:', error);

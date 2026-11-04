@@ -54,6 +54,7 @@ import {
 import PlatformSettings from "../../models/platformSettings";
 import LoyaltyConfig from "../../models/loyaltyConfig";
 import { getCurrentTier } from "../../utils/loyaltySystem";
+import { withSignedProjectMediaList } from "../../utils/projectMedia";
 
 const escapeSearchRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -989,8 +990,9 @@ async function searchProjects(
       return subproject?.pricing?.type === "unit" && subproject?.pricing?.durationBasis === "per_unit" ? minQuantity : 1;
     };
 
+    const signedResults = await withSignedProjectMediaList(finalResults as any[]);
     const resultsWithAvailability = await Promise.all(
-      finalResults.map(async (project: any) => {
+      signedResults.map(async (project: any) => {
         try {
           // Get professional from pre-loaded map
           const profId = toObjectIdString(project.professionalId);
