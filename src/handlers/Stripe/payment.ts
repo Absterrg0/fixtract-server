@@ -27,6 +27,7 @@ import {
   quoteAmountIncludesSelectedExtras,
 } from '../../utils/payment';
 import { canRetryTransfer, getTransferStatus, requireProfessionalPayout } from '../../utils/paymentSafety';
+import { withReferralDiscount } from '../../utils/referralDiscount';
 import { calculateVAT } from '../../utils/vat';
 import { calculateVatFromPricingLines } from '../../utils/vatLineCalculation';
 import { parseVatCountryCode, requiresVatRfqReview } from '../../utils/vatManagement';
@@ -298,6 +299,7 @@ export const createPaymentIntent = async (
   requestedMilestoneIndex?: number,
   discountCode?: string
 ): Promise<CreatePaymentIntentResult> => {
+  let createdIntentId: string | undefined;
   try {
     const booking = await Booking.findById(bookingId)
       .populate('customer')
@@ -307,6 +309,8 @@ export const createPaymentIntent = async (
     if (!booking) {
       return { success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } };
     }
+
+    const expectedWrite = { updatedAt: booking.updatedAt, status: booking.status, 'payment.stripePaymentIntentId': booking.payment?.stripePaymentIntentId ?? null };
 
     // Verify customer
     if (booking.customer._id.toString() !== userId) {
@@ -497,7 +501,7 @@ export const createPaymentIntent = async (
     }
 
 
-    const fullDiscountBreakdown = await calculateAutoDiscount(
+    const automaticDiscount = await calculateAutoDiscount(
       customer._id.toString(),
       professional._id.toString(),
       booking.project ? (booking.project as any)._id?.toString() || booking.project.toString() : null,
@@ -507,6 +511,7 @@ export const createPaymentIntent = async (
       codeInfo
     );
 
+    const fullDiscountBreakdown = await withReferralDiscount(automaticDiscount, customer._id.toString(), String(booking._id), true);
     let discountBreakdown = fullDiscountBreakdown;
     if (fullBookingAmount > 0 && chargeAmount < fullBookingAmount) {
       const ratio = chargeAmount / fullBookingAmount;
@@ -516,7 +521,8 @@ export const createPaymentIntent = async (
       const proratedCode = fullDiscountBreakdown.codeDiscount
         ? Math.round(fullDiscountBreakdown.codeDiscount.amount * ratio * 100) / 100
         : 0;
-      const proratedTotal = proratedLoyalty + proratedRepeat + proratedPoints + proratedCode;
+      const proratedReferral = Math.round((fullDiscountBreakdown.referralDiscount?.amount || 0) * ratio * 100) / 100;
+      const proratedTotal = proratedLoyalty + proratedRepeat + proratedPoints + proratedCode + proratedReferral;
       discountBreakdown = {
         ...fullDiscountBreakdown,
         loyaltyDiscount: { ...fullDiscountBreakdown.loyaltyDiscount, amount: proratedLoyalty },
@@ -525,6 +531,7 @@ export const createPaymentIntent = async (
         codeDiscount: fullDiscountBreakdown.codeDiscount
           ? { ...fullDiscountBreakdown.codeDiscount, amount: proratedCode }
           : undefined,
+        referralDiscount: fullDiscountBreakdown.referralDiscount ? { ...fullDiscountBreakdown.referralDiscount, amount: proratedReferral } : undefined,
         totalDiscount: proratedTotal,
         originalAmount: chargeAmount,
         finalAmount: chargeAmount - proratedTotal,
@@ -632,9 +639,11 @@ export const createPaymentIntent = async (
         pointsToRedeem,
         discountCode,
         quoteVersion: booking.currentQuoteVersion,
+        checkoutRevision: booking.checkoutRevision,
       })
     });
 
+    createdIntentId = paymentIntent.id;
     // Update booking with payment info
     booking.payment = {
       amount: netAmount,
@@ -654,7 +663,7 @@ export const createPaymentIntent = async (
       reverseCharge: vatCalculation.reverseCharge,
       vatBreakdown: (vatCalculation as any).vatBreakdown,
       ...(milestoneIndex !== null && { milestoneIndex }),
-      ...(discountBreakdown.totalDiscount > 0 && {
+      ...({
         discount: {
           loyaltyTier: discountBreakdown.loyaltyDiscount.tier,
           loyaltyPercentage: discountBreakdown.loyaltyDiscount.percentage,
@@ -663,6 +672,8 @@ export const createPaymentIntent = async (
           repeatBuyerAmount: discountBreakdown.repeatBuyerDiscount.amount,
           pointsRedeemed: discountBreakdown.pointsDiscount.pointsUsed,
           pointsDiscountAmount: discountBreakdown.pointsDiscount.discountAmount,
+          referralDiscountAmount: discountBreakdown.referralDiscount?.amount || 0,
+          referralId: discountBreakdown.referralDiscount?.referralId ? new mongoose.Types.ObjectId(discountBreakdown.referralDiscount.referralId) : undefined,
           codeDiscountAmount: discountBreakdown.codeDiscount?.amount || 0,
           codeId: discountBreakdown.codeDiscount?.codeId
             ? new mongoose.Types.ObjectId(discountBreakdown.codeDiscount.codeId)
@@ -676,6 +687,7 @@ export const createPaymentIntent = async (
     if (!hasUnpaidMilestones || ['quote_accepted', 'payment_pending'].includes(booking.status)) {
       booking.status = 'payment_pending';
     }
+    booking.$where = expectedWrite;
     await booking.save();
 
     // Points deduction is handled in the payment success webhook (handlePaymentIntentSucceeded)
@@ -722,6 +734,10 @@ export const createPaymentIntent = async (
     };
 
   } catch (error: any) {
+    if (error?.name === 'DocumentNotFoundError' && createdIntentId) {
+      try { await stripe.paymentIntents.cancel(createdIntentId); } catch { /* A racing success is handled by the durable superseded-intent reconciliation path. */ }
+      return { success: false, error: { code: 'BOOKING_CHANGED', message: 'The booking changed. Refresh before paying.' } };
+    }
     console.error('Error creating payment intent:', error);
     return {
       success: false,

@@ -20,7 +20,7 @@ import { notify } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
 import { bookingForRequest, sanitizeMilestoneForViewer, sanitizeMilestonesForViewer } from '../../utils/invoiceVisibility';
-import { buildQuoteCustomerTotals, quoteServiceLocationSnapshot } from '../../utils/bookingDetails/quoteTotals';
+import { buildQuoteCustomerTotalsWithDiscounts, quoteServiceLocationSnapshot } from '../../utils/bookingDetails/quoteTotals';
 import { computeQuoteFirstPossibleStartBounded } from '../../utils/bookingDetails/quoteFirstStart';
 import { captureBookingSnapshotIfMissing, loadVatQuestionDefinitions } from '../../utils/bookingDetails/capture';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
@@ -504,7 +504,7 @@ export const respondToRFQ = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
+      .populate('customer', 'name email totalSpent customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
       .populate('professional', 'name username email businessInfo isAnonymized deletedAt')
       .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 
@@ -719,7 +719,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
+      .populate('customer', 'name email totalSpent customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
       .populate('professional', 'name username email businessInfo isAnonymized deletedAt')
       .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 
@@ -753,7 +753,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
     const now = new Date();
     const versionNumber = 1;
     const commissionPercent = await getSafeCommissionPercent();
-    const customerTotals = buildQuoteCustomerTotals({
+    const customerTotals = await buildQuoteCustomerTotalsWithDiscounts({
       booking,
       totalAmount: normalizedTotalAmount,
       pricingLines: canonicalPricingLines,
@@ -931,7 +931,7 @@ export const editQuotation = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
+      .populate('customer', 'name email totalSpent customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
       .populate('professional', 'name username email businessInfo isAnonymized deletedAt')
       .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 
@@ -969,7 +969,7 @@ export const editQuotation = async (req: Request, res: Response) => {
       booking.quotationNumber = await getNextQuotationNumber();
     }
     const commissionPercent = await getSafeCommissionPercent();
-    const customerTotals = buildQuoteCustomerTotals({
+    const customerTotals = await buildQuoteCustomerTotalsWithDiscounts({
       booking,
       totalAmount: normalizedTotalAmount,
       pricingLines: canonicalPricingLines,

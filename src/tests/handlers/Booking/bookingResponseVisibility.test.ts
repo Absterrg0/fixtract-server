@@ -2,6 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   bookingFindById: vi.fn(),
+  bookingCountDocuments: vi.fn(),
+  intentRetrieve: vi.fn(),
+  intentCancel: vi.fn(),
   bookingFindOneAndUpdate: vi.fn(),
   bookingFind: vi.fn(),
   bookingDistinct: vi.fn(),
@@ -19,6 +22,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../../models/booking', () => ({
   default: {
     findById: mocks.bookingFindById,
+    countDocuments: mocks.bookingCountDocuments,
     findOneAndUpdate: mocks.bookingFindOneAndUpdate,
     find: mocks.bookingFind,
     distinct: mocks.bookingDistinct,
@@ -69,7 +73,7 @@ vi.mock('../../../models/warrantyClaim', () => ({
 }));
 
 vi.mock('../../../services/stripe', () => ({
-  stripe: {},
+  stripe: { paymentIntents: { retrieve: mocks.intentRetrieve, cancel: mocks.intentCancel } },
   STRIPE_CONFIG: {
     supportedCurrencies: ['EUR'],
     defaultCurrency: 'EUR',
@@ -247,6 +251,7 @@ const expectNoRawDiagnostics = (serialized: string) => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.bookingCountDocuments.mockResolvedValue(1);
   mocks.userFindById.mockImplementation((id: string) =>
     query({ _id: id, name: id === 'customer-1' ? 'Customer' : 'Professional' })
   );
@@ -274,7 +279,7 @@ describe('non-admin booking response serialization', () => {
 
     const res = response();
     await getMyDisputes(
-      { user: user(role, userId) } as any,
+      { user: user(role, userId), query: {} } as any,
       res as any,
       vi.fn() as any
     );
@@ -375,6 +380,7 @@ describe('non-admin booking response serialization', () => {
   it('sanitizes the schedule response for the customer', async () => {
     const booking = makeBooking({
       status: 'quote_accepted',
+      payment: undefined,
       project: null,
       customer: { _id: 'customer-1', name: 'Customer' },
       professional: { _id: 'professional-1', name: 'Professional' },
@@ -394,7 +400,61 @@ describe('non-admin booking response serialization', () => {
 
     expect(res.body.success).toBe(true);
     expectNoRawDiagnostics(JSON.stringify(res.body));
-    expect(res.body.data.booking.payment.refundReason).toBe('Customer accepted negotiated refund');
+    expect(res.body.data.booking.payment).toBeUndefined();
+  });
+
+  it('edits a saved unpaid schedule only after cancelling its old payment', async () => {
+    const booking = makeBooking({ status: 'payment_pending', project: null,
+      customer: { _id: 'customer-1' }, professional: { _id: 'professional-1' },
+      payment: { status: 'pending', stripePaymentIntentId: 'pi_old' },
+      scheduledStartDate: new Date('2099-01-01'), updatedAt: new Date('2026-01-01'),
+    });
+    mocks.bookingFindById.mockReturnValue(query(booking));
+    mocks.intentRetrieve.mockResolvedValue({ status: 'requires_payment_method' });
+    mocks.intentCancel.mockResolvedValue({ status: 'canceled' });
+    const res = response();
+    await setBookingSchedule({ params: { bookingId: 'booking-1' }, user: user('customer'), body: { scheduledStartDate: '2099-01-02' } } as any, res as any);
+    expect(res.body.success).toBe(true);
+    expect(mocks.intentCancel).toHaveBeenCalledWith('pi_old');
+    expect(booking.save.mock.invocationCallOrder[0]).toBeGreaterThan(mocks.intentCancel.mock.invocationCallOrder[0]);
+    expect(booking.status).toBe('quote_accepted');
+    expect(booking.payment).toBeUndefined();
+    expect(booking.checkoutRevision).toBe(1);
+    expect(booking.$where).toMatchObject({ status: 'payment_pending', 'payment.stripePaymentIntentId': 'pi_old' });
+  });
+
+  it.each(['processing', 'succeeded', 'requires_capture'])('blocks schedule edits for a %s charge', async (status) => {
+    const booking = makeBooking({ status: 'payment_pending', project: null, customer: { _id: 'customer-1' }, professional: { _id: 'professional-1' }, payment: { status: 'pending', stripePaymentIntentId: 'pi_old' } });
+    mocks.bookingFindById.mockReturnValue(query(booking));
+    mocks.intentRetrieve.mockResolvedValue({ status });
+    const res = response();
+    await setBookingSchedule({ params: { bookingId: 'booking-1' }, user: user('customer'), body: { scheduledStartDate: '2099-01-02' } } as any, res as any);
+    expect(res.body.error.code).toBe('PAYMENT_IN_PROGRESS');
+    expect(booking.save).not.toHaveBeenCalled();
+    expect(mocks.intentCancel).not.toHaveBeenCalled();
+  });
+
+  it('never saves edits if payment cancellation fails', async () => {
+    const booking = makeBooking({ status: 'payment_pending', project: null, customer: { _id: 'customer-1' }, professional: { _id: 'professional-1' }, payment: { status: 'pending', stripePaymentIntentId: 'pi_old' } });
+    mocks.bookingFindById.mockReturnValue(query(booking));
+    mocks.intentRetrieve.mockResolvedValue({ status: 'requires_action' });
+    mocks.intentCancel.mockRejectedValue(new Error('cancellation unavailable'));
+    const res = response();
+    await setBookingSchedule({ params: { bookingId: 'booking-1' }, user: user('customer'), body: { scheduledStartDate: '2099-01-02' } } as any, res as any);
+    expect(res.body.success).toBe(false);
+    expect(booking.save).not.toHaveBeenCalled();
+  });
+
+  it('paginates disputes with the same participant predicate and a stable tie breaker', async () => {
+    const chain = query([]);
+    mocks.bookingFind.mockReturnValue(chain);
+    mocks.bookingCountDocuments.mockResolvedValue(105);
+    const res = response();
+    await getMyDisputes({ user: user('customer', CUSTOMER_ID), query: { page: '6', limit: '20' } } as any, res as any, vi.fn());
+    expect(res.body.data.pagination).toEqual({ page: 6, limit: 20, total: 105, totalPages: 6 });
+    expect(chain.skip).toHaveBeenCalledWith(100);
+    expect(chain.sort).toHaveBeenCalledWith({ 'dispute.raisedAt': -1, _id: -1 });
+    expect(mocks.bookingCountDocuments.mock.calls[0][0]).toEqual(mocks.bookingFind.mock.calls[0][0]);
   });
 
   it('sanitizes the reschedule-request response for the professional', async () => {

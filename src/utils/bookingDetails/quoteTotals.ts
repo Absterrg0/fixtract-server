@@ -1,3 +1,5 @@
+import { calculateAutoDiscount, type DiscountBreakdown } from '../discountEngine';
+import { withReferralDiscount } from '../referralDiscount';
 import type { IQuoteCustomerTotals, IQuoteVersion } from '../../models/booking';
 import { calculateVatFromPricingLines } from '../vatLineCalculation';
 import { commissionedQuoteAmount } from '../customerPricing';
@@ -26,14 +28,16 @@ export const buildQuoteCustomerTotals = (params: {
   commissionPercent: number;
   currency: string;
   recordedAt?: Date;
+  discountBreakdown?: DiscountBreakdown;
 }): IQuoteCustomerTotals | null => {
   const professionalNetAmount = finite(params.totalAmount);
   if (professionalNetAmount == null || professionalNetAmount < 0) return null;
 
-  const customerNetAmount = roundMoney(
+  const amountBeforeDiscounts = roundMoney(
     commissionedQuoteAmount(professionalNetAmount, params.booking?.checkoutSnapshot, params.commissionPercent),
   );
 
+  const customerNetAmount = params.discountBreakdown?.finalAmount ?? amountBeforeDiscounts;
   const pricingLines = Array.isArray(params.pricingLines)
     ? params.pricingLines.filter((line) => finite(line?.price) != null && finite(line?.vatRate) != null)
     : [];
@@ -61,7 +65,15 @@ export const buildQuoteCustomerTotals = (params: {
     commissionPercent: Math.max(0, finite(params.commissionPercent) ?? 0),
     professionalNetAmount,
     customerNetAmount,
-    amountBeforeDiscounts: customerNetAmount,
+    amountBeforeDiscounts,
+    ...(params.discountBreakdown ? { discount: {
+      source: 'quote_time_automatic',
+      loyaltyAmount: params.discountBreakdown.loyaltyDiscount.amount,
+      repeatBuyerAmount: params.discountBreakdown.repeatBuyerDiscount.amount,
+      referralDiscountAmount: params.discountBreakdown.referralDiscount?.amount || 0,
+      totalDiscount: params.discountBreakdown.totalDiscount,
+      originalAmount: amountBeforeDiscounts,
+    } } : {}),
     currency: params.currency || 'EUR',
     recordedAt: params.recordedAt || new Date(),
   };
@@ -73,6 +85,22 @@ export const buildQuoteCustomerTotals = (params: {
   }
   return totals;
 };
+
+/** Freeze automatic customer discounts at quote time. Checkout still
+ * recalculates eligibility; points and user-entered codes are checkout-only.
+ * No referral reservation, redemption or reward is written by this reader.
+ */
+export async function buildQuoteCustomerTotalsWithDiscounts(params: Parameters<typeof buildQuoteCustomerTotals>[0]) {
+  const base = buildQuoteCustomerTotals(params);
+  if (!base) return null;
+  const booking = params.booking;
+  const customerId = booking.customer?._id?.toString?.() || String(booking.customer);
+  const professionalId = booking.professional?._id?.toString?.() || String(booking.professional);
+  const projectId = booking.project?._id?.toString?.() || (booking.project ? String(booking.project) : null);
+  const automatic = await calculateAutoDiscount(customerId, professionalId, projectId, base.customerNetAmount, booking.customer?.totalSpent || 0);
+  const discountBreakdown = await withReferralDiscount(automatic, customerId, String(booking._id));
+  return buildQuoteCustomerTotals({ ...params, discountBreakdown });
+}
 
 export const quoteServiceLocationSnapshot = (booking: any): IQuoteVersion['serviceLocation'] | undefined => {
   const location = booking?.location;

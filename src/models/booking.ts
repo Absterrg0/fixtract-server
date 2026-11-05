@@ -98,6 +98,7 @@ export interface IPaymentDiscountLedgerEntry {
   repeatBuyerAmount: number;
   pointsDiscountAmount: number;
   codeDiscountAmount: number;
+  referralDiscountAmount?: number;
   totalDiscount: number;
   recordedAt: Date;
 }
@@ -112,7 +113,7 @@ export interface IQuoteMaterial {
 export interface IQuoteCustomerTotals {
   commissionPercent: number;
   professionalNetAmount: number;
-  /** Customer net before VAT and before checkout-only discounts. */
+  /** Customer net after recorded quote-time automatic discounts, before VAT. */
   customerNetAmount: number;
   /** Alias kept for the frontend contract. */
   amountBeforeDiscounts?: number;
@@ -265,6 +266,7 @@ export interface IBooking extends Document {
    */
   serviceConfigurationId?: string;
 
+  checkoutRevision?: number;
   // Status and lifecycle
   status: BookingStatus;
   statusBeforeDispute?: BookingStatus;
@@ -517,6 +519,8 @@ export interface IBooking extends Document {
       pointsRedeemed: number;
       pointsDiscountAmount: number;
       codeDiscountAmount?: number;
+      referralDiscountAmount?: number;
+      referralId?: Types.ObjectId;
       codeId?: mongoose.Types.ObjectId;
       codeLabel?: string;
       totalDiscount: number;
@@ -828,6 +832,7 @@ const BookingSchema = new Schema({
     type: String,
     enum: ['rfq', 'rfq_accepted', 'draft_quote', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'rescheduling_requested', 'in_progress', 'professional_completed', 'completed', 'cancelled', 'dispute', 'refunded'],
   },
+  checkoutRevision: { type: Number, default: 0 },
   statusHistory: [{
     status: {
       type: String,
@@ -1066,6 +1071,7 @@ const BookingSchema = new Schema({
       loyaltyAmount: { type: Number, default: 0 },
       repeatBuyerAmount: { type: Number, default: 0 },
       pointsDiscountAmount: { type: Number, default: 0 },
+      referralDiscountAmount: { type: Number },
       codeDiscountAmount: { type: Number, default: 0 },
       totalDiscount: { type: Number, default: 0 },
       recordedAt: { type: Date, required: true },
@@ -1335,7 +1341,9 @@ const BookingSchema = new Schema({
       repeatBuyerAmount: { type: Number, default: 0 },
       pointsRedeemed: { type: Number, default: 0 },
       pointsDiscountAmount: { type: Number, default: 0 },
+      referralDiscountAmount: { type: Number },
       codeDiscountAmount: { type: Number, default: 0 },
+      referralId: { type: Schema.Types.ObjectId, ref: "Referral" },
       codeId: { type: mongoose.Schema.Types.ObjectId, ref: 'DiscountCode' },
       codeLabel: { type: String },
       totalDiscount: { type: Number, default: 0 },

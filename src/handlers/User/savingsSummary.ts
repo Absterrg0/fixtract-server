@@ -34,10 +34,7 @@ export const getSavingsSummary = async (req: Request, res: Response, next: NextF
       success: true,
       data: {
         ...summary,
-        // Referral value is not separately recorded in any discount snapshot.
-        // Surfaced explicitly as unknown — never 0, never inferred from points.
-        referral: null,
-        referralStatus: 'not_separately_recorded',
+        referralStatus: summary.groups.every(group => group.referral !== null) ? 'recorded' : 'partially_recorded',
         totalLabel: 'recorded',
       },
     });

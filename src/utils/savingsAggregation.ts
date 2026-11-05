@@ -27,9 +27,8 @@
  * - A fully refunded single payment is excluded (no saving). A refunded
  *   milestone booking that has other settled milestones is uncertain, because
  *   refunds are only tracked against the current PaymentIntent.
- * - Referral savings are NOT separately recorded in any snapshot. Reported as
- *   `null` (not separately recorded), never 0, and points redemptions are
- *   never attributed to referrals.
+ * - Referral savings use explicit checkout attribution only. Historical
+ *   snapshots without attribution remain unknown; rewards/points are separate.
  * - One currency group per currency; never summed across currencies.
  * - Per payment, parts are capped at that payment's `originalAmount`.
  * - Each payment counts once: ledger entries are deduplicated by intent id and
@@ -44,6 +43,7 @@ export interface RecordedDiscountSnapshot {
   repeatBuyerAmount?: unknown;
   pointsDiscountAmount?: unknown;
   codeDiscountAmount?: unknown;
+  referralDiscountAmount?: unknown;
   originalAmount?: unknown;
   codeLabel?: unknown;
   codeId?: unknown;
@@ -84,8 +84,9 @@ export interface SavingsByType {
 export interface SavingsCurrencyGroup {
   currency: string;
   byType: SavingsByType;
-  /** Referral savings are not separately recorded — always null. */
-  referral: null;
+  /** Null when any included snapshot lacks referral attribution. */
+  referral: number | null;
+  recordedReferral: number;
   totalRecorded: number;
   bookingCount: number;
   coverage: SavingsCoverage;
@@ -253,7 +254,8 @@ export function aggregateRecordedSavings(
       group = {
         currency,
         byType: { recurring: 0, loyalty: 0, discountCode: 0, points: 0 },
-        referral: null,
+        referral: 0,
+        recordedReferral: 0,
         totalRecorded: 0,
         bookingCount: 0,
         coverage: 'complete',
@@ -276,9 +278,10 @@ export function aggregateRecordedSavings(
 
   /** Add one payment's capped snapshot, allocating the cap in cents. */
   const addSnapshot = (group: SavingsCurrencyGroup, snapshot: RecordedDiscountSnapshot) => {
-    const parts = partsOf(snapshot);
+    const parts = { ...partsOf(snapshot), referral: toAmount(snapshot.referralDiscountAmount) };
+    if (snapshot.referralDiscountAmount === undefined) group.referral = null;
     const original = toAmount(snapshot.originalAmount);
-    const keys = Object.keys(parts) as (keyof SavingsByType)[];
+    const keys = Object.keys(parts) as (keyof typeof parts)[];
     const sum = keys.reduce((total, key) => total + parts[key], 0);
     // Allocate the capped total in cents, preserving proportions and the total
     // even when rounding several component rows would otherwise add a cent.
@@ -290,7 +293,12 @@ export function aggregateRecordedSavings(
     const remaining = totalCents - allocations.reduce((total, part) => total + part.cents, 0);
     allocations.sort((a, b) => b.remainder - a.remainder);
     for (let i = 0; i < remaining; i++) allocations[i].cents += 1;
-    for (const { key, cents } of allocations) group.byType[key] += cents / 100;
+    for (const { key, cents } of allocations) {
+      if (key === 'referral') {
+        group.recordedReferral += cents / 100;
+        if (group.referral !== null) group.referral += cents / 100;
+      } else group.byType[key] += cents / 100;
+    }
     group.totalRecorded += totalCents / 100;
   };
 
@@ -329,6 +337,7 @@ export function aggregateRecordedSavings(
         unrecordedPaymentCount += 1;
         group.unrecordedPaymentCount += 1;
         group.coverage = 'partial';
+        group.referral = null;
         if (!bookingUnrecorded) {
           bookingUnrecorded = true;
           unrecordedBookingCount += 1;
@@ -349,6 +358,8 @@ export function aggregateRecordedSavings(
     group.byType.loyalty = Math.round(group.byType.loyalty * 100) / 100;
     group.byType.discountCode = Math.round(group.byType.discountCode * 100) / 100;
     group.byType.points = Math.round(group.byType.points * 100) / 100;
+    group.recordedReferral = Math.round(group.recordedReferral * 100) / 100;
+    if (group.referral !== null) group.referral = Math.round(group.referral * 100) / 100;
     group.totalRecorded = Math.round(group.totalRecorded * 100) / 100;
   }
 

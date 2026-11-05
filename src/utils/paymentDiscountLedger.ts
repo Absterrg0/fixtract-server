@@ -1,3 +1,4 @@
+import Referral from '../models/referral';
 import Booking, { type IPaymentDiscountLedgerEntry } from "../models/booking";
 
 /**
@@ -50,6 +51,7 @@ export const buildPaymentDiscountLedgerEntry = (
     repeatBuyerAmount: money(discount.repeatBuyerAmount),
     pointsDiscountAmount: money(discount.pointsDiscountAmount),
     codeDiscountAmount: money(discount.codeDiscountAmount),
+    ...(discount.referralDiscountAmount !== undefined ? { referralDiscountAmount: money(discount.referralDiscountAmount) } : {}),
     totalDiscount: money(discount.totalDiscount),
     recordedAt,
   };
@@ -80,5 +82,10 @@ export const recordPaymentDiscountSnapshot = async (
     filter["paymentDiscountLedger.milestoneIndex"] = { $ne: entry.milestoneIndex };
   }
   const result = await Booking.updateOne(filter, { $push: { paymentDiscountLedger: entry } });
+  if (payment.discount?.referralId && money(payment.discount?.referralDiscountAmount) > 0) {
+    // The settled intent's own checkout snapshot is authority. The booking
+    // binding makes this idempotent and prevents consuming another benefit.
+    await Referral.updateOne({ _id: payment.discount.referralId, discountBooking: bookingId }, { $set: { referredUserDiscountApplied: true } });
+  }
   return result.modifiedCount === 1;
 };
