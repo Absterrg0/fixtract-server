@@ -479,11 +479,16 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
   });
 
   it('records one item when different events for one superseded intent are delivered concurrently', async () => {
+    await createCode('REPLACEMENT5', 'fixed', 5);
     const booking = await seedMilestoneBooking();
     const bookingId = String(booking._id);
     const oldIntent = await createPaymentIntent(bookingId, String(customerId), 0, 0);
     stripeMocks.intentCancel.mockRejectedValueOnce(Object.assign(new Error('processing'), { code: 'payment_intent_unexpected_state' }));
-    const newIntent = await createPaymentIntent(bookingId, String(customerId), 0, 0);
+    // An identical retry correctly reuses its intent. Change the checkout
+    // discount to create the superseded-intent scenario under test.
+    const newIntent = await createPaymentIntent(bookingId, String(customerId), 0, 0, 'REPLACEMENT5');
+    expect(newIntent.success).toBe(true);
+    expect(newIntent.paymentIntentId).not.toBe(oldIntent.paymentIntentId);
 
     // Stripe can deliver the same success under distinct event ids at once.
     const events = Array.from({ length: 4 }, () => succeededEvent(bookingId, oldIntent.paymentIntentId!));
