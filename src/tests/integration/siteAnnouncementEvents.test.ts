@@ -7,8 +7,8 @@ import publicRouter from '../../routes/Public';
 import SiteAnnouncement from '../../models/siteAnnouncement';
 
 const testUri = process.env.FIXERA_TEST_MONGODB_URI;
-const hasDisposableMongo = Boolean(testUri && /test/i.test(testUri) && /^mongodb:\/\/(127\.0\.0\.1|localhost)/.test(testUri));
-const describeDb = hasDisposableMongo ? describe : describe.skip;
+// Explicit test connection only; every run owns a fresh, isolated database.
+const describeDb = testUri ? describe : describe.skip;
 
 const DAY = 24 * 60 * 60 * 1000;
 let server: Server;
@@ -37,14 +37,15 @@ const makeAnnouncement = (overrides: Record<string, unknown> = {}) =>
   });
 
 const counters = async (id: unknown) =>
-  SiteAnnouncement.findById(id).select('impressions clicks dismissals').lean();
+  SiteAnnouncement.findById(id).select('impressions clicks dismissals updatedAt').lean();
 
 describeDb('public site announcement events (real Mongo)', () => {
   beforeAll(async () => {
-    await mongoose.connect(testUri!, { dbName: `fixera_announcement_events_it_${Date.now()}` });
+    await mongoose.connect(testUri!, { dbName: `fixera_announce_it_${Date.now()}` });
     const app = express();
     app.set('trust proxy', 1);
     app.use(express.json());
+    app.use(express.urlencoded({ extended: false }));
     app.use('/api/public', publicRouter);
     server = app.listen(0);
     await new Promise<void>((resolve) => server.once('listening', resolve));
@@ -54,8 +55,10 @@ describeDb('public site announcement events (real Mongo)', () => {
   });
 
   afterAll(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await mongoose.connection.dropDatabase();
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (mongoose.connection.name?.startsWith('fixera_announce_it_')) {
+      await mongoose.connection.dropDatabase();
+    }
     await mongoose.disconnect();
   });
 
@@ -69,8 +72,22 @@ describeDb('public site announcement events (real Mongo)', () => {
     expect((await postEvent(String(live._id), 'impression')).status).toBe(204);
     expect((await postEvent(String(live._id), 'click')).status).toBe(204);
     expect((await postEvent(String(live._id), 'dismissal')).status).toBe(204);
-    expect(await counters(live._id)).toMatchObject({ impressions: 2, clicks: 1, dismissals: 1 });
-  });
+    expect(await counters(live._id)).toMatchObject({
+      impressions: 2, clicks: 1, dismissals: 1, updatedAt: live.updatedAt,
+    });
+  }, 15000);
+
+  it('accepts the browser keepalive form body and preserves the campaign version', async () => {
+    const live = await makeAnnouncement();
+    const response = await fetch(`${baseUrl}/api/public/site-announcements/${live._id}/event`, {
+      method: 'POST',
+      body: new URLSearchParams({ event: 'impression' }),
+    });
+    expect(response.status).toBe(204);
+    expect(await counters(live._id)).toMatchObject({
+      impressions: 1, clicks: 0, dismissals: 0, updatedAt: live.updatedAt,
+    });
+  }, 15000);
 
   it.each([
     ['an inactive', { isActive: false }],
@@ -82,7 +99,7 @@ describeDb('public site announcement events (real Mongo)', () => {
       expect((await postEvent(String(announcement._id), kind)).status).toBe(404);
     }
     expect(await counters(announcement._id)).toMatchObject({ impressions: 0, clicks: 0, dismissals: 0 });
-  });
+  }, 15000);
 
   it('rejects unknown ids and event types', async () => {
     const live = await makeAnnouncement();
@@ -90,5 +107,5 @@ describeDb('public site announcement events (real Mongo)', () => {
     expect((await postEvent(String(live._id), 'view')).status).toBe(400);
     expect((await postEvent(String(new Types.ObjectId()), 'impression')).status).toBe(404);
     expect(await counters(live._id)).toMatchObject({ impressions: 0, clicks: 0, dismissals: 0 });
-  });
+  }, 15000);
 });

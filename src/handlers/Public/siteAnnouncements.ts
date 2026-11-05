@@ -82,7 +82,9 @@ export const recordSiteAnnouncementEvent = async (
         endsAt: { $gte: now },
       },
       { $inc: { [field]: 1 } },
-      { new: true, runValidators: true },
+      // Counters do not edit campaign content. Preserve the version used by
+      // visitor frequency/dismissal storage and event deduplication.
+      { new: true, runValidators: true, timestamps: false },
     );
     if (!updated) {
       return res.status(404).json({ success: false, msg: 'Announcement not found' });
