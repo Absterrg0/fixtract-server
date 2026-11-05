@@ -112,6 +112,7 @@ const callAs = async (handler: Handler, projectId: Types.ObjectId | string, acto
 
 /** Fields that pass every submission quality check. */
 const SUBMITTABLE = {
+  customerPresence: 'not_required',
   description: 'A complete bathroom renovation including demolition, plumbing, tiling, fixtures and final cleaning of the room.',
   subprojects: [{
     _id: new Types.ObjectId(),

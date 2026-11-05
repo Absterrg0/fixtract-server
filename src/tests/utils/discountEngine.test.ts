@@ -90,6 +90,9 @@ describe("payment safety invariants", () => {
     expect(buildPaymentIntentIdempotencyKey(base)).not.toBe(
       buildPaymentIntentIdempotencyKey({ ...base, amount: 122 }),
     );
+    expect(buildPaymentIntentIdempotencyKey(base)).not.toBe(
+      buildPaymentIntentIdempotencyKey({ ...base, checkoutRevision: 1 }),
+    );
   });
 
   it("reuses a transfer key only for the same transfer payload", () => {
