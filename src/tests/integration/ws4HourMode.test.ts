@@ -23,7 +23,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { DateTime } from 'luxon';
 
 const testUri = process.env.FIXERA_TEST_MONGODB_URI;
-const describeDb = testUri ? describe : describe.skip;
+const describeDb = testUri && /test/i.test(testUri) ? describe : describe.skip;
 
 vi.hoisted(() => {
   process.env.JWT_SECRET = process.env.JWT_SECRET || 'ws4-test-jwt-secret';
@@ -63,7 +63,7 @@ describeDb('WS4 hour mode (disposable local MongoDB)', () => {
   });
 
   beforeAll(async () => {
-    await mongoose.connect(testUri!);
+    await mongoose.connect(testUri!, { dbName: `ft3_ws4_${process.pid}_${Date.now().toString(36)}` });
     const users = mongoose.connection.collection('users');
     const projects = mongoose.connection.collection('projects');
     const bookings = mongoose.connection.collection('bookings');
@@ -180,7 +180,8 @@ describeDb('WS4 hour mode (disposable local MongoDB)', () => {
       await projects.deleteMany({ title: /WS4 hour/ });
       await bookings.deleteMany({ bookingNumber: /WS4T/ });
       await CalendarReservation.deleteMany({});
-      await mongoose.disconnect();
+      await mongoose.connection.dropDatabase();
+    await mongoose.disconnect();
     }
   });
 

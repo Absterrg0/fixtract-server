@@ -12,7 +12,7 @@ import mongoose, { Types } from 'mongoose';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const testUri = process.env.FIXERA_TEST_MONGODB_URI;
-const describeDb = testUri ? describe : describe.skip;
+const describeDb = testUri && /test/i.test(testUri) ? describe : describe.skip;
 
 vi.hoisted(() => {
   process.env.JWT_SECRET = process.env.JWT_SECRET || 'min-free-hours-test-secret';
@@ -107,7 +107,7 @@ describeDb('day availability requires 3 free working hours (real MongoDB)', () =
   });
 
   beforeAll(async () => {
-    await mongoose.connect(testUri!);
+    await mongoose.connect(testUri!, { dbName: `ft3_avail_${process.pid}_${Date.now().toString(36)}` });
     const users = mongoose.connection.collection('users');
     const projects = mongoose.connection.collection('projects');
     await users.deleteMany({ email: new RegExp(`${TAG}\\.example$`) });
@@ -173,7 +173,8 @@ describeDb('day availability requires 3 free working hours (real MongoDB)', () =
     if (mongoose.connection.readyState === 1) {
       await mongoose.connection.collection('users').deleteMany({ email: new RegExp(`${TAG}\\.example$`) });
       await mongoose.connection.collection('projects').deleteMany({ title: new RegExp(`^${TAG}`) });
-      await mongoose.disconnect();
+      await mongoose.connection.dropDatabase();
+    await mongoose.disconnect();
     }
   });
 

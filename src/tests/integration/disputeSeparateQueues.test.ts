@@ -1,12 +1,8 @@
 import mongoose, { Types } from 'mongoose';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Super Admin item 5 ("reset all dashboards linked to the booking flow"),
-// read-model side: the admin dispute list, its pagination and the analytics
-// cards must describe the same booking-dispute population, built only from
-// recorded records. Warranty claims and escalated refund requests stay their
-// own work: previewed separately, counted separately, never summed into the
-// booking-dispute totals. Nothing is deleted or reset.
+// Final Touches Part 3 #7: only recorded booking disputes join the overview.
+// Warranty and refund requests are separate queues; no dashboards are reset.
 vi.mock('../../handlers/Stripe/payment', () => ({
   captureAndTransferPayment: vi.fn(),
   executeRefund: vi.fn(),
@@ -54,7 +50,7 @@ const analytics = () => call(getDisputeAnalytics);
 
 describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
   beforeAll(async () => {
-    await mongoose.connect(testUri!, { dbName: `fixera_dispute_queues_it_${Date.now()}` });
+    await mongoose.connect(testUri!, { dbName: `ft3_queues_${process.pid}_${Date.now().toString(36)}` });
   });
   afterAll(async () => {
     await mongoose.connection.db?.dropDatabase();

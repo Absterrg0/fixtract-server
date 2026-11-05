@@ -14,7 +14,7 @@ import mongoose, { Types } from 'mongoose';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const testUri = process.env.FIXERA_TEST_MONGODB_URI;
-const describeDb = testUri ? describe : describe.skip;
+const describeDb = testUri && /test/i.test(testUri) ? describe : describe.skip;
 
 vi.hoisted(() => {
   process.env.JWT_SECRET = process.env.JWT_SECRET || 'ws3-test-jwt-secret';
@@ -25,7 +25,7 @@ describeDb('WS3 final touches (disposable local MongoDB)', () => {
   const brussels: [number, number] = [4.3622, 50.8453];
 
   beforeAll(async () => {
-    await mongoose.connect(testUri!);
+    await mongoose.connect(testUri!, { dbName: `ft3_ws3_${process.pid}_${Date.now().toString(36)}` });
     const users = mongoose.connection.collection('users');
     const projects = mongoose.connection.collection('projects');
     await users.deleteMany({ email: /ws3-test\.example$/ });
@@ -127,6 +127,7 @@ describeDb('WS3 final touches (disposable local MongoDB)', () => {
   afterAll(async () => {
     await mongoose.connection.collection('users').deleteMany({ email: /ws3-test\.example$/ });
     await mongoose.connection.collection('projects').deleteMany({ title: /WS3 geo/ });
+    await mongoose.connection.dropDatabase();
     await mongoose.disconnect();
   });
 

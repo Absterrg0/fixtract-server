@@ -52,7 +52,7 @@ describe('buildDisputeFilter keeps both rules', () => {
 
 describeDb('admin dispute overview query (disposable MongoDB)', () => {
   beforeAll(async () => {
-    await mongoose.connect(testUri!, { dbName: `fixera_dispute_overview_it_${Date.now()}` });
+    await mongoose.connect(testUri!, { dbName: `ft3_overview_${process.pid}_${Date.now().toString(36)}` });
   });
   afterAll(async () => {
     await mongoose.connection.db?.dropDatabase();
