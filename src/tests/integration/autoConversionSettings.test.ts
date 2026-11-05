@@ -29,7 +29,8 @@ const fakeRes = () => {
 describeDb('auto-conversion platform setting (disposable MongoDB)', () => {
   beforeAll(async () => {
     // Own database: other integration files run in parallel on the same server.
-    await mongoose.connect(testUri!, { dbName: `fixera_auto_conversion_it_${Date.now()}` });
+    // Managed MongoDB deployments can limit database names to 38 bytes.
+    await mongoose.connect(testUri!, { dbName: `fixera_auto_it_${Date.now()}` });
   });
   afterAll(async () => {
     await mongoose.connection.db?.dropDatabase();

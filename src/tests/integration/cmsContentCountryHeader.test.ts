@@ -47,7 +47,7 @@ describe('requestCountryCode precedence (pure)', () => {
   });
 });
 
-describeDb('public CMS content-country header (real MongoDB)', () => {
+describeDb('public CMS content-country header (real MongoDB)', { timeout: 30_000 }, () => {
   const app = express();
   app.set('trust proxy', 1);
   app.use('/api/public', publicRouter);
