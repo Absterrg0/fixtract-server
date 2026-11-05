@@ -83,7 +83,7 @@ class DisputeResolutionConflictError extends Error {}
 type ForceBookingStatus = 'completed' | 'cancelled' | 'refunded' | 'in_progress' | 'booked' | 'professional_completed';
 const FORCE_STATUS_VALUES: ForceBookingStatus[] = ['completed', 'cancelled', 'refunded', 'in_progress', 'booked', 'professional_completed'];
 
-const buildDisputeFilter = (status?: string) => {
+export const buildDisputeFilter = (status?: string) => {
   if (status === 'resolved') {
     return { 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': { $ne: null } };
   }
