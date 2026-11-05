@@ -85,6 +85,7 @@ import {
   validateVideoFile,
 } from '../../utils/s3Upload';
 import { hasRecordedDispute, RECORDED_DISPUTE_FILTER } from '../../utils/recordedDispute';
+import { applyReschedulePlanReset } from '../../utils/applyReschedulePlanReset';
 
 const ACTIVE_DISPUTE_STATUS: BookingStatus = 'dispute';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
@@ -557,8 +558,18 @@ export const resolveDispute = async (req: Request, res: Response) => {
           scheduledStartTime: booking.scheduledStartTime,
           scheduledEndTime: booking.scheduledEndTime,
           assignedTeamMembers: booking.assignedTeamMembers,
+          resourcePlan: booking.resourcePlan,
         }
       : null;
+
+    if (rescheduleScheduleFields) {
+      const replanned = { ...booking.toObject(), ...rescheduleScheduleFields };
+      await applyReschedulePlanReset(replanned, adminUser._id);
+      for (const field of ['resourcePlan', 'scheduledExecutionEndDate', 'scheduledBufferStartDate',
+        'scheduledBufferEndDate', 'scheduledBufferUnit']) {
+        rescheduleScheduleFields[field] = (replanned as any)[field];
+      }
+    }
 
     // The same per-person reservation boundary normal booking/support writers
     // use. If a forced reschedule is requested, the keys must move with the
@@ -569,7 +580,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
           professional: (booking.professional as any)?._id || booking.professional,
           assignedTeamMembers:
             rescheduleScheduleFields.assignedTeamMembers || booking.assignedTeamMembers || [],
-          resourcePlan: booking.resourcePlan || [],
+          resourcePlan: rescheduleScheduleFields.resourcePlan || [],
           scheduledStartDate: rescheduleScheduleFields.scheduledStartDate,
           scheduledExecutionEndDate: rescheduleScheduleFields.scheduledExecutionEndDate,
           scheduledBufferEndDate: rescheduleScheduleFields.scheduledBufferEndDate,
@@ -658,7 +669,11 @@ export const resolveDispute = async (req: Request, res: Response) => {
       const updated = await Booking.findOneAndUpdate(
         { _id: booking._id, ...RECORDED_DISPUTE_FILTER, 'dispute.resolvedAt': null },
         {
-          $set: setFields,
+          $set: Object.fromEntries(Object.entries(setFields).filter(([, value]) => value !== undefined)),
+          ...(rescheduleScheduleFields ? { $unset: Object.fromEntries(
+            Object.entries(rescheduleScheduleFields).filter(([, value]) => value === undefined)
+              .map(([field]) => [field, '']),
+          ) } : {}),
           $push: {
             statusHistory: {
               status: targetStatus,
