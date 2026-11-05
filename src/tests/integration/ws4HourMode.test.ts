@@ -1,8 +1,8 @@
 /**
  * WS4 (final touches part 3) disposable-DB tests.
  *
- * Run only when FIXERA_TEST_MONGODB_URI points at a disposable LOCAL
- * database (repo convention: skipped otherwise). Never point it at Atlas.
+ * Run only with a test-named FIXERA_TEST_MONGODB_URI. Each run uses
+ * its own isolated database and drops it after the suite.
  * The calendar/planning writes use multi-document transactions, so the
  * disposable database must be a replica set (single-node rs is enough).
  *
@@ -63,6 +63,9 @@ describeDb('WS4 hour mode (disposable local MongoDB)', () => {
   });
 
   beforeAll(async () => {
+    // Only Date is faked: Mongo/network timers remain real.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-01T09:00:00Z'));
     await mongoose.connect(testUri!, { dbName: `ft3_ws4_${process.pid}_${Date.now().toString(36)}` });
     const users = mongoose.connection.collection('users');
     const projects = mongoose.connection.collection('projects');
@@ -181,8 +184,9 @@ describeDb('WS4 hour mode (disposable local MongoDB)', () => {
       await bookings.deleteMany({ bookingNumber: /WS4T/ });
       await CalendarReservation.deleteMany({});
       await mongoose.connection.dropDatabase();
-    await mongoose.disconnect();
+      await mongoose.disconnect();
     }
+    vi.useRealTimers();
   });
 
   it('23b: a 14:00 start stores the correct instant and renders 14:00', async () => {

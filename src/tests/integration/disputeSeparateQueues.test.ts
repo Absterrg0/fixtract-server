@@ -129,8 +129,8 @@ describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
     await CancellationRequest.collection.insertMany([
       { booking: refundBooking, requestedBy: customer, requestedRole: 'customer', status: 'escalated', reason: 'no show', createdAt: at(23), escalatedAt: at(23) },
       // Not escalated, or not a customer request: not dispute-page work.
-      { booking: refundBooking, requestedBy: customer, requestedRole: 'customer', status: 'pending', reason: 'changed mind', createdAt: at(12) },
-      { booking: refundBooking, requestedBy: professional, requestedRole: 'professional', status: 'escalated', reason: 'sick', createdAt: at(13) },
+      { booking: new Types.ObjectId(), requestedBy: customer, requestedRole: 'customer', status: 'pending', reason: 'changed mind', createdAt: at(12) },
+      { booking: new Types.ObjectId(), requestedBy: professional, requestedRole: 'professional', status: 'escalated', reason: 'sick', createdAt: at(13) },
     ] as any[]);
 
     const a = await analytics();

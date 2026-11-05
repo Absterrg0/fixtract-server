@@ -15,7 +15,7 @@
  *   (covered in bookingCalendar.test.ts).
  */
 import { Types } from 'mongoose';
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   project: null as any,
@@ -107,8 +107,12 @@ const blockPro = (startIso: string, endIso: string) => {
 };
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-11-01T09:00:00Z'));
   seedHourProject();
 });
+
+afterEach(() => vi.useRealTimers());
 
 describe('effective scheduling timezone (client bug list #23b/c)', () => {
   it('prefers the stored professional zone', () => {

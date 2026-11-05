@@ -128,4 +128,3 @@ export const applyReschedulePlanReset = async (booking: any, updatedBy: unknown)
       note: `Planning updated: rescheduled start ${newStartKey} overrules earlier planning (${rebuilt.keptDays} day(s) kept, ${rebuilt.addedDays.length} added)` }
   );
 };
-
