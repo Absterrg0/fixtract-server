@@ -2255,7 +2255,7 @@ export const archiveProject = async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Project not found" });
     }
     if (project.status === "archived") {
-      return res.json({ success: true, project });
+      return res.json({ success: true, project: await withSignedProjectMedia(project) });
     }
 
     // Archive only the status and owner it was decided from: a hold/resume,
@@ -2275,11 +2275,11 @@ export const archiveProject = async (req: Request, res: Response) => {
       // endpoint idempotent and return the stored (winning) archive.
       const latest = await Project.findOne({ ...scope, status: "archived" });
       if (latest) {
-        return res.json({ success: true, project: latest });
+        return res.json({ success: true, project: await withSignedProjectMedia(latest) });
       }
       return sendProjectStatusConflict(res, scope);
     }
-    res.json({ success: true, project });
+    res.json({ success: true, project: await withSignedProjectMedia(project) });
   } catch (error) {
     res.status(500).json({ error: "Failed to archive project" });
   }
@@ -2346,7 +2346,7 @@ export const restoreProject = async (req: Request, res: Response) => {
       if (!isLostProjectTransition(error)) throw error;
       return sendProjectStatusConflict(res, isAdmin ? { _id: id } : { _id: id, professionalId: userId });
     }
-    res.json({ success: true, project });
+    res.json({ success: true, project: await withSignedProjectMedia(project) });
   } catch (error) {
     res.status(500).json({ error: "Failed to restore project" });
   }
@@ -2406,7 +2406,7 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
       }
     }
     if (search) {
-      const regex = new RegExp(search, "i");
+      const regex = new RegExp(search.trim().slice(0, 80).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
       filter.$and = (filter.$and || []).concat([
         {
           $or: [{ title: regex }, { description: regex }, { keywords: regex }],
@@ -2425,8 +2425,9 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
       // Status counts for header cards – normalize raw DB statuses
       (async () => {
         const professionalObjectId = new mongoose.Types.ObjectId(professionalId);
+        const { status: _selectedStatus, ...siblingFilters } = filter;
         const pipeline = [
-          { $match: { professionalId: professionalObjectId } },
+          { $match: { ...siblingFilters, professionalId: professionalObjectId } },
           {
             $addFields: {
               normalizedStatus: {

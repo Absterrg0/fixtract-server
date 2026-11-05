@@ -260,6 +260,29 @@ describe('project master team names', () => {
   });
 });
 
+describe('project status counts use sibling filters', () => {
+  it('keeps search/category/service, but removes only the selected status', async () => {
+    vi.clearAllMocks();
+    const chain: any = {};
+    for (const method of ['sort', 'skip', 'limit']) chain[method] = vi.fn(() => chain);
+    chain.lean = vi.fn(async () => []);
+    mocks.projectFind.mockReturnValue(chain);
+    mocks.projectCountDocuments.mockResolvedValue(0);
+    mocks.projectDistinct.mockResolvedValue([]);
+    mocks.projectAggregate.mockResolvedValue([]);
+    const res = mockRes();
+    await getProjectsMaster({ user: { id: '507f1f77bcf86cd799439011' }, query: { status: 'published', category: 'Indoor', service: 'Plumbing', search: 'A.*' } } as any, res);
+    expect(res.statusCode).toBe(200);
+    const listFilter = mocks.projectFind.mock.calls[0][0];
+    const countFilter = mocks.projectAggregate.mock.calls[0][0][0].$match;
+    expect(countFilter.status).toBeUndefined();
+    expect(countFilter.$or).toEqual(listFilter.$or);
+    expect(countFilter.$and).toEqual(listFilter.$and);
+    expect(countFilter.$and[1].$or[0].title.test('A.*')).toBe(true);
+    expect(countFilter.$and[1].$or[0].title.test('ABC')).toBe(false);
+  });
+});
+
 describe('recorded on-hold transition', () => {
   it('records the hold start and clears it on resume', async () => {
     const doc = projectDoc({ onHoldAt: undefined });
