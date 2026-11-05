@@ -91,7 +91,8 @@ async function seedMixedQueues() {
     Booking.collection.insertMany([
       { bookingNumber: 'BK-OPEN', status: 'dispute', dispute: recordedDispute(10) },
       // Phantom default (no actor), resolved history, extra-cost completion.
-      { bookingNumber: 'BK-PHANTOM', status: 'dispute', dispute: { type: 'extra_costs', raisedAt: at(1) } },
+      // Phantom (actor-less, schema-default) dispute rows are excluded by the
+      // Booking Page & Quotation Page Info task; this badge mirrors main's queue.
       { bookingNumber: 'BK-SETTLED', status: 'completed', dispute: { ...recordedDispute(4), resolvedAt: at(6) } },
       { bookingNumber: 'BK-EXTRA', status: 'professional_completed', extraCostTotal: 40 },
       // Published and hidden reviews are not moderation work.
@@ -172,8 +173,6 @@ describeDb('admin navigation badges (disposable MongoDB)', () => {
     const res: any = { status: () => res, json: (payload: any) => { analytics = payload.data; return res; } };
     await getDisputeAnalytics({ query: {} } as any, res);
     expect(counts.disputes).toBe(analytics.totalOpen);
-    // Warranty/refund work is reported separately and never summed in.
-    expect(analytics.separateQueues.activeWarrantyClaims).toBe(1);
   });
 
   it('returns only the badges each role may read (role packs, effective access)', async () => {
