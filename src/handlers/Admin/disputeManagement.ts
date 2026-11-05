@@ -84,6 +84,7 @@ import {
   validateImageFileBuffer,
   validateVideoFile,
 } from '../../utils/s3Upload';
+import { hasRecordedDispute, RECORDED_DISPUTE_FILTER } from '../../utils/recordedDispute';
 
 const ACTIVE_DISPUTE_STATUS: BookingStatus = 'dispute';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
@@ -95,16 +96,18 @@ const FORCE_STATUS_VALUES: ForceBookingStatus[] = ['completed', 'cancelled', 're
 
 export const buildDisputeFilter = (status?: string) => {
   if (status === 'resolved') {
-    return { 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': { $ne: null } };
+    return { ...RECORDED_DISPUTE_FILTER, 'dispute.resolvedAt': { $ne: null } };
   }
 
   if (status === 'open') {
-    return { status: ACTIVE_DISPUTE_STATUS, 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null };
+    return { status: ACTIVE_DISPUTE_STATUS, ...RECORDED_DISPUTE_FILTER, 'dispute.resolvedAt': null };
   }
 
   // Client bug list #7: the overview must only contain bookings whose status
   // is 'dispute' — never plain extra-cost requests or resolved history.
-  return { status: ACTIVE_DISPUTE_STATUS, 'dispute.raisedAt': { $exists: true } };
+  // RECORDED_DISPUTE_FILTER additionally excludes legacy phantom dispute
+  // sub-documents (schema-default raisedAt without an actor).
+  return { status: ACTIVE_DISPUTE_STATUS, ...RECORDED_DISPUTE_FILTER };
 };
 
 const transferResolvedExtraCostIfNeeded = async (resolvedBooking: any, finalExtraCostAmount: number) => {
@@ -398,7 +401,7 @@ export const getDisputeDetails = async (req: Request, res: Response) => {
       });
     }
 
-    if (!booking.dispute?.raisedAt) {
+    if (!booking.dispute?.raisedAt || !hasRecordedDispute(booking)) {
       return res.status(400).json({
         success: false,
         error: {
@@ -489,7 +492,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
       });
     }
 
-    const hasOpenDispute = Boolean((booking.dispute as any)?.raisedAt) && !(booking.dispute as any)?.resolvedAt;
+    const hasOpenDispute = hasRecordedDispute(booking) && Boolean((booking.dispute as any)?.raisedAt) && !(booking.dispute as any)?.resolvedAt;
     if (booking.status !== ACTIVE_DISPUTE_STATUS && !hasOpenDispute) {
       return res.status(400).json({
         success: false,
@@ -653,7 +656,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
         await replaceBookingCalendar(calendarCandidate as any, session);
       }
       const updated = await Booking.findOneAndUpdate(
-        { _id: booking._id, 'dispute.raisedAt': { $exists: true }, 'dispute.resolvedAt': null },
+        { _id: booking._id, ...RECORDED_DISPUTE_FILTER, 'dispute.resolvedAt': null },
         {
           $set: setFields,
           $push: {
