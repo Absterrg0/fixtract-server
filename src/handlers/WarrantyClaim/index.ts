@@ -5,6 +5,7 @@ import WarrantyClaim, {
   IWarrantyClaim,
   WarrantyClaimStatus,
 } from "../../models/warrantyClaim";
+import Project from "../../models/project";
 import Conversation from "../../models/conversation";
 import ChatMessage from "../../models/chatMessage";
 import User from "../../models/user";
@@ -870,6 +871,12 @@ export const getWarrantyClaimById = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * GET /api/warranty-claims/my — the viewer's own claims (customer or
+ * professional scope) with status, escaped literal search, bookingId and
+ * service filters, paginated. Every filter resolves inside the role scope;
+ * any other role is rejected with 403 before a query runs.
+ */
 export const listMyWarrantyClaims = async (req: Request, res: Response) => {
   try {
     const userId = getRequestUserId(req);
@@ -877,8 +884,14 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
     if (!userId || !role) {
       return res.status(401).json({ success: false, msg: "Authentication required" });
     }
+    // Only claim participants have a "my claims" scope. Any other role
+    // (admin, employee, visitor, unknown) would otherwise get an unscoped
+    // query; admins use /admin/list with its own permission checks.
+    if (role !== "customer" && role !== "professional") {
+      return res.status(403).json({ success: false, msg: "Only customers and professionals have warranty claims" });
+    }
 
-    const { status, page = "1", limit = "20" } = req.query;
+    const { status, page = "1", limit = "20", q, search, bookingId, service } = req.query;
     const pageNumber = Math.max(Number.parseInt(String(page), 10) || 1, 1);
     const limitNumber = Math.min(Math.max(Number.parseInt(String(limit), 10) || 20, 1), 100);
     const skip = (pageNumber - 1) * limitNumber;
@@ -890,16 +903,148 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
     if (role === "customer") query.customer = toObjectId(userId);
     if (role === "professional") query.professional = toObjectId(userId);
 
-    const [claims, total] = await Promise.all([
-      WarrantyClaim.find(query)
-        .populate("booking", "bookingNumber status")
-        .populate("customer", "name email isAnonymized deletedAt")
-        .populate("professional", "name email businessInfo isAnonymized deletedAt")
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limitNumber),
-      WarrantyClaim.countDocuments(query),
-    ]);
+    if (bookingId && typeof bookingId === "string" && /^[a-f\d]{24}$/i.test(bookingId)) {
+      query.booking = new mongoose.Types.ObjectId(bookingId);
+    }
+
+    // Literal search: claim number substring (escaped, never raw regex),
+    // exact booking identity, or booking-number text. Booking-number text
+    // matches only bookings in the viewer's own booking scope (customer; or
+    // professional incl. bookings of projects they own), as my-bookings does.
+    const searchRaw = typeof q === "string" && q ? q
+      : typeof search === "string" && search ? search : "";
+    const trimmedSearch = searchRaw.trim().slice(0, 80);
+    const searchRegex = trimmedSearch
+      ? new RegExp(trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")
+      : null;
+    const searchById = Boolean(trimmedSearch) && /^[a-f\d]{24}$/i.test(trimmedSearch);
+    const searchByBookingNumber = Boolean(searchRegex) && !searchById;
+    const serviceFilter = service && typeof service === "string" && service !== "all" ? service : null;
+
+    if (searchRegex && searchById) {
+      // The claim query is already role-scoped, so an exact booking id can
+      // only surface the viewer's own claims.
+      query.$and = [{ $or: [{ claimNumber: searchRegex }, { booking: new mongoose.Types.ObjectId(trimmedSearch) }] }];
+    } else if (searchRegex && !searchByBookingNumber) {
+      query.$and = [{ $or: [{ claimNumber: searchRegex }] }];
+    }
+
+    const sort = { createdAt: -1 as const, _id: -1 as const };
+    const populateClaims = (cursor: any) => cursor
+      .populate("booking", "bookingNumber status")
+      .populate("customer", "name email isAnonymized deletedAt")
+      .populate("professional", "name email businessInfo isAnonymized deletedAt");
+
+    let claims: any[];
+    let total: number;
+    if (!searchByBookingNumber && !serviceFilter) {
+      [claims, total] = await Promise.all([
+        populateClaims(WarrantyClaim.find(query)).sort(sort).skip(skip).limit(limitNumber),
+        WarrantyClaim.countDocuments(query),
+      ]);
+    } else {
+      // Booking-number search and the service filter depend on the claim's
+      // booking (and its project), so they are joined per claim inside one
+      // aggregation over the role-scoped claims. Filtering, counting and
+      // pagination all run in the database: no candidate booking/project id
+      // list is materialized in the handler.
+      const viewerId = query.customer || query.professional || null;
+      const needsProject = Boolean(serviceFilter) || (searchByBookingNumber && Boolean(query.professional));
+      const pipeline: any[] = [
+        { $match: query },
+        { $sort: sort },
+        {
+          $lookup: {
+            from: Booking.collection.collectionName,
+            let: { bookingId: "$booking" },
+            pipeline: [
+              { $match: { $expr: { $eq: ["$_id", "$$bookingId"] } } },
+              {
+                $project: {
+                  bookingNumber: 1,
+                  customer: 1,
+                  professional: 1,
+                  project: 1,
+                  "rfqData.serviceType": 1,
+                  "bookingSnapshot.project.service": 1,
+                },
+              },
+            ],
+            as: "_claimBooking",
+          },
+        },
+        { $set: { _claimBooking: { $arrayElemAt: ["$_claimBooking", 0] } } },
+      ];
+      if (needsProject) {
+        pipeline.push(
+          {
+            $lookup: {
+              from: Project.collection.collectionName,
+              let: { projectId: "$_claimBooking.project" },
+              pipeline: [
+                { $match: { $expr: { $eq: ["$_id", "$$projectId"] } } },
+                { $project: { service: 1, professionalId: 1 } },
+              ],
+              as: "_claimProject",
+            },
+          },
+          { $set: { _claimProject: { $arrayElemAt: ["$_claimProject", 0] } } },
+        );
+      }
+      if (searchByBookingNumber && searchRegex) {
+        const bookingNumberClause: Record<string, any> = { "_claimBooking.bookingNumber": searchRegex };
+        const bookingScope: Record<string, any> | null = query.customer
+          ? { "_claimBooking.customer": viewerId }
+          : query.professional
+            ? {
+                $or: [
+                  { "_claimBooking.professional": viewerId },
+                  // Project.professionalId is stored as a string id.
+                  { "_claimProject.professionalId": { $in: [viewerId, String(viewerId)] } },
+                ],
+              }
+            : null;
+        pipeline.push({
+          $match: {
+            $or: [
+              { claimNumber: searchRegex },
+              bookingScope ? { $and: [bookingNumberClause, bookingScope] } : bookingNumberClause,
+            ],
+          },
+        });
+      }
+      if (serviceFilter) {
+        // The service captured at booking time (bookingSnapshot) wins over
+        // the live project, whose service can change after booking; the
+        // live project is used only for legacy bookings without a snapshot.
+        pipeline.push({
+          $match: {
+            $or: [
+              { "_claimBooking.rfqData.serviceType": serviceFilter },
+              { "_claimBooking.bookingSnapshot.project.service": serviceFilter },
+              {
+                "_claimBooking.bookingSnapshot.project.service": null,
+                "_claimProject.service": serviceFilter,
+              },
+            ],
+          },
+        });
+      }
+      pipeline.push({
+        $facet: {
+          page: [{ $skip: skip }, { $limit: limitNumber }, { $project: { _id: 1 } }],
+          total: [{ $count: "count" }],
+        },
+      });
+      const [result] = await WarrantyClaim.aggregate(pipeline);
+      const pageIds: any[] = (result?.page || []).map((row: any) => row._id);
+      total = result?.total?.[0]?.count || 0;
+      const pageDocs: any[] = pageIds.length > 0
+        ? await populateClaims(WarrantyClaim.find({ _id: { $in: pageIds } }))
+        : [];
+      const byId = new Map(pageDocs.map((doc: any) => [String(doc._id), doc]));
+      claims = pageIds.map((id) => byId.get(String(id))).filter(Boolean);
+    }
 
     const presignedClaims = await Promise.all(claims.map((c) => presignClaim(c)));
 

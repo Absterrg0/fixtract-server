@@ -4,7 +4,10 @@
  */
 
 import { Request, Response } from 'express';
+import Booking from '../../models/booking';
 import Payment from '../../models/payment';
+import Project from '../../models/project';
+import mongoose from 'mongoose';
 import { buildSettledTransferExpression, getTransferStatus } from '../../utils/paymentSafety';
 
 /**
@@ -21,7 +24,11 @@ export const getPaymentStats = async (req: Request, res: Response) => {
       });
     }
 
-    const [completedStats, pendingStats] = await Promise.all([
+    // Project bookings may identify the owner only through the project, so the
+    // review aggregate uses the same ownership condition as getMyBookings.
+    const professionalProjectIds = await Project.find({ professionalId: userId }).distinct('_id');
+
+    const [completedStats, pendingStats, reviewStats] = await Promise.all([
       Payment.aggregate([
         { $match: {
           professional: userId,
@@ -59,6 +66,33 @@ export const getPaymentStats = async (req: Request, res: Response) => {
           $group: {
             _id: { currency: { $ifNull: ['$currency', 'EUR'] } },
             pendingEarnings: { $sum: '$professionalPayout' },
+            pendingBookings: { $sum: 1 },
+          },
+        },
+      ]),
+      // Canonical review aggregate: customer reviews recorded on bookings for
+      // this professional. Never derived from payment rows.
+      Booking.aggregate([
+        { $match: {
+          $or: [
+            { professional: userId },
+            { project: { $in: professionalProjectIds } },
+          ],
+          'customerReview.communicationLevel': { $exists: true, $ne: null },
+        } },
+        {
+          $group: {
+            _id: null,
+            reviewCount: { $sum: 1 },
+            avgRating: {
+              $avg: {
+                $avg: [
+                  '$customerReview.communicationLevel',
+                  '$customerReview.valueOfDelivery',
+                  '$customerReview.qualityOfService',
+                ],
+              },
+            },
           },
         },
       ]),
@@ -66,7 +100,7 @@ export const getPaymentStats = async (req: Request, res: Response) => {
 
     const totalsByCurrencyMap = new Map<
       string,
-      { currency: string; totalEarnings: number; pendingEarnings: number; completedBookings: number }
+      { currency: string; totalEarnings: number; pendingEarnings: number; completedBookings: number; pendingBookings: number }
     >();
 
     completedStats.forEach((bucket: any) => {
@@ -76,6 +110,7 @@ export const getPaymentStats = async (req: Request, res: Response) => {
         totalEarnings: bucket.totalEarnings || 0,
         pendingEarnings: 0,
         completedBookings: bucket.count || 0,
+        pendingBookings: 0,
       });
     });
 
@@ -86,16 +121,32 @@ export const getPaymentStats = async (req: Request, res: Response) => {
         totalEarnings: 0,
         pendingEarnings: 0,
         completedBookings: 0,
+        pendingBookings: 0,
       };
       current.pendingEarnings = bucket.pendingEarnings || 0;
+      current.pendingBookings = bucket.pendingBookings || 0;
       totalsByCurrencyMap.set(currency, current);
     });
 
     const totalsByCurrency = Array.from(totalsByCurrencyMap.values());
-    const totalEarnings = totalsByCurrency.reduce((sum, item) => sum + (item.totalEarnings || 0), 0);
-    const pendingEarnings = totalsByCurrency.reduce((sum, item) => sum + (item.pendingEarnings || 0), 0);
+    // Cross-currency sums are not single-currency figures. Only expose the
+    // blended totals when a single currency is present; otherwise report
+    // per-currency buckets and leave blended fields null.
+    const singleCurrency = totalsByCurrency.length === 1 ? totalsByCurrency[0].currency : null;
+    const totalEarnings = singleCurrency
+      ? totalsByCurrency.reduce((sum, item) => sum + (item.totalEarnings || 0), 0)
+      : null;
+    const pendingEarnings = singleCurrency
+      ? totalsByCurrency.reduce((sum, item) => sum + (item.pendingEarnings || 0), 0)
+      : null;
     const completedBookings = totalsByCurrency.reduce((sum, item) => sum + (item.completedBookings || 0), 0);
-    const currency = totalsByCurrency.length === 1 ? totalsByCurrency[0].currency : 'MULTI';
+    const pendingBookings = totalsByCurrency.reduce((sum, item) => sum + (item.pendingBookings || 0), 0);
+    const currency = singleCurrency || 'MULTI';
+    const reviewRow = reviewStats[0] || {};
+    const reviewCount = Number(reviewRow.reviewCount) || 0;
+    const avgRating = typeof reviewRow.avgRating === 'number'
+      ? Math.round(reviewRow.avgRating * 10) / 10
+      : null;
 
     res.json({
       success: true,
@@ -103,6 +154,9 @@ export const getPaymentStats = async (req: Request, res: Response) => {
         totalEarnings,
         pendingEarnings,
         completedBookings,
+        pendingBookings,
+        reviewCount,
+        avgRating,
         currency,
         totalsByCurrency,
       },
@@ -118,7 +172,10 @@ export const getPaymentStats = async (req: Request, res: Response) => {
 
 /**
  * Get transaction history for the authenticated professional
- * GET /api/professional/transactions?limit=10
+ * GET /api/professional/transactions?page=&limit=&status=
+ * Status accepts payment statuses (pending/authorized/completed/failed/
+ * refunded/partially_refunded) and transfer qualifiers
+ * (transfer_pending/transfer_failed) for completed-but-unsettled rows.
  */
 export const getTransactions = async (req: Request, res: Response) => {
   try {
@@ -130,26 +187,91 @@ export const getTransactions = async (req: Request, res: Response) => {
       });
     }
 
-    const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 10, 1), 50);
+    const page = Math.max(parseInt(req.query.page as string, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 20, 1), 50);
+    const skip = (page - 1) * limit;
+    const statusFilter = typeof req.query.status === 'string' ? req.query.status.trim() : '';
 
-    const transactions = await Payment.find({ professional: userId })
-      .select('bookingNumber status currency professionalPayout createdAt capturedAt transferredAt transferStatus stripeTransferId metadata')
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .lean();
+    const query: Record<string, unknown> = { professional: userId };
+    if (statusFilter && statusFilter !== 'all') {
+      if (statusFilter === 'transfer_pending' || statusFilter === 'transfer_failed') {
+        query.status = 'completed';
+        query.$or = statusFilter === 'transfer_pending'
+          ? [
+              { transferStatus: 'pending' },
+              // Legacy failed transfers also have null status/id; exclude them
+              // from "pending" so the filter matches the stats and row labels.
+              { transferStatus: null, stripeTransferId: null, 'metadata.transferFailed': { $ne: true } },
+            ]
+          : [{ transferStatus: 'failed' }, { transferStatus: null, 'metadata.transferFailed': true }];
+      } else {
+        query.status = statusFilter;
+        if (statusFilter === 'completed') {
+          // "Completed" means a settled transfer, the same rule as the stats
+          // bucket and the row label; captured payments still awaiting or
+          // failing payout belong to the transfer_* filters.
+          query.$expr = buildSettledTransferExpression();
+        }
+      }
+    }
 
-    const data = transactions.map((t: any) => ({
-      _id: t._id,
-      date: t.transferredAt || t.capturedAt || t.createdAt,
-      bookingNumber: t.bookingNumber || 'N/A',
-      status: t.status === 'completed' ? getTransferStatus(t) === 'succeeded' ? 'completed' : `transfer_${getTransferStatus(t)}` : t.status,
-      currency: t.currency || 'EUR',
-      amount: t.professionalPayout || 0,
-    }));
+    const search = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 80) : '';
+    if (search) {
+      const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      const alternatives: Record<string, unknown>[] = [{ bookingNumber: regex }];
+      // Strict 24-hex check: ObjectId.isValid also accepts any 12-character
+      // string, which would turn a booking-number search into an id lookup.
+      if (/^[a-f\d]{24}$/i.test(search)) {
+        alternatives.push({ booking: new mongoose.Types.ObjectId(search) });
+      }
+      // Payment.bookingNumber is optional, so the number may only be on the
+      // booking. Project bookings can identify their owner only through the
+      // project (Booking.professional is required for direct bookings only),
+      // so ownership matches getPaymentStats/getMyBookings.
+      const ownedProjectIds = await Project.find({ professionalId: userId }).distinct('_id');
+      const matchingBookings = await Booking.find({
+        bookingNumber: regex,
+        $or: [{ professional: userId }, { project: { $in: ownedProjectIds } }],
+      }).select('_id').lean();
+      if (matchingBookings.length) alternatives.push({ booking: { $in: matchingBookings.map(b => b._id) } });
+      query.$and = [{ $or: alternatives }];
+    }
+
+    const [transactions, total] = await Promise.all([
+      Payment.find(query)
+        .select('booking bookingNumber status currency professionalPayout createdAt capturedAt transferredAt transferStatus stripeTransferId metadata')
+        .populate('booking', '_id bookingNumber')
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Payment.countDocuments(query),
+    ]);
+
+    const data = transactions.map((t: any) => {
+      const bookingRef = t.booking && typeof t.booking === 'object' ? t.booking : null;
+      return {
+        _id: t._id,
+        // Actual payout date only: the transfer record. No capturedAt
+        // fallback — a capture is not a pay-out fact.
+        date: t.transferredAt || null,
+        bookingId: bookingRef?._id || null,
+        bookingNumber: t.bookingNumber || bookingRef?.bookingNumber || 'N/A',
+        status: t.status === 'completed' ? getTransferStatus(t) === 'succeeded' ? 'completed' : `transfer_${getTransferStatus(t)}` : t.status,
+        currency: t.currency || 'EUR',
+        amount: t.professionalPayout ?? 0,
+      };
+    });
 
     res.json({
       success: true,
       data,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
     });
   } catch (error: any) {
     console.error('Error fetching transactions:', error);

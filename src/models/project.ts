@@ -243,7 +243,7 @@ export interface IProject extends Document {
 
   // Step 8: Review & Status
   // Project lifecycle status
-  status: "draft" | "pending" | "rejected" | "published" | "on_hold" | "suspended";
+  status: "draft" | "pending" | "rejected" | "published" | "on_hold" | "suspended" | "archived";
   // Booking lifecycle status (only applicable when project is published and has active bookings)
   bookingStatus?:
   | "rfq"
@@ -258,7 +258,13 @@ export interface IProject extends Document {
   adminFeedback?: string;
   submittedAt?: Date;
   approvedAt?: Date;
+  onHoldAt?: Date;
   approvedBy?: string;
+
+  // Soft archive: unpublishes + hides from overview/search/new bookings.
+  // Never a delete; existing bookings and details stay readable.
+  archivedAt?: Date;
+  statusBeforeArchive?: "draft" | "pending" | "rejected" | "published" | "on_hold" | "suspended";
 
   // Change tracking for smart reapproval
   previousSnapshot?: Record<string, any>;
@@ -633,7 +639,7 @@ const ProjectSchema = new Schema<IProject>(
     // Project lifecycle status
     status: {
       type: String,
-      enum: ["draft", "pending", "rejected", "published", "on_hold", "suspended"],
+      enum: ["draft", "pending", "rejected", "published", "on_hold", "suspended", "archived"],
       default: "draft",
     },
     // Booking lifecycle status
@@ -655,7 +661,15 @@ const ProjectSchema = new Schema<IProject>(
     adminFeedback: { type: String },
     submittedAt: { type: Date },
     approvedAt: { type: Date },
+    onHoldAt: { type: Date },
     approvedBy: { type: String },
+
+    // Soft archive: unpublishes + hides from overview/search/new bookings.
+    archivedAt: { type: Date },
+    statusBeforeArchive: {
+      type: String,
+      enum: ["draft", "pending", "rejected", "published", "on_hold", "suspended"],
+    },
 
     // Change tracking for smart reapproval
     previousSnapshot: { type: Schema.Types.Mixed },

@@ -14,6 +14,8 @@ import {
   duplicateProject,
   deleteProject,
   updateProjectStatus,
+  archiveProject,
+  restoreProject,
   getProjectsMaster,
 } from "../../handlers/Project";
 import {
@@ -56,6 +58,8 @@ router.route("/:id/submit").post(authMiddleware, submitProject);
 router.route("/:id/duplicate").post(authMiddleware, duplicateProject);
 router.route("/:id").delete(authMiddleware, deleteProject);
 router.route("/:id/status").patch(authMiddleware, updateProjectStatus);
+router.route("/:id/archive").post(authMiddleware, archiveProject);
+router.route("/:id/restore").post(authMiddleware, restoreProject);
 
 // Admin routes
 router.route("/admin/:id/changes").get(authMiddleware, getProjectChanges);

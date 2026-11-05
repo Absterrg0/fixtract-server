@@ -1,3 +1,4 @@
+import { normalizeMarketingCountry } from './canonical';
 export const MARKETING_LOCALES = ['en', 'nl', 'fr', 'de'] as const;
 export type MarketingLocale = (typeof MARKETING_LOCALES)[number];
 
@@ -119,6 +120,27 @@ export function resolveSubscriberLocale(
     };
   }
   return { locale: 'en', source: 'fallback' };
+}
+
+/**
+ * Country precedence for display-locale resolution: explicit location first,
+ * then company address, then business info. Used by the notification
+ * preferences GET so the UI can show the country default (NL -> nl) without
+ * ever writing it back or treating it as consent.
+ */
+export function subscriberCountryFromUser(user: any): string | undefined {
+  const candidates = [
+    user?.location?.country,
+    user?.companyAddress?.country,
+    user?.businessInfo?.country,
+  ];
+  for (const candidate of candidates) {
+    // Signup can store a country name ("Netherlands"); normalize it the same
+    // way subscriber synchronization does, and skip unparseable values.
+    const normalized = normalizeMarketingCountry(candidate);
+    if (normalized) return normalized;
+  }
+  return undefined;
 }
 
 export function marketingLanguagesForCountries(countries: readonly string[]): MarketingLocale[] {
