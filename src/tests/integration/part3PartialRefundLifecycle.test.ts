@@ -13,6 +13,8 @@ import Booking from '../../models/booking';
 import User from '../../models/user';
 import CalendarReservation from '../../models/calendarReservation';
 import Payment from '../../models/payment';
+import CancellationRequest from '../../models/cancellationRequest';
+import { customerRespondToCounterOffer } from '../../handlers/Booking/refundNegotiation';
 import { refundPayment } from '../../handlers/Stripe/payment';
 import { resolveDispute } from '../../handlers/Admin/disputeManagement';
 import { replaceBookingCalendar } from '../../utils/support/bookingCalendar';
@@ -40,7 +42,7 @@ describeDb('Part 3 partial refund lifecycle with isolated Mongo and provider fak
   beforeEach(async () => {
     vi.clearAllMocks();
     await Promise.all([Booking.collection.deleteMany({}), User.collection.deleteMany({}),
-      CalendarReservation.collection.deleteMany({}), Payment.collection.deleteMany({})]);
+      CalendarReservation.collection.deleteMany({}), Payment.collection.deleteMany({}), CancellationRequest.collection.deleteMany({})]);
     await User.collection.insertMany([
       { _id: proId, role: 'professional', name: 'Professional', email: 'pro@ft3.test' },
       { _id: customerId, role: 'customer', name: 'Customer', email: 'customer@ft3.test' },
@@ -55,7 +57,7 @@ describeDb('Part 3 partial refund lifecycle with isolated Mongo and provider fak
     } }));
   });
 
-  for (const path of ['direct', 'dispute'] as const) {
+  for (const path of ['direct', 'dispute', 'negotiated'] as const) {
     for (const hasPast of [true, false]) {
       it(`${path}: cancels a partial refund, keeps ${hasPast ? 'past days' : 'no phantom window'}, and issues both artifacts`, async () => {
         const id = new Types.ObjectId();
@@ -75,8 +77,14 @@ describeDb('Part 3 partial refund lifecycle with isolated Mongo and provider fak
         await replaceBookingCalendar(booking);
         const res = response();
         if (path === 'direct') await refundPayment({ user: { _id: adminId }, body: { bookingId: String(id), amount: 50, reason: 'Partial cancellation' } } as any, res as any);
-        else await resolveDispute({ user: { _id: adminId }, params: { bookingId: String(id) },
+        else if (path === 'dispute') await resolveDispute({ user: { _id: adminId }, params: { bookingId: String(id) },
           body: { forceStatus: 'refunded', action: 'adjust', adjustedAmount: 50, resolution: 'Partial cancellation' } } as any, res as any);
+        else {
+          await CancellationRequest.create({ booking: id, requestedBy: customerId, requestedRole: 'customer',
+            status: 'negotiating', reason: 'Partial cancellation', counterOfferAmount: 50 });
+          await customerRespondToCounterOffer({ user: { _id: customerId }, params: { bookingId: String(id) },
+            body: { decision: 'accept' } } as any, res as any);
+        }
         expect(res.statusCode).toBe(200);
         expect(mocks.refund).toHaveBeenCalledWith(expect.objectContaining({ amount: 5000 }), expect.anything());
         await vi.waitFor(async () => {

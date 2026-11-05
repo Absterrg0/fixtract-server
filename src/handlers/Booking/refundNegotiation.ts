@@ -70,12 +70,7 @@ const finalizeRefund = async (
   // executeRefund may have pruned the plan and closed the booking. Do not
   // save the pre-refund instance over those recorded lifecycle facts.
   const refundedBooking = await Booking.findById(booking._id);
-  if (refundedBooking) {
-    booking.status = refundedBooking.status;
-    booking.payment = refundedBooking.payment;
-    booking.resourcePlan = refundedBooking.resourcePlan;
-    booking.refundPreservesPastPlanning = refundedBooking.refundPreservesPastPlanning;
-  }
+  if (refundedBooking) booking = refundedBooking;
   request.status = 'approved';
   request.resolvedAt = new Date();
   if (resolvedBy) request.resolvedBy = resolvedBy;
