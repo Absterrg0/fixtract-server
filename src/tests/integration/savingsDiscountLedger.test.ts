@@ -223,6 +223,24 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
     }));
   });
 
+  it.each([true, false])('a losing checkout save preserves a shared active intent: %s', async (sameIntent) => {
+    const booking = await seedMilestoneBooking();
+    const save = vi.spyOn(Booking.prototype, 'save').mockImplementationOnce(async function (this: any) {
+      await Booking.collection.updateOne({ _id: this._id }, { $set: {
+        payment: { stripePaymentIntentId: sameIntent ? this.payment.stripePaymentIntentId : 'pi_winner' },
+      } });
+      throw new mongoose.Error.DocumentNotFoundError({ _id: this._id });
+    });
+    try {
+      const result = await createPaymentIntent(String(booking._id), String(customerId), 0, 0);
+      expect(result).toMatchObject({ success: false, error: { code: 'BOOKING_CHANGED' } });
+      if (sameIntent) expect(stripeMocks.intentCancel).not.toHaveBeenCalled();
+      else expect(stripeMocks.intentCancel).toHaveBeenCalledOnce();
+    } finally {
+      save.mockRestore();
+    }
+  });
+
   it('keeps milestone 1 savings through the milestone 2 checkout and adds milestone 2 exactly once', async () => {
     await createCode('FIRST10', 'percentage', 10);
     await createCode('SECOND6', 'fixed', 6);

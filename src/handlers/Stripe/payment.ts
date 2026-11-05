@@ -735,7 +735,14 @@ export const createPaymentIntent = async (
 
   } catch (error: any) {
     if (error?.name === 'DocumentNotFoundError' && createdIntentId) {
-      try { await stripe.paymentIntents.cancel(createdIntentId); } catch { /* A racing success is handled by the durable superseded-intent reconciliation path. */ }
+      try {
+        // Stripe can return the same idempotent intent to two concurrent
+        // callers. A losing save must never cancel the winner's active intent.
+        const latest = await Booking.findById(bookingId).select('payment.stripePaymentIntentId').lean();
+        if (latest?.payment?.stripePaymentIntentId !== createdIntentId) {
+          await stripe.paymentIntents.cancel(createdIntentId);
+        }
+      } catch { /* A racing success is handled by the durable superseded-intent reconciliation path. */ }
       return { success: false, error: { code: 'BOOKING_CHANGED', message: 'The booking changed. Refresh before paying.' } };
     }
     console.error('Error creating payment intent:', error);
