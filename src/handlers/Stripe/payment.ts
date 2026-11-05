@@ -38,7 +38,7 @@ import {
   recordBasePaymentRefund,
 } from '../../utils/paymentRefundLedger';
 import { summarizeBaseRefunds } from '../../utils/paymentRefunds';
-import { isPreCompletionStatus } from '../../utils/refundFinalization';
+import { isBookingStarted, preparePartialRefundCancellation } from '../../utils/refundFinalization';
 import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
@@ -1347,6 +1347,8 @@ export const executeRefund = async (
     throw new RefundError('NO_PAYMENT', 'No payment to refund');
   }
 
+  const wasStarted = isBookingStarted(booking);
+
   // Legacy bookings predate totalWithVat; fall back to the captured amount so
   // they keep a refundable capacity instead of throwing REFUND_EXCEEDS_TOTAL.
   const totalWithVat = booking.payment?.totalWithVat ?? booking.payment?.amount ?? 0;
@@ -1467,12 +1469,8 @@ export const executeRefund = async (
     booking.payment.refundSource = 'platform';
     if (!isPartial) {
       booking.status = 'cancelled';
-    } else if (isPreCompletionStatus(booking.status)) {
-      // A partial refund ends the booking as well: only the remaining amount
-      // stays billable, so the booking must read 'cancelled', not 'Booked'.
-      // Paths that manage the status themselves (dispute 'refunded', already
-      // terminal states) are left untouched.
-      booking.status = 'cancelled';
+    } else {
+      preparePartialRefundCancellation(booking, wasStarted);
     }
     await booking.save();
 
@@ -1563,10 +1561,8 @@ export const executeRefund = async (
     booking.payment.refundReason = reason;
     if (booking.payment.status === 'refunded') {
       booking.status = 'refunded';
-    } else if (isPreCompletionStatus(booking.status)) {
-      // Partial refund on a live booking: the remainder stays billable, so the
-      // booking must read 'cancelled' instead of staying open.
-      booking.status = 'cancelled';
+    } else {
+      preparePartialRefundCancellation(booking, wasStarted);
     }
     await booking.save();
 

@@ -118,6 +118,7 @@ export interface IQuoteCustomerTotals {
   /** Alias kept for the frontend contract. */
   amountBeforeDiscounts?: number;
   vatAmount?: number;
+  vatBreakdown?: VatBreakdownLine[];
   vatRate?: number;
   totalWithVat?: number;
   /** Alias kept for the frontend contract. */
@@ -693,6 +694,8 @@ export interface IBooking extends Document {
   notes?: string; // Internal notes
   /** Terminal-state calendar release did not complete; retried on the next save. */
   calendarReleasePending?: boolean;
+  /** A started partial-refund cancellation retains only its historical resource plan. */
+  refundPreservesPastPlanning?: boolean;
   professionalCompletedAt?: Date;
   notificationReminders?: {
     unfinishedCheckoutLastSentAt?: Date;
@@ -769,6 +772,7 @@ const QuoteCustomerTotalsSchema = new Schema(
     customerNetAmount: { type: Number, min: 0 },
     amountBeforeDiscounts: { type: Number, min: 0 },
     vatAmount: { type: Number, min: 0 },
+    vatBreakdown: { type: [Schema.Types.Mixed], default: undefined },
     vatRate: { type: Number, min: 0, max: 100 },
     totalWithVat: { type: Number, min: 0 },
     totalAmount: { type: Number, min: 0 },
@@ -1730,6 +1734,7 @@ const BookingSchema = new Schema({
     type: String
   },
   calendarReleasePending: { type: Boolean, default: undefined },
+  refundPreservesPastPlanning: { type: Boolean, default: undefined },
   notes: {
     type: String,
     maxlength: 2000
@@ -1805,7 +1810,14 @@ BookingSchema.post("save", async function (doc) {
   if (!["cancelled", "refunded", "completed"].includes(String(doc.status))) return;
   try {
     const session = typeof (doc as any).$session === "function" ? (doc as any).$session() : undefined;
-    await releaseCalendarReservations("booking", doc._id, session || undefined);
+    if (doc.status === 'cancelled' && doc.payment?.status === 'partially_refunded'
+      && doc.refundPreservesPastPlanning
+      && doc.resourcePlan?.some((entry) => entry.days?.length > 0)) {
+      const { replaceBookingCalendar } = await import('../utils/support/bookingCalendar');
+      await replaceBookingCalendar(doc as unknown as IBooking, session || undefined);
+    } else {
+      await releaseCalendarReservations("booking", doc._id, session || undefined);
+    }
     if (doc.calendarReleasePending) {
       await Booking.updateOne({ _id: doc._id }, { $unset: { calendarReleasePending: 1 } });
       doc.calendarReleasePending = undefined;

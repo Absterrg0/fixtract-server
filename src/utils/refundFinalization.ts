@@ -1,4 +1,5 @@
-import { replaceBookingCalendar } from "./support/bookingCalendar";
+import { releaseBookingCalendar, replaceBookingCalendar } from "./support/bookingCalendar";
+import { DateTime } from 'luxon';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -8,8 +9,18 @@ const startOfUtcDay = (value: Date): Date =>
 /** A booking counts as started once work began (or the status proves it). */
 export const isBookingStarted = (booking: any): boolean => {
   if (!booking) return false;
-  if (booking.actualStartDate) return true;
-  return ["in_progress", "professional_completed", "dispute", "completed"].includes(String(booking.status));
+  if (booking.actualStartDate || booking.refundPreservesPastPlanning) return true;
+  const started = ["in_progress", "professional_completed", "completed"];
+  return started.includes(String(booking.status))
+    || started.includes(String(booking.statusBeforeDispute))
+    || (booking.statusHistory || []).some((entry: any) => started.includes(String(entry.status)));
+};
+
+/** Capture the started state before a refund changes the booking status. */
+export const preparePartialRefundCancellation = (booking: any, wasStarted: boolean): void => {
+  booking.status = 'cancelled';
+  booking.refundPreservesPastPlanning = wasStarted;
+  if (wasStarted) pruneFutureResourcePlanDays(booking);
 };
 
 /**
@@ -24,7 +35,10 @@ export const pruneFutureResourcePlanDays = (
   let keptDays = 0;
   let removedDays = 0;
   if (!Array.isArray(booking?.resourcePlan)) return { keptDays, removedDays };
-  const todayStart = startOfUtcDay(now).getTime();
+  const localNow = DateTime.fromJSDate(now).setZone(booking.scheduleTimeZone || 'UTC');
+  const todayStart = localNow.isValid
+    ? Date.UTC(localNow.year, localNow.month - 1, localNow.day)
+    : startOfUtcDay(now).getTime();
   for (const entry of booking.resourcePlan) {
     if (!Array.isArray(entry?.days)) continue;
     const kept: Date[] = [];
@@ -52,7 +66,12 @@ export const pruneFutureResourcePlanDays = (
  */
 export const retainPastBookingCalendar = async (booking: any): Promise<void> => {
   try {
-    await replaceBookingCalendar(booking);
+    if (booking.resourcePlan?.some((entry: any) => entry.days?.length > 0)) {
+      await replaceBookingCalendar(booking);
+    } else {
+      // An empty retained plan must not invoke the whole-window fallback.
+      await releaseBookingCalendar(booking._id);
+    }
   } catch (error) {
     console.error(
       `Partial refund kept past calendar blocks for booking ${booking?._id}, but the reservation replace failed:`,

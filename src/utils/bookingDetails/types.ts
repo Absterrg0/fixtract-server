@@ -397,6 +397,7 @@ export type QuotationVersionDto = {
     vatRate: number | null;
     totalWithVat: number | null;
     totalAmount: number | null;
+    vatBreakdown?: Array<{ description: string; netAmount: number; vatRate: number; vatAmount: number; totalAmount: number }>;
     currency: string;
     recordedAt: string;
     discount?: Record<string, unknown>;

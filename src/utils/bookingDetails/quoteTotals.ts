@@ -90,6 +90,11 @@ export const buildQuoteCustomerTotals = (params: {
     totals.vatRate = vatCalculation.vatRate;
     totals.totalWithVat = roundMoney(customerNetAmount + vatCalculation.vatAmount);
     totals.totalAmount = totals.totalWithVat;
+    totals.vatBreakdown = vatCalculation.vatBreakdown;
+    if (totals.discount) {
+      const beforeDiscount = calculateVatFromPricingLines(commissionedLines);
+      if (beforeDiscount) totals.discount.totalDiscountWithVat = roundMoney(beforeDiscount.total - totals.totalWithVat);
+    }
   }
   return totals;
 };

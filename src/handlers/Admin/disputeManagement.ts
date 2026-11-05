@@ -8,7 +8,7 @@ import Conversation from '../../models/conversation';
 import { captureAndTransferPayment, executeRefund, RefundError } from '../Stripe/payment';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
-import { resolveDisputeEmailAmount } from '../../utils/disputeFinalCharge';
+import { resolveDisputeEmailAmount, resolveDisputeBookingFinalCharge } from '../../utils/disputeFinalCharge';
 import {
   ensureRefundInvoices,
   isBookingStarted,
@@ -733,6 +733,10 @@ export const resolveDispute = async (req: Request, res: Response) => {
           reason: refundReason,
           actorId: adminUser._id,
         });
+        // A partial cancellation is persisted as cancelled by the refund core.
+        // Use that fresh status, payment and retained plan in the response and
+        // subsequent invoice/calendar work, rather than the pre-refund copy.
+        resolvedBooking = await Booking.findById(resolvedBooking._id) || resolvedBooking;
         await Booking.updateOne(
           { _id: resolvedBooking._id },
           {
@@ -963,6 +967,8 @@ export const resolveDispute = async (req: Request, res: Response) => {
           Number(originalExtraCostTotalForEmail) || 0,
           finalExtraCostAmount,
         );
+      } else {
+        disputeFinalAmount = await resolveDisputeBookingFinalCharge(resolvedBooking);
       }
       const disputeContext = {
         bookingId: String(resolvedBooking._id),

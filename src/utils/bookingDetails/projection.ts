@@ -1266,6 +1266,7 @@ export const buildBookingDetails = async (params: {
           vatRate: num(version.customerTotals.vatRate),
           totalWithVat: num(version.customerTotals.totalWithVat),
           totalAmount: num(version.customerTotals.totalAmount) ?? num(version.customerTotals.totalWithVat),
+          ...(Array.isArray(version.customerTotals.vatBreakdown) ? { vatBreakdown: version.customerTotals.vatBreakdown } : {}),
           currency: version.customerTotals.currency || version.currency || 'EUR',
           recordedAt: iso(version.customerTotals.recordedAt) || createdAt || new Date().toISOString(),
           ...(version.customerTotals.discount ? { discount: version.customerTotals.discount } : {}),
