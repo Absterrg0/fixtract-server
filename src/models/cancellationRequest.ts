@@ -144,6 +144,11 @@ const CancellationRequestSchema = new Schema<ICancellationRequest>(
 );
 
 export const ACTIVE_CANCELLATION_STATUSES = ["pending", "processing", "negotiating", "escalated"];
+/**
+ * Statuses an admin can approve or deny. `processing` is a transient lock and
+ * `negotiating` waits on the customer/professional, so neither is admin work.
+ */
+export const ADMIN_ACTIONABLE_CANCELLATION_STATUSES = ["pending", "escalated"];
 
 CancellationRequestSchema.index({ booking: 1, status: 1 });
 CancellationRequestSchema.index(

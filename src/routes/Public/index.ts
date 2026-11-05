@@ -24,6 +24,7 @@ import {
   listPublicPolicyLinks,
 } from "../../handlers/Public/cms";
 import { getPublicSiteSettings } from "../../handlers/Public/siteSettings";
+import { getPublicAutoConversion } from "../../handlers/Public/autoConversion";
 import { getPublicExchangeRates } from "../../handlers/Public/exchangeRates";
 import {
   listPublicSiteAnnouncements,
@@ -119,6 +120,9 @@ publicRouter
 
 // Public site settings (social links etc)
 publicRouter.route("/site-settings").get(getPublicSiteSettings);
+
+// Auto-conversion roll-out countries + default country (frontend middleware)
+publicRouter.route("/auto-conversion").get(getPublicAutoConversion);
 
 // ECB EUR-based daily exchange rates (cached in memory + Mongo snapshot)
 publicRouter.route("/exchange-rates").get(getPublicExchangeRates);

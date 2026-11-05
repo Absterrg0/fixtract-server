@@ -5,6 +5,11 @@ import { IUser } from "../../models/user";
 import { validateVATNumberFormat, normalizeVATNumberFormat } from "../../utils/vatValidation";
 import { listOdooCompanies } from "../../services/odooAccounting";
 import { resolveAdminRole } from "../../utils/adminRbac/rolePermissions";
+import {
+  AutoConversionValidationError,
+  parseAutoConversionInput,
+  serializeAdminAutoConversion,
+} from "../../utils/autoConversion";
 
 const serializePlatformSettings = (config: any) => ({
   commissionPercent: config.commissionPercent,
@@ -12,6 +17,7 @@ const serializePlatformSettings = (config: any) => ({
   companyAddress: config.companyAddress || {},
   eInvoicing: serializeEInvoicingSettings(config.eInvoicing),
   supportChatEnabled: config.supportChatEnabled === true,
+  autoConversion: serializeAdminAutoConversion(config.autoConversion),
   lastModified: config.lastModified,
   version: config.version,
 });
@@ -230,6 +236,57 @@ export const updateSupportChatSetting = async (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       msg: "Failed to update the support chat setting",
+    });
+  }
+};
+
+// Super-admin auto-conversion roll-out: countries that get IP-based
+// region/language/currency, plus the default country for everyone else.
+export const updateAutoConversionSetting = async (req: Request, res: Response) => {
+  try {
+    const adminUser = req.admin as IUser | undefined;
+    if (!adminUser || adminUser.role !== 'admin') {
+      return res.status(403).json({ success: false, msg: 'Admin access required' });
+    }
+    if (resolveAdminRole(adminUser.adminRole) !== 'super') {
+      return res.status(403).json({
+        success: false,
+        msg: 'Only a super admin can change the auto-conversion setting',
+        code: 'ADMIN_PERMISSION_DENIED',
+      });
+    }
+
+    await connecToDatabase();
+    const config = await PlatformSettings.getCurrentConfig();
+    let value;
+    try {
+      value = parseAutoConversionInput(req.body || {}, config.autoConversion);
+    } catch (error) {
+      if (error instanceof AutoConversionValidationError) {
+        return res.status(400).json({
+          success: false,
+          msg: error.message,
+          code: 'VALIDATION',
+          field: error.field,
+          ...(error.invalid ? { invalid: error.invalid } : {}),
+        });
+      }
+      throw error;
+    }
+
+    config.autoConversion = { ...value, configuredAt: new Date() };
+    config.lastModifiedBy = adminUser._id as any;
+    await config.save();
+
+    return res.status(200).json({
+      success: true,
+      data: { enabledCountries: value.enabledCountries, defaultCountry: value.defaultCountry },
+    });
+  } catch (error: any) {
+    console.error('Update auto-conversion setting error:', error);
+    return res.status(500).json({
+      success: false,
+      msg: 'Failed to update the auto-conversion setting',
     });
   }
 };
