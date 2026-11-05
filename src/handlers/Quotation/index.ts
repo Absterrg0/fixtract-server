@@ -504,7 +504,7 @@ export const respondToRFQ = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email totalSpent customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
+      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
       .populate('professional', 'name username email businessInfo isAnonymized deletedAt')
       .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 
@@ -719,7 +719,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email totalSpent customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
+      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
       .populate('professional', 'name username email businessInfo isAnonymized deletedAt')
       .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 
@@ -931,7 +931,7 @@ export const editQuotation = async (req: Request, res: Response) => {
     }
 
     const booking = await Booking.findById(bookingId)
-      .populate('customer', 'name email totalSpent customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
+      .populate('customer', 'name email customerType location vatNumber isVatVerified businessName companyAddress isAnonymized deletedAt')
       .populate('professional', 'name username email businessInfo isAnonymized deletedAt')
       .populate('project', 'serviceConfigurationId category service areaOfWork distance vatProfessionalAnswers');
 

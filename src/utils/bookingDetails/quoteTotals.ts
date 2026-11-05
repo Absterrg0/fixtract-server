@@ -1,5 +1,6 @@
 import { calculateAutoDiscount, type DiscountBreakdown } from '../discountEngine';
 import { withReferralDiscount } from '../referralDiscount';
+import User from '../../models/user';
 import type { IQuoteCustomerTotals, IQuoteVersion } from '../../models/booking';
 import { calculateVatFromPricingLines } from '../vatLineCalculation';
 import { commissionedQuoteAmount } from '../customerPricing';
@@ -97,7 +98,10 @@ export async function buildQuoteCustomerTotalsWithDiscounts(params: Parameters<t
   const customerId = booking.customer?._id?.toString?.() || String(booking.customer);
   const professionalId = booking.professional?._id?.toString?.() || String(booking.professional);
   const projectId = booking.project?._id?.toString?.() || (booking.project ? String(booking.project) : null);
-  const automatic = await calculateAutoDiscount(customerId, professionalId, projectId, base.customerNetAmount, booking.customer?.totalSpent || 0);
+  // Read private loyalty input separately; never populate spend history into
+  // the booking returned to a professional.
+  const customer = await User.findById(customerId).select('totalSpent').lean();
+  const automatic = await calculateAutoDiscount(customerId, professionalId, projectId, base.customerNetAmount, customer?.totalSpent || 0);
   const discountBreakdown = await withReferralDiscount(automatic, customerId, String(booking._id));
   return buildQuoteCustomerTotals({ ...params, discountBreakdown });
 }
