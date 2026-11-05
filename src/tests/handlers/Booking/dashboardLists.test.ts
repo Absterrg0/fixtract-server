@@ -168,7 +168,7 @@ describe('dashboard list counts and search', () => {
     const res = mockRes();
     await getMyBookings({ user: { _id: CUSTOMER_ID }, query: {} } as any, res, vi.fn());
     expect(res.statusCode).toBe(200);
-    expect(res.body.data.bookings[0].professional).toMatchObject(owner);
+    expect(res.body.bookings[0].professional).toMatchObject(owner);
     owner.isAnonymized = true;
     const anonymous = mockRes();
     await getMyBookings({ user: { _id: CUSTOMER_ID }, query: {} } as any, anonymous, vi.fn());
