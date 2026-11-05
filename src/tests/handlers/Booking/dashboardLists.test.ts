@@ -158,6 +158,23 @@ describe('dashboard list counts and search', () => {
     mocks.bookingDistinct.mockResolvedValue([]);
   });
 
+  it('enriches legacy project-owner-only rows before applying viewer masking', async () => {
+    const doc = { _id: 'b1', bookingType: 'project', status: 'booked', project: { _id: 'proj1', professionalId: PRO_ID }, toObject() { return { ...this, toObject: undefined } } };
+    mocks.bookingFind.mockReturnValue(chainFor([doc]));
+    mocks.bookingCountDocuments.mockResolvedValue(1);
+    mocks.bookingAggregate.mockResolvedValue([]);
+    const owner: any = { _id: PRO_ID, name: 'Piet', username: 'piet', professionalLevel: 'Gold', adminTags: ['verified'] };
+    mocks.userFind.mockReturnValue({ select: () => ({ lean: async () => [owner] }) });
+    const res = mockRes();
+    await getMyBookings({ user: { _id: CUSTOMER_ID }, query: {} } as any, res, vi.fn());
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.bookings[0].professional).toMatchObject(owner);
+    owner.isAnonymized = true;
+    const anonymous = mockRes();
+    await getMyBookings({ user: { _id: CUSTOMER_ID }, query: {} } as any, anonymous, vi.fn());
+    expect(JSON.stringify(anonymous.body)).not.toContain('piet');
+  });
+
   it('computes status counts without the status facet and service counts without the service facet', async () => {
     const bookingDoc = {
       _id: 'b1',
@@ -365,6 +382,20 @@ describe('dashboard list counts and search', () => {
     });
     expect(res.body.data.reviewCount).toBe(2);
   });
+  it('gets lifecycle counts from bookings, independently of milestone payment rows', async () => {
+    mocks.paymentAggregate.mockResolvedValue([{ _id: { currency: 'EUR' }, totalEarnings: 80, pendingEarnings: 40, count: 99, pendingBookings: 99 }]);
+    mocks.bookingAggregate.mockResolvedValueOnce([]).mockResolvedValueOnce([{ _id: { currency: 'EUR' }, pendingBookings: 3, completedBookings: 1 }]);
+    mocks.projectFind.mockReturnValue({ distinct: vi.fn(async () => ['project1']) });
+    const res = mockRes();
+    await getPaymentStats({ user: { _id: PRO_ID } } as any, res);
+    expect(res.body.data.pendingBookings).toBe(3);
+    expect(res.body.data.completedBookings).toBe(1);
+    const match = mocks.bookingAggregate.mock.calls[1][0][0].$match;
+    expect(match.status.$in).toContain('payment_pending');
+    expect(match.status.$in).not.toContain('quoted');
+    expect(match.$or).toEqual([{ professional: PRO_ID }, { project: { $in: ['project1'] } }]);
+  });
+
   it('treats a 12-character booking number as text, never as an ObjectId', async () => {
     const chain: any = chainFor([]);
     chain.select = vi.fn(() => chain);

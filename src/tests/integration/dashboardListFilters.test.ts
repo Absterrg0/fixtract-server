@@ -322,6 +322,25 @@ describeDb('dashboard list filters (real Mongo)', () => {
       return res.body;
     };
 
+    it('counts distinct booking lifecycles, including unpaid and project-owned bookings', async () => {
+      const projectId = new Types.ObjectId();
+      const completedId = new Types.ObjectId();
+      await Project.collection.insertOne({ _id: projectId, professionalId: PRO });
+      await Booking.collection.insertMany([
+        { _id: completedId, professional: PRO, status: 'completed', quote: { currency: 'EUR' } },
+        { _id: new Types.ObjectId(), professional: PRO, status: 'payment_pending', quote: { currency: 'EUR' } },
+        { _id: new Types.ObjectId(), project: projectId, status: 'booked', quote: { currency: 'EUR' } },
+        { _id: new Types.ObjectId(), professional: PRO, status: 'quoted', quote: { currency: 'EUR' } },
+        { _id: new Types.ObjectId(), professional: OTHER_PRO, status: 'completed' },
+      ]);
+      await Payment.collection.insertMany([1, 2].map(n => ({ _id: new Types.ObjectId(), booking: completedId, professional: PRO, status: 'completed', transferStatus: 'succeeded', professionalPayout: 25, currency: 'EUR' })));
+      const res = response();
+      await getPaymentStats({ user: { _id: PRO } } as any, res);
+      expect(res.statusCode).toBe(200);
+      expect(res.body.data.completedBookings).toBe(1);
+      expect(res.body.data.pendingBookings).toBe(2);
+    }, 30000);
+
     it('returns only settled transfers for "completed", matching the stats bucket and row labels', async () => {
       const completed = await transactions({ status: 'completed' });
       expect(completed.data.map((r: any) => r.bookingNumber).sort()).toEqual(['BK-LEGACY-SETTLED', 'BK-SETTLED']);
@@ -330,7 +349,9 @@ describeDb('dashboard list filters (real Mongo)', () => {
 
       const statsRes = response();
       await getPaymentStats({ user: { _id: PRO } } as unknown as Request, statsRes);
-      expect(statsRes.body.data.completedBookings).toBe(completed.pagination.total);
+      expect(statsRes.body.data.totalEarnings).toBe(200);
+      // No Booking records were inserted: transaction counts are not booking counts.
+      expect(statsRes.body.data.completedBookings).toBe(0);
 
       const pending = await transactions({ status: 'transfer_pending' });
       expect(pending.data.map((r: any) => r.bookingNumber).sort()).toEqual(['BK-LEGACY-NONE', 'BK-PENDING']);

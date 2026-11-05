@@ -28,7 +28,9 @@ export const getPaymentStats = async (req: Request, res: Response) => {
     // review aggregate uses the same ownership condition as getMyBookings.
     const professionalProjectIds = await Project.find({ professionalId: userId }).distinct('_id');
 
-    const [completedStats, pendingStats, reviewStats] = await Promise.all([
+    const pendingBookingStatuses = ['quote_accepted', 'payment_pending', 'booked', 'rescheduling_requested', 'in_progress', 'professional_completed', 'dispute'];
+    const finishedBookingStatuses = ['completed', 'cancelled', 'refunded'];
+    const [completedStats, pendingStats, reviewStats, bookingCounts] = await Promise.all([
       Payment.aggregate([
         { $match: {
           professional: userId,
@@ -39,7 +41,6 @@ export const getPaymentStats = async (req: Request, res: Response) => {
           $group: {
             _id: { currency: { $ifNull: ['$currency', 'EUR'] } },
             totalEarnings: { $sum: '$professionalPayout' },
-            count: { $sum: 1 },
           },
         },
       ]),
@@ -66,7 +67,6 @@ export const getPaymentStats = async (req: Request, res: Response) => {
           $group: {
             _id: { currency: { $ifNull: ['$currency', 'EUR'] } },
             pendingEarnings: { $sum: '$professionalPayout' },
-            pendingBookings: { $sum: 1 },
           },
         },
       ]),
@@ -96,6 +96,16 @@ export const getPaymentStats = async (req: Request, res: Response) => {
           },
         },
       ]),
+      // Count bookings themselves, including unpaid bookings; milestone
+      // Payment rows never multiply these lifecycle counts.
+      Booking.aggregate([
+        { $match: { $or: [{ professional: userId }, { project: { $in: professionalProjectIds } }], status: { $in: [...pendingBookingStatuses, ...finishedBookingStatuses] } } },
+        { $group: {
+          _id: { currency: { $ifNull: ['$payment.currency', { $ifNull: ['$quote.currency', 'EUR'] }] } },
+          pendingBookings: { $sum: { $cond: [{ $in: ['$status', pendingBookingStatuses] }, 1, 0] } },
+          completedBookings: { $sum: { $cond: [{ $in: ['$status', finishedBookingStatuses] }, 1, 0] } },
+        } },
+      ]),
     ]);
 
     const totalsByCurrencyMap = new Map<
@@ -109,7 +119,7 @@ export const getPaymentStats = async (req: Request, res: Response) => {
         currency,
         totalEarnings: bucket.totalEarnings || 0,
         pendingEarnings: 0,
-        completedBookings: bucket.count || 0,
+        completedBookings: 0,
         pendingBookings: 0,
       });
     });
@@ -124,10 +134,17 @@ export const getPaymentStats = async (req: Request, res: Response) => {
         pendingBookings: 0,
       };
       current.pendingEarnings = bucket.pendingEarnings || 0;
-      current.pendingBookings = bucket.pendingBookings || 0;
+
       totalsByCurrencyMap.set(currency, current);
     });
 
+    for (const bucket of bookingCounts) {
+      const currency = bucket?._id?.currency || 'EUR';
+      const current = totalsByCurrencyMap.get(currency) || { currency, totalEarnings: 0, pendingEarnings: 0, completedBookings: 0, pendingBookings: 0 };
+      current.pendingBookings = bucket.pendingBookings || 0;
+      current.completedBookings = bucket.completedBookings || 0;
+      totalsByCurrencyMap.set(currency, current);
+    }
     const totalsByCurrency = Array.from(totalsByCurrencyMap.values());
     // Cross-currency sums are not single-currency figures. Only expose the
     // blended totals when a single currency is present; otherwise report

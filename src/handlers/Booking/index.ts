@@ -1512,9 +1512,10 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       .filter((value): value is string => Boolean(value)))];
     const projectOwnerRows = projectOwnerIds.length > 0
       ? await User.find({ _id: { $in: projectOwnerIds } })
-          .select('_id isAnonymized deletedAt')
+          .select('_id name username businessInfo professionalLevel adminTags isAnonymized deletedAt')
           .lean()
       : [];
+    const projectOwners = new Map(projectOwnerRows.map((owner: any) => [String(owner._id), owner]));
     const anonymizedProjectOwners = new Set(
       projectOwnerRows
         .filter((owner: any) => owner.isAnonymized || owner.deletedAt)
@@ -1530,7 +1531,11 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       console.error('Get bookings: refund ledger read failed; overview money left unknown:', safeErrorSummary(ledgerError));
     }
     const visibleBookings = bookings.map((booking) => {
-      const visible: any = bookingForViewer(booking, viewerRole);
+      const ownerId = referenceId((booking.project as any)?.professionalId);
+      const source = !booking.professional && ownerId && projectOwners.has(ownerId)
+        ? { ...booking.toObject(), professional: projectOwners.get(ownerId) }
+        : booking;
+      const visible: any = bookingForViewer(source, viewerRole);
       if (visible && typeof visible === "object") visible.priceModel = selectedPriceModel(visible);
       // The shared bookings table exposes pro-only payout date/amount
       // columns. Strip the pro payout summary server-side for customers;
@@ -2293,24 +2298,28 @@ export const getMyDisputes = async (req: Request, res: Response, next: NextFunct
     }
 
     const objectUserId = new mongoose.Types.ObjectId(userId);
-    const bookings = await Booking.find({
+    const page = Math.max(parseInt(String(req.query.page), 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 20, 1), 100);
+    const filter = {
       status: { $in: ['dispute', 'completed', 'cancelled', 'refunded'] },
       'dispute.raisedAt': { $exists: true },
       $or: [{ customer: objectUserId }, { professional: objectUserId }],
-    })
+    };
+    const [bookings, total] = await Promise.all([Booking.find(filter)
       .select('bookingNumber status dispute customer professional project payment scheduledStartDate')
       .populate('customer', 'name isAnonymized deletedAt')
       .populate('professional', 'name isAnonymized deletedAt')
       .populate('project', 'title')
-      .sort({ 'dispute.raisedAt': -1 })
-      .limit(100)
-      .lean();
+      .sort({ 'dispute.raisedAt': -1, _id: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean(), Booking.countDocuments(filter)]);
 
     const visibleBookings = bookings.map((booking: any) =>
       bookingForRequest(booking, req.user)
     );
 
-    return res.json({ success: true, data: { items: visibleBookings } });
+    return res.json({ success: true, data: { items: visibleBookings, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } } });
   } catch (error: any) {
     console.error('Get my disputes error:', error);
     next(error);
