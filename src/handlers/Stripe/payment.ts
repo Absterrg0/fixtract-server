@@ -27,7 +27,7 @@ import {
   quoteAmountIncludesSelectedExtras,
 } from '../../utils/payment';
 import { canRetryTransfer, getTransferStatus, requireProfessionalPayout } from '../../utils/paymentSafety';
-import { withReferralDiscount } from '../../utils/referralDiscount';
+import { releaseReferralReservation, withReferralDiscount } from '../../utils/referralDiscount';
 import { calculateVAT } from '../../utils/vat';
 import { calculateVatFromPricingLines } from '../../utils/vatLineCalculation';
 import { parseVatCountryCode, requiresVatRfqReview } from '../../utils/vatManagement';
@@ -473,7 +473,8 @@ export const createPaymentIntent = async (
       }
       if (booking.payment.status === 'pending') {
         try {
-          await stripe.paymentIntents.cancel(booking.payment.stripePaymentIntentId);
+          const cancelled = await stripe.paymentIntents.cancel(booking.payment.stripePaymentIntentId);
+          if (cancelled.status === 'canceled') await releaseReferralReservation(String(booking._id));
           console.log(`🗑️  Cancelled superseded PaymentIntent ${booking.payment.stripePaymentIntentId} for booking ${booking._id}`);
         } catch (cancelErr: any) {
           if (cancelErr?.code !== 'payment_intent_unexpected_state' && cancelErr?.code !== 'resource_missing') {
@@ -738,9 +739,13 @@ export const createPaymentIntent = async (
       try {
         // Stripe can return the same idempotent intent to two concurrent
         // callers. A losing save must never cancel the winner's active intent.
-        const latest = await Booking.findById(bookingId).select('payment.stripePaymentIntentId').lean();
+        const latest = await Booking.findById(bookingId).select('payment.stripePaymentIntentId status').lean();
         if (latest?.payment?.stripePaymentIntentId !== createdIntentId) {
-          await stripe.paymentIntents.cancel(createdIntentId);
+          const cancelled = await stripe.paymentIntents.cancel(createdIntentId);
+          // A winning checkout for this same booking keeps its reservation.
+          if (cancelled.status === 'canceled' && (!latest?.payment?.stripePaymentIntentId || latest.status === 'cancelled')) {
+            await releaseReferralReservation(bookingId);
+          }
         }
       } catch { /* A racing success is handled by the durable superseded-intent reconciliation path. */ }
       return { success: false, error: { code: 'BOOKING_CHANGED', message: 'The booking changed. Refresh before paying.' } };

@@ -1,3 +1,4 @@
+import { releaseReferralReservation } from '../../utils/referralDiscount';
 /**
  * Stripe Webhook Handlers
  * Processes Stripe webhook events
@@ -775,6 +776,18 @@ async function handlePaymentIntentCanceled(paymentIntent: Stripe.PaymentIntent) 
 
   const booking = await Booking.findById(bookingId);
   if (!booking || !booking.payment) return;
+
+  // Superseded-intent events must never release a newer checkout's benefit.
+  if (booking.payment.stripePaymentIntentId !== paymentIntent.id) return;
+  if (['pending', 'failed'].includes(booking.payment.status)) {
+    const updated = await Booking.updateOne({
+      _id: bookingId,
+      'payment.stripePaymentIntentId': paymentIntent.id,
+      'payment.status': { $in: ['pending', 'failed'] },
+    }, { $set: { 'payment.status': 'failed', 'payment.canceledAt': new Date() } });
+    if (updated.modifiedCount) await releaseReferralReservation(bookingId);
+    return;
+  }
 
   if (booking.payment.status === 'authorized') {
     const now = new Date();

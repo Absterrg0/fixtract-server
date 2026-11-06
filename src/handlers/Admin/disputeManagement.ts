@@ -1,3 +1,4 @@
+import { releaseUnpaidReferral } from '../../utils/releaseUnpaidReferral';
 import { Request, Response } from 'express';
 import Booking, { BookingStatus } from '../../models/booking';
 import User from '../../models/user';
@@ -645,6 +646,8 @@ export const resolveDispute = async (req: Request, res: Response) => {
         }
       });
     }
+
+    if (targetStatus === 'cancelled') await releaseUnpaidReferral(resolvedBooking);
 
     if (targetStatus === COMPLETED_BOOKING_STATUS) {
       try {

@@ -60,6 +60,10 @@ vi.mock('../../utils/notifications/notify', () => ({
   notifyAsync: vi.fn(),
 }));
 
+import Referral from '../../models/referral';
+import ReferralConfig from '../../models/referralConfig';
+import { withReferralDiscount, releaseReferralReservation } from '../../utils/referralDiscount';
+import { releaseUnpaidReferral } from '../../utils/releaseUnpaidReferral';
 import Booking from '../../models/booking';
 import Payment from '../../models/payment';
 import User from '../../models/user';
@@ -170,6 +174,7 @@ const snapshotTotal = (discount: any) => Math.round((
   + (discount?.repeatBuyerAmount || 0)
   + (discount?.pointsDiscountAmount || 0)
   + (discount?.codeDiscountAmount || 0)
+  + (discount?.referralDiscountAmount || 0)
 ) * 100) / 100;
 
 const readLedger = async (bookingId: any): Promise<any[]> => {
@@ -202,8 +207,11 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    await User.updateOne({ _id: customerId }, { $unset: { manualCustomerLevelOverride: 1 } });
     await Promise.all([
       Booking.deleteMany({}),
+      Referral.deleteMany({}),
+      ReferralConfig.deleteMany({}),
       Payment.deleteMany({}),
       DiscountCode.deleteMany({}),
       DiscountCodeUsage.deleteMany({}),
@@ -221,6 +229,92 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
       latest_charge: `ch_${id}`,
       currency: 'eur',
     }));
+  });
+
+  const seedReferral = async () => {
+    await ReferralConfig.create({
+      isEnabled: true, referredCustomerDiscountType: 'fixed', referredCustomerDiscountValue: 20,
+      referredCustomerDiscountMaxAmount: 20, minBookingAmountForTrigger: 1, lastModifiedBy: customerId,
+    });
+    return Referral.create({ referrer: otherCustomerId, referredUser: customerId, referralCode: 'REFTEST', expiresAt: new Date(Date.now() + DAY_MS) });
+  };
+
+  it('returns an unpaid cancelled booking benefit and permits only one concurrent new reservation', async () => {
+    const referral = await seedReferral();
+    const old = await seedMilestoneBooking();
+    const fresh = await seedMilestoneBooking();
+    const rival = await seedMilestoneBooking();
+    expect((await createPaymentIntent(String(old._id), String(customerId), 0, 0)).success).toBe(true);
+    const pending = await Booking.findById(old._id);
+    pending!.status = 'cancelled';
+    await pending!.save();
+    stripeMocks.intentRetrieve.mockResolvedValue({ status: 'requires_payment_method' });
+    stripeMocks.intentCancel.mockResolvedValue({ status: 'canceled' });
+    await releaseUnpaidReferral(pending!);
+    expect((await Referral.findById(referral._id))?.discountBooking).toBeUndefined();
+    const discount = { originalAmount: 200, finalAmount: 200, totalDiscount: 0, loyaltyDiscount: { amount: 0, tier: 'Bronze', percentage: 0, capped: false }, repeatBuyerDiscount: { amount: 0, percentage: 0, previousBookings: 0, capped: false }, pointsDiscount: { discountAmount: 0, pointsUsed: 0, conversionRate: 1 } };
+    const results = await Promise.allSettled([
+      withReferralDiscount(discount, String(customerId), String(fresh._id), true),
+      withReferralDiscount(discount, String(customerId), String(rival._id), true),
+    ]);
+    const discounted = results.filter(result => result.status === 'fulfilled' && result.value.referralDiscount);
+    expect(discounted).toHaveLength(1);
+    const winner = (await Referral.findById(referral._id))!.discountBooking;
+    await releaseReferralReservation(String(old._id)); // delayed old cleanup cannot clear the winner
+    expect(String((await Referral.findById(referral._id))!.discountBooking)).toBe(String(winner));
+  });
+
+  it('releases a cancelled current intent but ignores a delayed superseded-intent cancellation', async () => {
+    const referral = await seedReferral();
+    const booking = await seedMilestoneBooking();
+    const checkout = await createPaymentIntent(String(booking._id), String(customerId), 0, 0);
+    expect(checkout.success).toBe(true);
+    await deliverEvent({ id: `evt_cancel_old_${new Types.ObjectId()}`, type: 'payment_intent.canceled', data: { object: {
+      id: 'pi_superseded', metadata: { bookingId: String(booking._id) }, status: 'canceled',
+    } } });
+    expect(String((await Referral.findById(referral._id))!.discountBooking)).toBe(String(booking._id));
+    await deliverEvent({ id: `evt_cancel_current_${new Types.ObjectId()}`, type: 'payment_intent.canceled', data: { object: {
+      id: checkout.paymentIntentId, metadata: { bookingId: String(booking._id) }, status: 'canceled',
+    } } });
+    expect((await Referral.findById(referral._id))!.discountBooking).toBeUndefined();
+    expect((await Booking.findById(booking._id))!.payment!.status).toBe('failed');
+  });
+
+  it('never releases a consumed referral even if a caller holds a stale unpaid booking', async () => {
+    const referral = await seedReferral();
+    const booking = await seedMilestoneBooking();
+    await Referral.updateOne({ _id: referral._id }, { $set: { discountBooking: booking._id, referredUserDiscountApplied: true } });
+    await releaseReferralReservation(String(booking._id));
+    expect(String((await Referral.findById(referral._id))!.discountBooking)).toBe(String(booking._id));
+  });
+
+  it('prorates referral with loyalty and code across real milestone checkouts and retains it on same-booking retries', async () => {
+    await seedReferral();
+    await createCode('REFERRALCOMBO', 'fixed', 10);
+    await User.updateOne({ _id: customerId }, { $set: { manualCustomerLevelOverride: 'Silver' } });
+    const booking = await seedMilestoneBooking();
+    expect((await createPaymentIntent(String(booking._id), String(customerId), 0, 0, 'REFERRALCOMBO')).success).toBe(true);
+    const first = (await Booking.findById(booking._id))!;
+    expect(first.payment!.discount!.referralDiscountAmount).toBe(10);
+    expect((await createPaymentIntent(String(booking._id), String(customerId), 0, 0, 'REFERRALCOMBO')).success).toBe(true);
+    expect(stripeMocks.intentCreate).toHaveBeenCalledOnce();
+    await recordPaymentDiscountSnapshot(String(booking._id), first.payment!, first.payment!.stripePaymentIntentId);
+    first.milestonePayments![0].status = 'paid';
+    first.payment!.status = 'completed';
+    await first.save();
+    expect((await createPaymentIntent(String(booking._id), String(customerId), 0, 1, 'REFERRALCOMBO')).success).toBe(true);
+    const second = (await Booking.findById(booking._id))!;
+    expect(second.payment!.discount!.referralDiscountAmount).toBe(10);
+    expect(first.payment!.discount!.loyaltyAmount).toBeGreaterThan(0);
+    expect(first.payment!.discount!.codeDiscountAmount).toBe(5);
+    expect(second.payment!.discount!.codeDiscountAmount).toBe(5);
+    const { buildUblInvoiceXml } = await import('../../services/invoiceArtifacts');
+    for (const installment of [first, second]) {
+      await installment.populate('customer professional');
+      const xml = buildUblInvoiceXml(installment.toObject(), 'FIX-MILESTONE', new Date(), { selfBilling: false, platform: { country: 'BE' } });
+      expect(xml).toContain('Referral discount');
+      expect(xml).toContain(`<cbc:TaxInclusiveAmount currencyID="EUR">${installment.payment!.totalWithVat!.toFixed(2)}</cbc:TaxInclusiveAmount>`);
+    }
   });
 
   it.each([true, false])('a losing checkout save preserves a shared active intent: %s', async (sameIntent) => {

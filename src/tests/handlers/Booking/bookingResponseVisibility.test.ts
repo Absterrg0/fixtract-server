@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   bookingFindById: vi.fn(),
+  releaseReferral: vi.fn(),
   bookingCountDocuments: vi.fn(),
   intentRetrieve: vi.fn(),
   intentCancel: vi.fn(),
@@ -18,6 +19,8 @@ const mocks = vi.hoisted(() => ({
   sendDisputeRaisedAdminEmail: vi.fn(),
   warrantyUpdateMany: vi.fn(),
 }));
+
+vi.mock('../../../utils/referralDiscount', () => ({ releaseReferralReservation: mocks.releaseReferral }));
 
 vi.mock('../../../models/booking', () => ({
   default: {
@@ -416,6 +419,8 @@ describe('non-admin booking response serialization', () => {
     await setBookingSchedule({ params: { bookingId: 'booking-1' }, user: user('customer'), body: { scheduledStartDate: '2099-01-02' } } as any, res as any);
     expect(res.body.success).toBe(true);
     expect(mocks.intentCancel).toHaveBeenCalledWith('pi_old');
+    expect(mocks.releaseReferral).toHaveBeenCalledWith('booking-1');
+    expect(mocks.releaseReferral.mock.invocationCallOrder[0]).toBeGreaterThan(booking.save.mock.invocationCallOrder[0]);
     expect(booking.save.mock.invocationCallOrder[0]).toBeGreaterThan(mocks.intentCancel.mock.invocationCallOrder[0]);
     expect(booking.status).toBe('quote_accepted');
     expect(booking.payment).toBeUndefined();
@@ -432,6 +437,7 @@ describe('non-admin booking response serialization', () => {
     expect(res.body.error.code).toBe('PAYMENT_IN_PROGRESS');
     expect(booking.save).not.toHaveBeenCalled();
     expect(mocks.intentCancel).not.toHaveBeenCalled();
+    expect(mocks.releaseReferral).not.toHaveBeenCalled();
   });
 
   it('never saves edits if payment cancellation fails', async () => {

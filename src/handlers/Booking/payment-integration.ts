@@ -6,6 +6,8 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { stripe } from '../../services/stripe';
+import { releaseReferralReservation } from '../../utils/referralDiscount';
+import { releaseUnpaidReferral } from '../../utils/releaseUnpaidReferral';
 import { quoteAmountIncludesSelectedExtras } from '../../utils/payment';
 import Booking, { BookingStatus } from '../../models/booking';
 import Project from '../../models/project';
@@ -953,6 +955,8 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       await booking.save(session ? { session } : undefined);
     });
 
+    if (requestedStatus === 'cancelled') await releaseUnpaidReferral(booking);
+
     if (['cancelled', 'refunded', 'completed'].includes(requestedStatus)) {
       try {
         await releaseBookingCalendar(booking._id);
@@ -1322,6 +1326,8 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       await booking.save(session ? { session } : undefined);
       return booking;
     });
+
+    await releaseReferralReservation(String(booking._id));
 
     try {
       const professional = booking.professional as any;
@@ -1757,6 +1763,8 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
     await withAnonymizationWriteFence([userId], async (session) => {
       await booking.save(session ? { session } : undefined);
     });
+
+    if (booking.status === 'cancelled') await releaseUnpaidReferral(booking);
 
     if (normalizedAction !== 'accept' && ['cancelled', 'refunded'].includes(booking.status)) {
       try {

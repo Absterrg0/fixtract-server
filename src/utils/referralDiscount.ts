@@ -45,3 +45,12 @@ export async function withReferralDiscount(
     finalAmount: round(discount.finalAmount - amount),
   };
 }
+
+/** Release only this booking's unconsumed benefit. A delayed release cannot
+ * clear a different booking's concurrent reservation or a settled benefit. */
+export async function releaseReferralReservation(bookingId: string): Promise<void> {
+  await Referral.updateOne({
+    discountBooking: bookingId,
+    referredUserDiscountApplied: { $ne: true },
+  }, { $unset: { discountBooking: 1 } });
+}

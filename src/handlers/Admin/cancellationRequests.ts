@@ -1,3 +1,4 @@
+import { releaseUnpaidReferral } from '../../utils/releaseUnpaidReferral';
 import { Request, Response } from "express";
 import mongoose from "mongoose";
 import CancellationRequest, { ADMIN_ACTIONABLE_CANCELLATION_STATUSES } from "../../models/cancellationRequest";
@@ -242,6 +243,7 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
 
     releaseScheduleSlots(freshBooking, adminId);
     await freshBooking.save();
+    await releaseUnpaidReferral(freshBooking);
     try {
       await releaseBookingCalendar(freshBooking._id);
     } catch (calendarError) {
