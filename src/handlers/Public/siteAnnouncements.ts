@@ -71,7 +71,10 @@ export const recordSiteAnnouncementEvent = async (
 
     const field = `${event}s` as 'impressions' | 'clicks' | 'dismissals';
     const now = new Date();
-    const updated = await SiteAnnouncement.findByIdAndUpdate(
+    // findOneAndUpdate, not findByIdAndUpdate: the latter wraps its first argument
+    // as `{ _id: <arg> }`, and casting an object to ObjectId keeps only its `_id`,
+    // which silently dropped the active/start/end conditions below.
+    const updated = await SiteAnnouncement.findOneAndUpdate(
       {
         _id: id,
         isActive: true,
@@ -79,7 +82,9 @@ export const recordSiteAnnouncementEvent = async (
         endsAt: { $gte: now },
       },
       { $inc: { [field]: 1 } },
-      { new: true, runValidators: true },
+      // Counters do not edit campaign content. Preserve the version used by
+      // visitor frequency/dismissal storage and event deduplication.
+      { new: true, runValidators: true, timestamps: false },
     );
     if (!updated) {
       return res.status(404).json({ success: false, msg: 'Announcement not found' });

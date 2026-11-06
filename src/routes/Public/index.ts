@@ -46,17 +46,34 @@ import { optionalProtect } from "../../middlewares/auth";
 // Public routes - accessible without authentication
 const publicRouter = Router();
 
-const schedulingRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 60,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    success: false,
-    msg: 'Too many requests. Please wait a few minutes and try again.',
-    code: 'RATE_LIMITED',
-  },
-});
+const PUBLIC_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+/** Per-IP budget shared by the booking calendar and other low-volume public reads. */
+export const SCHEDULING_RATE_LIMIT = 60;
+/**
+ * Marketing announcements get their own per-IP budgets, so that ordinary browsing
+ * (one listing call plus up to a few counter events per page view) can never
+ * exhaust the booking calendar budget above, and vice versa. Each budget still
+ * caps how far one IP can inflate counters or scrape listings.
+ */
+export const ANNOUNCEMENT_LIST_RATE_LIMIT = 300;
+export const ANNOUNCEMENT_EVENT_RATE_LIMIT = 600;
+
+const createPublicRateLimiter = (limit: number) =>
+  rateLimit({
+    windowMs: PUBLIC_RATE_LIMIT_WINDOW_MS,
+    limit,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      success: false,
+      msg: 'Too many requests. Please wait a few minutes and try again.',
+      code: 'RATE_LIMITED',
+    },
+  });
+
+const schedulingRateLimiter = createPublicRateLimiter(SCHEDULING_RATE_LIMIT);
+const announcementListRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_LIST_RATE_LIMIT);
+const announcementEventRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_EVENT_RATE_LIMIT);
 
 // Google Maps configuration (public endpoint)
 publicRouter.route("/google-maps-config").get(getGoogleMapsConfig);
@@ -128,10 +145,10 @@ publicRouter.route("/auto-conversion").get(getPublicAutoConversion);
 publicRouter.route("/exchange-rates").get(getPublicExchangeRates);
 
 // Marketing site announcements (top bar / modal / exit-intent)
-publicRouter.route("/site-announcements").get(schedulingRateLimiter, listPublicSiteAnnouncements);
+publicRouter.route("/site-announcements").get(announcementListRateLimiter, listPublicSiteAnnouncements);
 publicRouter
   .route("/site-announcements/:id/event")
-  .post(schedulingRateLimiter, recordSiteAnnouncementEvent);
+  .post(announcementEventRateLimiter, recordSiteAnnouncementEvent);
 
 // CMS public endpoints
 publicRouter.route("/cms/sitemap").get(listCmsSitemapEntries);
