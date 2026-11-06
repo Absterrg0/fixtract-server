@@ -492,6 +492,7 @@ export type PaymentRecordDto = {
     pointsRedeemed: number;
     pointsDiscountAmount: number;
     codeDiscountAmount: number;
+    referralDiscountAmount: number;
     codeLabel: string | null;
     totalDiscount: number;
     originalAmount: number;

@@ -224,6 +224,7 @@ export interface InvoiceBooking {
       repeatBuyerAmount?: number;
       pointsDiscountAmount?: number;
       codeDiscountAmount?: number;
+      referralDiscountAmount?: number;
       codeLabel?: string;
       totalDiscount?: number;
     };
@@ -889,7 +890,8 @@ export async function generateBookingInvoice(
     serviceLoyaltyDiscount
     + (Number(discount?.repeatBuyerAmount) || 0)
     + (Number(discount?.pointsDiscountAmount) || 0)
-    + (Number(discount?.codeDiscountAmount) || 0),
+    + (Number(discount?.codeDiscountAmount) || 0)
+    + (Number(discount?.referralDiscountAmount) || 0),
   );
   const customerLoyaltyDiscountTotal = roundInvoiceMoney(serviceLoyaltyDiscount + extraCostLoyaltyDiscount);
   const discounts = manualLines?.length ? [] : selfBilling
@@ -901,6 +903,7 @@ export async function generateBookingInvoice(
     : [
         customerLoyaltyDiscountTotal > 0 ? { label: "Loyalty discount", amount: customerLoyaltyDiscountTotal * sign } : undefined,
         discount?.repeatBuyerAmount ? { label: "Repeat buyer discount", amount: discount.repeatBuyerAmount * sign } : undefined,
+        discount?.referralDiscountAmount ? { label: "Referral discount", amount: discount.referralDiscountAmount * sign } : undefined,
         discount?.pointsDiscountAmount ? { label: "Points discount", amount: discount.pointsDiscountAmount * sign } : undefined,
         discount?.codeDiscountAmount ? { label: `Discount code${discount.codeLabel ? ` (${discount.codeLabel})` : ""}`, amount: discount.codeDiscountAmount * sign } : undefined,
       ].filter(Boolean) as { label: string; amount: number }[];

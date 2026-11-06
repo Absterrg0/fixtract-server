@@ -44,8 +44,8 @@ export const buildPaymentDiscountLedgerEntry = (
     paymentIntentId,
     ...(milestoneIndex !== undefined ? { milestoneIndex } : {}),
     ...(currency ? { currency } : {}),
-    // A payment without a discount snapshot had no checkout discount: the
-    // snapshot is only written when the total discount is positive.
+    // Legacy payments may have no snapshot; new checkouts persist one even
+    // when the configured discounts amount to zero.
     originalAmount: money(discount.originalAmount),
     loyaltyAmount: money(discount.loyaltyAmount),
     repeatBuyerAmount: money(discount.repeatBuyerAmount),

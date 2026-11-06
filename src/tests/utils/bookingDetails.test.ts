@@ -1915,3 +1915,11 @@ describe('legacy compatibility', () => {
     expect(details.quotation).toBeNull();
   });
 });
+
+
+it('projects the recorded referral amount with the customer payment discount breakdown', async () => {
+  const details = await buildDetails('customer', { payments: [payment({
+    discount: { referralDiscountAmount: 12, loyaltyAmount: 5, totalDiscount: 17, originalAmount: 100 },
+  })] });
+  expect(details.payments.records[0].discount).toMatchObject({ referralDiscountAmount: 12, loyaltyAmount: 5, totalDiscount: 17 });
+});

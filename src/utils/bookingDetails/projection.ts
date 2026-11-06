@@ -565,6 +565,7 @@ const buildPayments = async (params: {
           pointsRedeemed: num(payment.discount.pointsRedeemed) ?? 0,
           pointsDiscountAmount: num(payment.discount.pointsDiscountAmount) ?? 0,
           codeDiscountAmount: num(payment.discount.codeDiscountAmount) ?? 0,
+          referralDiscountAmount: num(payment.discount.referralDiscountAmount) ?? 0,
           codeLabel: str(payment.discount.codeLabel),
           totalDiscount: num(payment.discount.totalDiscount) ?? 0,
           originalAmount: num(payment.discount.originalAmount) ?? 0,

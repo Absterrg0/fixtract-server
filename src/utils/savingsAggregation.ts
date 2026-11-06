@@ -142,6 +142,7 @@ const hasSnapshot = (snapshot: RecordedDiscountSnapshot | null | undefined): boo
     toAmount(snapshot?.repeatBuyerAmount) > 0 ||
     toAmount(snapshot?.pointsDiscountAmount) > 0 ||
     toAmount(snapshot?.codeDiscountAmount) > 0 ||
+    toAmount(snapshot?.referralDiscountAmount) > 0 ||
     toAmount(snapshot?.originalAmount) > 0);
 
 const partsOf = (snapshot: RecordedDiscountSnapshot): SavingsByType => ({

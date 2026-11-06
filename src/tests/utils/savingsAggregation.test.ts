@@ -290,3 +290,10 @@ describe('per-payment discount ledger', () => {
     expect(summary.groups).toEqual([]);
   });
 });
+
+
+it('recognizes a sparse referral-only snapshot without another discount or original amount', () => {
+  const summary = aggregateRecordedSavings([settled({ referralDiscountAmount: 12 })]);
+  expect(summary.unrecordedBookingCount).toBe(0);
+  expect(summary.groups[0]).toMatchObject({ totalRecorded: 12, recordedReferral: 12, referral: 12 });
+});
