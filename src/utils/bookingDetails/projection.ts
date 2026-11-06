@@ -555,20 +555,31 @@ const buildPayments = async (params: {
       return invoice;
     })();
 
-    const discount = payment.discount
+    const intentId = str(payment.stripePaymentIntentId);
+    const currentDiscount = viewerRole === 'customer' && intentId
+      && intentId === str(booking.payment?.stripePaymentIntentId)
+      ? booking.payment?.discount
+      : null;
+    const recordedDiscount = viewerRole === 'customer' && intentId
+      ? booking.paymentDiscountLedger?.find((entry: any) => entry.paymentIntentId === intentId)
+      : null;
+    // Recorded amounts are authoritative. Only the same checkout can supply
+    // a fallback snapshot or descriptive fields absent from the ledger.
+    const discountSnapshot = recordedDiscount || payment.discount || currentDiscount;
+    const discount = discountSnapshot
       ? {
-          loyaltyTier: str(payment.discount.loyaltyTier),
-          loyaltyPercentage: num(payment.discount.loyaltyPercentage) ?? 0,
-          loyaltyAmount: num(payment.discount.loyaltyAmount) ?? 0,
-          repeatBuyerPercentage: num(payment.discount.repeatBuyerPercentage) ?? 0,
-          repeatBuyerAmount: num(payment.discount.repeatBuyerAmount) ?? 0,
-          pointsRedeemed: num(payment.discount.pointsRedeemed) ?? 0,
-          pointsDiscountAmount: num(payment.discount.pointsDiscountAmount) ?? 0,
-          codeDiscountAmount: num(payment.discount.codeDiscountAmount) ?? 0,
-          referralDiscountAmount: num(payment.discount.referralDiscountAmount) ?? 0,
-          codeLabel: str(payment.discount.codeLabel),
-          totalDiscount: num(payment.discount.totalDiscount) ?? 0,
-          originalAmount: num(payment.discount.originalAmount) ?? 0,
+          loyaltyTier: str(discountSnapshot.loyaltyTier ?? currentDiscount?.loyaltyTier),
+          loyaltyPercentage: num(discountSnapshot.loyaltyPercentage ?? currentDiscount?.loyaltyPercentage) ?? 0,
+          loyaltyAmount: num(discountSnapshot.loyaltyAmount) ?? 0,
+          repeatBuyerPercentage: num(discountSnapshot.repeatBuyerPercentage ?? currentDiscount?.repeatBuyerPercentage) ?? 0,
+          repeatBuyerAmount: num(discountSnapshot.repeatBuyerAmount) ?? 0,
+          pointsRedeemed: num(discountSnapshot.pointsRedeemed ?? currentDiscount?.pointsRedeemed) ?? 0,
+          pointsDiscountAmount: num(discountSnapshot.pointsDiscountAmount) ?? 0,
+          codeDiscountAmount: num(discountSnapshot.codeDiscountAmount) ?? 0,
+          referralDiscountAmount: num(discountSnapshot.referralDiscountAmount) ?? 0,
+          codeLabel: str(discountSnapshot.codeLabel ?? currentDiscount?.codeLabel),
+          totalDiscount: num(discountSnapshot.totalDiscount) ?? 0,
+          originalAmount: num(discountSnapshot.originalAmount) ?? 0,
         }
       : null;
 

@@ -55,10 +55,13 @@ export const buildDetailsForBookingDocument = async (params: {
   const { booking, viewerRole, user } = params;
   const plain = typeof booking?.toObject === 'function' ? booking.toObject() : booking;
   const bookingId = String(plain._id);
-  const [payments, cancellations, warrantyClaims] = await Promise.all([
+  const [payments, cancellations, warrantyClaims, discountHistory] = await Promise.all([
     Payment.find({ booking: bookingId }).sort({ createdAt: 1 }).lean(),
     CancellationRequest.find({ booking: bookingId }).sort({ createdAt: 1 }).lean(),
     WarrantyClaim.find({ booking: bookingId }).sort({ openedAt: 1 }).lean(),
+    viewerRole === 'customer'
+      ? Booking.findById(bookingId).select('paymentDiscountLedger').lean()
+      : null,
   ]);
   const professionalIdFromProject = referenceId(plain?.project?.professionalId);
   const actorIds = collectActorIds(plain, payments, cancellations, warrantyClaims);
@@ -72,6 +75,7 @@ export const buildDetailsForBookingDocument = async (params: {
   // when no Payment row recorded them. They are attached non-persistently.
   const bookingForProjection = {
     ...plain,
+    paymentDiscountLedger: viewerRole === 'customer' ? discountHistory?.paymentDiscountLedger : undefined,
     __cancellationRequests: adminAccess && !adminAccess.cancellations ? [] : cancellations,
   };
 

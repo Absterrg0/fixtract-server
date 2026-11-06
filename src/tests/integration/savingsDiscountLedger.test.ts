@@ -74,6 +74,7 @@ import StripeEvent from '../../models/stripeEvent';
 import { createPaymentIntent, confirmPayment } from '../../handlers/Stripe/payment';
 import { handleWebhook, reconciliationItemEventId } from '../../handlers/Stripe/webhooks';
 import { inspectStripeReconciliationItems } from '../../scripts/migrate/checkStripeReconciliationItems';
+import { buildDetailsForBookingDocument } from '../../handlers/Booking/details';
 import { getSavingsSummary } from '../../handlers/User/savingsSummary';
 import { recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger';
 import { bookingForRequest } from '../../utils/invoiceVisibility';
@@ -229,6 +230,26 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
       latest_charge: `ch_${id}`,
       currency: 'eur',
     }));
+  });
+
+  it('loads the hidden customer ledger for details with a persisted Payment row', async () => {
+    const booking = await seedMilestoneBooking();
+    await Booking.updateOne({ _id: booking._id }, { $set: {
+      payment: { status: 'completed', stripePaymentIntentId: 'pi_new_checkout', discount: { referralDiscountAmount: 99 } },
+      paymentDiscountLedger: [{ paymentIntentId: 'pi_recorded_checkout', referralDiscountAmount: 12, loyaltyAmount: 5, totalDiscount: 17, originalAmount: 100, recordedAt: new Date() }],
+    } });
+    await Payment.collection.insertOne({
+      booking: booking._id, customer: customerId, professional: professionalId,
+      stripePaymentIntentId: 'pi_recorded_checkout', status: 'completed',
+      amount: 83, netAmount: 83, currency: 'EUR', discount: null,
+    });
+    const loaded = await Booking.findById(booking._id);
+    expect(loaded?.paymentDiscountLedger).toBeUndefined();
+    const details = await buildDetailsForBookingDocument({ booking: loaded, viewerRole: 'customer', user: { _id: customerId } });
+    const recorded = details.payments.records.find(row => row.amount === 83)!;
+    expect(recorded.discount).toMatchObject({ referralDiscountAmount: 12, loyaltyAmount: 5, totalDiscount: 17, originalAmount: 100 });
+    const professional = await buildDetailsForBookingDocument({ booking: loaded, viewerRole: 'professional', user: { _id: professionalId } });
+    expect(professional.payments.records.find(row => row.amount === 83)?.discount).toBeNull();
   });
 
   const seedReferral = async () => {

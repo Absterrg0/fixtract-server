@@ -1923,3 +1923,37 @@ it('projects the recorded referral amount with the customer payment discount bre
   })] });
   expect(details.payments.records[0].discount).toMatchObject({ referralDiscountAmount: 12, loyaltyAmount: 5, totalDiscount: 17 });
 });
+
+it('uses the ledger matching a persisted Payment intent and preserves available breakdown fields', async () => {
+  const details = await buildDetails('customer', {
+    booking: {
+      payment: { stripePaymentIntentId: 'pi_secret_123', discount: { loyaltyPercentage: 5, codeLabel: 'WELCOME', referralDiscountAmount: 99 } },
+      paymentDiscountLedger: [
+        { paymentIntentId: 'pi_other', referralDiscountAmount: 77 },
+        { paymentIntentId: 'pi_secret_123', referralDiscountAmount: 12, loyaltyAmount: 5, totalDiscount: 17, originalAmount: 100 },
+      ],
+    },
+    payments: [payment({ discount: null })],
+  });
+  expect(details.payments.records[0].discount).toMatchObject({
+    referralDiscountAmount: 12, loyaltyAmount: 5, loyaltyPercentage: 5, codeLabel: 'WELCOME', totalDiscount: 17, originalAmount: 100,
+  });
+});
+
+it.each([['pi_secret_123', 12], ['pi_another', null]])('only falls back to the booking discount for the same intent (%s)', async (intent, expected) => {
+  const details = await buildDetails('customer', {
+    booking: { payment: { stripePaymentIntentId: intent, discount: { referralDiscountAmount: 12 } } },
+    payments: [payment({ discount: null })],
+  });
+  expect(details.payments.records[0].discount?.referralDiscountAmount ?? null).toBe(expected);
+});
+
+it('keeps customer ledger discounts out of professional and admin payment projections', async () => {
+  for (const role of ['professional', 'admin'] as const) {
+    const details = await buildDetails(role, {
+      booking: { paymentDiscountLedger: [{ paymentIntentId: 'pi_secret_123', referralDiscountAmount: 12 }] },
+      payments: [payment({ discount: null })],
+    });
+    expect(details.payments.records[0].discount).toBeNull();
+  }
+});
