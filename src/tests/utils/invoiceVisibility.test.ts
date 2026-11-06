@@ -370,3 +370,13 @@ describe("pro payout summary stripping", () => {
     expect(stripped.invoiceNumber).toBe("FIX-1");
   });
 });
+
+it('strips the referral reservation token for both participants without changing admin or stored data', () => {
+  const source = { ...payment, discount: { referralReservationToken: 'pi_internal', referralDiscountAmount: 12 } };
+  for (const role of ['customer', 'professional'] as const) {
+    const result = bookingForViewer({ payment: source }, role);
+    expect(result.payment.discount).toEqual({ referralDiscountAmount: 12 });
+  }
+  expect(bookingForViewer({ payment: source }, 'admin').payment.discount.referralReservationToken).toBe('pi_internal');
+  expect(source.discount.referralReservationToken).toBe('pi_internal');
+});
