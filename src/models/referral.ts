@@ -98,6 +98,11 @@ const referralSchema = new Schema<IReferral>({
   timestamps: true
 });
 
+referralSchema.index(
+  { discountBooking: 1 },
+  { partialFilterExpression: { discountBooking: { $exists: true } } },
+);
+
 // Compound indexes
 referralSchema.index({ referrer: 1, status: 1 });
 referralSchema.index({ referredUser: 1, status: 1 });
