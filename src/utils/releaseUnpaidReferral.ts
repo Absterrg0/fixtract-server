@@ -25,3 +25,21 @@ export async function releaseUnpaidReferral(booking: {
     : await getReferralReservationToken(booking._id.toString());
   await releaseReferralReservation(booking._id.toString(), token);
 }
+
+/** Post-persist cleanup must not prevent the terminal flow from completing. */
+export async function releaseUnpaidReferralSafely(
+  booking: Parameters<typeof releaseUnpaidReferral>[0],
+  context: string,
+): Promise<void> {
+  try {
+    await releaseUnpaidReferral(booking);
+  } catch (error) {
+    // Stripe failure leaves the reservation bound, so release can be retried.
+    // Do not log provider payloads or the reservation token.
+    console.error('Referral release failed after terminal booking update', {
+      bookingId: booking._id.toString(),
+      context,
+      errorType: error instanceof Error ? error.name : typeof error,
+    });
+  }
+}

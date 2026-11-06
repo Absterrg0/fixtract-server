@@ -7,7 +7,7 @@ import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { stripe } from '../../services/stripe';
 import { getReferralReservationToken, releaseReferralReservation } from '../../utils/referralDiscount';
-import { releaseUnpaidReferral } from '../../utils/releaseUnpaidReferral';
+import { releaseUnpaidReferralSafely } from '../../utils/releaseUnpaidReferral';
 import { quoteAmountIncludesSelectedExtras } from '../../utils/payment';
 import Booking, { BookingStatus } from '../../models/booking';
 import Project from '../../models/project';
@@ -955,7 +955,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       await booking.save(session ? { session } : undefined);
     });
 
-    if (requestedStatus === 'cancelled') await releaseUnpaidReferral(booking);
+    if (requestedStatus === 'cancelled') await releaseUnpaidReferralSafely(booking, 'booking cancellation');
 
     if (['cancelled', 'refunded', 'completed'].includes(requestedStatus)) {
       try {
@@ -1767,7 +1767,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       await booking.save(session ? { session } : undefined);
     });
 
-    if (booking.status === 'cancelled') await releaseUnpaidReferral(booking);
+    if (booking.status === 'cancelled') await releaseUnpaidReferralSafely(booking, 'reschedule decline');
 
     if (normalizedAction !== 'accept' && ['cancelled', 'refunded'].includes(booking.status)) {
       try {
