@@ -53,13 +53,14 @@ describe("scaleDiscountToFullGross", () => {
 
   it("scales the slice back up to the full gross", () => {
     const scaled = scaleDiscountToFullGross(
-      { loyaltyAmount: 5, repeatBuyerAmount: 2, totalDiscount: 7, originalAmount: 220 },
+      { loyaltyAmount: 5, repeatBuyerAmount: 2, referralDiscountAmount: 3, totalDiscount: 10, originalAmount: 220 },
       220,
       440,
     );
     expect(scaled?.loyaltyAmount).toBeCloseTo(10, 2);
     expect(scaled?.repeatBuyerAmount).toBeCloseTo(4, 2);
-    expect(scaled?.totalDiscount).toBeCloseTo(14, 2);
+    expect(scaled?.referralDiscountAmount).toBeCloseTo(6, 2);
+    expect(scaled?.totalDiscount).toBeCloseTo(20, 2);
   });
 });
 

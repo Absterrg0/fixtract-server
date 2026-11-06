@@ -46,6 +46,7 @@ export const getMilestoneFullCustomerGross = (
 export type ScaledInvoiceDiscount = {
   loyaltyAmount: number;
   repeatBuyerAmount: number;
+  referralDiscountAmount: number;
   pointsDiscountAmount: number;
   codeDiscountAmount: number;
   codeLabel?: string;
@@ -72,6 +73,7 @@ export const scaleDiscountToFullGross = (
   return {
     loyaltyAmount: scale(discount.loyaltyAmount),
     repeatBuyerAmount: scale(discount.repeatBuyerAmount),
+    referralDiscountAmount: scale(discount.referralDiscountAmount),
     pointsDiscountAmount: scale(discount.pointsDiscountAmount),
     codeDiscountAmount: scale(discount.codeDiscountAmount),
     codeLabel: discount.codeLabel,
