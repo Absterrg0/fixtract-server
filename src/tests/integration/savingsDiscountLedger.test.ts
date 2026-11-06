@@ -309,11 +309,15 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
     expect(first.payment!.discount!.codeDiscountAmount).toBe(5);
     expect(second.payment!.discount!.codeDiscountAmount).toBe(5);
     const { buildUblInvoiceXml } = await import('../../services/invoiceArtifacts');
+    // Part 3 #19d invoices the entire quotation, regardless of which slice
+    // most recently supplied the payment snapshot. Both real checkout totals
+    // include their own referral/loyalty/code allocation and VAT.
+    const fullBookingTotal = (first.payment!.totalWithVat! + second.payment!.totalWithVat!).toFixed(2);
     for (const installment of [first, second]) {
       await installment.populate('customer professional');
       const xml = buildUblInvoiceXml(installment.toObject(), 'FIX-MILESTONE', new Date(), { selfBilling: false, platform: { country: 'BE' } });
       expect(xml).toContain('Referral discount');
-      expect(xml).toContain(`<cbc:TaxInclusiveAmount currencyID="EUR">${installment.payment!.totalWithVat!.toFixed(2)}</cbc:TaxInclusiveAmount>`);
+      expect(xml).toContain(`<cbc:TaxInclusiveAmount currencyID="EUR">${fullBookingTotal}</cbc:TaxInclusiveAmount>`);
     }
   });
 
