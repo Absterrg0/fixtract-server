@@ -1,12 +1,12 @@
 import { stripe } from '../services/stripe';
-import { releaseReferralReservation } from './referralDiscount';
+import { getReferralReservationToken, releaseReferralReservation } from './referralDiscount';
 
 /** Terminal booking paths must confirm that an outstanding checkout cannot
  * settle before making its unconsumed benefit available to another booking.
  * Failed cancellation deliberately retains the reservation for a safe retry. */
 export async function releaseUnpaidReferral(booking: {
   _id: { toString(): string };
-  payment?: { status?: string; stripePaymentIntentId?: string };
+  payment?: { status?: string; stripePaymentIntentId?: string; discount?: { referralReservationToken?: string } };
   milestonePayments?: ReadonlyArray<{ status?: string }>;
 }): Promise<void> {
   if (booking.milestonePayments?.some(milestone => milestone.status === 'paid')) return;
@@ -20,5 +20,8 @@ export async function releaseUnpaidReferral(booking: {
       if (cancelled.status !== 'canceled') return;
     }
   }
-  await releaseReferralReservation(booking._id.toString());
+  const token = intentId
+    ? booking.payment?.discount?.referralReservationToken
+    : await getReferralReservationToken(booking._id.toString());
+  await releaseReferralReservation(booking._id.toString(), token);
 }

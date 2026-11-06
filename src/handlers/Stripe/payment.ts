@@ -27,7 +27,7 @@ import {
   quoteAmountIncludesSelectedExtras,
 } from '../../utils/payment';
 import { canRetryTransfer, getTransferStatus, requireProfessionalPayout } from '../../utils/paymentSafety';
-import { releaseReferralReservation, withReferralDiscount } from '../../utils/referralDiscount';
+import { bindReferralReservation, releaseReferralReservation, withReferralDiscount } from '../../utils/referralDiscount';
 import { calculateVAT } from '../../utils/vat';
 import { calculateVatFromPricingLines } from '../../utils/vatLineCalculation';
 import { parseVatCountryCode, requiresVatRfqReview } from '../../utils/vatManagement';
@@ -300,6 +300,7 @@ export const createPaymentIntent = async (
   discountCode?: string
 ): Promise<CreatePaymentIntentResult> => {
   let createdIntentId: string | undefined;
+  let reservationToken: string | undefined;
   try {
     const booking = await Booking.findById(bookingId)
       .populate('customer')
@@ -474,7 +475,7 @@ export const createPaymentIntent = async (
       if (booking.payment.status === 'pending') {
         try {
           const cancelled = await stripe.paymentIntents.cancel(booking.payment.stripePaymentIntentId);
-          if (cancelled.status === 'canceled') await releaseReferralReservation(String(booking._id));
+          if (cancelled.status === 'canceled') await releaseReferralReservation(String(booking._id), booking.payment.discount?.referralReservationToken);
           console.log(`🗑️  Cancelled superseded PaymentIntent ${booking.payment.stripePaymentIntentId} for booking ${booking._id}`);
         } catch (cancelErr: any) {
           if (cancelErr?.code !== 'payment_intent_unexpected_state' && cancelErr?.code !== 'resource_missing') {
@@ -513,6 +514,7 @@ export const createPaymentIntent = async (
     );
 
     const fullDiscountBreakdown = await withReferralDiscount(automaticDiscount, customer._id.toString(), String(booking._id), true);
+    reservationToken = fullDiscountBreakdown.referralDiscount?.reservationToken;
     let discountBreakdown = fullDiscountBreakdown;
     if (fullBookingAmount > 0 && chargeAmount < fullBookingAmount) {
       const ratio = chargeAmount / fullBookingAmount;
@@ -641,10 +643,20 @@ export const createPaymentIntent = async (
         discountCode,
         quoteVersion: booking.currentQuoteVersion,
         checkoutRevision: booking.checkoutRevision,
+        previousIntentId: booking.payment?.stripePaymentIntentId,
       })
     });
 
     createdIntentId = paymentIntent.id;
+    if (reservationToken) {
+      const bound = await bindReferralReservation(bookingId, reservationToken, paymentIntent.id);
+      if (!bound) {
+        // Another attempt owns the reservation. This idempotent intent may be
+        // shared with it, so neither cancel it nor expose its client secret.
+        return { success: false, error: { code: 'BOOKING_CHANGED', message: 'The checkout changed. Refresh before paying.' } };
+      }
+      reservationToken = paymentIntent.id;
+    }
     // Update booking with payment info
     booking.payment = {
       amount: netAmount,
@@ -674,6 +686,7 @@ export const createPaymentIntent = async (
           pointsRedeemed: discountBreakdown.pointsDiscount.pointsUsed,
           pointsDiscountAmount: discountBreakdown.pointsDiscount.discountAmount,
           referralDiscountAmount: discountBreakdown.referralDiscount?.amount || 0,
+          referralReservationToken: reservationToken,
           referralId: discountBreakdown.referralDiscount?.referralId ? new mongoose.Types.ObjectId(discountBreakdown.referralDiscount.referralId) : undefined,
           codeDiscountAmount: discountBreakdown.codeDiscount?.amount || 0,
           codeId: discountBreakdown.codeDiscount?.codeId
@@ -739,12 +752,17 @@ export const createPaymentIntent = async (
       try {
         // Stripe can return the same idempotent intent to two concurrent
         // callers. A losing save must never cancel the winner's active intent.
-        const latest = await Booking.findById(bookingId).select('payment.stripePaymentIntentId status').lean();
+        const latest = await Booking.findById(bookingId).select('payment.stripePaymentIntentId payment.discount.referralReservationToken status').lean();
         if (latest?.payment?.stripePaymentIntentId !== createdIntentId) {
           const cancelled = await stripe.paymentIntents.cancel(createdIntentId);
           // A winning checkout for this same booking keeps its reservation.
           if (cancelled.status === 'canceled' && (!latest?.payment?.stripePaymentIntentId || latest.status === 'cancelled')) {
-            await releaseReferralReservation(bookingId);
+            await releaseReferralReservation(bookingId, reservationToken);
+          } else if (cancelled.status === 'canceled' && reservationToken && latest?.payment?.stripePaymentIntentId) {
+            // Restore the winning checkout's fence only if we still own the
+            // cancelled attempt. A later retry's token must survive this too.
+            await bindReferralReservation(bookingId, reservationToken,
+              latest.payment.discount?.referralReservationToken || latest.payment.stripePaymentIntentId);
           }
         }
       } catch { /* A racing success is handled by the durable superseded-intent reconciliation path. */ }

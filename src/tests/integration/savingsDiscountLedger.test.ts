@@ -260,7 +260,7 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
     const discounted = results.filter(result => result.status === 'fulfilled' && result.value.referralDiscount);
     expect(discounted).toHaveLength(1);
     const winner = (await Referral.findById(referral._id))!.discountBooking;
-    await releaseReferralReservation(String(old._id)); // delayed old cleanup cannot clear the winner
+    await releaseReferralReservation(String(old._id), pending!.payment!.discount!.referralReservationToken); // delayed old cleanup cannot clear the winner
     expect(String((await Referral.findById(referral._id))!.discountBooking)).toBe(String(winner));
   });
 
@@ -280,11 +280,46 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
     expect((await Booking.findById(booking._id))!.payment!.status).toBe('failed');
   });
 
+  it('keeps retry B reserved when the old A webhook releases after B re-reserves the SAME booking', async () => {
+    const referral = await seedReferral();
+    const booking = await seedMilestoneBooking();
+    const rival = await seedMilestoneBooking();
+    const first = await createPaymentIntent(String(booking._id), String(customerId), 0, 0);
+    const oldPayment = (await Booking.findById(booking._id))!.payment!;
+    expect(oldPayment.discount!.referralReservationToken).toBe(first.paymentIntentId);
+    const update = Booking.updateOne.bind(Booking);
+    let retry: Awaited<ReturnType<typeof createPaymentIntent>> | undefined;
+    const spy = vi.spyOn(Booking, 'updateOne').mockImplementationOnce((async (...args: any[]) => {
+      const result = await (update as any)(...args);
+      // A has become failed, but its handler has not released its token yet.
+      retry = await createPaymentIntent(String(booking._id), String(customerId), 0, 0);
+      return result;
+    }) as any);
+    try {
+      await deliverEvent({ id: `evt_race_${new Types.ObjectId()}`, type: 'payment_intent.canceled', data: { object: {
+        id: first.paymentIntentId, metadata: { bookingId: String(booking._id) }, status: 'canceled',
+      } } });
+    } finally { spy.mockRestore(); }
+    expect(retry?.success).toBe(true);
+    expect(retry?.paymentIntentId).not.toBe(first.paymentIntentId);
+    const current = (await Booking.findById(booking._id))!.payment!;
+    expect(current.discount!.referralReservationToken).toBe(retry!.paymentIntentId);
+    expect((await Referral.findById(referral._id))!.discountReservationToken).toBe(retry!.paymentIntentId);
+    expect(current.discount!.referralDiscountAmount).toBeGreaterThan(0);
+    expect(stripeMocks.intentCreate.mock.calls[0][1].idempotencyKey).not.toBe(stripeMocks.intentCreate.mock.calls[1][1].idempotencyKey);
+    expect((await createPaymentIntent(String(rival._id), String(customerId), 0, 0)).success).toBe(true);
+    expect((await Booking.findById(rival._id))!.payment!.discount!.referralDiscountAmount).toBe(0);
+    // A terminal path holding A's snapshot is fenced by the same token.
+    stripeMocks.intentRetrieve.mockResolvedValue({ status: 'canceled' });
+    await releaseUnpaidReferral({ _id: booking._id, payment: oldPayment });
+    expect((await Referral.findById(referral._id))!.discountReservationToken).toBe(retry!.paymentIntentId);
+  });
+
   it('never releases a consumed referral even if a caller holds a stale unpaid booking', async () => {
     const referral = await seedReferral();
     const booking = await seedMilestoneBooking();
-    await Referral.updateOne({ _id: referral._id }, { $set: { discountBooking: booking._id, referredUserDiscountApplied: true } });
-    await releaseReferralReservation(String(booking._id));
+    await Referral.updateOne({ _id: referral._id }, { $set: { discountBooking: booking._id, discountReservationToken: 'pi_settled', referredUserDiscountApplied: true } });
+    await releaseReferralReservation(String(booking._id), 'pi_settled');
     expect(String((await Referral.findById(referral._id))!.discountBooking)).toBe(String(booking._id));
   });
 
@@ -318,6 +353,8 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
   });
 
   it.each([true, false])('a losing checkout save preserves a shared active intent: %s', async (sameIntent) => {
+    const referral = await seedReferral();
+    stripeMocks.intentCancel.mockResolvedValue({ status: 'canceled' });
     const booking = await seedMilestoneBooking();
     const save = vi.spyOn(Booking.prototype, 'save').mockImplementationOnce(async function (this: any) {
       await Booking.collection.updateOne({ _id: this._id }, { $set: {
@@ -330,6 +367,8 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
       expect(result).toMatchObject({ success: false, error: { code: 'BOOKING_CHANGED' } });
       if (sameIntent) expect(stripeMocks.intentCancel).not.toHaveBeenCalled();
       else expect(stripeMocks.intentCancel).toHaveBeenCalledOnce();
+      const winner = (await Booking.findById(booking._id))!.payment!.stripePaymentIntentId;
+      expect((await Referral.findById(referral._id))!.discountReservationToken).toBe(winner);
     } finally {
       save.mockRestore();
     }

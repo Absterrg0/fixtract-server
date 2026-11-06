@@ -521,6 +521,7 @@ export interface IBooking extends Document {
       codeDiscountAmount?: number;
       referralDiscountAmount?: number;
       referralId?: Types.ObjectId;
+      referralReservationToken?: string;
       codeId?: mongoose.Types.ObjectId;
       codeLabel?: string;
       totalDiscount: number;
@@ -1344,6 +1345,7 @@ const BookingSchema = new Schema({
       referralDiscountAmount: { type: Number },
       codeDiscountAmount: { type: Number, default: 0 },
       referralId: { type: Schema.Types.ObjectId, ref: "Referral" },
+      referralReservationToken: { type: String },
       codeId: { type: mongoose.Schema.Types.ObjectId, ref: 'DiscountCode' },
       codeLabel: { type: String },
       totalDiscount: { type: Number, default: 0 },
