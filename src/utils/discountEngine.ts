@@ -47,7 +47,7 @@ export interface DiscountBreakdown {
   repeatBuyerDiscount: RepeatBuyerDiscountInfo;
   pointsDiscount: PointsDiscountInfo;
   codeDiscount?: CodeDiscountInfo;
-  referralDiscount?: { amount: number; referralId: string };
+  referralDiscount?: { amount: number; referralId: string; reservationToken?: string };
   totalDiscount: number;
   originalAmount: number;
   finalAmount: number;

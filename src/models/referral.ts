@@ -11,6 +11,7 @@ export interface IReferral extends Document {
   referrerRewardType?: 'customer_credit' | 'professional_level_boost';
   referrerRewardIssuedAt?: Date;
   referredUserDiscountApplied: boolean;
+  discountReservationToken?: string;
   discountBooking?: mongoose.Types.ObjectId; // first checkout claiming the customer discount
   qualifyingBooking?: mongoose.Types.ObjectId; // the booking that triggered completion
   expiresAt: Date; // when this referral expires if not completed
@@ -65,6 +66,7 @@ const referralSchema = new Schema<IReferral>({
     default: false
   },
   discountBooking: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
+  discountReservationToken: { type: String },
   qualifyingBooking: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Booking',
@@ -95,6 +97,11 @@ const referralSchema = new Schema<IReferral>({
 }, {
   timestamps: true
 });
+
+referralSchema.index(
+  { discountBooking: 1 },
+  { partialFilterExpression: { discountBooking: { $exists: true } } },
+);
 
 // Compound indexes
 referralSchema.index({ referrer: 1, status: 1 });

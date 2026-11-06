@@ -6,8 +6,8 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { stripe } from '../../services/stripe';
-import { releaseReferralReservation } from '../../utils/referralDiscount';
-import { releaseUnpaidReferral } from '../../utils/releaseUnpaidReferral';
+import { getReferralReservationToken, releaseReferralReservation } from '../../utils/referralDiscount';
+import { releaseUnpaidReferralSafely } from '../../utils/releaseUnpaidReferral';
 import { quoteAmountIncludesSelectedExtras } from '../../utils/payment';
 import Booking, { BookingStatus } from '../../models/booking';
 import Project from '../../models/project';
@@ -968,7 +968,7 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       await booking.save(session ? { session } : undefined);
     });
 
-    if (requestedStatus === 'cancelled') await releaseUnpaidReferral(booking);
+    if (requestedStatus === 'cancelled') await releaseUnpaidReferralSafely(booking, 'booking cancellation');
 
     if (['cancelled', 'refunded', 'completed'].includes(requestedStatus)) {
       try {
@@ -1319,6 +1319,9 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
     }
 
     const oldIntentId = booking.payment?.stripePaymentIntentId;
+    const oldReservationToken = oldIntentId
+      ? booking.payment?.discount?.referralReservationToken
+      : await getReferralReservationToken(String(booking._id));
     if (oldIntentId) {
       // Never edit while a charge is processing, authorized, or succeeded.
       // A successful cancellation is authority to invalidate the checkout.
@@ -1345,7 +1348,7 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       return booking;
     });
 
-    await releaseReferralReservation(String(booking._id));
+    await releaseReferralReservation(String(booking._id), oldReservationToken);
 
     try {
       const professional = booking.professional as any;
@@ -1805,7 +1808,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       await booking.save(session ? { session } : undefined);
     });
 
-    if (booking.status === 'cancelled') await releaseUnpaidReferral(booking);
+    if (booking.status === 'cancelled') await releaseUnpaidReferralSafely(booking, 'reschedule decline');
 
     if (normalizedAction !== 'accept' && ['cancelled', 'refunded'].includes(booking.status)) {
       try {

@@ -3,7 +3,7 @@ const mocks = vi.hoisted(() => ({ find: vi.fn(), reserve: vi.fn(), config: vi.fn
 vi.mock('../../models/referral', () => ({ default: { findOne: mocks.find, findOneAndUpdate: mocks.reserve, updateOne: mocks.consume } }));
 vi.mock('../../models/referralConfig', () => ({ default: { getCurrentConfig: mocks.config } }));
 vi.mock('../../models/booking', () => ({ default: { updateOne: mocks.ledger } }));
-import { withReferralDiscount } from '../../utils/referralDiscount';
+import { bindReferralReservation, releaseReferralReservation, withReferralDiscount } from '../../utils/referralDiscount';
 import { calculateDiscountedPayouts } from '../../utils/discountAccounting';
 import { buildPaymentDiscountLedgerEntry, recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger';
 import { aggregateRecordedSavings } from '../../utils/savingsAggregation';
@@ -24,10 +24,26 @@ describe('referred customer checkout savings', () => {
     expect(preview.finalAmount).toBe(96);
     expect(mocks.reserve).not.toHaveBeenCalled();
     const paid = await withReferralDiscount(discount(), 'customer1', 'booking1', true);
-    expect(paid.referralDiscount).toEqual({ amount: 12, referralId: 'r1' });
+    expect(paid.referralDiscount).toEqual({ amount: 12, referralId: 'r1', reservationToken: expect.any(String) });
+    expect(mocks.reserve.mock.calls[0][1].$set.discountReservationToken).toBe(paid.referralDiscount?.reservationToken);
     expect(mocks.reserve.mock.calls[0][0].$or[0]).toMatchObject({ discountBooking: 'booking1' });
     mocks.reserve.mockResolvedValue(null);
     await expect(withReferralDiscount(discount(), 'customer1', 'booking2', true)).rejects.toThrow('another checkout');
+  });
+  it('re-stamps same-booking attempts and binds only the current nonce or shared intent', async () => {
+    const first = await withReferralDiscount(discount(), 'customer1', 'booking1', true);
+    const retry = await withReferralDiscount(discount(), 'customer1', 'booking1', true);
+    expect(retry.referralDiscount!.reservationToken).not.toBe(first.referralDiscount!.reservationToken);
+    mocks.consume.mockResolvedValueOnce({ matchedCount: 0 }).mockResolvedValueOnce({ matchedCount: 1 });
+    expect(await bindReferralReservation('booking1', first.referralDiscount!.reservationToken!, 'pi_A')).toBe(false);
+    expect(await bindReferralReservation('booking1', retry.referralDiscount!.reservationToken!, 'pi_B')).toBe(true);
+    expect(mocks.consume).toHaveBeenLastCalledWith({ discountBooking: 'booking1', discountReservationToken: { $in: [retry.referralDiscount!.reservationToken, 'pi_B'] } }, { $set: { discountReservationToken: 'pi_B' } });
+  });
+  it('fences both token-bearing and legacy cleanup without matching a new reservation', async () => {
+    await releaseReferralReservation('booking1', 'pi_A');
+    expect(mocks.consume).toHaveBeenLastCalledWith({ discountBooking: 'booking1', discountReservationToken: 'pi_A', referredUserDiscountApplied: { $ne: true } }, { $unset: { discountBooking: 1, discountReservationToken: 1 } });
+    await releaseReferralReservation('booking1', undefined);
+    expect(mocks.consume.mock.lastCall![0].discountReservationToken).toBeNull();
   });
   it('does not discount non-referred customers or disabled programs', async () => {
     mocks.find.mockReturnValue({ lean: async () => null });

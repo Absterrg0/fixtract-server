@@ -805,7 +805,7 @@ async function handlePaymentIntentCanceled(paymentIntent: Stripe.PaymentIntent) 
       'payment.stripePaymentIntentId': paymentIntent.id,
       'payment.status': { $in: ['pending', 'failed'] },
     }, { $set: { 'payment.status': 'failed', 'payment.canceledAt': new Date() } });
-    if (updated.modifiedCount) await releaseReferralReservation(bookingId);
+    if (updated.modifiedCount) await releaseReferralReservation(bookingId, booking.payment.discount?.referralReservationToken);
     return;
   }
 

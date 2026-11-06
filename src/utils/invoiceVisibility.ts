@@ -238,6 +238,10 @@ export const sanitizePaymentForViewer = (
 
   const clean: Record<string, any> = stripInternalPaymentDiagnostics(payment);
   stripFields(clean, PARTICIPANT_PROVIDER_FIELDS);
+  if (clean.discount && typeof clean.discount === "object") {
+    clean.discount = { ...clean.discount };
+    delete clean.discount.referralReservationToken;
+  }
   if ("metadata" in clean) clean.metadata = undefined;
 
   if (viewerRole === "customer") {

@@ -20,7 +20,7 @@ const mocks = vi.hoisted(() => ({
   warrantyUpdateMany: vi.fn(),
 }));
 
-vi.mock('../../../utils/referralDiscount', () => ({ releaseReferralReservation: mocks.releaseReferral }));
+vi.mock('../../../utils/referralDiscount', () => ({ releaseReferralReservation: mocks.releaseReferral, getReferralReservationToken: vi.fn() }));
 
 vi.mock('../../../models/booking', () => ({
   default: {
@@ -419,7 +419,7 @@ describe('non-admin booking response serialization', () => {
     await setBookingSchedule({ params: { bookingId: 'booking-1' }, user: user('customer'), body: { scheduledStartDate: '2099-01-02' } } as any, res as any);
     expect(res.body.success).toBe(true);
     expect(mocks.intentCancel).toHaveBeenCalledWith('pi_old');
-    expect(mocks.releaseReferral).toHaveBeenCalledWith('booking-1');
+    expect(mocks.releaseReferral).toHaveBeenCalledWith('booking-1', undefined);
     expect(mocks.releaseReferral.mock.invocationCallOrder[0]).toBeGreaterThan(booking.save.mock.invocationCallOrder[0]);
     expect(booking.save.mock.invocationCallOrder[0]).toBeGreaterThan(mocks.intentCancel.mock.invocationCallOrder[0]);
     expect(booking.status).toBe('quote_accepted');

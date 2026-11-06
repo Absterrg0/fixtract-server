@@ -9,8 +9,10 @@ vi.hoisted(() => {
   process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_dispute_calendar';
 });
 
-const { refundMock, notifyMock, auditMock } = vi.hoisted(() => ({
+const { refundMock, notifyMock, auditMock, retrieveMock, cancelMock } = vi.hoisted(() => ({
   refundMock: vi.fn(),
+  retrieveMock: vi.fn(),
+  cancelMock: vi.fn(),
   notifyMock: vi.fn(async () => undefined),
   auditMock: vi.fn(async () => undefined),
 }));
@@ -43,12 +45,22 @@ vi.mock('../../handlers/Stripe/payment', async (importOriginal) => {
     captureAndTransferPayment: vi.fn(async () => ({ success: true })),
   };
 });
+vi.mock('../../services/stripe', () => ({
+  stripe: { paymentIntents: { retrieve: retrieveMock, cancel: cancelMock } },
+  STRIPE_CONFIG: { environment: 'test', defaultCurrency: 'EUR', supportedCurrencies: ['EUR'] },
+}));
+vi.mock('../../utils/notifications/notifyBookingCancelledAndRefunded', () => ({
+  notifyBookingCancelledAndRefunded: vi.fn(),
+}));
 vi.mock('../../utils/notifications/notify', () => ({ notify: notifyMock }));
 vi.mock('../../utils/auditLogger', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../utils/auditLogger')>();
   return { ...actual, auditLog: auditMock };
 });
 
+import Referral from '../../models/referral';
+import CancellationRequest from '../../models/cancellationRequest';
+import { approveCancellationRequest } from '../../handlers/Admin/cancellationRequests';
 import Booking from '../../models/booking';
 import CalendarReservation from '../../models/calendarReservation';
 import Conversation from '../../models/conversation';
@@ -176,6 +188,8 @@ describeDb('admin dispute resolution keeps the booking calendar boundary', () =>
     await mongoose.connect(testUri!, { dbName: `fixera_dispute_it_${Date.now()}` });
     await Promise.all([
       Booking.createIndexes(),
+      Referral.createIndexes(),
+      CancellationRequest.createIndexes(),
       CalendarReservation.createIndexes(),
       Conversation.createIndexes(),
       Project.createIndexes(),
@@ -188,6 +202,8 @@ describeDb('admin dispute resolution keeps the booking calendar boundary', () =>
     refundMock.mockReset();
     await Promise.all([
       Booking.deleteMany({}),
+      Referral.deleteMany({}),
+      CancellationRequest.deleteMany({}),
       CalendarReservation.deleteMany({}),
       Conversation.deleteMany({}),
       Project.deleteMany({}),
@@ -200,6 +216,35 @@ describeDb('admin dispute resolution keeps the booking calendar boundary', () =>
     await settleBackgroundWork();
     await mongoose.connection.dropDatabase();
     await mongoose.disconnect();
+  });
+
+  it.each(['retrieve', 'cancel'])('approves cancellation and frees the calendar despite a Stripe %s failure', async operation => {
+    const bookingId = await seedDisputeBooking({
+      status: 'quote_accepted',
+      rfqData: { serviceType: 'Renovation', description: 'Cancellation regression' },
+      vatDecision: { action: 'standard_rate', country: 'BE', standardRate: 21, appliedRate: 21, answers: [] },
+      statusHistory: [],
+      payment: { status: 'pending', stripePaymentIntentId: 'pi_pending', discount: { referralReservationToken: 'pi_pending' } },
+    });
+    const referral = await Referral.create({
+      referrer: professionalId, referredUser: customerId, referralCode: 'TEST',
+      discountBooking: bookingId, discountReservationToken: 'pi_pending',
+      expiresAt: new Date('2031-01-01'),
+    });
+    const request = await CancellationRequest.create({
+      booking: bookingId, requestedBy: customerId, requestedRole: 'customer', reason: 'No longer needed',
+    });
+    retrieveMock.mockResolvedValue({ status: 'requires_payment_method' });
+    cancelMock.mockResolvedValue({ status: 'canceled' });
+    (operation === 'retrieve' ? retrieveMock : cancelMock).mockRejectedValueOnce(new Error('Stripe unavailable'));
+    const res = mockRes();
+    await approveCancellationRequest({ params: { id: String(request._id) }, body: {}, user: { _id: adminId } } as any, res as any);
+    expect(res.statusCode).toBe(200);
+    expect((await CancellationRequest.findById(request._id).lean())?.status).toBe('approved');
+    expect((await Booking.findById(bookingId).lean())?.status).toBe('cancelled');
+    expect(await CalendarReservation.countDocuments({ sourceId: bookingId })).toBe(0);
+    expect(await Referral.findById(referral._id).lean()).toMatchObject({ discountBooking: bookingId, discountReservationToken: 'pi_pending', referredUserDiscountApplied: false });
+    expect(refundMock).not.toHaveBeenCalled();
   });
 
   it('force-cancels a disputed booking and releases its shared reservations', async () => {
