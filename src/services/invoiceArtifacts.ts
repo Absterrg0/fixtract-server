@@ -306,6 +306,8 @@ const releaseSupplierInvoiceGenerationClaim = async (
 
 /** Short TTL so a hung/background generation does not block admin retries for 15 minutes. */
 const GENERATION_CLAIM_TTL_MS = 60 * 1000;
+// Credit PDFs, XML uploads and dispatch can exceed a minute.
+export const CREDIT_GENERATION_CLAIM_TTL_MS = 15 * 60 * 1000;
 
 const parseGenerationClaimTimestamp = (value: string, prefix: string): number | null => {
   if (!value.startsWith(prefix)) return null;
@@ -317,7 +319,8 @@ const isStaleGenerationClaim = (value?: string | null, prefix = "GENERATING-"): 
   if (!value?.startsWith(prefix)) return false;
   const timestamp = parseGenerationClaimTimestamp(value, prefix);
   if (timestamp == null) return true;
-  return Date.now() - timestamp > GENERATION_CLAIM_TTL_MS;
+  return Date.now() - timestamp > (prefix === "GENERATING-CN-"
+    ? CREDIT_GENERATION_CLAIM_TTL_MS : GENERATION_CLAIM_TTL_MS);
 };
 
 const clearStaleGenerationClaimsIfNeeded = async (bookingId: string) => {
@@ -2395,14 +2398,14 @@ const recordedInvoiceSettlementBasis = (booking: any, platform: UblPlatformParty
  */
 export async function ensurePartialRefundCreditArtifacts(
   bookingId: string,
-): Promise<"credited" | "generate" | "skip"> {
+): Promise<"credited" | "generate" | "skip" | "busy"> {
   await clearStaleGenerationClaimsIfNeeded(bookingId);
   const existing = await Booking.findById(bookingId);
   if (!existing?.payment || existing.payment.status !== "partially_refunded") return "skip";
   if (!(Number(existing.payment.refundAmount) > 0)) return "skip";
   if (!hasCustomerInvoiceArtifacts(existing.payment)) return "generate";
   const claimed = await claimCreditNoteGeneration(bookingId);
-  if (!claimed) return "generate";
+  if (!claimed) return "busy";
   try {
     const booking = await loadBookingForInvoice(bookingId);
     if (!booking?.payment || booking.payment.status !== "partially_refunded") return "skip";
@@ -2537,6 +2540,18 @@ export async function createManualInvoiceArtifact(
   const manualBooking = applyManualParty(booking, input);
   const generatedAt = new Date();
   const platform = await getPlatformParty();
+  const assertCreditClaim = async () => {
+    if (!refundFact) return;
+    const active = await Booking.findById(bookingId).select('payment.creditNoteGenerationClaim +payment.refundCreditLedger');
+    const token = active?.payment?.creditNoteGenerationClaim;
+    if (!refundFact.generationClaim || token !== refundFact.generationClaim
+      || isStaleGenerationClaim(token, 'GENERATING-CN-')
+      || active?.payment?.refundCreditLedger?.some(fact => fact.key === refundFact.key && fact.side === refundFact.side)) {
+      throw new Error('Refund credit generation claim expired or was already recorded.');
+    }
+  };
+  // Check after asynchronous setup, before reserving a FIX-CN/SUP-CN number.
+  await assertCreditClaim();
   const generated = await generateBookingInvoice(manualBooking as any, {
     kind: input.side === "supplier" ? "self_bill" : "customer",
     creditNote: input.documentType === "credit_note",
@@ -2545,6 +2560,7 @@ export async function createManualInvoiceArtifact(
     exactManualAmounts: input.exactAmounts,
   });
   const keyBase = `invoices/${booking._id.toString()}/manual/${generated.invoiceNumber}`;
+  await assertCreditClaim();
   const artifactUrl = await uploadBufferToS3(
     generated.pdfBuffer,
     `${keyBase}.pdf`,
@@ -2557,6 +2573,7 @@ export async function createManualInvoiceArtifact(
     selfBilling: input.side === "supplier",
     platform,
   });
+  await assertCreditClaim();
   const ublUrl = await uploadBufferToS3(
     Buffer.from(ublXml, "utf8"),
     `${keyBase}.xml`,

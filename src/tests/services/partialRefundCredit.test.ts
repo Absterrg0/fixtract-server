@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { inflateSync } from "node:zlib";
 
 const mocks = vi.hoisted(() => ({
+  activeClaim: undefined as string | undefined,
   platformSettings: vi.fn(),
   invoiceSequence: vi.fn(),
   bookingFindById: vi.fn(),
@@ -114,7 +115,8 @@ const baseBooking = (payment: Record<string, unknown>) => ({
   __supplierVatDecision: { reverseCharge: false, appliedRate: 21 },
 });
 
-const chainQuery = (doc: unknown) => {
+const chainQuery = (doc: any) => {
+  if (doc?.payment && mocks.activeClaim !== undefined) doc.payment.creditNoteGenerationClaim = mocks.activeClaim;
   const query: Record<string, unknown> = {};
   query.populate = vi.fn(() => query);
   query.select = vi.fn(() => query);
@@ -125,6 +127,7 @@ const chainQuery = (doc: unknown) => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.activeClaim = undefined;
   mocks.platformSettings.mockResolvedValue({
     companyAddress: { name: "Fixtract", street: "Main 1", city: "Brussels", postalCode: "1000", country: "BE" },
     companyVatNumber: "BE0123456789",
@@ -138,7 +141,10 @@ beforeEach(() => {
   mocks.bookingUpdateOne.mockResolvedValue({});
   mocks.paymentFindOneAndUpdate.mockResolvedValue({});
   mocks.paymentFind.mockReturnValue(chainQuery([]));
-  mocks.bookingFindOneAndUpdate.mockImplementation(async () => ({ _id: "booking-1" }));
+  mocks.bookingFindOneAndUpdate.mockImplementation(async (_filter: any, update: any) => {
+    mocks.activeClaim = update?.$set?.['payment.creditNoteGenerationClaim'];
+    return { _id: 'booking-1' };
+  });
 });
 
 describe("partial-refund credit builders", () => {
@@ -380,4 +386,33 @@ describe("ensurePartialRefundCreditArtifacts", () => {
     expect(pdfText(pdfUploads[0][0] as Buffer)).toContain("121.00");
     expect(pdfText(pdfUploads[1][0] as Buffer)).toContain("363.00");
   });
+
+  it('returns busy when another credit worker owns the claim', async () => {
+    mocks.bookingFindById.mockImplementation(() => chainQuery(baseBooking(basePayment())));
+    mocks.bookingFindOneAndUpdate.mockResolvedValueOnce(null);
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('busy');
+    expect(mocks.invoiceSequence).not.toHaveBeenCalled();
+    expect(mocks.upload).not.toHaveBeenCalled();
+  });
+
+  it('does not reserve credit numbers or upload when the claim is lost before generation', async () => {
+    mocks.bookingFindById.mockImplementation(() => chainQuery(baseBooking(basePayment())));
+    mocks.platformSettings.mockImplementationOnce(async () => {
+      mocks.activeClaim = 'another-worker';
+      return { companyAddress: { country: 'BE' }, companyVatNumber: 'BE0123456789' };
+    });
+    await expect(ensurePartialRefundCreditArtifacts('booking-1')).rejects.toThrow('claim expired');
+    expect(mocks.invoiceSequence).not.toHaveBeenCalled();
+    expect(mocks.upload).not.toHaveBeenCalled();
+    expect(mocks.peppol).not.toHaveBeenCalled();
+  });
+
+  it('allows slow credit work a fifteen-minute lease rather than reclaiming after one minute', async () => {
+    const claim = `GENERATING-CN-${Date.now() - 120000}-slow`;
+    mocks.bookingFindById.mockImplementation(() => chainQuery(baseBooking(basePayment({ creditNoteGenerationClaim: claim }))));
+    mocks.bookingFindOneAndUpdate.mockResolvedValueOnce(null);
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('busy');
+    expect(mocks.bookingUpdateOne.mock.calls.some(([, update]) => update.$unset?.['payment.creditNoteGenerationClaim'] !== undefined)).toBe(false);
+  });
+
 });

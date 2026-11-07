@@ -5,6 +5,7 @@ vi.mock('../../services/stripe', () => ({ stripe: {
   refunds: { create: mocks.refund }, transfers: { createReversal: vi.fn() },
 }, STRIPE_CONFIG: { supportedCurrencies: ['EUR'], defaultCurrency: 'EUR', environment: 'test' } }));
 vi.mock('../../services/invoiceArtifacts', () => ({
+  CREDIT_GENERATION_CLAIM_TTL_MS: 900000,
   ensurePartialRefundCreditArtifacts: mocks.credits, ensureBookingInvoiceArtifacts: mocks.invoices,
 }));
 vi.mock('../../utils/notifications/notify', () => ({ notify: mocks.notify }));
@@ -185,6 +186,24 @@ describeDb('Part 3 partial refund lifecycle with isolated Mongo and provider fak
     await customerRespondToCounterOffer({ user: { _id: customerId }, params: { bookingId: String(booking._id) }, body: { decision: 'accept' } } as any, res as any);
     expect(res.statusCode).toBe(200);
     expect(mocks.credits).toHaveBeenCalledWith(String(booking._id));
+  });
+
+
+  it('persists busy-credit retries and drains them without generating another invoice', async () => {
+    const booking = await seedRefund('cancelled', { status: 'partially_refunded', refundAmount: 50 });
+    mocks.credits.mockResolvedValueOnce('busy');
+    await refundFinalization.ensureRefundInvoices(String(booking._id));
+    const queued = await Booking.collection.findOne({ _id: booking._id });
+    expect(queued?.payment.refundInvoiceRetryAt).toBeInstanceOf(Date);
+    expect(queued?.payment.refundInvoiceRetryAt.getTime()).toBeGreaterThan(Date.now() + 899000);
+    expect(mocks.invoices).not.toHaveBeenCalled();
+    await Booking.updateOne({ _id: booking._id }, { $set: { 'payment.refundInvoiceRetryAt': new Date(Date.now() - 1000) } });
+    mocks.credits.mockResolvedValue('credited');
+    await refundFinalization.retryPendingRefundInvoices();
+    const drained = await Booking.collection.findOne({ _id: booking._id });
+    expect(drained?.payment.refundInvoiceRetryAt).toBeUndefined();
+    expect(mocks.credits).toHaveBeenCalledTimes(2);
+    expect(mocks.invoices).not.toHaveBeenCalled();
   });
 
 });

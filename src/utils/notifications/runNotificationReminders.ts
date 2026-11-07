@@ -1,3 +1,4 @@
+import { retryPendingRefundInvoices } from '../refundFinalization';
 import Booking from '../../models/booking';
 import User from '../../models/user';
 import CancellationRequest from '../../models/cancellationRequest';
@@ -455,6 +456,12 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
     }
   } catch (e: any) {
     counts.errors.push(`notStarted query: ${e?.message || e}`);
+  }
+
+  try {
+    await retryPendingRefundInvoices(now);
+  } catch (error: any) {
+    counts.errors.push(`refundInvoices query: ${error?.message || error}`);
   }
 
   // --- Milestone payment due (payable but unpaid) ---
