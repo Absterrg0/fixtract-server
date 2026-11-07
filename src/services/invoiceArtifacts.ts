@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import Booking from "../models/booking";
 import Payment from "../models/payment";
 import PlatformSettings from "../models/platformSettings";
@@ -31,7 +31,8 @@ import {
   type ManualInvoiceLine,
   type ManualInvoiceOverride,
 } from "./invoiceGenerator";
-import { invoiceSettledServiceLines } from "../utils/invoiceSettlements";
+import { invoiceRefundFacts, invoiceSettledServiceLines } from "../utils/invoiceSettlements";
+import type { InvoiceSettlementBasis, RefundCreditFact } from "../models/invoiceSettlement";
 import { normalizeInvoiceBasis } from "../utils/milestoneInvoice";
 import { quoteAmountIncludesSelectedExtras } from "../utils/payment";
 import { maybeDispatchPeppolInvoice } from "./peppolDispatch";
@@ -214,8 +215,9 @@ const claimInvoiceGeneration = async (bookingId: string) =>
     { new: true }
   );
 
-const claimCreditNoteGeneration = async (bookingId: string) =>
-  Booking.findOneAndUpdate(
+const claimCreditNoteGeneration = async (bookingId: string) => {
+  const token = `GENERATING-CN-${Date.now()}-${randomUUID()}`;
+  const claimed = await Booking.findOneAndUpdate(
     {
       _id: bookingId,
       "payment.invoiceNumber": { $exists: true, $nin: [null, ""] },
@@ -223,12 +225,13 @@ const claimCreditNoteGeneration = async (bookingId: string) =>
         { "payment.creditNoteGenerationClaim": { $exists: false } },
         { "payment.creditNoteGenerationClaim": null },
         { "payment.creditNoteGenerationClaim": "" },
-        { "payment.creditNoteGenerationClaim": /^GENERATING-CN-/ },
       ],
     },
-    { $set: { "payment.creditNoteGenerationClaim": `GENERATING-CN-${Date.now()}` } },
+    { $set: { "payment.creditNoteGenerationClaim": token } },
     { new: true }
   );
+  return claimed ? token : null;
+};
 
 const clearInvoiceGenerationClaim = async (bookingId: string) => {
   await Booking.updateOne(
@@ -237,9 +240,9 @@ const clearInvoiceGenerationClaim = async (bookingId: string) => {
   );
 };
 
-const clearCreditNoteGenerationClaim = async (bookingId: string) => {
+const clearCreditNoteGenerationClaim = async (bookingId: string, token?: string) => {
   await Booking.updateOne(
-    { _id: bookingId, "payment.creditNoteGenerationClaim": /^GENERATING-CN-/ },
+    { _id: bookingId, "payment.creditNoteGenerationClaim": token || /^GENERATING-CN-/ },
     { $unset: { "payment.creditNoteGenerationClaim": "" } }
   );
 };
@@ -306,7 +309,7 @@ const GENERATION_CLAIM_TTL_MS = 60 * 1000;
 
 const parseGenerationClaimTimestamp = (value: string, prefix: string): number | null => {
   if (!value.startsWith(prefix)) return null;
-  const timestamp = Number(value.slice(prefix.length));
+  const timestamp = Number(value.slice(prefix.length).split("-")[0]);
   return Number.isFinite(timestamp) ? timestamp : null;
 };
 
@@ -325,7 +328,7 @@ const clearStaleGenerationClaimsIfNeeded = async (bookingId: string) => {
     await clearInvoiceGenerationClaim(bookingId);
   }
   if (isStaleGenerationClaim(booking?.payment?.creditNoteGenerationClaim, "GENERATING-CN-")) {
-    await clearCreditNoteGenerationClaim(bookingId);
+    await clearCreditNoteGenerationClaim(bookingId, booking!.payment!.creditNoteGenerationClaim);
   }
   const staleSupplierClaim = booking?.payment?.supplierInvoiceGenerationClaim;
   if (isStaleSupplierGenerationClaim(staleSupplierClaim)) {
@@ -369,9 +372,11 @@ const persistPaymentArtifactUpdate = async (
   paymentId: string | undefined,
   update: Record<string, unknown>,
   historyEntry?: InvoiceArtifactHistoryEntry,
+  creditFact?: RefundCreditFact,
 ) => {
   const updateDocument: Record<string, unknown> = { $set: update };
   if (historyEntry) updateDocument.$push = { invoiceArtifactHistory: historyEntry };
+  if (creditFact) updateDocument.$push = { ...(updateDocument.$push as object), refundCreditLedger: creditFact };
   if (paymentId && mongoose.Types.ObjectId.isValid(paymentId)) {
     await Payment.findByIdAndUpdate(paymentId, updateDocument);
     return;
@@ -1232,7 +1237,7 @@ const hydrateServiceConfigPricingOptions = async (booking: any) => {
 
 const loadBookingForInvoice = async (bookingId: string) => {
   const booking = await Booking.findById(bookingId)
-    .select("+paymentDiscountLedger")
+    .select("+paymentDiscountLedger +payment.invoiceSettlementBasis +payment.refundCreditLedger")
     .populate("customer")
     .populate("professional")
     .populate(
@@ -1572,6 +1577,8 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
   );
 
   const update: InvoiceArtifactResult = toInvoiceArtifactResult(existing.payment);
+  const invoiceSettlementBasis = { ...booking.payment.invoiceSettlementBasis,
+    supplier: recordedInvoiceSettlementBasis(booking, platform).supplier };
   update.supplierInvoiceNumber = supplierInvoice.invoiceNumber;
   update.supplierInvoiceUrl = supplierInvoiceUrl;
   update.supplierInvoiceUblUrl = supplierInvoiceUblUrl;
@@ -1583,6 +1590,7 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
     { _id: booking._id },
     {
       $set: {
+        "payment.invoiceSettlementBasis": invoiceSettlementBasis,
         "payment.supplierInvoiceNumber": update.supplierInvoiceNumber,
         "payment.supplierInvoiceUrl": update.supplierInvoiceUrl,
         "payment.supplierInvoiceUblUrl": update.supplierInvoiceUblUrl,
@@ -1593,6 +1601,7 @@ const generateSupplierInvoiceArtifactsWithClaim = async (
     }
   );
   await persistPaymentArtifactUpdate(booking._id, paymentId, {
+    invoiceSettlementBasis,
     supplierInvoiceNumber: update.supplierInvoiceNumber,
     supplierInvoiceUrl: update.supplierInvoiceUrl,
     supplierInvoiceUblUrl: update.supplierInvoiceUblUrl,
@@ -1742,6 +1751,7 @@ export async function ensureBookingInvoiceArtifacts(
       `attachment; filename="${supplierInvoice.invoiceNumber}.xml"`
     );
 
+    const invoiceSettlementBasis = recordedInvoiceSettlementBasis(booking, platform);
     const update: InvoiceArtifactResult = {
       invoiceNumber: customerInvoice.invoiceNumber,
       invoiceUrl,
@@ -1763,6 +1773,7 @@ export async function ensureBookingInvoiceArtifacts(
       { _id: booking._id },
       {
         $set: {
+          "payment.invoiceSettlementBasis": invoiceSettlementBasis,
           "payment.invoiceNumber": update.invoiceNumber,
           "payment.invoiceUrl": update.invoiceUrl,
           "payment.invoiceUblUrl": update.invoiceUblUrl,
@@ -1778,7 +1789,7 @@ export async function ensureBookingInvoiceArtifacts(
         },
       }
     );
-    await persistPaymentArtifactUpdate(booking._id, paymentId, update);
+    await persistPaymentArtifactUpdate(booking._id, paymentId, { ...update, invoiceSettlementBasis });
 
     try {
       const customerPricing = getPricingLinesForUbl(booking, { selfBilling: false, platform });
@@ -2367,141 +2378,94 @@ export const buildPartialRefundCreditInput = (args: {
   exactAmounts: true,
 });
 
+const recordedInvoiceSettlementBasis = (booking: any, platform: UblPlatformParty): InvoiceSettlementBasis => {
+  const refundAmount = normalizeInvoiceBasis(booking, 0).refund?.amount || 0;
+  const side = (selfBilling: boolean) => {
+    const totals = getPricingLinesForUbl(booking, { selfBilling, platform }).totals;
+    return { netAmount: totals.netAmount, vatAmount: totals.vatAmount, totalWithVat: totals.totalWithVat, refundAmount };
+  };
+  return { customer: side(false), supplier: side(true) };
+};
+
 /**
- * Issue FIX + SUP partial credit notes for a partial refund that landed after
- * the invoices were already issued. The credit amounts come from the refund
- * basis (FIX: exact net/VAT split; SUP: same fraction of the supplier
- * document), reference the original invoice numbers, and carry the refund
- * date/amount/reason/description on one canonical line.
- *
- * Returns "credited" when a credit now covers the refund (issued or already
- * present — retries never issue a second one), "generate" when no invoice
- * exists yet (the caller generates net invoices instead), and "skip" when
- * there is nothing to credit (no/full refund). Uses the standard credit-note
- * slot, claim and numbering, so it composes with the existing machinery;
- * per-side existence checks let a retry complete a half-finished pair.
+ * Credit only refunds not yet represented by the issued invoice and credit
+ * ledger. Each side has its own durable refund-fact key, so a retry completes
+ * a half-finished pair and a later refund creates a new pair. Original
+ * artifacts remain in history; coverage and URLs are persisted atomically.
  */
 export async function ensurePartialRefundCreditArtifacts(
-  bookingId: string
+  bookingId: string,
 ): Promise<"credited" | "generate" | "skip"> {
   await clearStaleGenerationClaimsIfNeeded(bookingId);
   const existing = await Booking.findById(bookingId);
-  const payment = existing?.payment;
-  if (!payment || payment.status !== "partially_refunded") return "skip";
-  const refundAmount = Number(payment.refundAmount) || 0;
-  if (!(refundAmount > 0)) return "skip";
-  if (!hasCustomerInvoiceArtifacts(payment)) return "generate";
-  if (hasCreditNoteArtifacts(payment)) return "credited";
-
+  if (!existing?.payment || existing.payment.status !== "partially_refunded") return "skip";
+  if (!(Number(existing.payment.refundAmount) > 0)) return "skip";
+  if (!hasCustomerInvoiceArtifacts(existing.payment)) return "generate";
   const claimed = await claimCreditNoteGeneration(bookingId);
-  if (!claimed) {
-    const refreshed = await Booking.findById(bookingId);
-    if (refreshed?.payment && hasCreditNoteArtifacts(refreshed.payment)) return "credited";
-    // Lost the race while no credit exists yet: the winner will finish it.
-    // Falling back to net-invoice generation is a no-op (invoices exist).
-    return "generate";
-  }
-
+  if (!claimed) return "generate";
   try {
     const booking = await loadBookingForInvoice(bookingId);
-    if (!booking?.payment || booking.payment.status !== "partially_refunded") {
-      await clearCreditNoteGenerationClaim(bookingId);
-      return "skip";
-    }
-    const commissionPercent = Number((booking as any).__commissionPercent) || 0;
-    const basis = normalizeInvoiceBasis(booking, commissionPercent);
-    if (!basis.refund || !(basis.refund.amount > 0)) {
-      await clearCreditNoteGenerationClaim(bookingId);
-      return "skip";
-    }
-    // Below a real cent there is nothing a credit note can state: Stripe
-    // cannot move fractions of a cent, so smaller remainders live only in
-    // the rounded invoice totals.
-    if (!(basis.refund.amount >= 0.01)) {
-      console.warn(
-        `[INVOICE] Partial refund credit for booking ${bookingId} skipped: refund amount ${basis.refund.amount} is below one cent.`
-      );
-      await clearCreditNoteGenerationClaim(bookingId);
-      return "skip";
-    }
-    const currency = booking.payment.currency || "EUR";
-    const description = buildPartialRefundDescription({
-      amount: basis.refund.amount,
-      currency,
-      date: basis.refund.date,
-      reason: basis.refund.reason,
-      description: basis.refund.description,
-    });
-    const reverseCharge = Boolean(booking.payment.reverseCharge);
-    const vatRate = reverseCharge ? 0 : Math.max(0, Number(booking.payment.vatRate) || 0);
-    // Invoice numbers were verified on the pre-claim read; re-read them here
-    // so a concurrent change can only skip, never mis-reference.
-    const fixNumber: string | undefined = booking.payment.invoiceNumber;
-
-    if (fixNumber && !hasCustomerCreditArtifacts(booking.payment)) {
-      const fixRate = effectiveVatRateForCredit(basis.refund.net, basis.refund.vat, vatRate);
-      await createManualInvoiceArtifact(
-        bookingId,
-        undefined,
-        buildPartialRefundCreditInput({
-          side: "customer",
-          net: basis.refund.net,
-          vat: basis.refund.vat,
-          vatRate: fixRate,
-          reverseCharge,
-          currency,
-          relatedInvoiceNumber: fixNumber,
-          description,
-        })
-      );
-    }
-
-    const supplierPayment = (
-      await Booking.findById(bookingId).select(
-        "payment.supplierInvoiceNumber payment.supplierCreditNoteNumber payment.supplierCreditNoteUrl"
-      ).lean()
-    )?.payment as
-      | { supplierInvoiceNumber?: string; supplierCreditNoteNumber?: string; supplierCreditNoteUrl?: string }
-      | undefined;
-    const supplierNumber = supplierPayment?.supplierInvoiceNumber;
-    if (supplierNumber && !hasSupplierCreditArtifacts(supplierPayment)) {
-      const platform = await getPlatformParty();
-      const supplierPricing = getPricingLinesForUbl(booking, { selfBilling: true, platform });
-      const ratio = basis.serviceTotal > 0 ? basis.refund.amount / basis.serviceTotal : 0;
-      const supNet = roundCreditMoney(supplierPricing.totals.netAmount * ratio);
-      const supVat = roundCreditMoney(supplierPricing.totals.vatAmount * ratio);
-      if (supNet + supVat < 0.005) {
-        console.warn(
-          `[INVOICE] Partial refund credit for booking ${bookingId}: supplier share rounds to zero; FIX credit issued alone.`
-        );
-      } else {
-        const supRate = effectiveVatRateForCredit(supNet, supVat, supplierPricing.totals.vatRate);
-        await createManualInvoiceArtifact(
-          bookingId,
-          undefined,
-          buildPartialRefundCreditInput({
-            side: "supplier",
-            net: supNet,
-            vat: supVat,
-            vatRate: supRate,
-            reverseCharge: supplierPricing.totals.reverseCharge,
-            currency,
-            relatedInvoiceNumber: supplierNumber,
-            description,
-          })
-        );
+    if (!booking?.payment || booking.payment.status !== "partially_refunded") return "skip";
+    const platform = await getPlatformParty();
+    const facts = invoiceRefundFacts(booking);
+    const cumulativeRefund = roundCreditMoney(facts.reduce((sum, fact) => sum + fact.amount, 0));
+    const key = createHash("sha256").update(facts.map(fact => fact.key).sort().join("|")).digest("hex");
+    const current = recordedInvoiceSettlementBasis(booking, platform);
+    let issued = booking.payment.invoiceSettlementBasis;
+    const ledger = booking.payment.refundCreditLedger || [];
+    if (!issued) {
+      // Legacy invoices can be reconstructed only from their recorded payments
+      // and issue date. Existing credits without coverage metadata need an
+      // explicit reconciliation; guessing would issue duplicate money.
+      if (hasCustomerCreditArtifacts(booking.payment) || hasSupplierCreditArtifacts(booking.payment)) {
+        throw new Error("Existing refund credits lack recorded coverage; reconcile their amounts before issuing another credit.");
       }
-    } else if (!supplierNumber) {
-      console.warn(
-        `[INVOICE] Partial refund credit for booking ${bookingId}: no supplier invoice to reference; FIX credit issued alone.`
-      );
+      const issuedAt = booking.payment.invoiceGeneratedAt?.getTime?.();
+      const included = issuedAt ? roundCreditMoney(facts.filter(fact => fact.refundedAt
+        && new Date(fact.refundedAt).getTime() <= issuedAt).reduce((sum, fact) => sum + fact.amount, 0)) : 0;
+      const originalBooking = { ...(booking.toObject?.() || booking), __settledPayments: (booking as any).__settledPayments,
+        payment: { ...(booking.toObject?.() || booking).payment, refundAmount: included, status: included > 0 ? "partially_refunded" : "completed" } };
+      // The durable refund rows remain unchanged. Restrict this historical view
+      // to the facts represented at invoice issuance.
+      originalBooking.__settledPayments = originalBooking.__settledPayments?.map((payment: any) => ({ ...payment,
+        refunds: (payment.refunds || []).filter((fact: any) => issuedAt && new Date(fact.refundedAt).getTime() <= issuedAt) }));
+      issued = recordedInvoiceSettlementBasis(originalBooking, platform);
+      await Booking.updateOne({ _id: booking._id }, { $set: { "payment.invoiceSettlementBasis": issued } });
     }
-
-    await clearCreditNoteGenerationClaim(bookingId);
+    for (const side of ["customer", "supplier"] as const) {
+      const original = issued[side];
+      const remaining = current[side];
+      const relatedInvoiceNumber = side === "customer" ? booking.payment.invoiceNumber : booking.payment.supplierInvoiceNumber;
+      if (!original || !remaining || !relatedInvoiceNumber) continue;
+      const prior = ledger.filter(fact => fact.side === side);
+      const covered = prior.reduce((sum, fact) => sum + fact.refundAmount, 0);
+      const delta = roundCreditMoney(cumulativeRefund - original.refundAmount - covered);
+      if (delta < 0.01 || prior.some(fact => fact.key === key)) continue;
+      // Supplier credits use the VAT and amount on the ISSUED document,
+      // never a newly resolved supplier tax setting.
+      const refundShare = issued.customer?.totalWithVat
+        ? Math.min(1, Math.max(0, (cumulativeRefund - original.refundAmount) / issued.customer.totalWithVat)) : 0;
+      const targetNet = side === "supplier" ? roundCreditMoney(original.netAmount * refundShare) : original.netAmount - remaining.netAmount;
+      const targetVat = side === "supplier" ? roundCreditMoney(original.vatAmount * refundShare) : original.vatAmount - remaining.vatAmount;
+      const net = roundCreditMoney(targetNet - prior.reduce((sum, fact) => sum + fact.netAmount, 0));
+      const vat = roundCreditMoney(targetVat - prior.reduce((sum, fact) => sum + fact.vatAmount, 0));
+      if (side === "customer" && Math.abs(net + vat - delta) >= 0.005) {
+        throw new Error("Refund credit does not reconcile with the outstanding settled refund.");
+      }
+      if (net + vat < 0.005) continue;
+      const currency = booking.payment.currency || "EUR";
+      const description = buildPartialRefundDescription({ amount: delta, currency,
+        date: booking.payment.refundedAt, reason: booking.payment.refundReason,
+        description: booking.cancellation?.adminResolutionNote });
+      await createManualInvoiceArtifact(bookingId, undefined, buildPartialRefundCreditInput({
+        side, net, vat, vatRate: effectiveVatRateForCredit(net, vat, booking.payment.vatRate),
+        reverseCharge: vat === 0 && Boolean(side === "customer" ? booking.payment.reverseCharge : getSupplierVatContext(booking, platform).reverseCharge),
+        currency, relatedInvoiceNumber, description,
+      }), { key, side, refundAmount: delta, netAmount: net, vatAmount: vat, generationClaim: claimed });
+    }
     return "credited";
-  } catch (error) {
-    await clearCreditNoteGenerationClaim(bookingId);
-    throw error;
+  } finally {
+    await clearCreditNoteGenerationClaim(bookingId, claimed);
   }
 }
 
@@ -2558,6 +2522,7 @@ export async function createManualInvoiceArtifact(
   bookingId: string,
   paymentId: string | undefined,
   input: ManualInvoiceCorrectionInput,
+  refundFact?: Pick<RefundCreditFact, "key" | "side" | "refundAmount" | "netAmount" | "vatAmount"> & { generationClaim?: string },
 ): Promise<Record<string, unknown>> {
   const booking = await loadBookingForInvoice(bookingId);
   if (!booking?.payment?.status) throw new Error("Booking payment was not found.");
@@ -2599,37 +2564,9 @@ export async function createManualInvoiceArtifact(
     `attachment; filename="${generated.invoiceNumber}.xml"`,
   );
 
-  let peppolDispatchStatus = "skipped";
+  let peppolDispatchStatus = "queued";
   let peppolDispatchReason: string | undefined;
   let peppolDispatchReference: string | undefined;
-  try {
-    const pricing = getPricingLinesForUbl(manualBooking, {
-      selfBilling: input.side === "supplier",
-      platform,
-    });
-    const result = await maybeDispatchPeppolInvoice({
-      booking: manualBooking,
-      side: input.side,
-      invoiceNumber: generated.invoiceNumber,
-      ublXml,
-      invoiceUblUrl: ublUrl,
-      invoicePdf: generated.pdfBuffer,
-      issueDate: generatedAt,
-      documentType: input.documentType,
-      netAmount: pricing.totals.netAmount,
-      totalWithVat: pricing.totals.totalWithVat,
-      vatRate: pricing.totals.vatRate,
-      reverseCharge: pricing.totals.reverseCharge,
-      lineItems: getPeppolLineItems(pricing),
-    });
-    peppolDispatchStatus = result.status;
-    peppolDispatchReason = result.reason;
-    peppolDispatchReference = result.reference;
-  } catch (error) {
-    console.error(`[INVOICE] Manual ${input.documentType} Peppol dispatch failed for booking ${bookingId}:`, providerErrorMessage(error));
-    peppolDispatchStatus = "failed";
-    peppolDispatchReason = dispatchFailureReason(error);
-  }
 
   const isCustomer = input.side === "customer";
   const isCredit = input.documentType === "credit_note";
@@ -2720,8 +2657,62 @@ export async function createManualInvoiceArtifact(
     $set: Object.fromEntries(Object.entries(fields).map(([key, value]) => [`payment.${key}`, value])),
   };
   if (historyEntry) bookingUpdate.$push = { "payment.invoiceArtifactHistory": historyEntry };
-  await Booking.updateOne({ _id: booking._id }, bookingUpdate);
-  await persistPaymentArtifactUpdate(booking._id, paymentId, fields, historyEntry);
+  const creditFact = refundFact ? {
+    key: refundFact.key, side: refundFact.side, refundAmount: refundFact.refundAmount,
+    netAmount: refundFact.netAmount, vatAmount: refundFact.vatAmount,
+    invoiceNumber: generated.invoiceNumber, invoiceUrl: artifactUrl,
+    invoiceUblUrl: ublUrl, generatedAt,
+  } : undefined;
+  if (creditFact) bookingUpdate.$push = { ...(bookingUpdate.$push as object), "payment.refundCreditLedger": creditFact };
+  const artifactFilter: Record<string, unknown> = { _id: booking._id };
+  if (refundFact) {
+    artifactFilter["payment.creditNoteGenerationClaim"] = refundFact.generationClaim;
+    artifactFilter["payment.refundCreditLedger"] = { $not: { $elemMatch: { key: refundFact.key, side: refundFact.side } } };
+  }
+  const saved = await Booking.updateOne(artifactFilter, bookingUpdate);
+  if (refundFact && saved.modifiedCount === 0) throw new Error("Refund credit generation claim expired or was already recorded.");
+  await persistPaymentArtifactUpdate(booking._id, paymentId, fields, historyEntry, creditFact);
+  try {
+    const pricing = getPricingLinesForUbl(manualBooking, {
+      selfBilling: input.side === "supplier",
+      platform,
+    });
+    const result = await maybeDispatchPeppolInvoice({
+      booking: manualBooking,
+      side: input.side,
+      invoiceNumber: generated.invoiceNumber,
+      ublXml,
+      invoiceUblUrl: ublUrl,
+      invoicePdf: generated.pdfBuffer,
+      issueDate: generatedAt,
+      documentType: input.documentType,
+      netAmount: pricing.totals.netAmount,
+      totalWithVat: pricing.totals.totalWithVat,
+      vatRate: pricing.totals.vatRate,
+      reverseCharge: pricing.totals.reverseCharge,
+      lineItems: getPeppolLineItems(pricing),
+    });
+    peppolDispatchStatus = result.status;
+    peppolDispatchReason = result.reason;
+    peppolDispatchReference = result.reference;
+  } catch (error) {
+    console.error(`[INVOICE] Manual ${input.documentType} Peppol dispatch failed for booking ${bookingId}:`, providerErrorMessage(error));
+    peppolDispatchStatus = "failed";
+    peppolDispatchReason = dispatchFailureReason(error);
+  }
+
+  const dispatchPrefix = isCredit ? (isCustomer ? "creditNote" : "supplierCreditNote") : (isCustomer ? "peppol" : "supplierPeppol");
+  const dispatchFields = isCredit ? {
+    [`${dispatchPrefix}PeppolDispatchStatus`]: peppolDispatchStatus,
+    [`${dispatchPrefix}PeppolDispatchReason`]: peppolDispatchReason,
+    [`${dispatchPrefix}PeppolDispatchReference`]: peppolDispatchReference,
+  } : {
+    [`${dispatchPrefix}DispatchStatus`]: peppolDispatchStatus,
+    [`${dispatchPrefix}DispatchReason`]: peppolDispatchReason,
+    [`${dispatchPrefix}DispatchReference`]: peppolDispatchReference,
+  };
+  await Booking.updateOne({ _id: booking._id }, { $set: Object.fromEntries(Object.entries(dispatchFields).map(([key, value]) => [`payment.${key}`, value])) });
+  await persistPaymentArtifactUpdate(booking._id, paymentId, dispatchFields);
   try {
     await notifyManualArtifactReady(booking, input, generated.invoiceNumber, artifactUrl, generated.pdfBuffer);
   } catch (notifyError) {

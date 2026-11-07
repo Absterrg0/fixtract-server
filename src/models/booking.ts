@@ -1,3 +1,4 @@
+import { InvoiceSettlementBasisSchema, RefundCreditFactSchema, type InvoiceSettlementBasis, type RefundCreditFact } from "./invoiceSettlement";
 import mongoose, { Schema, model, Document, Types } from "mongoose";
 import { getNextSequence } from "../utils/counterSequence";
 import { STRIPE_CONFIG } from "../services/stripe";
@@ -517,6 +518,8 @@ export interface IBooking extends Document {
     supplierCreditNotePeppolDispatchReason?: string;
     supplierCreditNotePeppolDispatchReference?: string;
     invoiceArtifactHistory?: InvoiceArtifactHistoryEntry[];
+    invoiceSettlementBasis?: InvoiceSettlementBasis;
+    refundCreditLedger?: RefundCreditFact[];
 
     // Auto-discount breakdown
     discount?: {
@@ -1352,6 +1355,8 @@ const BookingSchema = new Schema({
     supplierCreditNotePeppolDispatchReason: { type: String },
     supplierCreditNotePeppolDispatchReference: { type: String },
     invoiceArtifactHistory: { type: [InvoiceArtifactHistorySchema], default: [] },
+    invoiceSettlementBasis: { type: InvoiceSettlementBasisSchema, select: false },
+    refundCreditLedger: { type: [RefundCreditFactSchema], default: undefined, select: false },
 
     // Auto-discount breakdown
     discount: {

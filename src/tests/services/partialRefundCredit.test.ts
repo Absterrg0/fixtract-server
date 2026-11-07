@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   bookingFindOneAndUpdate: vi.fn(),
   bookingUpdateOne: vi.fn(),
   paymentFindOneAndUpdate: vi.fn(),
+  paymentFind: vi.fn(),
   upload: vi.fn(),
   peppol: vi.fn(),
   notify: vi.fn(),
@@ -29,6 +30,7 @@ vi.mock("../../models/booking", () => ({
 }));
 vi.mock("../../models/payment", () => ({
   default: {
+    find: (...args: unknown[]) => mocks.paymentFind(...args),
     findOneAndUpdate: (...args: unknown[]) => mocks.paymentFindOneAndUpdate(...args),
     findByIdAndUpdate: vi.fn(),
   },
@@ -135,6 +137,7 @@ beforeEach(() => {
   mocks.notify.mockResolvedValue({ notificationId: "n", emailSent: true, pushSent: false });
   mocks.bookingUpdateOne.mockResolvedValue({});
   mocks.paymentFindOneAndUpdate.mockResolvedValue({});
+  mocks.paymentFind.mockReturnValue(chainQuery([]));
   mocks.bookingFindOneAndUpdate.mockImplementation(async () => ({ _id: "booking-1" }));
 });
 
@@ -223,6 +226,14 @@ describe("ensurePartialRefundCreditArtifacts", () => {
       chainQuery(
         baseBooking(
           basePayment({
+            invoiceSettlementBasis: {
+              customer: { netAmount: 100, vatAmount: 21, totalWithVat: 121, refundAmount: 0 },
+              supplier: { netAmount: 300, vatAmount: 63, totalWithVat: 363, refundAmount: 0 },
+            },
+            refundCreditLedger: [
+              { side: 'customer', key: 'legacy-first', refundAmount: 21, netAmount: 17.36, vatAmount: 3.64 },
+              { side: 'supplier', key: 'legacy-first', refundAmount: 21, netAmount: 52.07, vatAmount: 10.93 },
+            ],
             creditNoteNumber: "FIX-CN-2026-000007",
             creditNoteUrl: "s3://bucket/FIX-CN-2026-000007.pdf",
             supplierCreditNoteNumber: "SUP-CN-2026-000007",
@@ -236,7 +247,7 @@ describe("ensurePartialRefundCreditArtifacts", () => {
     expect(outcome).toBe("credited");
     expect(mocks.upload).not.toHaveBeenCalled();
     expect(mocks.invoiceSequence).not.toHaveBeenCalled();
-    expect(mocks.bookingFindOneAndUpdate).not.toHaveBeenCalled();
+    expect(mocks.bookingFindOneAndUpdate).toHaveBeenCalledTimes(1);
   });
 
   it("completes only the missing side when a retry left a half-finished pair", async () => {
@@ -244,6 +255,13 @@ describe("ensurePartialRefundCreditArtifacts", () => {
       chainQuery(
         baseBooking(
           basePayment({
+            invoiceSettlementBasis: {
+              customer: { netAmount: 100, vatAmount: 21, totalWithVat: 121, refundAmount: 0 },
+              supplier: { netAmount: 300, vatAmount: 63, totalWithVat: 363, refundAmount: 0 },
+            },
+            refundCreditLedger: [
+              { side: 'customer', key: 'legacy-first', refundAmount: 21, netAmount: 17.36, vatAmount: 3.64 },
+            ],
             creditNoteNumber: "FIX-CN-2026-000007",
             creditNoteUrl: "s3://bucket/FIX-CN-2026-000007.pdf",
           })
@@ -259,6 +277,74 @@ describe("ensurePartialRefundCreditArtifacts", () => {
     const merged = Object.assign({}, ...sets);
     expect(merged["payment.supplierCreditNoteNumber"]).toMatch(/^SUP-CN-/);
     expect(merged["payment.creditNoteNumber"]).toBeUndefined();
+  });
+
+  it('#3 creates a second credit for only the new refund delta and keeps retry idempotency', async () => {
+    const doc = baseBooking(basePayment({ refundAmount: 36.3,
+      creditNoteNumber: 'FIX-CN-FIRST', creditNoteUrl: 's3://first.pdf',
+      supplierCreditNoteNumber: 'SUP-CN-FIRST', supplierCreditNoteUrl: 's3://supplier-first.pdf',
+      invoiceSettlementBasis: {
+        customer: { netAmount: 100, vatAmount: 21, totalWithVat: 121, refundAmount: 0 },
+        supplier: { netAmount: 300, vatAmount: 63, totalWithVat: 363, refundAmount: 0 },
+      },
+      refundCreditLedger: [
+        { side: 'customer', key: 're_first', refundAmount: 24.2, netAmount: 20, vatAmount: 4.2 },
+        { side: 'supplier', key: 're_first', refundAmount: 24.2, netAmount: 60, vatAmount: 12.6 },
+      ],
+    }));
+    (doc as any).__settledPayments = [{ status: 'completed', stripePaymentIntentId: 'pi_paid',
+      refunds: [{ refundId: 're_first', amount: 24.2, netAmount: 20, vatAmount: 4.2 },
+        { refundId: 're_second', amount: 12.1, netAmount: 10, vatAmount: 2.1 }] }];
+    mocks.paymentFind.mockReturnValue(chainQuery((doc as any).__settledPayments));
+    mocks.bookingFindById.mockImplementation(() => chainQuery(doc));
+    mocks.bookingUpdateOne.mockImplementation(async (_filter: any, update: any) => {
+      const fact = update.$push?.['payment.refundCreditLedger'];
+      if (fact) (doc.payment.refundCreditLedger as any[]).push(fact);
+      return { modifiedCount: 1 };
+    });
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('credited');
+    const xmls = mocks.upload.mock.calls.filter(call => String(call[1]).endsWith('.xml')).map(call => (call[0] as Buffer).toString());
+    expect(xmls).toHaveLength(2);
+    expect(xmls[0]).toContain('<cbc:TaxInclusiveAmount currencyID="EUR">-12.10</cbc:TaxInclusiveAmount>');
+    expect(xmls[1]).toContain('<cbc:TaxInclusiveAmount currencyID="EUR">-36.30</cbc:TaxInclusiveAmount>');
+    mocks.upload.mockClear();
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('credited');
+    expect(mocks.upload).not.toHaveBeenCalled();
+  });
+
+  it('#3 credits only the increment after the first refund was included in net invoices', async () => {
+    const doc = baseBooking(basePayment({ refundAmount: 36.3,
+      invoiceSettlementBasis: {
+        customer: { netAmount: 80, vatAmount: 16.8, totalWithVat: 96.8, refundAmount: 24.2 },
+        supplier: { netAmount: 240, vatAmount: 50.4, totalWithVat: 290.4, refundAmount: 24.2 },
+      },
+    }));
+    mocks.bookingFindById.mockImplementation(() => chainQuery(doc));
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('credited');
+    const xmls = mocks.upload.mock.calls.filter(call => String(call[1]).endsWith('.xml')).map(call => (call[0] as Buffer).toString());
+    expect(xmls[0]).toContain('<cbc:TaxInclusiveAmount currencyID="EUR">-12.10</cbc:TaxInclusiveAmount>');
+    expect(xmls[1]).toContain('<cbc:TaxInclusiveAmount currencyID="EUR">-36.30</cbc:TaxInclusiveAmount>');
+  });
+
+  it('#3 refuses to guess the covered amount of a legacy credit without facts', async () => {
+    mocks.bookingFindById.mockImplementation(() => chainQuery(baseBooking(basePayment({
+      creditNoteNumber: 'FIX-CN-LEGACY', creditNoteUrl: 's3://legacy.pdf',
+    }))));
+    await expect(ensurePartialRefundCreditArtifacts('booking-1')).rejects.toThrow('lack recorded coverage');
+    expect(mocks.upload).not.toHaveBeenCalled();
+  });
+
+  it('#3 never dispatches a credit after losing its generation claim', async () => {
+    const doc = baseBooking(basePayment({ invoiceSettlementBasis: {
+      customer: { netAmount: 100, vatAmount: 21, totalWithVat: 121, refundAmount: 0 },
+      supplier: { netAmount: 300, vatAmount: 63, totalWithVat: 363, refundAmount: 0 },
+    } }));
+    mocks.bookingFindById.mockImplementation(() => chainQuery(doc));
+    mocks.bookingUpdateOne.mockImplementation(async (_filter: any, update: any) => ({
+      modifiedCount: update.$push?.['payment.refundCreditLedger'] ? 0 : 1,
+    }));
+    await expect(ensurePartialRefundCreditArtifacts('booking-1')).rejects.toThrow('claim expired');
+    expect(mocks.peppol).not.toHaveBeenCalled();
   });
 
   it("returns generate when no invoice exists yet", async () => {
@@ -278,7 +364,7 @@ describe("ensurePartialRefundCreditArtifacts", () => {
     expect(mocks.bookingFindOneAndUpdate).not.toHaveBeenCalled();
   });
 
-  it("credits the full base on sub-cent dust while skipping the zero supplier share", async () => {
+  it("credits both original invoice bases when a dust remainder rounds to zero", async () => {
     mocks.bookingFindById.mockImplementation(() =>
       chainQuery(baseBooking(basePayment({ refundAmount: 120.996, refundReason: "Dust" })))
     );
@@ -288,9 +374,10 @@ describe("ensurePartialRefundCreditArtifacts", () => {
     const sets = mocks.bookingUpdateOne.mock.calls.map((call) => (call[1] as any)?.$set || {});
     const merged = Object.assign({}, ...sets);
     expect(String(merged["payment.creditNoteNumber"])).toMatch(/^FIX-CN-/);
-    expect(merged["payment.supplierCreditNoteNumber"]).toBeUndefined();
+    expect(merged["payment.supplierCreditNoteNumber"]).toMatch(/^SUP-CN-/);
     const pdfUploads = mocks.upload.mock.calls.filter((call) => String(call[1]).endsWith(".pdf"));
-    expect(pdfUploads).toHaveLength(1);
+    expect(pdfUploads).toHaveLength(2);
     expect(pdfText(pdfUploads[0][0] as Buffer)).toContain("121.00");
+    expect(pdfText(pdfUploads[1][0] as Buffer)).toContain("363.00");
   });
 });
