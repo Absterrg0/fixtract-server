@@ -85,9 +85,11 @@ export const milestoneCustomerCharge = (
   entry: MilestoneChargeEntry,
   payments: any[] = [],
 ): number | null => {
-  const matching = payments.find(payment => payment.milestoneIndex === entry.index
-    && ['pending', 'authorized', 'completed', 'partially_refunded', 'refunded'].includes(payment.status));
-  const snapshot = booking.payment?.milestoneIndex === entry.index ? booking.payment : undefined;
+  const matchingRows = payments.filter(payment => payment.milestoneIndex === entry.index);
+  const matching = matchingRows.find(payment => ['completed', 'partially_refunded', 'refunded'].includes(payment.status))
+    || matchingRows.find(payment => ['pending', 'authorized'].includes(payment.status));
+  const snapshot = booking.payment?.milestoneIndex === entry.index
+    && !['failed', 'canceled'].includes(booking.payment?.status) ? booking.payment : undefined;
   const recorded = matching || snapshot;
   if (recorded?.totalWithVat != null && Number.isFinite(Number(recorded.totalWithVat))) {
     return Number(recorded.totalWithVat);

@@ -204,6 +204,17 @@ describe('milestone expected charges in booking details (client bug list #19b)',
     expect(details.payments.milestones[1].expectedCustomerCharge).toBe(242);
   });
 
+  it('#9 distinguishes settled charges from pending attempts and ignores failed attempts', async () => {
+    const payments = [
+      { stripePaymentIntentId: 'pi_failed', milestoneIndex: 0, status: 'failed', totalWithVat: 150, currency: 'EUR' },
+      { stripePaymentIntentId: 'pi_settled', milestoneIndex: 0, status: 'completed', totalWithVat: 133.1, currency: 'EUR' },
+      { stripePaymentIntentId: 'pi_pending', milestoneIndex: 1, status: 'pending', totalWithVat: 242, currency: 'EUR' },
+    ];
+    const details = await build('customer', { booking: milestoneBooking, payments });
+    expect(details.payments.milestones[0]).toMatchObject({ customerChargeTotalWithVat: 133.1, expectedCustomerCharge: 133.1 });
+    expect(details.payments.milestones[1]).toMatchObject({ customerChargeTotalWithVat: null, expectedCustomerCharge: 242 });
+  });
+
   it('reports null expected charges when no commission was recorded', async () => {
     const details = await build('customer', {
       booking: { ...milestoneBooking, quoteVersions: [], currentQuoteVersion: undefined },

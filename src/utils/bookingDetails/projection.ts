@@ -711,7 +711,9 @@ const buildPayments = async (params: {
     : [];
   const milestones = (Array.isArray(booking.milestonePayments) ? booking.milestonePayments : []).map(
     (milestone: any, index: number) => {
-      const matching = paymentRows.find((payment) => num(payment.milestoneIndex) === index);
+      const matchingRows = paymentRows.filter(payment => num(payment.milestoneIndex) === index);
+      const settled = matchingRows.find(payment => ['completed', 'partially_refunded', 'refunded'].includes(payment.status));
+      const matching = settled || matchingRows.find(payment => ['pending', 'authorized'].includes(payment.status));
       const planEntry = milestoneChargePlan.find((entry) => entry.index === index);
       return {
         index,
@@ -725,7 +727,7 @@ const buildPayments = async (params: {
         startedAt: iso(milestone.startedAt),
         completedAt: iso(milestone.completedAt),
         paidAt: iso(milestone.paidAt),
-        customerChargeTotalWithVat: num(matching?.totalWithVat),
+        customerChargeTotalWithVat: num(settled?.totalWithVat),
         paymentRowPresent: Boolean(matching),
         expectedCustomerCharge: planEntry ? milestoneCustomerCharge(booking, planEntry, paymentRows) : null,
         expectedCustomerNetBeforeDiscount: planEntry?.expectedCustomerGross ?? null,
