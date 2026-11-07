@@ -186,6 +186,21 @@ describe('reschedule plan reset helpers (client bug list #9b)', () => {
     expect(rebuilt.maxDayKey).toBe('2026-11-11');
   });
 
+  it('fills all free slots before advancing beyond the execution window', () => {
+    const rebuilt = rebuildResourcePlanForNewStart({
+      resourcePlan: [{ resourceId: 'r1', days: ['2026-10-29'] }],
+      newStartKey: '2026-11-02',
+      assignedResourceIds: ['r1', 'r2', 'r3', 'r4'],
+      minResourceDays: computeMinExecutionResourceDays({ executionDays: 3, resourceCount: 4, overlapFraction: 1 }),
+      executionDays: 3,
+      minResourcesPerDay: 2,
+    });
+    expect(rebuilt.maxDayKey).toBe('2026-11-04');
+    expect(rebuilt.resourcePlan).toEqual(['r1', 'r2', 'r3', 'r4'].map(resourceId => ({
+      resourceId, days: ['2026-11-02', '2026-11-03', '2026-11-04'],
+    })));
+  });
+
   it('is idempotent: re-running the rebuild changes nothing', () => {
     const params = {
       newStartKey: '2026-11-02',

@@ -153,7 +153,7 @@ export type RebuildPlanResult = {
  *    deficit forward);
  * 2. the total reaches at least max(minResourceDays, executionDays *
  *    minResourcesPerDay) resource-days;
- * 3. remaining resource-days are added one per calendar day, earliest first,
+ * 3. remaining resource-days fill all eligible slots per day, earliest first,
  *    so the span stays as short as possible and never ends before the
  *    execution window (it only extends beyond the window when blocks force it).
  * Re-running on the result is a no-op.
@@ -231,15 +231,16 @@ export const rebuildResourcePlanForNewStart = ({
       }
     }
 
-    // Phase B: top up to the target total, one resource-day per calendar day,
+    // Phase B: fill all eligible slots on each day before advancing,
     // earliest first (extends beyond the window only when blocks force it).
     let need = targetTotal - keptDays;
     let cursorKey: string | null = newStartKey;
     let guard = 0;
     while (need > 0 && cursorKey && guard < 366 * 2 + execDays) {
       guard++;
-      const rid = orderedIds.find((id) => !isBlocked(id, cursorKey as string) && !entries.get(id)?.has(cursorKey as string));
-      if (rid) {
+      for (const rid of orderedIds) {
+        if (need <= 0) break;
+        if (isBlocked(rid, cursorKey) || entries.get(rid)?.has(cursorKey)) continue;
         addDay(rid, cursorKey);
         need--;
       }
