@@ -185,7 +185,7 @@ const readLedger = async (bookingId: any): Promise<any[]> => {
 
 describeDb('per-payment savings ledger (disposable Mongo)', () => {
   beforeAll(async () => {
-    await mongoose.connect(testUri!, { dbName: 'fixera_savings_ledger_test' });
+    await mongoose.connect(testUri!, { dbName: `ft3_savings_${process.pid}_${Date.now().toString(36)}`, autoCreate: false, autoIndex: false });
     await mongoose.connection.dropDatabase();
     await PlatformSettings.deleteMany({});
     // Loyalty/points configs default-create themselves attributed to an admin.
