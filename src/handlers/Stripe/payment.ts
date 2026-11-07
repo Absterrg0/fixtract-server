@@ -223,7 +223,7 @@ const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {
   };
 };
 
-const getQuotePricingVatCalculation = (booking: any, amount: number, commissionPercent: number) => {
+export const getQuotePricingVatCalculation = (booking: any, amount: number, commissionPercent: number) => {
   const quoteVersions = Array.isArray(booking.quoteVersions) ? booking.quoteVersions : [];
   const currentVersion = quoteVersions.find((version: any) => version.version === booking.currentQuoteVersion)
     || quoteVersions[quoteVersions.length - 1];
@@ -259,8 +259,20 @@ const getQuotePricingVatCalculation = (booking: any, amount: number, commissionP
     customerNet,
     commissionPercent,
   );
+  if (!quoteAmountIncludesSelectedExtras(booking)) {
+    const options = (booking.selectedExtraOptions || []).filter((option: any) => Number(option.bookedPrice) > 0);
+    const optionRate = Number(booking.vatDecision?.appliedRate ?? booking.payment?.vatRate ?? pricingLines[0].vatRate);
+    if (!Number.isFinite(optionRate) || optionRate < 0 || optionRate > 100) return null;
+    const optionsTotal = options.reduce((sum: number, option: any) => sum + Number(option.bookedPrice), 0);
+    commissionedLines.push(...commissionedPricingLines(options.map((option: any) => ({
+      description: String(option.name || option.extraOptionId || 'Option'),
+      price: Number(option.bookedPrice), vatRate: optionRate,
+      vatCountry: booking.vatDecision?.country,
+    })), commissionedQuoteAmount(optionsTotal, undefined, commissionPercent), commissionPercent));
+  }
   const commissionedNet = commissionedLines.reduce((sum, line) => sum + Number(line.price), 0);
-  const discountedNet = commissionedNet > 0 && amount > 0 && amount <= commissionedNet ? amount : undefined;
+  if (amount > commissionedNet + 0.005) return null;
+  const discountedNet = commissionedNet > 0 && amount > 0 ? amount : undefined;
   return calculateVatFromPricingLines(commissionedLines, discountedNet);
 };
 
