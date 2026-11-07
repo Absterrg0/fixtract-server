@@ -27,7 +27,15 @@ export const listNotifications = async (req: Request, res: Response): Promise<vo
     const unreadOnly = req.query.unreadOnly === 'true' || req.query.unreadOnly === '1';
     const before = typeof req.query.before === 'string' ? req.query.before : undefined;
 
+    const rawEventKeys = req.query.eventKeys;
+    if (rawEventKeys !== undefined && (typeof rawEventKeys !== 'string'
+      || rawEventKeys.split(',').length > 20
+      || rawEventKeys.split(',').some(key => !/^[a-z][a-z0-9_.]{0,119}$/.test(key)))) {
+      res.status(400).json({ success: false, msg: 'Invalid notification event keys' });
+      return;
+    }
     const filter: Record<string, unknown> = { userId };
+    if (typeof rawEventKeys === 'string') filter.eventKey = { $in: [...new Set(rawEventKeys.split(','))] };
     if (unreadOnly) filter.readAt = null;
     if (before) {
       const sep = before.indexOf('|');
