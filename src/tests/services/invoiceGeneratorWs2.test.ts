@@ -13,6 +13,7 @@ vi.mock("../../models/invoiceSequence", () => ({
   default: { findOneAndUpdate: mocks.invoiceSequence },
 }));
 
+import { buildUblInvoiceXml } from "../../services/invoiceArtifacts";
 import { generateBookingInvoice } from "../../services/invoiceGenerator";
 
 const extractPdfStreamText = (pdf: Buffer): string => {
@@ -100,6 +101,17 @@ describe("partial-refund invoices", () => {
     expect(text).toContain("100.00");
   });
 
+  it("reconciles PDF and UBL to the retained payment after exactly one refund", async () => {
+    const booking = baseBooking({ ...refundedPayment, refundAmount: 24.2 });
+    const text = await pdfText(booking, "customer");
+    const xml = buildUblInvoiceXml(booking, "FIX-REFUND", new Date(), { selfBilling: false, platform: { name: "Fixtract", country: "BE" } });
+    const retained = booking.payment.totalWithVat - booking.payment.refundAmount;
+    expect(retained).toBe(96.8);
+    expect(text).toContain(retained.toFixed(2));
+    expect(xml).toContain(`<cbc:TaxInclusiveAmount currencyID="EUR">${retained.toFixed(2)}</cbc:TaxInclusiveAmount>`);
+    expect(xml).toContain('<cbc:TaxExclusiveAmount currencyID="EUR">80.00</cbc:TaxExclusiveAmount>');
+  });
+
   it("reduces the supplier invoice by the same remainder", async () => {
     const text = await pdfText(baseBooking(refundedPayment), "self_bill");
     expect(text).toContain("Refund");
@@ -137,6 +149,16 @@ describe("dispute-resolved extra costs", () => {
         extraCostTotal,
       },
     );
+
+  it.each([50, 0])("reconciles commissioned extra costs after admin resolution to %s", async (resolved) => {
+    const booking = { ...extraCostBooking(resolved), __commissionPercent: 10 };
+    const expected = 121 + 106.48 * resolved / 80;
+    const text = await pdfText(booking, "customer");
+    const xml = buildUblInvoiceXml(booking, "FIX-EXTRA", new Date(), { selfBilling: false, platform: { name: "Fixtract", country: "BE" } });
+    expect(text).toContain(expected.toFixed(2));
+    expect(xml).toContain(`<cbc:TaxInclusiveAmount currencyID="EUR">${expected.toFixed(2)}</cbc:TaxInclusiveAmount>`);
+    if (resolved === 0) expect(xml).not.toContain("Extra cost:");
+  });
 
   it("renders the reduced amount on both invoices (80 -> 50)", async () => {
     // Customer: 121 + 106.48 * 50/80 (66.55) = 187.55

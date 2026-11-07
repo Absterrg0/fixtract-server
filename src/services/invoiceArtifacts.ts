@@ -471,7 +471,7 @@ const getExtraCostLinesForUbl = (
     ? (booking.extraCosts || []).map((cost: any) => commissionedExtraCostAmount(cost, commissionPercent))
     : [];
   const chargedPerLine = perLine.length > 0
-    && Math.abs(Math.round(perLine.reduce((sum: number, amount: number) => sum + amount, 0) * 100) / 100 - targetTotal) < 0.005;
+    && Math.abs(Math.round(perLine.reduce((sum: number, amount: number) => sum + amount, 0) * 100) / 100 - adjustedTarget) < 0.005;
   const fallbackUnit = resolveInvoiceServiceUnit({
     checkoutUnit: (booking.checkoutSnapshot as any)?.unit,
     subprojectUnit: (booking.project as any)?.subprojects?.[booking.selectedSubprojectIndex as number]?.pricing?.unit,
@@ -802,18 +802,9 @@ const getRawPricingLinesForUbl = (
   }
   const serviceAndDiscountLines = withCustomerDiscountLines(booking, baseLines, vatRate, reverseCharge, basis.discount)
     ?? [...baseLines, ...getExtraCostLinesForUbl(booking, vatRate, reverseCharge, true)];
-  // A partial refund is a visible negative line (as on the PDF); the totals
-  // below are recomputed from the lines, so they stay reconciled.
-  const refundLines: UblLine[] = basis.refund
-    ? [{
-        description: `Refund${basis.refund.reason ? `: ${basis.refund.reason}` : ""}`,
-        amount: -basis.refund.net,
-        price: -basis.refund.net,
-        vatRate,
-        vatAmount: 0,
-      }]
-    : [];
-  const lines = [...serviceAndDiscountLines, ...refundLines];
+  // normalizeInvoiceBasis already deducts the refund. Keep its facts in the
+  // header note; another negative line would deduct it a second time.
+  const lines = serviceAndDiscountLines;
   const totals = calculateInvoiceSideTotals({ lines, reverseCharge, vatRate, vatLabel: booking.payment?.vatLabel });
   return { lines: lines.map((line) => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * (line.vatRate ?? vatRate)) / 100 })), totals };
 };
@@ -841,7 +832,8 @@ const withCustomerDiscountLines = (
     { label: "Points discount", amount: moneyNumber(discount.pointsDiscountAmount) },
     { label: `Discount code${discount.codeLabel ? ` (${discount.codeLabel})` : ""}`, amount: moneyNumber(discount.codeDiscountAmount) },
   ].filter((entry) => entry.amount > 0);
-  const extraCostDiscount = Math.max(0, moneyNumber(booking.payment?.extraCostCustomerDiscount));
+  const extraCostDiscount = Math.round(Math.max(0, moneyNumber(booking.payment?.extraCostCustomerDiscount))
+    * resolveExtraCostScale(booking.extraCosts, booking.extraCostTotal) * 100) / 100;
   if (serviceDiscounts.length === 0 && extraCostDiscount === 0) return undefined;
   const lineRateOf = (line: UblLine): number =>
     reverseCharge ? 0 : moneyNumber(line.vatRate ?? vatRate);
