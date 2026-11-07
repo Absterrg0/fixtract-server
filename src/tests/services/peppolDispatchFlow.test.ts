@@ -118,14 +118,14 @@ describe("Peppol Odoo dispatch", () => {
     expect(JSON.stringify(errored)).not.toContain("ECONNREFUSED");
   });
 
-  it.each([["sent", "sent", "invoice"], ["processing", "queued", "invoice"], ["sent", "sent", "credit_note"], ["processing", "queued", "credit_note"]])("refreshes an existing %s move without sending it again", async (state, status, documentType) => {
+  it.each([["sent", "sent", "invoice"], ["processing", "queued", "invoice"], ["sent", "sent", "credit_note"], ["processing", "queued", "credit_note"], ["to_send", "queued", "credit_note"]] as const)("refreshes an existing %s move without sending it again", async (state, status, documentType) => {
     const normal = mocks.call.getMockImplementation()!;
     mocks.call.mockImplementation(async (...args) => {
       if (args[1] === "account.move" && args[2] === "search_read") return [{ id: 70, state: "posted" }];
       if (args[1] === "account.edi.document") return [{ state }];
       return normal(...args);
     });
-    expect(await dispatch("supplier")).toMatchObject({ status });
+    expect(await dispatch("supplier", documentType)).toMatchObject({ status });
     expect(mocks.call.mock.calls.some((call) => call[2] === "button_process_edi_web_services")).toBe(false);
     expect(mocks.call.mock.calls.some((call) => call[2] === "create")).toBe(false);
   });

@@ -32,7 +32,7 @@ import {
   type ManualInvoiceOverride,
 } from "./invoiceGenerator";
 import { invoiceRefundFacts, invoiceSettledServiceLines } from "../utils/invoiceSettlements";
-import type { InvoiceSettlementBasis, RefundCreditFact } from "../models/invoiceSettlement";
+import type { InvoiceSettlementBasis, RefundCreditFact, RefundCreditDispatch } from "../models/invoiceSettlement";
 import { normalizeInvoiceBasis } from "../utils/milestoneInvoice";
 import { quoteAmountIncludesSelectedExtras } from "../utils/payment";
 import { maybeDispatchPeppolInvoice } from "./peppolDispatch";
@@ -2400,51 +2400,103 @@ const isPartialCreditDispatchRetryable = (status: unknown, reason: unknown): boo
   return status === 'failed' && /did not answer|in progress|timed? ?out/i.test(message);
 };
 
-/** Retry the issued partial credit, never regenerate it from today's balance. */
+/** Update only dispatch metadata, keeping issued artifacts and amounts immutable. */
+const persistPartialCreditDispatch = async (
+  booking: any, fact: RefundCreditFact, dispatch: RefundCreditDispatch,
+) => {
+  const identity = { side: fact.side, invoiceNumber: fact.invoiceNumber };
+  await Booking.updateOne({ _id: booking._id, 'payment.refundCreditLedger': { $elemMatch: identity } }, {
+    $set: { 'payment.refundCreditLedger.$.dispatch': dispatch },
+  });
+  await Payment.findOneAndUpdate({ booking: booking._id, milestoneIndex: null,
+    refundCreditLedger: { $elemMatch: identity } }, { $set: { 'refundCreditLedger.$.dispatch': dispatch } });
+  fact.dispatch = dispatch;
+  // UI/legacy readers still see the latest credit. An older retry must never
+  // replace that mirror, even if another worker advanced it after our read.
+  const prefix = fact.side === 'customer' ? 'creditNote' : 'supplierCreditNote';
+  const fields = { [`${prefix}PeppolDispatchStatus`]: dispatch.status,
+    [`${prefix}PeppolDispatchReason`]: dispatch.reason, [`${prefix}PeppolDispatchReference`]: dispatch.reference };
+  const mirrorUpdate = (path = '') => ({
+    $set: Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)
+      .map(([key, value]) => [`${path}${key}`, value])),
+    $unset: Object.fromEntries(Object.entries(fields).filter(([, value]) => value === undefined)
+      .map(([key]) => [`${path}${key}`, ''])),
+  });
+  await Booking.updateOne({ _id: booking._id, [`payment.${prefix}Number`]: fact.invoiceNumber }, mirrorUpdate('payment.'));
+  await Payment.findOneAndUpdate({ booking: booking._id, milestoneIndex: null,
+    [`${prefix}Number`]: fact.invoiceNumber }, mirrorUpdate());
+};
+
+const assertPartialCreditDispatchClaim = async (booking: any, claim: string) => {
+  const active = await Booking.findById(booking._id).select('payment.creditNoteGenerationClaim');
+  if (active?.payment?.creditNoteGenerationClaim !== claim || isStaleGenerationClaim(claim, 'GENERATING-CN-')) {
+    throw new Error('Partial credit dispatch claim expired; retry with the active worker.');
+  }
+};
+
+/** Retry each issued partial credit, never regenerate it from today's balance. */
 const retryRecordedPartialCredit = async (
-  booking: any, side: 'customer' | 'supplier', platform: UblPlatformParty, claim: string,
+  booking: any, fact: RefundCreditFact, platform: UblPlatformParty, claim: string,
 ): Promise<boolean> => {
+  const side = fact.side;
   const prefix = side === 'customer' ? 'creditNote' : 'supplierCreditNote';
-  const number = booking.payment[`${prefix}Number`];
-  const status = booking.payment[`${prefix}PeppolDispatchStatus`];
-  if (!number || !isPartialCreditDispatchRetryable(status, booking.payment[`${prefix}PeppolDispatchReason`])) return false;
-  const fact = booking.payment.refundCreditLedger?.find((entry: RefundCreditFact) =>
-    entry.side === side && entry.invoiceNumber === number);
-  if (!fact) throw new Error('Partial credit dispatch lacks recorded amounts; reconcile before retry.');
+  // Ledger entries are Mongoose subdocuments in production. Copy only their
+  // values; spreading a subdocument carries its stale internal _doc into writes.
+  const recorded = fact.dispatch;
+  let dispatch: RefundCreditDispatch | undefined = recorded && {
+    status: recorded.status, reason: recorded.reason, reference: recorded.reference,
+    provider: recorded.provider, attempts: recorded.attempts,
+    dispatchedAt: recorded.dispatchedAt, lastAttemptAt: recorded.lastAttemptAt,
+  };
+  if (!dispatch && fact.invoiceNumber === booking.payment[`${prefix}Number`]) {
+    const status = booking.payment[`${prefix}PeppolDispatchStatus`];
+    if (status) {
+      dispatch = { status, reason: booking.payment[`${prefix}PeppolDispatchReason`],
+        reference: booking.payment[`${prefix}PeppolDispatchReference`] };
+      // Adopt the matching legacy state before a new delta replaces the mirror.
+      await persistPartialCreditDispatch(booking, fact, dispatch);
+    }
+  }
+  if (!dispatch || !isPartialCreditDispatchRetryable(dispatch.status, dispatch.reason)) return false;
   // Persist before any provider work, including artifact reads. A crash at any
   // later point leaves an obligation for the existing refund-invoice cron.
   await Booking.updateOne({ _id: booking._id }, { $set: {
     'payment.refundInvoiceRetryAt': new Date(Date.now() + CREDIT_GENERATION_CLAIM_TTL_MS + 1000),
   } });
-  const xml = fact.invoiceUblUrl && await downloadBufferFromS3(fact.invoiceUblUrl);
-  if (!xml) throw new Error('The original partial credit UBL is unavailable; dispatch remains queued.');
-  const input = buildPartialRefundCreditInput({ side, net: fact.netAmount, vat: fact.vatAmount,
-    vatRate: effectiveVatRateForCredit(fact.netAmount, fact.vatAmount, booking.payment.vatRate),
-    reverseCharge: fact.vatAmount === 0, currency: booking.payment.currency || 'EUR',
-    relatedInvoiceNumber: booking.payment[`${prefix}RelatedInvoiceNumber`], description: 'Partial refund',
-  });
-  const manualBooking = applyManualParty(booking, input);
-  const active = await Booking.findById(booking._id).select('payment.creditNoteGenerationClaim');
-  if (active?.payment?.creditNoteGenerationClaim !== claim || isStaleGenerationClaim(claim, 'GENERATING-CN-')) {
-    throw new Error('Partial credit dispatch claim expired; retry with the active worker.');
+  try {
+    const ublUrl = fact.invoiceUblUrl;
+    const xml = ublUrl && await downloadBufferFromS3(ublUrl);
+    if (!ublUrl || !xml) throw new Error('The original partial credit UBL is unavailable; dispatch remains queued.');
+    const input = buildPartialRefundCreditInput({ side, net: fact.netAmount, vat: fact.vatAmount,
+      vatRate: effectiveVatRateForCredit(fact.netAmount, fact.vatAmount, booking.payment.vatRate),
+      reverseCharge: fact.vatAmount === 0, currency: booking.payment.currency || 'EUR',
+      relatedInvoiceNumber: booking.payment[`${prefix}RelatedInvoiceNumber`], description: 'Partial refund',
+    });
+    const manualBooking = applyManualParty(booking, input);
+    await assertPartialCreditDispatchClaim(booking, claim);
+    dispatch = { ...dispatch, lastAttemptAt: new Date() };
+    await persistPartialCreditDispatch(booking, fact, dispatch);
+    // Reconcile this exact invoice number with Odoo's move and EDI state first;
+    // sent/processing/to_send attempts are never submitted again.
+    const result = await maybeDispatchPeppolInvoice({ booking: manualBooking, side,
+      invoiceNumber: fact.invoiceNumber, ublXml: xml.toString('utf8'),
+      invoiceUblUrl: ublUrl, invoicePdfUrl: fact.invoiceUrl,
+      issueDate: fact.generatedAt, documentType: 'credit_note',
+      netAmount: fact.netAmount, totalWithVat: roundCreditMoney(fact.netAmount + fact.vatAmount),
+      vatRate: input.payment.vatRate, reverseCharge: input.payment.reverseCharge,
+      lineItems: getPeppolLineItems(getPricingLinesForUbl(manualBooking, { selfBilling: side === 'supplier', platform })),
+    });
+    await persistPartialCreditDispatch(booking, fact, { ...dispatch, status: result.status, reason: result.reason,
+      reference: result.reference || dispatch.reference, provider: result.provider || dispatch.provider,
+      attempts: result.attempts ?? dispatch.attempts, dispatchedAt: result.dispatchedAt || dispatch.dispatchedAt });
+    return isPartialCreditDispatchRetryable(result.status, result.reason);
+  } catch (error) {
+    // A missing artifact or unavailable provider on one credit cannot block the
+    // other pending credits or a new refund delta. Claim loss still fences work.
+    await assertPartialCreditDispatchClaim(booking, claim);
+    console.error(`[INVOICE] Partial credit retry failed for ${fact.invoiceNumber}:`, providerErrorMessage(error));
+    return true;
   }
-  // maybeDispatch reconciles the same invoice number with Odoo's move and EDI
-  // state first; sent/processing/to_send attempts are never submitted again.
-  const result = await maybeDispatchPeppolInvoice({ booking: manualBooking, side,
-    invoiceNumber: fact.invoiceNumber, ublXml: xml.toString('utf8'),
-    invoiceUblUrl: fact.invoiceUblUrl, invoicePdfUrl: fact.invoiceUrl,
-    issueDate: fact.generatedAt, documentType: 'credit_note',
-    netAmount: fact.netAmount, totalWithVat: roundCreditMoney(fact.netAmount + fact.vatAmount),
-    vatRate: input.payment.vatRate, reverseCharge: input.payment.reverseCharge,
-    lineItems: getPeppolLineItems(getPricingLinesForUbl(manualBooking, { selfBilling: side === 'supplier', platform })),
-  });
-  const fields = { [`${prefix}PeppolDispatchStatus`]: result.status,
-    [`${prefix}PeppolDispatchReason`]: result.reason, [`${prefix}PeppolDispatchReference`]: result.reference };
-  await Booking.updateOne({ _id: booking._id, [`payment.${prefix}Number`]: number }, {
-    $set: Object.fromEntries(Object.entries(fields).map(([key, value]) => [`payment.${key}`, value])),
-  });
-  await persistPaymentArtifactUpdate(booking._id, undefined, fields);
-  return isPartialCreditDispatchRetryable(result.status, result.reason);
 };
 
 /**
@@ -2474,10 +2526,9 @@ export async function ensurePartialRefundCreditArtifacts(
     let issued = booking.payment.invoiceSettlementBasis;
     const ledger = booking.payment.refundCreditLedger || [];
     let dispatchPending = false;
-    for (const side of ['customer', 'supplier'] as const) {
-      // Refresh both existing documents independently of issuing new deltas.
-      // A pending send must not prevent either side's next credit.
-      const pending = await retryRecordedPartialCredit(booking, side, platform, claimed);
+    for (const fact of ledger) {
+      // Refresh every recorded credit independently of issuing new deltas.
+      const pending = await retryRecordedPartialCredit(booking, fact, platform, claimed);
       dispatchPending = pending || dispatchPending;
     }
     if (!issued) {
@@ -2739,11 +2790,11 @@ export async function createManualInvoiceArtifact(
     $set: Object.fromEntries(Object.entries(fields).map(([key, value]) => [`payment.${key}`, value])),
   };
   if (historyEntry) bookingUpdate.$push = { "payment.invoiceArtifactHistory": historyEntry };
-  const creditFact = refundFact ? {
+  const creditFact: RefundCreditFact | undefined = refundFact ? {
     key: refundFact.key, side: refundFact.side, refundAmount: refundFact.refundAmount,
     netAmount: refundFact.netAmount, vatAmount: refundFact.vatAmount,
     invoiceNumber: generated.invoiceNumber, invoiceUrl: artifactUrl,
-    invoiceUblUrl: ublUrl, generatedAt,
+    invoiceUblUrl: ublUrl, generatedAt, dispatch: { status: 'queued' as const, lastAttemptAt: new Date() },
   } : undefined;
   if (creditFact) (bookingUpdate.$set as Record<string, unknown>)['payment.refundInvoiceRetryAt'] =
     new Date(Date.now() + CREDIT_GENERATION_CLAIM_TTL_MS + 1000);
@@ -2779,6 +2830,9 @@ export async function createManualInvoiceArtifact(
     peppolDispatchStatus = result.status;
     peppolDispatchReason = result.reason;
     peppolDispatchReference = result.reference;
+    if (creditFact) creditFact.dispatch = { status: result.status, reason: result.reason,
+      reference: result.reference, provider: result.provider, attempts: result.attempts,
+      dispatchedAt: result.dispatchedAt, lastAttemptAt: creditFact.dispatch?.lastAttemptAt };
   } catch (error) {
     console.error(`[INVOICE] Manual ${input.documentType} Peppol dispatch failed for booking ${bookingId}:`, providerErrorMessage(error));
     peppolDispatchStatus = "failed";
@@ -2795,8 +2849,14 @@ export async function createManualInvoiceArtifact(
     [`${dispatchPrefix}DispatchReason`]: peppolDispatchReason,
     [`${dispatchPrefix}DispatchReference`]: peppolDispatchReference,
   };
-  await Booking.updateOne({ _id: booking._id }, { $set: Object.fromEntries(Object.entries(dispatchFields).map(([key, value]) => [`payment.${key}`, value])) });
-  await persistPaymentArtifactUpdate(booking._id, paymentId, dispatchFields);
+  if (creditFact) {
+    await persistPartialCreditDispatch(booking, creditFact, { ...creditFact.dispatch!,
+      status: peppolDispatchStatus as RefundCreditDispatch['status'], reason: peppolDispatchReason,
+      reference: peppolDispatchReference });
+  } else {
+    await Booking.updateOne({ _id: booking._id }, { $set: Object.fromEntries(Object.entries(dispatchFields).map(([key, value]) => [`payment.${key}`, value])) });
+    await persistPaymentArtifactUpdate(booking._id, paymentId, dispatchFields);
+  }
   try {
     await notifyManualArtifactReady(booking, input, generated.invoiceNumber, artifactUrl, generated.pdfBuffer);
   } catch (notifyError) {
