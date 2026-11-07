@@ -8,11 +8,12 @@ export const invoiceSettledPayments = (booking: any): any[] => {
     if (!settledStatuses.has(row.status)) continue;
     unique.set(String(row.stripePaymentIntentId || row._id || `milestone:${row.milestoneIndex}`), row);
   }
-  if (!unique.size) {
+  {
     for (const entry of booking.paymentDiscountLedger || []) {
+      if (!entry.paymentIntentId || unique.has(String(entry.paymentIntentId))) continue;
       if (entry.totalWithVat == null || entry.netAmount == null || entry.vatAmount == null) continue;
       const snapshot = typeof entry.toObject === 'function' ? entry.toObject() : entry;
-      unique.set(entry.paymentIntentId, { ...snapshot, stripePaymentIntentId: entry.paymentIntentId, status: 'completed' });
+      unique.set(String(entry.paymentIntentId), { ...snapshot, stripePaymentIntentId: entry.paymentIntentId, status: 'completed' });
     }
   }
   // The booking snapshot is a fallback only; Payment rows are authoritative.
