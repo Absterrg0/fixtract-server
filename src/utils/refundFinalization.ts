@@ -18,7 +18,7 @@ export const isBookingStarted = (booking: any): boolean => {
 
 /** Capture the started state before a refund changes the booking status. */
 export const preparePartialRefundCancellation = (booking: any, wasStarted: boolean): void => {
-  booking.status = 'cancelled';
+  if (isPreCompletionStatus(booking.status)) booking.status = 'cancelled';
   booking.refundPreservesPastPlanning = wasStarted;
   if (wasStarted) pruneFutureResourcePlanDays(booking);
 };

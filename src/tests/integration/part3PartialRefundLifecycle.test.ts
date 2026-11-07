@@ -15,7 +15,10 @@ import CalendarReservation from '../../models/calendarReservation';
 import Payment from '../../models/payment';
 import CancellationRequest from '../../models/cancellationRequest';
 import { customerRespondToCounterOffer } from '../../handlers/Booking/refundNegotiation';
-import { refundPayment } from '../../handlers/Stripe/payment';
+import { approveCancellationRequest } from '../../handlers/Admin/cancellationRequests';
+import * as refundFinalization from '../../utils/refundFinalization';
+import AccountDataGuard from '../../models/accountDataGuard';
+import { refundPayment, executeRefund } from '../../handlers/Stripe/payment';
 import { resolveDispute } from '../../handlers/Admin/disputeManagement';
 import { replaceBookingCalendar } from '../../utils/support/bookingCalendar';
 
@@ -40,9 +43,10 @@ describeDb('Part 3 partial refund lifecycle with isolated Mongo and provider fak
   });
   afterAll(async () => { await mongoose.connection.dropDatabase(); await mongoose.disconnect(); });
   beforeEach(async () => {
+    vi.restoreAllMocks();
     vi.clearAllMocks();
     await Promise.all([Booking.collection.deleteMany({}), User.collection.deleteMany({}),
-      CalendarReservation.collection.deleteMany({}), Payment.collection.deleteMany({}), CancellationRequest.collection.deleteMany({})]);
+      CalendarReservation.collection.deleteMany({}), Payment.collection.deleteMany({}), CancellationRequest.collection.deleteMany({}), AccountDataGuard.collection.deleteMany({})]);
     await User.collection.insertMany([
       { _id: proId, role: 'professional', name: 'Professional', email: 'pro@ft3.test' },
       { _id: customerId, role: 'customer', name: 'Customer', email: 'customer@ft3.test' },
@@ -56,6 +60,27 @@ describeDb('Part 3 partial refund lifecycle with isolated Mongo and provider fak
       'payment.invoiceNumber': 'FIX-FT3-TEST', 'payment.supplierInvoiceNumber': 'SUP-FT3-TEST',
     } }));
   });
+
+
+  const seedRefund = async (status = 'in_progress', payment: Record<string, any> = {}) => {
+    const id = new Types.ObjectId();
+    const booking = { _id: id, bookingNumber: `BK-FT3-${id}`, bookingType: 'professional',
+          professional: proId, customer: customerId, status,
+          statusBeforeDispute: 'in_progress', scheduleTimeZone: 'UTC',
+          location: { type: 'Point', coordinates: [4.35, 50.85], country: 'BE' },
+          vatDecision: { action: 'standard_rate', country: 'BE', standardRate: 21, appliedRate: 21, reverseCharge: false },
+          rfqData: { serviceType: 'Plumbing', description: 'Partial refund regression fixture' },
+          dispute: { type: 'refund_request', raisedAt: new Date(), raisedBy: customerId, reason: 'Cancelled after work began' },
+          scheduledStartDate: utcDay(-2), scheduledExecutionEndDate: utcDay(3),
+          assignedTeamMembers: [proId], resourcePlan: [{ resourceId: proId, days: [utcDay(-1), utcDay(1)] }], quote: { amount: 100, currency: 'EUR' },
+          payment: { status: 'completed', stripePaymentIntentId: 'pi_ft3_partial', currency: 'EUR',
+            amount: 100, netAmount: 100, vatAmount: 21, vatRate: 21, totalWithVat: 121 } };
+
+    Object.assign(booking.payment, payment);
+    await Booking.collection.insertOne(booking as any);
+    await replaceBookingCalendar(booking);
+    return booking;
+  };
 
   for (const path of ['direct', 'dispute', 'negotiated'] as const) {
     for (const hasPast of [true, false]) {
@@ -111,4 +136,55 @@ describeDb('Part 3 partial refund lifecycle with isolated Mongo and provider fak
       }, 30000);
     }
   }
+
+  it.each(['admin', 'dispute', 'negotiated'])('%s releases the calendar and skips partial invoices after a cumulative full refund', async path => {
+    const booking = await seedRefund(path === 'dispute' ? 'dispute' : 'in_progress', { status: 'partially_refunded', refundAmount: 71 });
+    const res = response();
+    if (path === 'dispute') {
+      await resolveDispute({ user: { _id: adminId }, params: { bookingId: String(booking._id) },
+        body: { forceStatus: 'refunded', action: 'adjust', adjustedAmount: 50, resolution: 'Final refund' } } as any, res as any);
+    } else {
+      const request = await CancellationRequest.create({ booking: booking._id, requestedBy: customerId,
+        requestedRole: 'customer', status: path === 'admin' ? 'pending' : 'negotiating', reason: 'Final refund', counterOfferAmount: 50 });
+      if (path === 'admin') await approveCancellationRequest({ user: { _id: adminId }, params: { id: String(request._id) }, body: { amount: 50 } } as any, res as any);
+      else await customerRespondToCounterOffer({ user: { _id: customerId }, params: { bookingId: String(booking._id) }, body: { decision: 'accept' } } as any, res as any);
+    }
+    expect(res.statusCode).toBe(200);
+    const current = await Booking.findById(booking._id);
+    expect(current?.payment).toMatchObject({ status: 'refunded', refundAmount: 121 });
+    expect(await CalendarReservation.countDocuments({ sourceId: booking._id })).toBe(0);
+    expect(mocks.credits).not.toHaveBeenCalled();
+    expect(mocks.invoices).not.toHaveBeenCalled();
+  });
+
+  it.each(['completed', 'dispute', 'refunded'])('partial refund preserves %s status owned by another flow', async status => {
+    const booking = await seedRefund(status);
+    await executeRefund(String(booking._id), { amount: 50 });
+    expect((await Booking.findById(booking._id))?.status).toBe(status);
+  });
+
+  it('records the persisted completed status in negotiated refund history', async () => {
+    const booking = await seedRefund('completed');
+    await CancellationRequest.create({ booking: booking._id, requestedBy: customerId, requestedRole: 'customer',
+      status: 'negotiating', reason: 'After completion', counterOfferAmount: 50 });
+    const res = response();
+    await customerRespondToCounterOffer({ user: { _id: customerId }, params: { bookingId: String(booking._id) }, body: { decision: 'accept' } } as any, res as any);
+    expect(res.statusCode).toBe(200);
+    const current = await Booking.findById(booking._id);
+    expect(current?.status).toBe('completed');
+    expect(current?.statusHistory.at(-1)?.status).toBe('completed');
+  });
+
+  it('triggers partial refund invoices even if retention fails and the account is fenced', async () => {
+    const booking = await seedRefund();
+    await AccountDataGuard.create({ _id: customerId, state: 'anonymizing', startedAt: new Date() });
+    vi.spyOn(refundFinalization, 'retainPastBookingCalendar').mockRejectedValueOnce(new Error('calendar unavailable'));
+    await CancellationRequest.create({ booking: booking._id, requestedBy: customerId, requestedRole: 'customer',
+      status: 'negotiating', reason: 'Partial refund', counterOfferAmount: 50 });
+    const res = response();
+    await customerRespondToCounterOffer({ user: { _id: customerId }, params: { bookingId: String(booking._id) }, body: { decision: 'accept' } } as any, res as any);
+    expect(res.statusCode).toBe(200);
+    expect(mocks.credits).toHaveBeenCalledWith(String(booking._id));
+  });
+
 });

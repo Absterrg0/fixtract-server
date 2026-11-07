@@ -737,7 +737,13 @@ export const resolveDispute = async (req: Request, res: Response) => {
         // A partial cancellation is persisted as cancelled by the refund core.
         // Use that fresh status, payment and retained plan in the response and
         // subsequent invoice/calendar work, rather than the pre-refund copy.
-        resolvedBooking = await Booking.findById(resolvedBooking._id) || resolvedBooking;
+        // This flow owns its resolved 'refunded' state. Only its partial
+        // cancellation becomes cancelled; the generic refund core preserves
+        // dispute-managed and completed lifecycle states.
+        resolvedBooking = await Booking.findOneAndUpdate({
+          _id: resolvedBooking._id, status: 'refunded', 'payment.status': 'partially_refunded',
+        }, { $set: { status: 'cancelled' } }, { new: true })
+          || await Booking.findById(resolvedBooking._id) || resolvedBooking;
         await Booking.updateOne(
           { _id: resolvedBooking._id },
           {
@@ -750,11 +756,11 @@ export const resolveDispute = async (req: Request, res: Response) => {
           }
         ).catch((cancelWriteError) => console.error('Failed to record dispute refund on booking cancellation:', cancelWriteError));
         try {
-          const refundTotal = Number(resolvedBooking.payment?.totalWithVat) || 0;
           // Partial dispute refunds keep the remainder billable: invoices are
           // generated from the remaining amount, and on a started booking only
           // future days are unplanned while past days stay blocked.
-          if (leavesBillableRemainder(refundTotal, refundResult.amount)) {
+          if (resolvedBooking.payment?.status === 'partially_refunded'
+            && leavesBillableRemainder(resolvedBooking.payment.totalWithVat, resolvedBooking.payment.refundAmount)) {
             if (isBookingStarted(resolvedBooking)) {
               pruneFutureResourcePlanDays(resolvedBooking);
               await Booking.updateOne(
