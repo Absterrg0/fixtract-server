@@ -53,7 +53,10 @@ export const buildMilestoneChargePlan = (
   const milestones = Array.isArray(booking?.milestonePayments) ? booking.milestonePayments : [];
   if (milestones.length === 0) return [];
 
-  const orders = milestones.map((milestone: any) => Number(milestone?.order ?? 0));
+  const orders = milestones.map((milestone: any) => {
+    const order = Number(milestone?.order ?? 0);
+    return Number.isFinite(order) ? order : 0;
+  });
   const minOrder = Math.min(...orders);
   const optionsTotal = sumSelectedOptionPrices(booking);
   const optionsGross =
@@ -62,7 +65,7 @@ export const buildMilestoneChargePlan = (
       : 0;
 
   return milestones.map((milestone: any, index: number) => {
-    const order = Number(milestone?.order ?? 0);
+    const order = orders[index];
     const baseProfessionalAmount = Number(milestone?.amount) || 0;
     const baseCustomerGross = toMilestoneCustomerGross(baseProfessionalAmount, commissionPercent);
     const isFirst = order === minOrder;

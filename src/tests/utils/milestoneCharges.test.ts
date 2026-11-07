@@ -123,3 +123,11 @@ describe('buildMilestoneChargePlan', () => {
     expect(plan[0].expectedCustomerGross).toBeCloseTo(legacyFirst, 10);
   });
 });
+
+
+it.each(['invalid', Infinity, NaN])('normalizes non-finite milestone order %s before selecting the first', order => {
+  const plan = buildMilestoneChargePlan(booking({ selectedExtraOptions: [{ bookedPrice: 20 }],
+    milestonePayments: [{ amount: 100, order }, { amount: 200, order: 1 }] }), 10);
+  expect(plan[0]).toMatchObject({ order: 0, optionsCustomerGross: 22, includesSelectedOptions: true });
+  expect(plan[1].optionsCustomerGross).toBe(0);
+});
