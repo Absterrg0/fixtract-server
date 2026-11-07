@@ -416,7 +416,7 @@ describe("ensurePartialRefundCreditArtifacts", () => {
     expect(mocks.bookingUpdateOne.mock.calls.some(([, update]) => update.$unset?.['payment.creditNoteGenerationClaim'] !== undefined)).toBe(false);
   });
 
-  it.each(['sent', 'queued'])('retries the original queued credit without generating artifacts (provider %s)', async providerStatus => {
+  it.each(['sent', 'queued', 'lost-claim'])('retries the original queued credit without generating artifacts (provider %s)', async providerStatus => {
     const fact = { side: 'customer', key: 'recorded', refundAmount: 21, netAmount: 17.36, vatAmount: 3.64,
       invoiceNumber: 'FIX-CN-ORIGINAL', invoiceUrl: 's3://original.pdf', invoiceUblUrl: 's3://original.xml', generatedAt: new Date('2026-10-29') };
     const doc = baseBooking(basePayment({
@@ -429,6 +429,11 @@ describe("ensurePartialRefundCreditArtifacts", () => {
     const originalLedger = JSON.stringify(doc.payment.refundCreditLedger);
     mocks.bookingFindById.mockImplementation(() => chainQuery(doc));
     mocks.peppol.mockResolvedValue({ status: providerStatus, reference: 'odoo-account.move-123' });
+    if (providerStatus === 'lost-claim') {
+      mocks.download.mockImplementationOnce(async () => { mocks.activeClaim = 'another-worker'; return Buffer.from('<CreditNote/>'); });
+      await expect(ensurePartialRefundCreditArtifacts('booking-1')).rejects.toThrow('claim expired');
+      expect(mocks.peppol).not.toHaveBeenCalled(); expect(mocks.upload).not.toHaveBeenCalled(); return;
+    }
     expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe(providerStatus === 'queued' ? 'busy' : 'credited');
     expect(mocks.download).toHaveBeenCalledWith(fact.invoiceUblUrl);
     expect(mocks.peppol).toHaveBeenCalledWith(expect.objectContaining({ invoiceNumber: fact.invoiceNumber,

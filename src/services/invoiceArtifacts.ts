@@ -2393,7 +2393,7 @@ const recordedInvoiceSettlementBasis = (booking: any, platform: UblPlatformParty
 
 /** Retry the issued partial credit, never regenerate it from today's balance. */
 const retryRecordedPartialCredit = async (
-  booking: any, side: 'customer' | 'supplier', platform: UblPlatformParty,
+  booking: any, side: 'customer' | 'supplier', platform: UblPlatformParty, claim: string,
 ): Promise<boolean> => {
   const prefix = side === 'customer' ? 'creditNote' : 'supplierCreditNote';
   const number = booking.payment[`${prefix}Number`];
@@ -2415,6 +2415,10 @@ const retryRecordedPartialCredit = async (
     relatedInvoiceNumber: booking.payment[`${prefix}RelatedInvoiceNumber`], description: 'Partial refund',
   });
   const manualBooking = applyManualParty(booking, input);
+  const active = await Booking.findById(booking._id).select('payment.creditNoteGenerationClaim');
+  if (active?.payment?.creditNoteGenerationClaim !== claim || isStaleGenerationClaim(claim, 'GENERATING-CN-')) {
+    throw new Error('Partial credit dispatch claim expired; retry with the active worker.');
+  }
   // maybeDispatch reconciles the same invoice number with Odoo's move and EDI
   // state first; sent/processing/to_send attempts are never submitted again.
   const result = await maybeDispatchPeppolInvoice({ booking: manualBooking, side,
@@ -2461,7 +2465,7 @@ export async function ensurePartialRefundCreditArtifacts(
     let issued = booking.payment.invoiceSettlementBasis;
     const ledger = booking.payment.refundCreditLedger || [];
     for (const side of ['customer', 'supplier'] as const) {
-      if (await retryRecordedPartialCredit(booking, side, platform)) return 'busy';
+      if (await retryRecordedPartialCredit(booking, side, platform, claimed)) return 'busy';
     }
     if (!issued) {
       // Legacy invoices can be reconstructed only from their recorded payments

@@ -57,6 +57,15 @@ describe("Peppol Odoo dispatch", () => {
       invoice_line_ids: [[0, 0, expect.objectContaining({ account_id: 20, tax_ids: [[6, 0, [61]]] })]],
     });
   });
+  it('does not resend an existing credit when neither provider delivery read can be reconciled', async () => {
+    mocks.call.mockImplementation(async (_config, model, method) => {
+      if (model === 'account.move' && method === 'search_read') return [{ id: 70, state: 'posted' }];
+      throw new Error('provider read unavailable');
+    });
+    expect(await dispatch('customer', 'credit_note')).toMatchObject({ status: 'queued', attempts: 0 });
+    expect(mocks.call.mock.calls.some(call => ['create', 'button_process_edi_web_services'].includes(call[2]))).toBe(false);
+  });
+
   it("keeps customer invoices in the sales journal", async () => {
     expect((await dispatch("customer")).status).toBe("sent");
     const create = mocks.call.mock.calls.find((call) => call[1] === "account.move" && call[2] === "create");
