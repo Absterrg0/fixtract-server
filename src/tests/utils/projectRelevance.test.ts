@@ -132,3 +132,9 @@ describe('sortProjectsByRelevance', () => {
     expect(ranked[0].project._id).toBe(high.project._id);
   });
 });
+
+
+it.each(['éé', '東京', 'ЖЖ'])('keeps Unicode letters in the search token %s', query => {
+  expect(scoreProjectRelevance(project('a', { title: query }), null, null, { query })).toBe(5);
+  expect(scoreProjectRelevance(project('b'), null, null, { query })).toBe(0);
+});
