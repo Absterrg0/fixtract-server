@@ -462,19 +462,7 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
   // event-driven notifies missed. The per-milestone delivery key dedupes
   // repeats, so each payable milestone notifies exactly once.
   try {
-    const bookings = await Booking.find({
-      status: { $in: ['booked', 'in_progress', 'professional_completed'] },
-      milestonePayments: { $elemMatch: { status: { $ne: 'paid' } } },
-    }).select('_id').limit(200);
-
-    for (const candidate of bookings) {
-      try {
-        const result = await notifyMilestonePaymentDue(String(candidate._id), { notifyProfessional: true });
-        if (result.notified) counts.milestoneDue++;
-      } catch (e: any) {
-        counts.errors.push(`milestoneDue ${candidate._id}: ${e?.message || e}`);
-      }
-    }
+    await sweepMilestonePaymentDue(counts);
   } catch (e: any) {
     counts.errors.push(`milestoneDue query: ${e?.message || e}`);
   }
@@ -536,4 +524,27 @@ export async function runNotificationReminders(): Promise<ReminderJobCounts> {
 
   console.log('[Notification Reminders] Done', counts);
   return counts;
+}
+
+
+/** Cursor pagination prevents already-notified early rows starving later bookings. */
+export async function sweepMilestonePaymentDue(counts: Pick<ReminderJobCounts, 'milestoneDue' | 'errors'>): Promise<void> {
+  let after: unknown;
+  while (true) {
+    const bookings = await Booking.find({
+      status: { $in: ['booked', 'in_progress', 'professional_completed'] },
+      milestonePayments: { $elemMatch: { status: { $ne: 'paid' } } },
+      ...(after ? { _id: { $gt: after } } : {}),
+    }).select('_id').sort({ _id: 1 }).limit(200);
+    if (bookings.length === 0) break;
+    for (const candidate of bookings) {
+      after = candidate._id;
+      try {
+        const result = await notifyMilestonePaymentDue(String(candidate._id), { notifyProfessional: true });
+        if (result.notified) counts.milestoneDue++;
+      } catch (e: any) {
+        counts.errors.push(`milestoneDue ${candidate._id}: ${e?.message || e}`);
+      }
+    }
+  }
 }
