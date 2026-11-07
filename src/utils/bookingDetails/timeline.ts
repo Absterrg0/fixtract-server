@@ -1,3 +1,4 @@
+import { withoutPhantomBookingActivity, hasRecordedDispute, hasRecordedCustomerReview, hasRecordedProfessionalReview } from '../bookingActivity';
 import type {
   ActivityItem,
   ActorDto,
@@ -186,6 +187,7 @@ const sourceForType = (type: string): ActivityItem['source'] => {
 };
 
 interface TimelineContext {
+  viewerId?: string | null;
   booking: any;
   payments: any[];
   cancellations: any[];
@@ -205,7 +207,7 @@ interface TimelineContext {
 
 export const buildBookingActivity = async (context: TimelineContext): Promise<BookingActivityDto> => {
   const {
-    booking,
+    booking: unfilteredBooking,
     payments,
     cancellations,
     warrantyClaims,
@@ -216,14 +218,14 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
     adminAccess,
   } = context;
 
+  const booking = withoutPhantomBookingActivity(unfilteredBooking);
   const events: ActivityItem[] = [];
   const seenIds = new Set<string>();
   const coveredStatus: Array<{ status: string; timestamp: number }> = [];
-  let undatedEvents = 0;
   const qualityNotes = new Set<string>();
 
   const pushEvent = (event: PushEvent) => {
-    if (!event.occurredAt || seenIds.has(event.id)) return;
+    if (seenIds.has(event.id)) return;
     const type = event.type;
     seenIds.add(event.id);
     const { descriptionOrigin, ...activityEvent } = event;
@@ -239,6 +241,8 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
       : 'not_recorded';
     events.push({
       ...activityEvent,
+      timestampRecorded: Boolean(toIso(activityEvent.occurredAt)),
+      provenance: 'surviving_record',
       titleKey: activityEvent.titleKey || `activity.${type}`,
       titleEn: viewerRole === 'admin' ? humanizeType(type) : undefined,
       descriptionSource,
@@ -325,7 +329,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
     : (!firstStatus && ['rfq', 'rfq_accepted'].includes(String(booking.status))
       ? toIso(booking.createdAt)
       : null);
-  if (rfqSubmittedAt) {
+  if (firstStatus?.status === 'rfq' || (!firstStatus && ['rfq', 'rfq_accepted'].includes(String(booking.status)))) {
     const submittedActor = actorForId(firstStatus?.updatedBy, actors, viewerRole, {
       roleHint: 'customer',
     });
@@ -335,13 +339,14 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
       id: 'rfq:submitted',
       type: 'rfq_submitted',
       category: 'rfq',
-      occurredAt: rfqSubmittedAt,
+      occurredAt: rfqSubmittedAt || '',
       actor: submittedActor,
       actorRecorded,
-      description: null,
+      description: typeof booking.rfqData?.description === 'string' ? booking.rfqData.description : null,
+      descriptionOrigin: 'user',
       statusFrom: null,
       statusTo: 'rfq',
-      attachments: [],
+      attachments: await evidenceAttachments(booking.rfqData?.attachments, [customerId], 'rfq'),
       metadata: firstStatus ? { statusHistoryIndex: 0 } : { derivedFromCreatedAt: true },
       source: 'status_history',
       visibility: 'participants',
@@ -382,9 +387,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
   for (const version of versions) {
     const createdAt = toDate(version.createdAt);
     if (!createdAt) {
-      undatedEvents += 1;
       qualityNotes.add('UNDATED_QUOTE_VERSION');
-      continue;
     }
     let actor = actorForId(version.createdBy, actors, viewerRole, { roleHint: 'professional' });
     let legacyDerived = false;
@@ -394,6 +397,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
           entry?.status === 'quoted'
           && entry?.updatedBy
           && entry?.timestamp
+          && createdAt
           && Math.abs(new Date(entry.timestamp).getTime() - createdAt.getTime()) <= 5000,
       );
       if (matchingStatus?.updatedBy) {
@@ -414,7 +418,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
       id: `quote:${version.version}`,
       type: isRevision ? 'quotation_revised' : 'quotation_submitted',
       category: 'quotation',
-      occurredAt: createdAt.toISOString(),
+      occurredAt: createdAt?.toISOString() || '',
       actor,
       actorRecorded: Boolean(version.createdBy) || isActorRecorded(actor),
       description: version.changeNote || null,
@@ -606,18 +610,16 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
   });
   for (const fact of refundFacts) {
     if (!fact.refundedAt) {
-      undatedEvents += 1;
       qualityNotes.add('UNDATED_REFUND');
-      continue;
     }
     if (!fact.vatSplitRecorded) qualityNotes.add('REFUND_VAT_SPLIT_NOT_RECORDED');
     const refundActor = actorForId(fact.actorId, actors, viewerRole);
     const refundRef = refundFactReference(fact);
     pushEvent({
       id: `refund:${fact.paymentId || 'booking'}:${refundRef}`,
-      type: 'refund_issued',
+      type: fact.providerStatus && fact.providerStatus !== 'succeeded' ? 'refund_pending' : 'refund_issued',
       category: 'refund',
-      occurredAt: fact.refundedAt,
+      occurredAt: fact.refundedAt || '',
       actor: refundActor || systemActor('provider_webhook'),
       actorRecorded: refundActor ? isActorRecorded(refundActor) : true,
       description: fact.justification,
@@ -755,14 +757,14 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
       || (typeof booking.quote?.currency === 'string' && booking.quote.currency)
       || null;
     if (!declaredAt) {
-      undatedEvents += 1;
       qualityNotes.add('UNDATED_EXTRA_COSTS');
-    } else {
+    }
+    {
       pushEvent({
         id: 'extra-costs:declared',
         type: 'extra_costs_declared',
         category: 'extra_cost',
-        occurredAt: toIso(declaredAt)!,
+        occurredAt: toIso(declaredAt) || '',
         actor: actorForId(booking.completionAttestation?.confirmedBy, actors, viewerRole, {
           roleHint: 'professional',
         }),
@@ -820,14 +822,14 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
   }
 
   // ── Dispute ─────────────────────────────────────────────────────────────
-  if (booking.dispute?.raisedAt) {
+  if (hasRecordedDispute(booking)) {
     const actor = actorForId(booking.dispute.raisedBy, actors, viewerRole, { roleHint: 'customer' });
     const isExtraCostDispute = booking.dispute.type === 'extra_costs';
     pushEvent({
       id: 'dispute:opened',
       type: isExtraCostDispute ? 'extra_costs_disputed' : 'dispute_opened',
       category: isExtraCostDispute ? 'extra_cost' : 'dispute',
-      occurredAt: toIso(booking.dispute.raisedAt)!,
+      occurredAt: toIso(booking.dispute.raisedAt) || '',
       actor,
       actorRecorded: isActorRecorded(actor),
       description: booking.dispute.reason || null,
@@ -879,9 +881,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
   for (const [index, reschedule] of reschedules.entries()) {
     const requestedAt = toIso(reschedule.requestedAt);
     if (!requestedAt) {
-      undatedEvents += 1;
       qualityNotes.add('UNDATED_RESCHEDULE');
-      continue;
     }
     const requestedBy = actorForId(reschedule.requestedBy, actors, viewerRole, { roleHint: 'customer' });
     const scheduleMetadata = {
@@ -893,7 +893,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
       id: `reschedule:${index}:requested`,
       type: 'reschedule_requested',
       category: 'schedule',
-      occurredAt: requestedAt,
+      occurredAt: requestedAt || '',
       actor: requestedBy,
       actorRecorded: isActorRecorded(requestedBy),
       description: reschedule.reason || null,
@@ -937,9 +937,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
   for (const [index, request] of cancellations.entries()) {
     const createdAt = toIso(request.createdAt);
     if (!createdAt) {
-      undatedEvents += 1;
       qualityNotes.add('UNDATED_CANCELLATION_REQUEST');
-      continue;
     }
     const requestedBy = actorForId(request.requestedBy, actors, viewerRole, {
       roleHint: request.requestedRole === 'professional' ? 'professional' : 'customer',
@@ -954,7 +952,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
       id: `cancellation:${reference(request._id)}:requested`,
       type: 'cancellation_requested',
       category: 'cancellation',
-      occurredAt: createdAt,
+      occurredAt: createdAt || '',
       actor: requestedBy,
       actorRecorded: isActorRecorded(requestedBy),
       description: request.reason || null,
@@ -1101,21 +1099,20 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
   for (const [index, claim] of warrantyClaims.entries()) {
     const base = {
       claimId: reference(claim._id),
+      participantCanOpen: Boolean(context.viewerId && [referenceId(claim.customer), referenceId(claim.professional)].includes(context.viewerId)),
       claimNumber: claim.claimNumber,
       reason: claim.reason,
     };
     const openedAt = toIso(claim.openedAt);
     if (!openedAt) {
-      undatedEvents += 1;
       qualityNotes.add('UNDATED_WARRANTY_CLAIM');
-      continue;
     }
     const customerActor = actorForId(claim.customer, actors, viewerRole, { roleHint: 'customer' });
     pushEvent({
       id: `warranty:${reference(claim._id)}:opened:${index}`,
       type: 'warranty_claim_opened',
       category: 'warranty',
-      occurredAt: openedAt,
+      occurredAt: openedAt || '',
       actor: customerActor,
       actorRecorded: isActorRecorded(customerActor),
       description: null,
@@ -1239,15 +1236,15 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
   if (booking.postBookingData?.length > 0) {
     const submittedAt = toIso(booking.postBookingSubmittedAt);
     if (!submittedAt) {
-      undatedEvents += 1;
       qualityNotes.add('POST_BOOKING_TIMESTAMP_NOT_RECORDED');
-    } else {
+    }
+    {
       const actor = actorForId(booking.postBookingSubmittedBy, actors, viewerRole, { roleHint: 'customer' });
       pushEvent({
         id: 'post-booking:submitted',
         type: 'post_booking_answers_submitted',
         category: 'lifecycle',
-        occurredAt: submittedAt,
+        occurredAt: submittedAt || '',
         actor,
         actorRecorded: isActorRecorded(actor),
         description: null,
@@ -1262,13 +1259,13 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
   }
 
   // ── Reviews ─────────────────────────────────────────────────────────────
-  if (toIso(booking.customerReview?.reviewedAt)) {
+  if (hasRecordedCustomerReview(booking)) {
     const actor = actorForId(booking.customer, actors, viewerRole, { roleHint: 'customer' });
     pushEvent({
       id: 'review:customer',
       type: 'review_submitted',
       category: 'review',
-      occurredAt: toIso(booking.customerReview.reviewedAt)!,
+      occurredAt: toIso(booking.customerReview.reviewedAt) || '',
       actor,
       actorRecorded: isActorRecorded(actor),
       description: booking.customerReview.comment || null,
@@ -1298,13 +1295,13 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
       visibility: 'participants',
     });
   }
-  if (toIso(booking.professionalReview?.reviewedAt)) {
+  if (hasRecordedProfessionalReview(booking)) {
     const actor = actorForId(professionalId, actors, viewerRole, { roleHint: 'professional' });
     pushEvent({
       id: 'review:professional',
       type: 'review_submitted',
       category: 'review',
-      occurredAt: toIso(booking.professionalReview.reviewedAt)!,
+      occurredAt: toIso(booking.professionalReview.reviewedAt) || '',
       actor,
       actorRecorded: isActorRecorded(actor),
       description: booking.professionalReview.comment || null,
@@ -1326,9 +1323,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
   for (const [index, entry] of statusHistory.entries()) {
     const occurredAt = toIso(entry.timestamp);
     if (!occurredAt) {
-      undatedEvents += 1;
       qualityNotes.add('UNDATED_STATUS_HISTORY');
-      continue;
     }
     if (isStatusCovered(coveredStatus, entry.status, entry.timestamp)) continue;
     const previous = index > 0 ? statusHistory[index - 1]?.status : null;
@@ -1343,7 +1338,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
         id: `status:${index}`,
         type,
         category: 'quotation',
-        occurredAt,
+        occurredAt: occurredAt || '',
         actor: actor || inferredActor('professional'),
         actorRecorded: hasActor,
         description: entry.note || null,
@@ -1363,7 +1358,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
         id: `status:${index}`,
         type,
         category: 'lifecycle',
-        occurredAt,
+        occurredAt: occurredAt || '',
         actor: actorForId(customerId, actors, viewerRole, { roleHint: 'customer', source: 'inferred_route' }),
         actorRecorded: false,
         description: entry.note || null,
@@ -1384,7 +1379,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
       id: `status:${index}`,
       type,
       category: categoryForType(type),
-      occurredAt,
+      occurredAt: occurredAt || '',
       actor,
       actorRecorded: hasActor,
       description: suppressAdminNote ? null : entry.note || null,
@@ -1408,13 +1403,13 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
         id: 'status:implicit-created',
         type: 'booking_created',
         category: 'lifecycle',
-        occurredAt,
+        occurredAt: occurredAt || '',
         actor: actorForId(customerId, actors, viewerRole, { roleHint: 'customer', source: 'inferred_route' }),
         actorRecorded: false,
         description: 'Booking created',
         descriptionOrigin: 'system',
         statusFrom: null,
-        statusTo: initialStatus.status,
+        statusTo: null,
         attachments: [],
         metadata: {},
         source: 'status_history',
@@ -1442,8 +1437,8 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
       });
 
   visibleEvents.sort((a, b) => {
-    const time = new Date(a.occurredAt).getTime() - new Date(b.occurredAt).getTime();
-    return time !== 0 ? time : a.id.localeCompare(b.id);
+    const time = (toDate(a.occurredAt)?.getTime() ?? Infinity) - (toDate(b.occurredAt)?.getTime() ?? Infinity);
+    return Number.isNaN(time) || time === 0 ? a.id.localeCompare(b.id) : time;
   });
 
   const actorMissingEvents = visibleEvents.filter((event) => !event.actorRecorded).length;
@@ -1453,13 +1448,16 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
     qualityNotes.add('ATTACHMENT_UNAVAILABLE_FOR_LEGACY_RECORD');
   }
 
+  qualityNotes.add('HISTORICAL_COVERAGE_UNKNOWN');
   return {
     generatedAt: new Date().toISOString(),
-    complete: undatedEvents === 0,
+    // Surviving mutable state cannot prove complete historical coverage.
+    complete: false,
+    coverage: { status: 'unknown', source: 'surviving_records', appendOnlyArchive: false },
     order: 'asc',
     items: visibleEvents,
     dataQuality: {
-      undatedEvents,
+      undatedEvents: visibleEvents.filter((event) => !event.timestampRecorded).length,
       actorMissingEvents,
       legacyDerivedEvents,
       notes: [...qualityNotes],

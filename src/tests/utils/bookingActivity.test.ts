@@ -88,3 +88,15 @@ describe('recorded activity predicates', () => {
     expect(String(cleaned._id)).toBe(String(legacyPhantom._id));
   });
 });
+
+
+it('does not manufacture a quote creation timestamp when hydrating a legacy version', () => {
+  const hydrated = Booking.hydrate({ _id: new Types.ObjectId(), quoteVersions: [{ version: 1, scope: 'Legacy quote' }] });
+  expect(hydrated.quoteVersions[0].createdAt).toBeUndefined();
+});
+
+
+it('does not manufacture a legacy status-history timestamp', () => {
+  const hydrated = Booking.hydrate({ _id: new Types.ObjectId(), statusHistory: [{ status: 'quoted' }] });
+  expect(hydrated.statusHistory[0].timestamp).toBeUndefined();
+});

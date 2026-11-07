@@ -430,3 +430,18 @@ describe('booking and quotation alias privacy/IDOR contract', () => {
     });
   }
 });
+
+
+describe('owned warranty navigation evidence', () => {
+  it.each([
+    ['customer', customerId, customerId, true],
+    ['professional', professionalId, professionalId, true],
+    ['professional', professionalId, new Types.ObjectId(), false],
+  ] as const)('grants claim navigation only to the claim participant (%s)', async (role, viewerId, claimPartyId, expected) => {
+    mocks.warrantyFind.mockReturnValue(query([{ _id: new Types.ObjectId(), claimNumber: 'WC-1', status: 'open', openedAt: new Date(),
+      customer: role === 'customer' ? claimPartyId : customerId, professional: role === 'professional' ? claimPartyId : professionalId }]));
+    const res = response();
+    await getBookingDetails(request({ _id: viewerId, role }) as any, res, vi.fn());
+    expect(res.body.data.activity.items.find((item: any) => item.type === 'warranty_claim_opened').metadata.participantCanOpen).toBe(expected);
+  });
+});

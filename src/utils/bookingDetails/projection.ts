@@ -1,4 +1,5 @@
-import { quotationForViewer } from '../quotationVisibility';
+import { selectedPriceModel, resolvePinnedQuoteVersion } from './overviewRows';
+import { quotationForViewer, publicProfessionalTags } from '../quotationVisibility';
 import type {
   ActorDto,
   AdminLinksDto,
@@ -800,6 +801,8 @@ const buildPayments = async (params: {
       refundedAt: fact.refundedAt,
       source: fact.source,
       status: fact.status,
+      providerStatus: fact.providerStatus,
+      cashReturned: !fact.providerStatus || fact.providerStatus === 'succeeded',
       justification: fact.justification,
       justificationRecorded: fact.justificationRecorded,
       vatAmount: fact.vatAmount,
@@ -842,7 +845,7 @@ const buildPayments = async (params: {
     }
   }
   for (const refund of refunds) {
-    if (refund.kind !== 'booking') continue;
+    if (refund.kind !== 'booking' || !refund.cashReturned) continue;
     if (!byCurrencyMap.has(refund.currency)) byCurrencyMap.set(refund.currency, { charged: 0, refunded: 0, complete: true });
     byCurrencyMap.get(refund.currency)!.refunded += refund.amount;
   }
@@ -886,6 +889,7 @@ export const buildBookingDetails = async (params: {
   viewerRole: DetailsViewerRole;
   adminAccess?: { bookings?: boolean; disputes: boolean; warranty: boolean; cancellations: boolean; payments: boolean };
   quotationAlias?: boolean;
+  viewerId?: string | null;
 }): Promise<BookingDetailsDto> => {
   const { payments, cancellations, warrantyClaims, actors, viewerRole } = params;
   const rawProject = params.booking?.project && typeof params.booking.project === 'object'
@@ -912,7 +916,9 @@ export const buildBookingDetails = async (params: {
   // participant can otherwise read.
   const maySeeAdminNotes = isAdminViewer && params.adminAccess?.cancellations === true;
   const customer = booking.customer && typeof booking.customer === 'object' ? booking.customer : null;
-  const professional = booking.professional && typeof booking.professional === 'object' ? booking.professional : null;
+  const professional = booking.professional && typeof booking.professional === 'object' && !booking.professional.toHexString
+    ? booking.professional
+    : projectProfessionalActor ? { _id: projectProfessionalId, name: projectProfessionalActor.name, username: projectProfessionalActor.username, businessInfo: { companyName: projectProfessionalActor.companyName } } : null;
   const project = booking.project && typeof booking.project === 'object' ? booking.project : null;
   const customerId = objectId(booking.customer);
   const professionalId = objectId(booking.professional || project?.professionalId);
@@ -1286,7 +1292,7 @@ export const buildBookingDetails = async (params: {
           totalAmount: num(version.customerTotals.totalAmount) ?? num(version.customerTotals.totalWithVat),
           ...(Array.isArray(version.customerTotals.vatBreakdown) ? { vatBreakdown: version.customerTotals.vatBreakdown } : {}),
           currency: version.customerTotals.currency || version.currency || 'EUR',
-          recordedAt: iso(version.customerTotals.recordedAt) || createdAt || new Date().toISOString(),
+          recordedAt: iso(version.customerTotals.recordedAt),
           ...(version.customerTotals.discount ? { discount: version.customerTotals.discount } : {}),
         }
       : null;
@@ -1351,6 +1357,7 @@ export const buildBookingDetails = async (params: {
         && version.bufferDuration.unit
         ? { value: num(version.bufferDuration.value)!, unit: version.bufferDuration.unit }
         : null,
+      firstPossibleStart: dateOnly(version.firstPossibleStart),
       validUntil: iso(version.validUntil),
       createdAt,
       changeNote: str(version.changeNote),
@@ -1693,6 +1700,7 @@ export const buildBookingDetails = async (params: {
     customerId,
     professionalId,
     adminAccess: params.adminAccess,
+    viewerId: params.viewerId,
   });
 
   if (quotation) {
@@ -1705,6 +1713,8 @@ export const buildBookingDetails = async (params: {
   const snapshotProject = captured?.project || null;
   const projectTitle = snapshotProject?.title || str(project?.title);
   const overviewStatus = booking.status as string;
+  const pinnedNumber = resolvePinnedQuoteVersion(booking).pinnedVersion;
+  const pinnedVersion = quotationVersions.find((version) => version.version === pinnedNumber) || null;
   const quoteDto: BookingOverviewDto['quote'] = quotation
     ? {
         quotationNumber: quotation.quotationNumber,
@@ -1714,7 +1724,9 @@ export const buildBookingDetails = async (params: {
         status: quotation.status,
         totalAmount: quotation.totalAmountProfessional,
         currency: quotation.currency,
-        validUntil: currentVersion?.validUntil || iso(booking.quote?.validUntil),
+        validUntil: pinnedVersion?.validUntil || (quotationVersions.length === 0 ? iso(booking.quote?.validUntil) : null),
+        firstPossibleStart: pinnedVersion?.firstPossibleStart || null,
+        createdAt: pinnedVersion?.createdAt || null,
       }
     : null;
   const basePayment = paymentsDto.base;
@@ -1722,7 +1734,7 @@ export const buildBookingDetails = async (params: {
     || basePayment?.currency
     || paymentCurrency;
   const overviewRefundedTotal = paymentsDto.refunds
-    .filter((refund) => refund.kind === 'booking')
+    .filter((refund) => refund.kind === 'booking' && refund.cashReturned)
     .filter((refund) => !overviewPaymentCurrency || refund.currency === overviewPaymentCurrency)
     .reduce((sum, refund) => sum + refund.amount, 0);
   const bookingOverview: BookingOverviewDto = {
@@ -1733,6 +1745,7 @@ export const buildBookingDetails = async (params: {
     statusBeforeDispute: booking.statusBeforeDispute || null,
     title: projectTitle || str(booking.rfqData?.serviceType) || 'Booking',
     projectTitle,
+    priceModel: selectedPriceModel(booking),
     serviceType: str(booking.rfqData?.serviceType),
     category: snapshotProject?.category || str(project?.category),
     service: snapshotProject?.service || str(project?.service),
@@ -1884,6 +1897,9 @@ export const buildBookingDetails = async (params: {
         ? null
         : professionalContactVisible ? str(professional?.vatNumber) : null,
       website: professionalAnonymized ? null : str(professional?.businessInfo?.website),
+      professionalLevel: professionalAnonymized ? null : str(professional?.professionalLevel),
+      publicTags: professionalAnonymized ? [] : publicProfessionalTags(professional?.adminTags),
+      metadataSource: 'current_profile',
       address: professionalAnonymized
         ? professional?.businessInfo
           ? { city: null, country: str(professional.businessInfo.country), postalCode: null }

@@ -858,8 +858,7 @@ const BookingSchema = new Schema({
     },
     timestamp: {
       type: Date,
-      default: Date.now,
-      required: true
+      // Recorded by status writers; legacy hydration must stay undated.
     },
     updatedBy: {
       type: Schema.Types.ObjectId,
@@ -1032,7 +1031,8 @@ const BookingSchema = new Schema({
       unit: { type: String, enum: ['hours', 'days'] }
     },
     validUntil: { type: Date, required: true },
-    createdAt: { type: Date, default: Date.now },
+    // Writers set this explicitly; hydration must not manufacture a legacy date.
+    createdAt: { type: Date },
     changeNote: { type: String, maxlength: 500 },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
     rejectedAt: { type: Date },

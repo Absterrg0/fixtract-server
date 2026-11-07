@@ -1658,10 +1658,10 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       .populate('customer', isAdmin
         ? 'name username email phone customerType location vatNumber totalSpent businessName timeZone isAnonymized deletedAt'
         : 'name username email phone customerType location businessName timeZone isAnonymized deletedAt')
-      .populate('professional', professionalFields)
+      .populate('professional', `${professionalFields} professionalLevel adminTags`)
       .populate(
         'project',
-        `title description pricing category service team timeMode rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects minResources minOverlapPercentage executionDuration${isAdmin ? ' resources' : ''}`
+        `title description pricing category service team timeMode priceModel rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects minResources minOverlapPercentage executionDuration${isAdmin ? ' resources' : ''}`
       )
       .populate('assignedTeamMembers', 'name email');
 
