@@ -12,7 +12,7 @@ const MAX_BADGE_LENGTH = 40;
  */
 const sanitizeBadge = (value: unknown): string | undefined => {
   if (typeof value !== "string") return undefined;
-  const withoutMarkup = value.replace(/<[^>]*>/g, "");
+  const withoutMarkup = value.replace(/<[^>]*>/g, "").replace(/[<>]/g, "");
   // Drop C0 control characters and DEL by code point (charCodeAt keeps this
   // free of raw escape sequences and surrogate-safe via Array.from).
   const withoutControls = Array.from(withoutMarkup)
@@ -47,6 +47,7 @@ export const getPublicLoyaltyTiers = async (_req: Request, res: Response) => {
         order: Number(tier?.order) || 0,
       }))
       .filter((tier: any) => tier.name);
+    res.setHeader("Cache-Control", "public, max-age=60");
     return res.status(200).json({ success: true, data: { tiers } });
   } catch (error) {
     console.error("Public loyalty tiers error:", error);
@@ -69,6 +70,7 @@ export const getPublicProfessionalLevels = async (_req: Request, res: Response) 
         order: Number(level?.order) || 0,
       }))
       .filter((level: any) => level.name);
+    res.setHeader("Cache-Control", "public, max-age=60");
     return res.status(200).json({ success: true, data: { levels } });
   } catch (error) {
     console.error("Public professional levels error:", error);

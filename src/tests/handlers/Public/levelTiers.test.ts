@@ -22,6 +22,8 @@ import {
 
 function mockRes() {
   const res: any = {
+    headers: {} as Record<string, string>,
+    setHeader(name: string, value: string) { this.headers[name] = value; return this; },
     statusCode: 200,
     body: undefined,
     status(code: number) {
@@ -33,7 +35,7 @@ function mockRes() {
       return this;
     },
   };
-  return res as Response & { statusCode: number; body: any };
+  return res as Response & { statusCode: number; body: any; headers: Record<string, string> };
 }
 
 beforeEach(() => {
@@ -55,6 +57,7 @@ describe("GET /api/public/loyalty-tiers (tag colours)", () => {
     await getPublicLoyaltyTiers({} as Request, res);
 
     expect(res.statusCode).toBe(200);
+    expect(res.headers["Cache-Control"]).toBe("public, max-age=60");
     expect(res.body).toMatchObject({
       success: true,
       data: {
@@ -78,6 +81,7 @@ describe("GET /api/public/loyalty-tiers (tag colours)", () => {
     await getPublicLoyaltyTiers({} as Request, res);
 
     expect(res.statusCode).toBe(200);
+    expect(res.headers["Cache-Control"]).toBe("public, max-age=60");
     expect(res.body.data.tiers).toMatchObject([{ name: "Platinum", color: "#6B7280" }]);
   });
 });
@@ -95,6 +99,7 @@ describe("GET /api/public/professional-levels (tag colours)", () => {
     await getPublicProfessionalLevels({} as Request, res);
 
     expect(res.statusCode).toBe(200);
+    expect(res.headers["Cache-Control"]).toBe("public, max-age=60");
     expect(res.body.data.levels).toMatchObject([
       { name: "New", color: "#123456", icon: "user", badge: "new-badge", order: 1 },
       { name: "Expert", color: "#F59E0B", icon: "crown", badge: "expert-badge", order: 5 },
@@ -112,6 +117,7 @@ describe("GET /api/public/professional-levels (tag colours)", () => {
     await getPublicProfessionalLevels({} as Request, res);
 
     expect(res.statusCode).toBe(200);
+    expect(res.headers["Cache-Control"]).toBe("public, max-age=60");
     expect(res.body.data.levels).toMatchObject([{ name: "Level 1", color: "#6B7280" }]);
   });
 
@@ -130,6 +136,7 @@ describe("GET /api/public/professional-levels (tag colours)", () => {
     await getPublicProfessionalLevels({} as Request, res);
 
     expect(res.statusCode).toBe(200);
+    expect(res.headers["Cache-Control"]).toBe("public, max-age=60");
     const [fresh, markup, controls, long] = res.body.data.levels;
     expect(fresh.badge).toBe("new-badge");
     expect(markup.badge).toBe("Top pro");
@@ -151,8 +158,25 @@ describe("GET /api/public/professional-levels (tag colours)", () => {
     await getPublicProfessionalLevels({} as Request, res);
 
     expect(res.statusCode).toBe(200);
+    expect(res.headers["Cache-Control"]).toBe("public, max-age=60");
     for (const level of res.body.data.levels) {
       expect(level.badge).toBeUndefined();
     }
   });
+});
+
+
+it('removes unclosed markup and stray angle brackets from public badges', async () => {
+  getProfessionalConfig.mockResolvedValue({ levels: [{ name: 'Expert', perks: { badge: '<b>Pro</b> <unfinished >><open' } }] });
+  const res = mockRes();
+  await getPublicProfessionalLevels({} as Request, res);
+  expect(res.body.data.levels[0].badge).toBe('Pro open');
+});
+
+it.each([getPublicLoyaltyTiers, getPublicProfessionalLevels])('does not cache failures', async handler => {
+  connectDB.mockRejectedValueOnce(new Error('offline'));
+  const res = mockRes();
+  await handler({} as Request, res);
+  expect(res.statusCode).toBe(500);
+  expect(res.headers['Cache-Control']).toBeUndefined();
 });
