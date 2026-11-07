@@ -33,8 +33,8 @@ export const withCommission = (amount: number, commissionPercent: number): numbe
  * Commission-inclusive copy of professional pricing lines for VAT.
  * VAT is charged on the price AFTER commission is included, so every line's
  * VAT base is the customer-facing amount. Per-line rounding can drift by a
- * cent from the whole-quote commissioned total; the drift is absorbed on the
- * last line so the line sum is exactly the recorded customer net.
+ * cent from the whole-quote commissioned total; the drift is distributed across
+ * lines so the line sum is exactly the recorded customer net.
  */
 export const commissionedPricingLines = (
   lines: VatPricingLineInput[],
@@ -46,15 +46,21 @@ export const commissionedPricingLines = (
     ...line,
     price: withCommission(Number(line.price) || 0, commissionPercent),
   }));
-  const sum = roundMoney(commissioned.reduce((total, line) => total + line.price, 0));
-  const drift = roundMoney(customerNetAmount - sum);
-  if (Math.abs(drift) >= 0.005) {
-    const last = commissioned[commissioned.length - 1];
-    commissioned[commissioned.length - 1] = {
-      ...last,
-      price: roundMoney(last.price + drift),
-    };
+  // Allocate in whole cents, proportionally, so reductions can span all
+  // lines without a negative tail. Largest remainders absorb rounding cents.
+  const target = Math.max(0, Math.round(customerNetAmount * 100));
+  const weights = commissioned.map(line => Math.max(0, Math.round(line.price * 100)));
+  const total = weights.reduce((sum, value) => sum + value, 0);
+  const allocations = weights.map((weight, index) => {
+    const exact = total > 0 ? target * weight / total : target / weights.length;
+    return { index, cents: Math.floor(exact), remainder: exact - Math.floor(exact) };
+  });
+  let remaining = target - allocations.reduce((sum, line) => sum + line.cents, 0);
+  for (const line of [...allocations].sort((a, b) => b.remainder - a.remainder || a.index - b.index)) {
+    if (remaining-- <= 0) break;
+    line.cents++;
   }
+  allocations.forEach(({ index, cents }) => { commissioned[index].price = cents / 100; });
   return commissioned;
 };
 
