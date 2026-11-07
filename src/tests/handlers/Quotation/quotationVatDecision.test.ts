@@ -81,3 +81,14 @@ describe("syncQuotationVatDecision per-line awareness", () => {
     expect(String(target.vatDecision.explanation)).toContain("Mixed per-line");
   });
 });
+
+
+it('records a completed mixed-rate quotation when the base rule routes to RFQ', async () => {
+  findOneMock.mockReturnValue({ select: vi.fn().mockResolvedValue({ ...cleaningBothRates,
+    vatManagement: { ...cleaningBothRates.vatManagement, logicRules: [{ country: 'BE', standardRate: 21,
+      reducedRate: 6, action: 'rfq', priority: 0, conditions: [] }] } }) });
+  const target: any = booking();
+  await syncQuotationVatDecision(target, [{ vatRate: 6 }, { vatRate: 21 }]);
+  expect(target.vatDecision.action).toBe('standard_rate');
+  expect(target.vatDecision.appliedRate).toBe(21);
+});
