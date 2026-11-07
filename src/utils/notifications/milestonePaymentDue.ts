@@ -1,6 +1,6 @@
 import Booking from "../../models/booking";
 import PlatformSettings from "../../models/platformSettings";
-import { buildMilestoneChargePlan, toMilestoneCustomerGross } from "../milestoneCharges";
+import { buildMilestoneChargePlan, milestoneCustomerCharge } from "../milestoneCharges";
 import { notify } from "./notify";
 
 export type PayableMilestone = {
@@ -17,7 +17,7 @@ const NOTIFIABLE_STATUSES = new Set(["booked", "in_progress", "professional_comp
 
 const sortedMilestones = (booking: any): PayableMilestone[] =>
   (Array.isArray(booking?.milestonePayments) ? booking.milestonePayments : [])
-    .map((milestone: any) => ({ ...milestone }))
+    .map((milestone: any) => typeof milestone.toObject === "function" ? milestone.toObject() : { ...milestone })
     .sort((a: PayableMilestone, b: PayableMilestone) => (a.order ?? 0) - (b.order ?? 0));
 
 /**
@@ -63,8 +63,7 @@ const customerChargeForMilestone = async (booking: any, milestone: PayableMilest
     // notified amount always matches what paying this milestone charges.
     const entry = buildMilestoneChargePlan(booking, commissionPercent)
       .find((candidate) => candidate.order === (milestone.order ?? 0));
-    if (entry) return entry.expectedCustomerGross;
-    return toMilestoneCustomerGross(Number(milestone.amount) || 0, commissionPercent);
+    return entry ? milestoneCustomerCharge(booking, entry) ?? undefined : undefined;
   } catch {
     return undefined;
   }
@@ -81,7 +80,7 @@ export async function notifyMilestonePaymentDue(
   opts?: { notifyProfessional?: boolean },
 ): Promise<{ notified: boolean; order?: number }> {
   const booking = await Booking.findById(bookingId).select(
-    "customer professional status milestonePayments selectedExtraOptions checkoutSnapshot quote payment.currency",
+    "customer professional status milestonePayments selectedExtraOptions checkoutSnapshot quote quoteVersions currentQuoteVersion vatDecision payment",
   );
   if (!booking || !NOTIFIABLE_STATUSES.has(String(booking.status))) return { notified: false };
   const milestone = findPayableMilestone(booking);

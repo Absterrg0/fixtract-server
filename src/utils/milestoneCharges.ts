@@ -22,7 +22,7 @@ export interface MilestoneChargeEntry {
   baseCustomerGross: number;
   /** Commissioned options total attached to this milestone (0 except first). */
   optionsCustomerGross: number;
-  /** Amount the customer is actually charged for this milestone. */
+  /** Commission-inclusive plan net, BEFORE customer discounts and VAT. */
   expectedCustomerGross: number;
   /** True when this milestone carries the selected options in full. */
   includesSelectedOptions: boolean;
@@ -77,4 +77,38 @@ export const buildMilestoneChargePlan = (
       includesSelectedOptions: optionsCustomerGross > 0,
     };
   });
+};
+
+/** A display total requires recorded VAT/discount terms, or an actual payment. */
+export const milestoneCustomerCharge = (
+  booking: any,
+  entry: MilestoneChargeEntry,
+  payments: any[] = [],
+): number | null => {
+  const matching = payments.find(payment => payment.milestoneIndex === entry.index
+    && ['pending', 'authorized', 'completed', 'partially_refunded', 'refunded'].includes(payment.status));
+  const snapshot = booking.payment?.milestoneIndex === entry.index ? booking.payment : undefined;
+  const recorded = matching || snapshot;
+  if (recorded?.totalWithVat != null && Number.isFinite(Number(recorded.totalWithVat))) {
+    return Number(recorded.totalWithVat);
+  }
+  const versions = Array.isArray(booking.quoteVersions) ? booking.quoteVersions : [];
+  const version = versions.find((candidate: any) => Number(candidate.version) === Number(booking.currentQuoteVersion));
+  const totals = version?.customerTotals;
+  const beforeDiscount = Number(totals?.amountBeforeDiscounts);
+  const afterDiscount = Number(totals?.customerNetAmount);
+  // Quote-time benefits can differ from checkout benefits. Once a checkout
+  // exists above, its own total takes precedence over this estimate.
+  const discountRatio = beforeDiscount > 0 && Number.isFinite(afterDiscount)
+    ? Math.min(1, Math.max(0, afterDiscount / beforeDiscount)) : 1;
+  const net = Math.round(entry.expectedCustomerGross * discountRatio * 100) / 100;
+  const reverseCharge = booking.vatDecision?.reverseCharge;
+  if (reverseCharge === true) return net;
+  const vatRate = totals?.vatRate ?? booking.vatDecision?.appliedRate;
+  if (vatRate == null || !Number.isFinite(Number(vatRate))) return null;
+  // For mixed-rate quotations, keep the recorded tax ratio rather than
+  // treating the nominal headline rate as every line's rate.
+  const vatRatio = afterDiscount > 0 && totals?.vatAmount != null
+    ? Number(totals.vatAmount) / afterDiscount : Number(vatRate) / 100;
+  return Math.round((net + Math.round(net * vatRatio * 100) / 100) * 100) / 100;
 };

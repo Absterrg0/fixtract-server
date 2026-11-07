@@ -10,6 +10,7 @@ vi.mock("../../../models/booking", () => ({ default: { findById: mocks.findById 
 vi.mock("../../../models/platformSettings", () => ({ default: { getCurrentConfig: mocks.getCurrentConfig } }));
 vi.mock("../../../utils/notifications/notify", () => ({ notify: mocks.notify }));
 
+import mongoose from "mongoose";
 import { findPayableMilestone, notifyMilestonePaymentDue } from "../../../utils/notifications/milestonePaymentDue";
 
 const bookingDoc = (overrides: any = {}) => ({
@@ -17,6 +18,7 @@ const bookingDoc = (overrides: any = {}) => ({
   customer: "customer-1",
   professional: "pro-1",
   status: "booked",
+  vatDecision: { appliedRate: 0, reverseCharge: false },
   milestonePayments: [
     { title: "Deposit", amount: 100, order: 0, status: "paid", dueCondition: "on_start", workStatus: "completed" },
     { title: "Mid", amount: 200, order: 1, status: "pending", dueCondition: "on_milestone_completion", workStatus: "pending" },
@@ -84,6 +86,19 @@ describe("notifyMilestonePaymentDue", () => {
     expect(args.context).toMatchObject({ milestoneTitle: "Mid", milestoneAmount: 220, currency: "EUR" });
   });
 
+  it('#9 emails the VAT- and discount-inclusive charge', async () => {
+    const booking = bookingDoc({ vatDecision: { appliedRate: 21, reverseCharge: false },
+      currentQuoteVersion: 1, quoteVersions: [{ version: 1, customerTotals: {
+        commissionPercent: 10, amountBeforeDiscounts: 330, customerNetAmount: 300,
+        vatRate: 21, vatAmount: 63, totalWithVat: 363, discount: { totalDiscount: 30 },
+      } }],
+    });
+    booking.milestonePayments[1].workStatus = 'completed';
+    mocks.findById.mockReturnValue({ select: vi.fn().mockResolvedValue(booking) });
+    await notifyMilestonePaymentDue('booking-1');
+    expect(mocks.notify.mock.calls[0][0].context.milestoneAmount).toBe(242);
+  });
+
   it("also notifies the professional from the sweep, with its own dedupe key", async () => {
     const booking = bookingDoc();
     booking.milestonePayments[1].workStatus = "completed";
@@ -96,6 +111,28 @@ describe("notifyMilestonePaymentDue", () => {
       eventKey: "professional.milestone_payment_due",
       idempotencyKey: "milestone-due-pro:booking-1:1",
     });
+  });
+
+  it("notifies for a real hydrated Booking with milestone subdocuments", async () => {
+    // Load the real model despite the query mock; no database is contacted.
+    const { default: BookingModel } = await vi.importActual<typeof import("../../../models/booking")>("../../../models/booking");
+    const booking = BookingModel.hydrate({
+      ...bookingDoc(),
+      _id: new mongoose.Types.ObjectId(),
+      customer: new mongoose.Types.ObjectId(),
+      professional: new mongoose.Types.ObjectId(),
+      milestonePayments: [
+        { title: "Deposit", amount: 100, order: 0, status: "paid", dueCondition: "on_start" },
+        { title: "Mid", amount: 200, order: 1, status: "pending", workStatus: "completed", dueCondition: "on_milestone_completion" },
+      ],
+    });
+    expect(booking.milestonePayments![1]).toHaveProperty("$isSubdocument", true);
+    mocks.findById.mockReturnValue({ select: vi.fn().mockResolvedValue(booking) });
+    expect(await notifyMilestonePaymentDue(String(booking._id))).toEqual({ notified: true, order: 1 });
+    expect(mocks.notify).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: "customer.milestone_payment_due",
+      context: expect.objectContaining({ milestoneTitle: "Mid" }),
+    }));
   });
 
   it("stays silent when no milestone is payable or the booking is not billable", async () => {

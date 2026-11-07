@@ -166,6 +166,7 @@ describe('reschedule canRespond and terminal state (client bug list #9c)', () =>
 describe('milestone expected charges in booking details (client bug list #19b)', () => {
   const milestoneBooking = {
     status: 'booked',
+    vatDecision: { appliedRate: 0, reverseCharge: false },
     milestonePayments: [
       { title: 'Deposit', amount: 100, order: 0, status: 'pending', workStatus: 'pending' },
       { title: 'Final', amount: 200, order: 1, status: 'pending', workStatus: 'pending' },
@@ -190,6 +191,17 @@ describe('milestone expected charges in booking details (client bug list #19b)',
       expectedCustomerCharge: 220,
       includesSelectedOptions: false,
     });
+  });
+
+  it('#9 exposes a VAT- and discount-inclusive milestone charge, keeping plan net separate', async () => {
+    const doc = { ...milestoneBooking, vatDecision: { appliedRate: 21, reverseCharge: false },
+      quoteVersions: [{ version: 1, customerTotals: { commissionPercent: 10, amountBeforeDiscounts: 352,
+        customerNetAmount: 320, vatRate: 21, vatAmount: 67.2, totalWithVat: 387.2,
+        discount: { totalDiscount: 32 } } }],
+    };
+    const details = await build('customer', { booking: doc });
+    expect(details.payments.milestones[0]).toMatchObject({ expectedCustomerCharge: 145.2, expectedCustomerNetBeforeDiscount: 132 });
+    expect(details.payments.milestones[1].expectedCustomerCharge).toBe(242);
   });
 
   it('reports null expected charges when no commission was recorded', async () => {

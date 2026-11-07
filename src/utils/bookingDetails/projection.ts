@@ -29,7 +29,7 @@ import type {
   WarrantyClaimSummaryDto,
 } from './types';
 import { actorForId, isActorRecorded, type ActorMap } from './actors';
-import { buildMilestoneChargePlan } from '../milestoneCharges';
+import { buildMilestoneChargePlan, milestoneCustomerCharge } from '../milestoneCharges';
 import {
   presignOwnedUrl,
   presignQuestionAnswerUrl,
@@ -727,7 +727,8 @@ const buildPayments = async (params: {
         paidAt: iso(milestone.paidAt),
         customerChargeTotalWithVat: num(matching?.totalWithVat),
         paymentRowPresent: Boolean(matching),
-        expectedCustomerCharge: planEntry ? planEntry.expectedCustomerGross : null,
+        expectedCustomerCharge: planEntry ? milestoneCustomerCharge(booking, planEntry, paymentRows) : null,
+        expectedCustomerNetBeforeDiscount: planEntry?.expectedCustomerGross ?? null,
         includesSelectedOptions: Boolean(planEntry?.includesSelectedOptions),
       };
     },

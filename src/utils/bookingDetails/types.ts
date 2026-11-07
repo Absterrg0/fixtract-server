@@ -555,6 +555,8 @@ export type MilestonePaymentDto = {
    * options proportionally across milestones.
    */
   expectedCustomerCharge: number | null;
+  /** Commission-inclusive plan net, before customer discounts and VAT. */
+  expectedCustomerNetBeforeDiscount: number | null;
   includesSelectedOptions: boolean;
 };
 
