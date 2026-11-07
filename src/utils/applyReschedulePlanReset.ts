@@ -16,7 +16,12 @@ import { computeMinExecutionResourceDays, planKeyToDate, rebuildResourcePlanForN
  * as short as possible. The professional can still adjust planning afterwards.
  * Hour-mode bookings are left untouched (owned by another workstream).
  */
-export const applyReschedulePlanReset = async (booking: any, updatedBy: unknown) => {
+export const applyReschedulePlanReset = async (
+  booking: any,
+  updatedBy: unknown,
+  coveringPlan?: Array<{ resourceId: any; days: Array<Date | string> }>,
+  previousPlan?: Array<{ resourceId: any; days: Array<Date | string> }>,
+) => {
   const newStart = booking.scheduledStartDate ? new Date(booking.scheduledStartDate) : null;
   if (!newStart || Number.isNaN(newStart.getTime())) return;
 
@@ -56,7 +61,9 @@ export const applyReschedulePlanReset = async (booking: any, updatedBy: unknown)
     : { minResources: 1, minOverlapPercentage: 90, totalResources: assignedIds.length };
   const minResourceDays = computeMinExecutionResourceDays({
     executionDays,
-    resourceCount: Math.max(1, assignedIds.length),
+    // A substitution union is not a daily headcount. Its engine plan already
+    // covers the required work with the minimum attending team.
+    resourceCount: coveringPlan?.length ? policy.minResources : Math.max(1, assignedIds.length),
     overlapFraction: policy.minOverlapPercentage / 100,
   });
 
@@ -80,10 +87,21 @@ export const applyReschedulePlanReset = async (booking: any, updatedBy: unknown)
     console.error('Failed to load blocked days for reschedule plan reset:', blockedError?.message || blockedError);
   }
 
-  const currentPlan = (Array.isArray(booking.resourcePlan) ? booking.resourcePlan : []).map((entry: any) => ({
+  const currentPlan = (Array.isArray(previousPlan) ? previousPlan : Array.isArray(booking.resourcePlan) ? booking.resourcePlan : []).map((entry: any) => ({
     resourceId: ((entry?.resourceId?._id || entry?.resourceId)?.toString?.()) || '',
     days: Array.isArray(entry?.days) ? entry.days : [],
   }));
+
+  // Keep later manual planning, and seed the exact new covering assignment.
+  // Merge by resource so a retained day and an engine day count only once.
+  if (coveringPlan?.length) {
+    for (const entry of coveringPlan) {
+      const resourceId = String(entry.resourceId);
+      const existing = currentPlan.find((row: any) => row.resourceId === resourceId);
+      if (existing) existing.days = [...existing.days, ...entry.days];
+      else currentPlan.push({ resourceId, days: entry.days });
+    }
+  }
 
   const rebuilt = rebuildResourcePlanForNewStart({
     resourcePlan: currentPlan,
@@ -92,10 +110,12 @@ export const applyReschedulePlanReset = async (booking: any, updatedBy: unknown)
     blockedByResource,
     minResourceDays,
     executionDays,
-    minResourcesPerDay: policy.minResources,
+    // The engine has already enforced daily attendance and overlap (including
+    // allowed solo days). Re-filling it from the union would invent extra work.
+    minResourcesPerDay: coveringPlan?.length ? 0 : policy.minResources,
   });
 
-  if (rebuilt.removedDays === 0 && rebuilt.addedDays.length === 0) return;
+  if (!coveringPlan?.length && rebuilt.removedDays === 0 && rebuilt.addedDays.length === 0) return;
 
   booking.resourcePlan = rebuilt.resourcePlan
     .filter((entry) => mongoose.isValidObjectId(entry.resourceId))

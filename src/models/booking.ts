@@ -260,6 +260,7 @@ export interface IBookingScheduleSnapshot {
   scheduledStartTime?: string;
   scheduledEndTime?: string;
   assignedTeamMembers?: Types.ObjectId[];
+  resourcePlan?: { resourceId: Types.ObjectId; days: Date[] }[];
 }
 
 export interface IBooking extends Document {
@@ -1418,6 +1419,7 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      resourcePlan: { type: [{ resourceId: { type: Schema.Types.ObjectId, ref: 'User', required: true }, days: [Date] }], default: undefined },
       assignedTeamMembers: [{
         type: Schema.Types.ObjectId,
         ref: 'User',
@@ -1431,6 +1433,7 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      resourcePlan: { type: [{ resourceId: { type: Schema.Types.ObjectId, ref: 'User', required: true }, days: [Date] }], default: undefined },
       assignedTeamMembers: [{
         type: Schema.Types.ObjectId,
         ref: 'User',
@@ -1457,6 +1460,7 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      resourcePlan: { type: [{ resourceId: { type: Schema.Types.ObjectId, ref: 'User', required: true }, days: [Date] }], default: undefined },
       assignedTeamMembers: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     },
     proposedSchedule: {
@@ -1467,6 +1471,7 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      resourcePlan: { type: [{ resourceId: { type: Schema.Types.ObjectId, ref: 'User', required: true }, days: [Date] }], default: undefined },
       assignedTeamMembers: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     },
     status: { type: String, enum: ['accepted', 'declined', 'disputed', 'auto_cancelled'], required: true },

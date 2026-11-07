@@ -542,6 +542,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
         scheduledStartTime: window.scheduledStartTime,
         scheduledEndTime: window.scheduledEndTime,
         ...(window.assignedTeamMembers?.length ? { assignedTeamMembers: window.assignedTeamMembers } : {}),
+        ...(window.resourcePlan ? { resourcePlan: window.resourcePlan } : {}),
       };
       if (forceStatus === undefined) {
         targetStatus = 'booked' as BookingStatus;
@@ -564,7 +565,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
 
     if (rescheduleScheduleFields) {
       const replanned = { ...booking.toObject(), ...rescheduleScheduleFields };
-      await applyReschedulePlanReset(replanned, adminUser._id);
+      await applyReschedulePlanReset(replanned, adminUser._id, rescheduleScheduleFields.resourcePlan, booking.resourcePlan);
       for (const field of ['resourcePlan', 'scheduledExecutionEndDate', 'scheduledBufferStartDate',
         'scheduledBufferEndDate', 'scheduledBufferUnit']) {
         rescheduleScheduleFields[field] = (replanned as any)[field];

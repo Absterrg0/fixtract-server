@@ -731,7 +731,6 @@ async function searchProjects(
       }
       geoPipeline.push({
         $project: {
-          geoDistanceMeters: 0,
           locationExactMatch: 0,
         },
       });
@@ -1025,7 +1024,7 @@ async function searchProjects(
     for (const [counts, values] of selectedFacetValues) for (const value of values) {
       if (!Object.keys(counts).some((candidate) => normalizeSearchValue(candidate) === normalizeSearchValue(value))) counts[value] = 0;
     }
-    if (!isPopularitySort && !usedGeoSearch) {
+    if (!isPopularitySort) {
       if (isRelevanceSort(sortBy)) {
         // Client bug list #4a: the default / "Most relevant" sort ranks by a
         // real relevance score (level, admin tags, keyword/service/category
@@ -1051,7 +1050,11 @@ async function searchProjects(
           },
         );
         baseResults = ranked.map(({ project }) => project);
-      } else {
+      } else if (usedGeoSearch && sortBy === 'distance') {
+        baseResults.sort((a: any, b: any) =>
+          (a.geoDistanceMeters ?? Infinity) - (b.geoDistanceMeters ?? Infinity)
+          || String(a._id).localeCompare(String(b._id)));
+      } else if (!usedGeoSearch) {
         baseResults.sort((a: any, b: any) => (new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()) || a._id.toString().localeCompare(b._id.toString()));
       }
     }

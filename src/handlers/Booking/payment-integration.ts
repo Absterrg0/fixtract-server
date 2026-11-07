@@ -207,9 +207,11 @@ const snapshotCurrentSchedule = (booking: any) => ({
   scheduledStartTime: booking.scheduledStartTime,
   scheduledEndTime: booking.scheduledEndTime,
   assignedTeamMembers: Array.isArray(booking.assignedTeamMembers) ? booking.assignedTeamMembers : undefined,
+  resourcePlan: booking.resourcePlan,
 });
 
 const applyScheduleFields = (booking: any, schedule: Record<string, any>) => {
+  if (Array.isArray(schedule.resourcePlan)) booking.resourcePlan = schedule.resourcePlan;
   booking.scheduledStartDate = schedule.scheduledStartDate;
   booking.scheduledExecutionEndDate = schedule.scheduledExecutionEndDate;
   booking.scheduledBufferStartDate = schedule.scheduledBufferStartDate;
@@ -340,6 +342,7 @@ export const buildScheduleUpdatePayload = async ({
         };
       }
 
+      scheduleData.resourcePlan = window.resourcePlan;
       scheduleData.scheduledStartDate = window.scheduledStartDate;
       scheduleData.scheduledExecutionEndDate = window.scheduledExecutionEndDate;
       scheduleData.scheduledBufferStartDate = window.scheduledBufferStartDate;
@@ -1476,7 +1479,8 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
         String(booking._id),
         proposedTeamMembers as any,
         proposedStart,
-        proposedEnd
+        proposedEnd,
+        proposedSchedule.data.resourcePlan,
       );
       if (conflicts.length > 0) {
         return res.status(409).json({
@@ -1508,6 +1512,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
         scheduledStartTime: proposedSchedule.data.scheduledStartTime,
         scheduledEndTime: proposedSchedule.data.scheduledEndTime,
         assignedTeamMembers: proposedSchedule.data.assignedTeamMembers,
+        resourcePlan: proposedSchedule.data.resourcePlan,
       },
     } as any;
     booking.statusHistory = booking.statusHistory || [];
@@ -1641,7 +1646,8 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
           String(booking._id),
           proposedTeamMembers as any,
           proposedStart as Date,
-          proposedEnd as Date
+          proposedEnd as Date,
+          booking.rescheduleRequest.proposedSchedule?.resourcePlan,
         );
         if (conflicts.length > 0) {
           return res.status(409).json({
@@ -1659,7 +1665,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
             _id: booking._id,
             professional: (booking.professional as any)?._id || booking.professional,
             assignedTeamMembers: proposedTeamMembers as any[],
-            resourcePlan: booking.resourcePlan || [],
+            resourcePlan: booking.rescheduleRequest.proposedSchedule?.resourcePlan || [],
             scheduledStartDate: proposedStart as Date,
             scheduledExecutionEndDate: booking.rescheduleRequest.proposedSchedule?.scheduledExecutionEndDate,
             scheduledBufferEndDate: booking.rescheduleRequest.proposedSchedule?.scheduledBufferEndDate,
@@ -1685,10 +1691,11 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       booking.rescheduleRequest!.respondedBy = (req as any).user._id;
       if (responseNote !== undefined) booking.rescheduleRequest!.responseNote = responseNote;
       booking.rescheduleRequest!.status = 'accepted';
+      const previousResourcePlan = booking.resourcePlan;
       applyScheduleFields(booking, proposedSchedule || {});
       // Client bug list #9b: the new start date overrules earlier manual
       // planning (day-mode only; hour-mode planning stays untouched).
-      await applyReschedulePlanReset(booking, (req as any).user._id);
+      await applyReschedulePlanReset(booking, (req as any).user._id, proposedSchedule.resourcePlan, previousResourcePlan);
       const calendarCandidate = {
         _id: booking._id,
         professional: (booking.professional as any)?._id || booking.professional,
@@ -1977,6 +1984,7 @@ export const extendBookingExecution = async (req: Request, res: Response) => {
           ] as any[],
           booking.scheduledStartDate,
           intervalEnd,
+          candidate.resourcePlan,
         )
       : [];
     const conflicts = [...calendarConflicts, ...bookingConflicts];
