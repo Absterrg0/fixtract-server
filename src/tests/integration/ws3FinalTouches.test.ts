@@ -13,8 +13,10 @@
 import mongoose, { Types } from 'mongoose';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { isLocalMongoTestUri } from '../localMongoUri';
+
 const testUri = process.env.FIXERA_TEST_MONGODB_URI;
-const describeDb = testUri && /test/i.test(testUri) ? describe : describe.skip;
+const describeDb = isLocalMongoTestUri(testUri) ? describe : describe.skip;
 
 vi.hoisted(() => {
   process.env.JWT_SECRET = process.env.JWT_SECRET || 'ws3-test-jwt-secret';
