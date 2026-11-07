@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ config: vi.fn() }));
+const mocks = vi.hoisted(() => ({ config: vi.fn(), paymentFind: vi.fn(), bookingFind: vi.fn() }));
 vi.mock('../../models/platformSettings', () => ({ default: { getCurrentConfig: mocks.config } }));
+vi.mock('../../models/payment', () => ({ default: { find: mocks.paymentFind } }));
+vi.mock('../../models/booking', () => ({ default: { findById: mocks.bookingFind } }));
 import { resolveDisputeEmailAmount, resolveDisputeBookingFinalCharge } from '../../utils/disputeFinalCharge';
 import { buildQuoteCustomerTotals } from '../../utils/bookingDetails/quoteTotals';
 import { isBookingStarted, preparePartialRefundCancellation, pruneFutureResourcePlanDays } from '../../utils/refundFinalization';
@@ -31,11 +33,28 @@ describe('Part 3 final customer amounts', () => {
     const booking = { currentQuoteVersion: 1, quote: { amount: 100 },
       quoteVersions: [{ version: 1, customerTotals: { commissionPercent: 10 } }],
       checkoutSnapshot: { baseSubtotal: 100, extraOptionsTotal: 20 },
+      __settledPayments: [0, 1].map(milestoneIndex => ({
+        milestoneIndex, stripePaymentIntentId: `pi_${milestoneIndex}`, status: 'completed',
+        netAmount: 59.4, vatAmount: 12.47, vatRate: 21, totalWithVat: 71.87,
+      })),
+      paymentDiscountLedger: [0, 1].map(milestoneIndex => ({ paymentIntentId: `pi_${milestoneIndex}`,
+        totalDiscount: 6.6, loyaltyAmount: 6.6 })),
       selectedExtraOptions: [{ bookedPrice: 20 }], milestonePayments: [{ amount: 40 }, { amount: 60 }],
       payment: { totalWithVat: 71.87, netAmount: 59.4, vatAmount: 12.47, vatRate: 21,
         discount: { originalAmount: 66, totalDiscount: 6.6, loyaltyAmount: 6.6 } } };
-    // Full €132 net less €13.20 discount + €24.95 VAT, never the last €71.87 slice.
-    await expect(resolveDisputeBookingFinalCharge(booking)).resolves.toBe(143.75);
+    // Two independently rounded €71.87 settlements, never a reconstructed €143.75.
+    await expect(resolveDisputeBookingFinalCharge(booking)).resolves.toBe(143.74);
+  });
+  it('loads historical settlements for dispute emails without requiring current commission', async () => {
+    mocks.paymentFind.mockReturnValue({ lean: async () => [
+      { status: 'completed', milestoneIndex: 0, netAmount: 90, vatAmount: 18.9, totalWithVat: 108.9 },
+      { status: 'completed', milestoneIndex: 1, netAmount: 100, vatAmount: 21, totalWithVat: 121 },
+    ] });
+    mocks.bookingFind.mockReturnValue({ select: () => ({ lean: async () => ({ paymentDiscountLedger: [] }) }) });
+    await expect(resolveDisputeBookingFinalCharge({ _id: 'booking-settled',
+      milestonePayments: [{ status: 'paid' }, { status: 'paid' }],
+      payment: { status: 'completed', netAmount: 100, vatAmount: 21, totalWithVat: 121 },
+    })).resolves.toBe(229.9);
   });
   it('records commission-inclusive mixed-rate VAT and gross quote savings consistently', () => {
     const totals = buildQuoteCustomerTotals({ booking: {}, totalAmount: 100, commissionPercent: 10, currency: 'EUR',

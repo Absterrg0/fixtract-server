@@ -1,3 +1,5 @@
+import Booking from "../models/booking";
+import Payment from "../models/payment";
 import PlatformSettings from "../models/platformSettings";
 import { calculateExtraCostBreakdown } from './extraCostAccounting';
 import { normalizeInvoiceBasis } from './milestoneInvoice';
@@ -80,11 +82,21 @@ export const resolveDisputeBookingFinalCharge = async (booking: any): Promise<nu
   const versions = booking.quoteVersions || [];
   const quote = versions.find((version: any) => version.version === (booking.acceptedQuoteVersion ?? booking.currentQuoteVersion));
   if (booking.milestonePayments?.length) {
-    const commission = finite(quote?.customerTotals?.commissionPercent);
-    if (commission == null) return undefined;
-    // The same full-scope basis as FIX/SUP, including all milestones, options,
-    // recorded discounts and the partial refund (never the latest slice alone).
-    serviceTotal = normalizeInvoiceBasis(booking, commission).serviceTotal;
+    try {
+      const snapshot = typeof booking.toObject === 'function' ? booking.toObject() : { ...booking };
+      snapshot.__settledPayments = booking.__settledPayments;
+      if (!snapshot.__settledPayments && booking._id) {
+        snapshot.__settledPayments = await Payment.find({
+          booking: booking._id, status: { $in: ['completed', 'partially_refunded', 'refunded'] },
+        }).lean();
+        snapshot.paymentDiscountLedger = (await Booking.findById(booking._id)
+          .select('+paymentDiscountLedger').lean())?.paymentDiscountLedger;
+      }
+      serviceTotal = normalizeInvoiceBasis(snapshot, 0).serviceTotal;
+    } catch {
+      // Do not quote an invented or incomplete amount in a resolution email.
+      return undefined;
+    }
   } else if (serviceTotal != null && payment.status === 'partially_refunded') {
     serviceTotal = Math.max(0, serviceTotal - (finite(payment.refundAmount) ?? 0));
   }
