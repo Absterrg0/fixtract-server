@@ -23,11 +23,13 @@ export interface ILoyaltyConfig extends Document {
   tiers: ILoyaltyTier[];
   lastModifiedBy: mongoose.Types.ObjectId;
   lastModified: Date;
+  legacyTierBackfilledAt?: Date;
   version: number; // for tracking config changes
 }
 
 export interface ILoyaltyConfigModel extends Model<ILoyaltyConfig> {
   getCurrentConfig(): Promise<ILoyaltyConfig>;
+  backfillConfirmedLegacyConfig(id: string, expectedVersion: number): Promise<boolean>;
 }
 
 const loyaltyTierSchema = new Schema<ILoyaltyTier>({
@@ -112,6 +114,7 @@ const loyaltyConfigSchema = new Schema<ILoyaltyConfig>({
     type: Date,
     default: Date.now
   },
+  legacyTierBackfilledAt: { type: Date },
   version: {
     type: Number,
     default: 1
@@ -155,8 +158,7 @@ loyaltyConfigSchema.pre('save', function(next) {
   next();
 });
 
-// Standard tier ladder. Extracted so getCurrentConfig can backfill tiers that
-// are missing from configs created before they existed (client bug list #14a).
+// Standard tier ladder for new configurations and explicit legacy repair.
 export const defaultLoyaltyTiers = () => [
   {
     name: 'Bronze',
@@ -247,23 +249,43 @@ loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyalt
       lastModified: new Date(),
       version: 1
     });
-  } else {
-    // Client bug list #14a: configs created before Platinum existed stop
-    // progression at Gold. Backfill any missing standard tier (additive only;
-    // never touch admin-customized thresholds).
-    const names = new Set((config.tiers || []).map((tier: any) => tier?.name));
-    const missing = defaultLoyaltyTiers().filter((tier) => !names.has(tier.name));
-    if (missing.length > 0) {
-      config.tiers = [...(config.tiers || []), ...missing];
-      // Review nit: re-sort in place so raw tier order stays deterministic
-      // for any consumer that reads it without sorting.
-      config.tiers.sort((a: any, b: any) => (Number(a?.order) || 0) - (Number(b?.order) || 0));
-      await config.save();
-      console.log(`Loyalty: backfilled missing tiers: ${missing.map((tier) => tier.name).join(', ')}`);
-    }
   }
 
   return config;
+};
+
+/** One-off repair only after an operator confirms this exact legacy id/version.
+ * Reads never restore tiers. Customized thresholds require explicit admin
+ * reconciliation; the durable marker preserves later intentional removals.
+ */
+loyaltyConfigSchema.statics.backfillConfirmedLegacyConfig = async function(
+  id: string, expectedVersion: number,
+): Promise<boolean> {
+  const config = await this.findOne({ _id: id, version: expectedVersion,
+    legacyTierBackfilledAt: { $exists: false } });
+  if (!config) return false;
+  const defaults = defaultLoyaltyTiers();
+  const tiers = [...config.tiers].sort((a, b) => a.minSpendingAmount - b.minSpendingAmount);
+  if (tiers.length !== 3 || tiers.some((tier, index) => {
+    const expected = defaults[index];
+    return tier.name !== expected.name || tier.minSpendingAmount !== expected.minSpendingAmount
+      || (index < 2 ? tier.maxSpendingAmount !== expected.maxSpendingAmount
+        : tier.maxSpendingAmount != null && tier.maxSpendingAmount !== expected.maxSpendingAmount);
+  })) throw new Error('Legacy tier thresholds must be reconciled before backfill.');
+  const planned = tiers.map((tier: any, index) => ({ ...(tier.toObject?.() || tier),
+    maxSpendingAmount: defaults[index].maxSpendingAmount }));
+  planned.push(defaults[3]);
+  for (let index = 0; index < planned.length - 1; index++) {
+    if (planned[index].maxSpendingAmount >= planned[index + 1].minSpendingAmount) {
+      throw new Error('Legacy tier ranges overlap.');
+    }
+  }
+  const result = await this.updateOne({ _id: config._id, version: expectedVersion,
+    tiers: config.tiers, legacyTierBackfilledAt: { $exists: false } }, {
+    $set: { tiers: planned, legacyTierBackfilledAt: new Date(), lastModified: new Date() },
+    $inc: { version: 1 },
+  }, { runValidators: true });
+  return result.modifiedCount === 1;
 };
 
 const LoyaltyConfig = mongoose.model('LoyaltyConfig', loyaltyConfigSchema) as unknown as ILoyaltyConfigModel;
