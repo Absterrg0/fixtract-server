@@ -218,6 +218,17 @@ describe("project search handler", () => {
     expect(oneSided.json.mock.calls[0][0].results[0]._id.toString()).toBe(later._id.toString());
   });
 
+  it("adds no lower-bound block when the lower bound is the professional's local today", async () => {
+    pinClock("2026-11-03T08:00:00.000Z");
+    const today = project("507f1f77bcf86cd799439045");
+    mocks.projects = [today];
+    mocks.schedules = new Map([[today._id.toString(), "2026-11-03T10:00:00.000Z"]]);
+    const response = await execute({ startDateFrom: "2026-11-03" });
+    expect(response.json.mock.calls[0][0].pagination.total).toBe(1);
+    expect(mocks.scheduleCalls[0].professional.companyBlockedRanges ?? []).toHaveLength(0);
+    expect(Date.now()).toBe(Date.parse("2026-11-03T08:00:00.000Z"));
+  });
+
   it("does not truncate rating-filtered projects at the previous 500-row cap", async () => {
     mocks.projects = Array.from({ length: 501 }, () => project(new Types.ObjectId().toString()));
     mocks.ratings = new Map(mocks.projects.map((item) => [item._id.toString(), { avgRating: 4, totalReviews: 1 }]));

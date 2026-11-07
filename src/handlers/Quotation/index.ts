@@ -20,7 +20,8 @@ import { notify } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
 import { bookingForRequest, sanitizeMilestoneForViewer, sanitizeMilestonesForViewer } from '../../utils/invoiceVisibility';
-import { buildQuoteCustomerTotals, quoteServiceLocationSnapshot } from '../../utils/bookingDetails/quoteTotals';
+import { buildQuoteCustomerTotalsWithDiscounts, quoteServiceLocationSnapshot } from '../../utils/bookingDetails/quoteTotals';
+import { computeQuoteFirstPossibleStartBounded } from '../../utils/bookingDetails/quoteFirstStart';
 import { captureBookingSnapshotIfMissing, loadVatQuestionDefinitions } from '../../utils/bookingDetails/capture';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 import { UserFacingError } from '../../utils/appErrors';
@@ -752,7 +753,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
     const now = new Date();
     const versionNumber = 1;
     const commissionPercent = await getSafeCommissionPercent();
-    const customerTotals = buildQuoteCustomerTotals({
+    const customerTotals = await buildQuoteCustomerTotalsWithDiscounts({
       booking,
       totalAmount: normalizedTotalAmount,
       pricingLines: canonicalPricingLines,
@@ -791,6 +792,17 @@ export const submitQuotation = async (req: Request, res: Response) => {
       ...(customerTotals ? { customerTotals } : {}),
       ...(serviceLocation ? { serviceLocation } : {}),
     };
+    // Server-calculated earliest feasible start from the quantity-aware
+    // schedule engine (resource/calendar/lead-time/timezone). Read-only: no
+    // reservation. Null when unavailable/insufficient (incl. professional-only
+    // RFQs without a project), on error, or after a short timeout; never
+    // blocks or stalls the quote write.
+    // Bounded: errors and timeouts both store null (unknown).
+    quoteVersion.firstPossibleStart = await computeQuoteFirstPossibleStartBounded(booking, {
+      executionDuration,
+      preparationDuration,
+      bufferDuration: bufferDuration || undefined,
+    });
 
     booking.quoteVersions = [quoteVersion];
     booking.currentQuoteVersion = 1;
@@ -957,7 +969,7 @@ export const editQuotation = async (req: Request, res: Response) => {
       booking.quotationNumber = await getNextQuotationNumber();
     }
     const commissionPercent = await getSafeCommissionPercent();
-    const customerTotals = buildQuoteCustomerTotals({
+    const customerTotals = await buildQuoteCustomerTotalsWithDiscounts({
       booking,
       totalAmount: normalizedTotalAmount,
       pricingLines: canonicalPricingLines,
@@ -997,6 +1009,12 @@ export const editQuotation = async (req: Request, res: Response) => {
       ...(customerTotals ? { customerTotals } : {}),
       ...(serviceLocation ? { serviceLocation } : {}),
     };
+    // Bounded: errors and timeouts both store null (unknown).
+    quoteVersion.firstPossibleStart = await computeQuoteFirstPossibleStartBounded(booking, {
+      executionDuration,
+      preparationDuration,
+      bufferDuration: bufferDuration || undefined,
+    });
 
     // Capture the state this edit was based on, so the write below cannot
     // overwrite a concurrent accept/reject/version bump (lost update).

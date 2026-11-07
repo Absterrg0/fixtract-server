@@ -1269,6 +1269,7 @@ const computeDaysOverlapPercentage = (
     availableDays < executionDays &&
     workingDays < workingDayCap
   ) {
+    checkScheduleWork();
     iterations++;
     if (isWorkingDay(availability, cursor)) {
       workingDays++;
@@ -1312,6 +1313,7 @@ const computeHoursOverlapPercentage = (
   let availableSamples = 0;
 
   for (let i = 0; i < totalSamples; i++) {
+    checkScheduleWork();
     const sampleTime = new Date(startUtc.getTime() + i * sampleInterval * 60 * 1000);
     // Ensure sampleTime doesn't exceed endUtc
     if (sampleTime.getTime() >= endUtc.getTime()) {
@@ -1383,6 +1385,7 @@ const forEachSubset = (
 
   const walk = (startIndex: number): boolean => {
     if (subset.length === subsetSize) {
+      checkScheduleWork();
       iterationCount++;
       if (iterationCount > maxIterations) {
         return false;
@@ -1791,6 +1794,7 @@ const advanceWorkingDays = (
   }
 
   while (counted < workingDays && iterations < maxIterations) {
+    checkScheduleWork();
     iterations++;
 
     let dayIsBlocked = false;
@@ -2049,6 +2053,7 @@ const getAvailableSlotsForDate = (
   const slots: Array<{ startZoned: Date; startTime: string }> = [];
 
   for (let startMinutes = currentStart; startMinutes <= lastSlotStart; startMinutes += 30) {
+    checkScheduleWork();
     const slotStartZoned = buildZonedTime(dayStart, startMinutes);
     const slotStartUtc = fromZonedTime(slotStartZoned, timeZone);
     const slotEndUtc = new Date(slotStartUtc.getTime() + executionMinutes * 60000);
@@ -2253,9 +2258,97 @@ const calculateBufferEnd = (
 };
 
 /**
+ * Cooperative cancellation and a wall-clock budget for a schedule search.
+ * The day search is synchronous CPU work, so a caller's timer alone
+ * (Promise.race) cannot stop it.
+ * - `signal`: the search yields to the event loop once per searched day
+ *   (letting the caller's timer run) and stops at the next day once the
+ *   signal is aborted.
+ * - `deadlineAt`: a `performance.now()` timestamp. Besides the per-day
+ *   checks, the hot subset/overlap/working-day/slot loops check it every
+ *   SCHEDULE_WORK_CHECK_INTERVAL iterations, so one multi-resource day (up to
+ *   C(n,k) subsets x 1,830 calendar days) cannot run past it even though no
+ *   timer can fire during that synchronous work. `performance.now()` is
+ *   monotonic and unaffected by a faked or adjusted `Date`.
+ * Either option enables the yields and checks. Without options the search
+ * runs exactly as before: no yields, no checks.
+ */
+export type ScheduleSearchOptions = {
+  signal?: { readonly aborted: boolean };
+  deadlineAt?: number;
+};
+
+/** Thrown when a schedule search stops because its signal or deadline ran out. */
+export class ScheduleSearchAbortedError extends Error {
+  constructor(
+    readonly reason: "aborted" | "deadline" = "aborted",
+    /** Day offset being searched when it stopped; null before the day loop. */
+    readonly dayOffset: number | null = null,
+  ) {
+    super(reason === "deadline" ? "Schedule search deadline exceeded" : "Schedule search aborted");
+    this.name = "ScheduleSearchAbortedError";
+  }
+}
+
+/** Hot-loop iterations between wall-clock checks (a power of two). */
+export const SCHEDULE_WORK_CHECK_INTERVAL = 256;
+
+type ScheduleWorkBudget = {
+  signal?: { readonly aborted: boolean };
+  deadlineAt?: number;
+  dayOffset: number | null;
+  ticks: number;
+};
+
+/**
+ * Budget of the search whose synchronous segment is running right now. It is
+ * set only between two awaits of one budgeted search (JavaScript runs one
+ * synchronous segment at a time, so no other search can observe it) and is
+ * cleared before that search awaits, returns or throws. It stays null for
+ * unbudgeted searches, whose hot loops then do one null check and nothing
+ * else.
+ */
+let activeWorkBudget: ScheduleWorkBudget | null = null;
+
+const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+const createWorkBudget = (options?: ScheduleSearchOptions): ScheduleWorkBudget | null => {
+  const deadlineAt = typeof options?.deadlineAt === "number" && !Number.isNaN(options.deadlineAt)
+    ? options.deadlineAt
+    : undefined;
+  if (!options?.signal && deadlineAt === undefined) return null;
+  return { signal: options?.signal, deadlineAt, dayOffset: null, ticks: 0 };
+};
+
+const deadlinePassed = (budget: ScheduleWorkBudget) =>
+  budget.deadlineAt !== undefined && performance.now() >= budget.deadlineAt;
+
+/** Full check at a yield point: the signal, then the deadline. */
+const throwIfWorkBudgetExhausted = (budget: ScheduleWorkBudget | null) => {
+  if (!budget) return;
+  if (budget.signal?.aborted) throw new ScheduleSearchAbortedError("aborted", budget.dayOffset);
+  if (deadlinePassed(budget)) throw new ScheduleSearchAbortedError("deadline", budget.dayOffset);
+};
+
+/**
+ * Hot-loop check: the wall clock only. A signal cannot change while a
+ * synchronous segment runs (its abort needs the event loop), so the signal is
+ * read at the yield points.
+ */
+const checkScheduleWork = () => {
+  const budget = activeWorkBudget;
+  if (budget === null) return;
+  budget.ticks += 1;
+  if ((budget.ticks & (SCHEDULE_WORK_CHECK_INTERVAL - 1)) !== 0) return;
+  if (deadlinePassed(budget)) throw new ScheduleSearchAbortedError("deadline", budget.dayOffset);
+};
+
+/**
  * Build schedule proposals using pre-loaded project and professional data.
  * This avoids N+1 queries when called in bulk.
  * Supports resource policy mode when project has resources.
+ * `options.signal` makes the search cooperatively cancellable (see
+ * ScheduleSearchOptions); results are unchanged when it is not aborted.
  */
 export const buildProjectScheduleProposalsWithData = async (
   project: any,
@@ -2263,11 +2356,14 @@ export const buildProjectScheduleProposalsWithData = async (
   subprojectIndex?: number,
   durationOverride?: DurationOverride,
   excludeBookingId?: string,
-  quantity = 1
+  quantity = 1,
+  options?: ScheduleSearchOptions
 ): Promise<ScheduleProposals | null> => {
   if (!project || !professional) {
     return null;
   }
+  const workBudget = createWorkBudget(options);
+  throwIfWorkBudgetExhausted(workBudget);
 
   const durations = getProjectDurations(project, subprojectIndex, durationOverride, quantity);
   if (!durations || !durations.execution?.value) {
@@ -2298,6 +2394,8 @@ export const buildProjectScheduleProposalsWithData = async (
     excludeBookingId
   );
 
+  throwIfWorkBudgetExhausted(workBudget);
+
   // Collect company-only blocked dates and ranges for multi-resource start date validation
   // Personal/customer blocks should not veto multi-resource start dates - only company-level blocks should
   const { companyBlockedDates, companyBlockedRanges } = collectCompanyBlocks(professional, timeZone);
@@ -2315,6 +2413,7 @@ export const buildProjectScheduleProposalsWithData = async (
       undefined,
       excludeBookingId
     );
+    throwIfWorkBudgetExhausted(workBudget);
   }
 
   const prepEnd = calculatePrepEnd(
@@ -2351,7 +2450,18 @@ export const buildProjectScheduleProposalsWithData = async (
   let shortestProposal: ProposalWindow | undefined;
   let shortestThroughput: number | null = null;
 
+  try {
   for (let dayOffset = 0; dayOffset <= maxDays; dayOffset += 1) {
+    if (workBudget) {
+      // Yield once per searched day so a caller's timer can run, then check
+      // the signal and deadline. Within the day the hot loops check the
+      // deadline themselves (checkScheduleWork via activeWorkBudget).
+      activeWorkBudget = null;
+      await yieldToEventLoop();
+      workBudget.dayOffset = dayOffset;
+      throwIfWorkBudgetExhausted(workBudget);
+      activeWorkBudget = workBudget;
+    }
     const currentDay = addDaysZoned(searchStart, dayOffset);
 
     if (executionMode === "hours") {
@@ -2584,6 +2694,9 @@ export const buildProjectScheduleProposalsWithData = async (
         break;
       }
     }
+  }
+  } finally {
+    if (workBudget) activeWorkBudget = null;
   }
 
   const fallbackDate = earliestBookableDate || startOfDayZoned(prepEnd);

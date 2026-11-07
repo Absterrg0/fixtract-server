@@ -5,6 +5,7 @@
 
 import { Request, Response } from 'express';
 import Booking from '../../models/booking';
+import { withReferralDiscount } from '../../utils/referralDiscount';
 import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
 import { computeGrossBookingAmount } from '../../utils/payment';
 import PlatformSettings from '../../models/platformSettings';
@@ -104,7 +105,7 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
       }
     }
 
-    const discount = await calculateAutoDiscount(
+    const automaticDiscount = await calculateAutoDiscount(
       userId,
       professionalId,
       projectId,
@@ -114,6 +115,7 @@ export const getDiscountPreview = async (req: Request, res: Response) => {
       codeInfo
     );
 
+    const discount = await withReferralDiscount(automaticDiscount, userId, String(booking._id));
     return res.json({
       success: true,
       data: {

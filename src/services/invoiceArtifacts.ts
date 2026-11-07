@@ -717,6 +717,7 @@ const withCustomerDiscountLines = (
   const serviceDiscounts = [
     { label: "Loyalty discount", amount: moneyNumber(discount.loyaltyAmount) },
     { label: "Repeat buyer discount", amount: moneyNumber(discount.repeatBuyerAmount) },
+    { label: "Referral discount", amount: moneyNumber(discount.referralDiscountAmount) },
     { label: "Points discount", amount: moneyNumber(discount.pointsDiscountAmount) },
     { label: `Discount code${discount.codeLabel ? ` (${discount.codeLabel})` : ""}`, amount: moneyNumber(discount.codeDiscountAmount) },
   ].filter((entry) => entry.amount > 0);

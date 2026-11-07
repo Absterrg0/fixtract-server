@@ -28,22 +28,35 @@ import { normalizePreparationDuration } from "../../utils/projectDurations";
 import { computeProjectDiff, determineReapprovalType } from "../../utils/projectDiff";
 import { toSlug } from "../../utils/slug";
 import { withArticle47ProfessionalQuestion } from "../../utils/vatManagement";
+import { pruneDraftArticle47Answers } from "../../utils/projectDraftVatAnswers";
 import { withAnonymizationWriteFence, ACCOUNT_WRITE_FENCE_CODE } from "../../utils/support/accountGuard";
 import {
   canonicalizeProjectMedia,
   withSignedProjectMedia,
   withSignedProjectMediaList,
 } from "../../utils/projectMedia";
+import { denyUnlessPermission } from "../../utils/adminRbac/assertPermission";
+import {
+  isLostProjectTransition,
+  PROJECT_STATUS_CONFLICT,
+  projectTransitionGuard,
+  saveProjectWithFence,
+} from "../../utils/projectConditionalSave";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
-const saveProjectWithFence = async (project: any, userId: string) =>
-  withAnonymizationWriteFence(
-    [userId, (project as any).professionalId?._id || (project as any).professionalId],
-    async (session) => {
-      await project.save(session ? { session } : undefined);
-      return project;
-    },
-  );
+/**
+ * 409 for a lifecycle transition whose conditional save lost a race (see
+ * `saveProjectWithFence`). `currentStatus` is read with the caller's own
+ * scope, so it is omitted when the project is no longer visible to them.
+ */
+const sendProjectStatusConflict = async (res: Response, scope: Record<string, unknown>) => {
+  const latest = await Project.findOne(scope).select("status").lean();
+  return res.status(409).json({
+    error: "Project status changed while updating; reload and try again",
+    code: PROJECT_STATUS_CONFLICT,
+    ...(latest ? { currentStatus: (latest as any).status } : {}),
+  });
+};
 
 let cachedWindowFieldsSupport: boolean | null = null;
 const mongoHasWindowFields = async (): Promise<boolean> => {
@@ -489,6 +502,20 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
         return res.status(404).json({ error: "Project not found" });
       }
 
+      // Archived projects are read-only until restored; an update here could
+      // otherwise reopen them (e.g. status: "published") while the archive
+      // metadata stays populated.
+      if (existingProject.status === "archived") {
+        return res.status(400).json({
+          error: "Archived projects must be restored before editing",
+          code: "PROJECT_ARCHIVED",
+        });
+      }
+
+      // Same reserved-answer write boundary as POST /api/user/projects; the
+      // saved config decides when a partial update omits it.
+      await pruneDraftArticle47Answers(projectData, existingProject.serviceConfigurationId);
+
       // Log what fields are being updated
       console.log("[PROJECT] Fields being updated:");
       console.log("- Title:", projectData.title);
@@ -514,6 +541,9 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
       if (clearCustomerPresence) {
         updateData.$unset = { ...(updateData.$unset || {}), customerPresence: 1 };
       }
+      // Archive bookkeeping is owned by the archive/restore endpoints.
+      delete updateData.archivedAt;
+      delete updateData.statusBeforeArchive;
 
       // If editing a published/on_hold project, take a snapshot for smart reapproval
       // but do NOT change status to pending — defer to submit time
@@ -533,12 +563,27 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
       console.log("[PROJECT] Update query:", { _id: projectData.id, professionalId });
       console.log("[PROJECT] Update data keys:", Object.keys(updateData));
 
+      // The archived check above is a read; the status predicate makes it
+      // part of the write so an archive committed in between is never
+      // reopened (status) or overwritten (content) by an in-flight autosave.
       project = await withAnonymizationWriteFence([professionalId], async (session) =>
         Project.findOneAndUpdate(
-          { _id: projectData.id, professionalId },
+          { _id: projectData.id, professionalId, status: { $ne: "archived" } },
           updateData,
           { new: true, runValidators: true, ...(session ? { session } : {}) },
         ));
+      if (!project) {
+        const current = await Project.findOne({ _id: projectData.id, professionalId })
+          .select("status")
+          .lean();
+        if (current?.status === "archived") {
+          return res.status(409).json({
+            error: "This project was archived while you were editing. Restore it before editing.",
+            code: "PROJECT_ARCHIVED",
+          });
+        }
+        return res.status(404).json({ error: "Project not found" });
+      }
 
       console.log("[PROJECT] Project updated successfully");
       console.log("Updated project ID:", project?._id);
@@ -546,6 +591,7 @@ export const createOrUpdateDraft = async (req: Request, res: Response) => {
       console.log("Updated project status:", project?.status);
     } else {
       console.log("[PROJECT] Creating new project");
+      await pruneDraftArticle47Answers(projectData);
       project = new Project({
         ...projectData,
         professionalId,
@@ -594,8 +640,10 @@ export const getDrafts = async (req: Request, res: Response) => {
 export const getAllProjects = async (req: Request, res: Response) => {
   try {
     const professionalId = req.user?.id;
+    const includeArchived = String(req.query.includeArchived || "").toLowerCase() === "true";
     const projects = await Project.find({
       professionalId,
+      ...(includeArchived ? {} : { status: { $ne: "archived" } }),
     }).sort({ updatedAt: -1 });
 
     res.json(await withSignedProjectMediaList(projects));
@@ -1882,6 +1930,11 @@ export const submitProject = async (req: Request, res: Response) => {
         .json({ error: "Project cannot be submitted in current status" });
     }
 
+    // Every write below (failed checks, auto-approval, admin review, first
+    // submission) applies only to the status and owner read above: an archive
+    // (or any other transition) committed meanwhile wins with a 409.
+    const expected = projectTransitionGuard(project);
+
     console.log("[PROJECT] Project validation passed, running quality checks...");
 
     const qualityChecks = [];
@@ -1937,7 +1990,7 @@ export const submitProject = async (req: Request, res: Response) => {
 
     if (failedChecks.length > 0) {
       project.qualityChecks = qualityChecks;
-      await saveProjectWithFence(project, professionalId);
+      await saveProjectWithFence(project, professionalId, expected);
       return res.status(400).json({
         error: "Quality checks failed",
         qualityChecks: failedChecks,
@@ -1977,7 +2030,7 @@ export const submitProject = async (req: Request, res: Response) => {
         project.reapprovalType = undefined;
         project.isResubmission = false;
 
-        await saveProjectWithFence(project, professionalId);
+        await saveProjectWithFence(project, professionalId, expected);
         return res.json({
           message: "Changes approved automatically",
           id: project._id,
@@ -1995,7 +2048,7 @@ export const submitProject = async (req: Request, res: Response) => {
       project.approvedAt = undefined;
       project.approvedBy = undefined;
 
-      await saveProjectWithFence(project, professionalId);
+      await saveProjectWithFence(project, professionalId, expected);
       console.log(`[PROJECT] Resubmission sent to admin for review (type: ${reapprovalType})`);
       return res.json({
         message: "Changes submitted for admin review",
@@ -2015,7 +2068,7 @@ export const submitProject = async (req: Request, res: Response) => {
       project.adminFeedback = undefined;
     }
 
-    await saveProjectWithFence(project, professionalId);
+    await saveProjectWithFence(project, professionalId, expected);
 
     const message = isResubmission
       ? "Project resubmitted for approval"
@@ -2025,6 +2078,9 @@ export const submitProject = async (req: Request, res: Response) => {
 
     res.json({ message, id: project._id, status: project.status, submittedAt: project.submittedAt });
   } catch (error: any) {
+    if (isLostProjectTransition(error)) {
+      return sendProjectStatusConflict(res, { _id: req.params.id, professionalId: req.user?.id });
+    }
     console.error("[PROJECT] Submit project error:", error);
     console.error("Error stack:", error.stack);
     res.status(500).json({ error: "Failed to submit project. Please try again." });
@@ -2069,6 +2125,9 @@ export const duplicateProject = async (req: Request, res: Response) => {
         pendingChanges: undefined,
         reapprovalType: undefined,
         isResubmission: false,
+        // A copy of an archived project is a fresh draft, not an archive.
+        archivedAt: undefined,
+        statusBeforeArchive: undefined,
         autoSaveTimestamp: new Date(),
         createdAt: undefined,
         updatedAt: undefined,
@@ -2138,15 +2197,167 @@ export const updateProjectStatus = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Status transition not allowed" });
     }
 
+    const expected = projectTransitionGuard(project);
+    project.onHoldAt = status === "on_hold" ? new Date() : undefined;
     project.status = status as any;
-    await saveProjectWithFence(project, professionalId);
+    try {
+      // Write only while the project is still in the status this transition
+      // was read from and still owned by the caller: a concurrent archive (or
+      // another hold/resume) that committed after the read wins, and the stale
+      // transition is reported instead of overwriting it.
+      await saveProjectWithFence(project, professionalId, expected);
+    } catch (error) {
+      if (isLostProjectTransition(error)) {
+        return sendProjectStatusConflict(res, { _id: id, professionalId });
+      }
+      throw error;
+    }
     res.json({ success: true, project });
   } catch (error) {
     res.status(500).json({ error: "Failed to update project status" });
   }
 };
 
-// Master listing with search and filters for Manage Projects screen
+/**
+ * POST /api/projects/:id/archive — soft archive for the Project Dashboard.
+ * Archive unpublishes and hides the project from the professional overview,
+ * public search, and new bookings. It is never a delete: existing bookings,
+ * details, and snapshots stay readable. Owners must be approved
+ * professionals; admins need `projects.approve`. Idempotent for an already
+ * archived project.
+ */
+export const archiveProject = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = (req.user as any)?.id || (req.user as any)?._id?.toString();
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const actor = await User.findById(userId).select("role professionalStatus adminRole adminPermissionLevels");
+    if (!actor) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const isAdmin = actor.role === "admin";
+    if (isAdmin) {
+      // Same RBAC gate as the other project-administration handlers.
+      const denied = denyUnlessPermission(actor as any, "projects.approve");
+      if (denied) {
+        return res.status(denied.status).json(denied.body);
+      }
+    } else if (actor.role !== "professional" || actor.professionalStatus !== "approved") {
+      return res.status(403).json({ error: "Only approved professionals can archive projects" });
+    }
+
+    const project = isAdmin
+      ? await Project.findById(id)
+      : await Project.findOne({ _id: id, professionalId: userId });
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    if (project.status === "archived") {
+      return res.json({ success: true, project: await withSignedProjectMedia(project) });
+    }
+
+    // Archive only the status and owner it was decided from: a hold/resume,
+    // submission, restore or owner change committed after this read wins,
+    // and the stale archive is reported instead of recording the wrong
+    // pre-archive status.
+    const expected = projectTransitionGuard(project);
+    project.statusBeforeArchive = project.status as any;
+    project.archivedAt = new Date();
+    project.status = "archived" as any;
+    try {
+      await saveProjectWithFence(project, userId, expected);
+    } catch (error) {
+      if (!isLostProjectTransition(error)) throw error;
+      const scope = isAdmin ? { _id: id } : { _id: id, professionalId: userId };
+      // A concurrent archive already reached the requested state: keep the
+      // endpoint idempotent and return the stored (winning) archive.
+      const latest = await Project.findOne({ ...scope, status: "archived" });
+      if (latest) {
+        return res.json({ success: true, project: await withSignedProjectMedia(latest) });
+      }
+      return sendProjectStatusConflict(res, scope);
+    }
+    res.json({ success: true, project: await withSignedProjectMedia(project) });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to archive project" });
+  }
+};
+
+/**
+ * POST /api/projects/:id/restore — undo an archive. Restores to draft, or to
+ * the verified pre-archive status for non-published states — never straight
+ * back to published (the re-approval flow stays authoritative). Same actor
+ * rules as archiveProject.
+ */
+export const restoreProject = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = (req.user as any)?.id || (req.user as any)?._id?.toString();
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const actor = await User.findById(userId).select("role professionalStatus adminRole adminPermissionLevels");
+    if (!actor) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const isAdmin = actor.role === "admin";
+    if (isAdmin) {
+      // Same RBAC gate as the other project-administration handlers.
+      const denied = denyUnlessPermission(actor as any, "projects.approve");
+      if (denied) {
+        return res.status(denied.status).json(denied.body);
+      }
+    } else if (actor.role !== "professional" || actor.professionalStatus !== "approved") {
+      return res.status(403).json({ error: "Only approved professionals can restore projects" });
+    }
+
+    const project = isAdmin
+      ? await Project.findById(id)
+      : await Project.findOne({ _id: id, professionalId: userId });
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    if (project.status !== "archived") {
+      return res.status(400).json({ error: "Project is not archived" });
+    }
+
+    // Never bypass approval: a previously published project restores as
+    // draft so the publish/approval flow runs again. Other verified states
+    // restore to their recorded pre-archive status.
+    const previous = project.statusBeforeArchive;
+    // Restore only the archive this decision was read from: same owner, and
+    // the same archive episode (pre-archive status and archive time), so a
+    // concurrent restore, or a restore followed by a new archive, is never
+    // undone with a stale pre-archive status. `null` matches a missing field.
+    const expected = {
+      ...projectTransitionGuard(project),
+      statusBeforeArchive: previous ?? null,
+      archivedAt: project.archivedAt ?? null,
+    };
+    const restorable = ["draft", "pending", "rejected", "on_hold", "suspended"];
+    project.status = (previous && restorable.includes(previous) ? previous : "draft") as any;
+    project.statusBeforeArchive = undefined;
+    project.archivedAt = undefined;
+    try {
+      await saveProjectWithFence(project, userId, expected);
+    } catch (error) {
+      if (!isLostProjectTransition(error)) throw error;
+      return sendProjectStatusConflict(res, isAdmin ? { _id: id } : { _id: id, professionalId: userId });
+    }
+    res.json({ success: true, project: await withSignedProjectMedia(project) });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to restore project" });
+  }
+};
+
+/**
+ * GET /api/projects/master — the professional's own projects for the Manage
+ * Projects screen: search/category/service/status filters (archived hidden
+ * unless requested), pagination, status counts, and team member names
+ * resolved only for the professional and their own employees.
+ */
 export const getProjectsMaster = async (req: Request, res: Response) => {
   try {
     const professionalId = req.user?.id;
@@ -2170,9 +2381,15 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
         filter.status = "rejected";
       } else if (status === "cancelled") {
         filter.status = "closed";
+      } else if (status === "archived") {
+        filter.status = "archived";
       } else {
         filter.status = status;
       }
+    } else {
+      // Archived projects are hidden from the professional overview by
+      // default; they remain reachable via the explicit archived tab.
+      filter.status = { $ne: "archived" };
     }
     if (category && category !== "all") {
       // Match either the primary category field or within services[] selections
@@ -2189,7 +2406,7 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
       }
     }
     if (search) {
-      const regex = new RegExp(search, "i");
+      const regex = new RegExp(search.trim().slice(0, 80).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
       filter.$and = (filter.$and || []).concat([
         {
           $or: [{ title: regex }, { description: regex }, { keywords: regex }],
@@ -2201,14 +2418,16 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
       Project.find(filter)
         .sort({ updatedAt: -1 })
         .skip((page - 1) * limit)
-        .limit(limit),
+        .limit(limit)
+        .lean(),
       Project.countDocuments(filter),
       Project.distinct("service", { professionalId }),
       // Status counts for header cards – normalize raw DB statuses
       (async () => {
         const professionalObjectId = new mongoose.Types.ObjectId(professionalId);
+        const { status: _selectedStatus, ...siblingFilters } = filter;
         const pipeline = [
-          { $match: { professionalId: professionalObjectId } },
+          { $match: { ...siblingFilters, professionalId: professionalObjectId } },
           {
             $addFields: {
               normalizedStatus: {
@@ -2219,6 +2438,7 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
                     { case: { $eq: ["$status", "on_hold"] }, then: "on_hold" },
                     { case: { $eq: ["$status", "suspended"] }, then: "suspended" },
                     { case: { $eq: ["$status", "rejected"] }, then: "rejected" },
+                    { case: { $eq: ["$status", "archived"] }, then: "archived" },
                   ],
                   default: "draft",
                 },
@@ -2243,12 +2463,37 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
           on_hold: byStatus["on_hold"] || 0,
           suspended: byStatus["suspended"] || 0,
           rejected: byStatus["rejected"] || 0,
+          archived: byStatus["archived"] || 0,
         };
       })(),
     ]);
 
+    // Assigned team member names, resolved in one batched lookup. Only
+    // ids + display names cross the wire — never full person payloads.
+    const teamIds = [...new Set(
+      items.flatMap((item: any) => Array.isArray(item?.resources) ? item.resources : [])
+        .filter((id: unknown) => typeof id === "string" && mongoose.Types.ObjectId.isValid(id)),
+    )];
+    // Resource ids are client-supplied on draft saves, so names resolve only
+    // for the professional and their own company employees.
+    const teamRows = teamIds.length > 0
+      ? await User.find({
+          _id: { $in: teamIds },
+          $or: [
+            { _id: professionalId },
+            { role: "employee", "employee.companyId": String(professionalId) },
+          ],
+        }).select("_id name").lean()
+      : [];
+    const teamNames = new Map(teamRows.map((row: any) => [String(row._id), row.name || null]));
+    const itemsWithTeam = items.map((item: any) => ({
+      ...item,
+      teamMembers: (Array.isArray(item?.resources) ? item.resources : [])
+        .map((id: unknown) => ({ id: String(id), name: teamNames.get(String(id)) || null })),
+    }));
+
     res.json({
-      items: await withSignedProjectMediaList(items),
+      items: await withSignedProjectMediaList(itemsWithTeam),
       meta: {
         total,
         page,

@@ -27,6 +27,7 @@ import {
   quoteAmountIncludesSelectedExtras,
 } from '../../utils/payment';
 import { canRetryTransfer, getTransferStatus, requireProfessionalPayout } from '../../utils/paymentSafety';
+import { bindReferralReservation, releaseReferralReservation, withReferralDiscount } from '../../utils/referralDiscount';
 import { calculateVAT } from '../../utils/vat';
 import { calculateVatFromPricingLines } from '../../utils/vatLineCalculation';
 import { parseVatCountryCode, requiresVatRfqReview } from '../../utils/vatManagement';
@@ -39,6 +40,7 @@ import { summarizeBaseRefunds } from '../../utils/paymentRefunds';
 import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
+import { recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger';
 import { commissionedQuoteAmount } from '../../utils/customerPricing';
 import { auditLog } from '../../utils/auditLogger';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
@@ -297,6 +299,8 @@ export const createPaymentIntent = async (
   requestedMilestoneIndex?: number,
   discountCode?: string
 ): Promise<CreatePaymentIntentResult> => {
+  let createdIntentId: string | undefined;
+  let reservationToken: string | undefined;
   try {
     const booking = await Booking.findById(bookingId)
       .populate('customer')
@@ -306,6 +310,8 @@ export const createPaymentIntent = async (
     if (!booking) {
       return { success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } };
     }
+
+    const expectedWrite = { updatedAt: booking.updatedAt, status: booking.status, 'payment.stripePaymentIntentId': booking.payment?.stripePaymentIntentId ?? null };
 
     // Verify customer
     if (booking.customer._id.toString() !== userId) {
@@ -468,7 +474,8 @@ export const createPaymentIntent = async (
       }
       if (booking.payment.status === 'pending') {
         try {
-          await stripe.paymentIntents.cancel(booking.payment.stripePaymentIntentId);
+          const cancelled = await stripe.paymentIntents.cancel(booking.payment.stripePaymentIntentId);
+          if (cancelled.status === 'canceled') await releaseReferralReservation(String(booking._id), booking.payment.discount?.referralReservationToken);
           console.log(`🗑️  Cancelled superseded PaymentIntent ${booking.payment.stripePaymentIntentId} for booking ${booking._id}`);
         } catch (cancelErr: any) {
           if (cancelErr?.code !== 'payment_intent_unexpected_state' && cancelErr?.code !== 'resource_missing') {
@@ -496,7 +503,7 @@ export const createPaymentIntent = async (
     }
 
 
-    const fullDiscountBreakdown = await calculateAutoDiscount(
+    const automaticDiscount = await calculateAutoDiscount(
       customer._id.toString(),
       professional._id.toString(),
       booking.project ? (booking.project as any)._id?.toString() || booking.project.toString() : null,
@@ -506,6 +513,8 @@ export const createPaymentIntent = async (
       codeInfo
     );
 
+    const fullDiscountBreakdown = await withReferralDiscount(automaticDiscount, customer._id.toString(), String(booking._id), true);
+    reservationToken = fullDiscountBreakdown.referralDiscount?.reservationToken;
     let discountBreakdown = fullDiscountBreakdown;
     if (fullBookingAmount > 0 && chargeAmount < fullBookingAmount) {
       const ratio = chargeAmount / fullBookingAmount;
@@ -515,7 +524,8 @@ export const createPaymentIntent = async (
       const proratedCode = fullDiscountBreakdown.codeDiscount
         ? Math.round(fullDiscountBreakdown.codeDiscount.amount * ratio * 100) / 100
         : 0;
-      const proratedTotal = proratedLoyalty + proratedRepeat + proratedPoints + proratedCode;
+      const proratedReferral = Math.round((fullDiscountBreakdown.referralDiscount?.amount || 0) * ratio * 100) / 100;
+      const proratedTotal = proratedLoyalty + proratedRepeat + proratedPoints + proratedCode + proratedReferral;
       discountBreakdown = {
         ...fullDiscountBreakdown,
         loyaltyDiscount: { ...fullDiscountBreakdown.loyaltyDiscount, amount: proratedLoyalty },
@@ -524,6 +534,7 @@ export const createPaymentIntent = async (
         codeDiscount: fullDiscountBreakdown.codeDiscount
           ? { ...fullDiscountBreakdown.codeDiscount, amount: proratedCode }
           : undefined,
+        referralDiscount: fullDiscountBreakdown.referralDiscount ? { ...fullDiscountBreakdown.referralDiscount, amount: proratedReferral } : undefined,
         totalDiscount: proratedTotal,
         originalAmount: chargeAmount,
         finalAmount: chargeAmount - proratedTotal,
@@ -631,9 +642,21 @@ export const createPaymentIntent = async (
         pointsToRedeem,
         discountCode,
         quoteVersion: booking.currentQuoteVersion,
+        checkoutRevision: booking.checkoutRevision,
+        previousIntentId: booking.payment?.stripePaymentIntentId,
       })
     });
 
+    createdIntentId = paymentIntent.id;
+    if (reservationToken) {
+      const bound = await bindReferralReservation(bookingId, reservationToken, paymentIntent.id);
+      if (!bound) {
+        // Another attempt owns the reservation. This idempotent intent may be
+        // shared with it, so neither cancel it nor expose its client secret.
+        return { success: false, error: { code: 'BOOKING_CHANGED', message: 'The checkout changed. Refresh before paying.' } };
+      }
+      reservationToken = paymentIntent.id;
+    }
     // Update booking with payment info
     booking.payment = {
       amount: netAmount,
@@ -653,7 +676,7 @@ export const createPaymentIntent = async (
       reverseCharge: vatCalculation.reverseCharge,
       vatBreakdown: (vatCalculation as any).vatBreakdown,
       ...(milestoneIndex !== null && { milestoneIndex }),
-      ...(discountBreakdown.totalDiscount > 0 && {
+      ...({
         discount: {
           loyaltyTier: discountBreakdown.loyaltyDiscount.tier,
           loyaltyPercentage: discountBreakdown.loyaltyDiscount.percentage,
@@ -662,6 +685,9 @@ export const createPaymentIntent = async (
           repeatBuyerAmount: discountBreakdown.repeatBuyerDiscount.amount,
           pointsRedeemed: discountBreakdown.pointsDiscount.pointsUsed,
           pointsDiscountAmount: discountBreakdown.pointsDiscount.discountAmount,
+          referralDiscountAmount: discountBreakdown.referralDiscount?.amount || 0,
+          referralReservationToken: reservationToken,
+          referralId: discountBreakdown.referralDiscount?.referralId ? new mongoose.Types.ObjectId(discountBreakdown.referralDiscount.referralId) : undefined,
           codeDiscountAmount: discountBreakdown.codeDiscount?.amount || 0,
           codeId: discountBreakdown.codeDiscount?.codeId
             ? new mongoose.Types.ObjectId(discountBreakdown.codeDiscount.codeId)
@@ -675,6 +701,7 @@ export const createPaymentIntent = async (
     if (!hasUnpaidMilestones || ['quote_accepted', 'payment_pending'].includes(booking.status)) {
       booking.status = 'payment_pending';
     }
+    booking.$where = expectedWrite;
     await booking.save();
 
     // Points deduction is handled in the payment success webhook (handlePaymentIntentSucceeded)
@@ -721,6 +748,26 @@ export const createPaymentIntent = async (
     };
 
   } catch (error: any) {
+    if (error?.name === 'DocumentNotFoundError' && createdIntentId) {
+      try {
+        // Stripe can return the same idempotent intent to two concurrent
+        // callers. A losing save must never cancel the winner's active intent.
+        const latest = await Booking.findById(bookingId).select('payment.stripePaymentIntentId payment.discount.referralReservationToken status').lean();
+        if (latest?.payment?.stripePaymentIntentId !== createdIntentId) {
+          const cancelled = await stripe.paymentIntents.cancel(createdIntentId);
+          // A winning checkout for this same booking keeps its reservation.
+          if (cancelled.status === 'canceled' && (!latest?.payment?.stripePaymentIntentId || latest.status === 'cancelled')) {
+            await releaseReferralReservation(bookingId, reservationToken);
+          } else if (cancelled.status === 'canceled' && reservationToken && latest?.payment?.stripePaymentIntentId) {
+            // Restore the winning checkout's fence only if we still own the
+            // cancelled attempt. A later retry's token must survive this too.
+            await bindReferralReservation(bookingId, reservationToken,
+              latest.payment.discount?.referralReservationToken || latest.payment.stripePaymentIntentId);
+          }
+        }
+      } catch { /* A racing success is handled by the durable superseded-intent reconciliation path. */ }
+      return { success: false, error: { code: 'BOOKING_CHANGED', message: 'The booking changed. Refresh before paying.' } };
+    }
     console.error('Error creating payment intent:', error);
     return {
       success: false,
@@ -729,6 +776,19 @@ export const createPaymentIntent = async (
         message: "We couldn't start the payment. Please try again."
       }
     };
+  }
+};
+
+/**
+ * Record the succeeded payment's discount snapshot from the confirm endpoint.
+ * The webhook is the durable writer (it fails and retries); here a ledger
+ * error must not turn a successful payment into a failed confirmation.
+ */
+const recordDiscountSnapshotSafely = async (booking: any, paymentIntentId: string) => {
+  try {
+    await recordPaymentDiscountSnapshot(booking._id, booking.payment, paymentIntentId);
+  } catch (ledgerError: any) {
+    console.error(`[PAYMENT CONFIRM] Discount ledger write failed for booking ${booking._id}:`, ledgerError?.message || ledgerError);
   }
 };
 
@@ -793,6 +853,7 @@ export const confirmPayment = async (req: Request, res: Response) => {
       } catch (notifyError: any) {
         console.error(`[PAYMENT CONFIRM] Post-payment notify failed for booking ${booking._id}:`, notifyError?.message || notifyError);
       }
+      await recordDiscountSnapshotSafely(booking, paymentIntentId);
       return res.json({
         success: true,
         data: {
@@ -837,6 +898,9 @@ export const confirmPayment = async (req: Request, res: Response) => {
       if (typeof msIdx === 'number' && Array.isArray(booking.milestonePayments) && booking.milestonePayments[msIdx]) {
         updateFields[`milestonePayments.${msIdx}.status`] = 'paid';
         updateFields[`milestonePayments.${msIdx}.paidAt`] = now;
+        // Same settlement fact as the webhook path: the intent that paid.
+        updateFields[`milestonePayments.${msIdx}.stripePaymentIntentId`] = paymentIntent.id;
+        updateFields[`milestonePayments.${msIdx}.paidStripePaymentIntentId`] = paymentIntent.id;
       }
 
       const milestoneFilter: Record<string, any> = { _id: booking._id };
@@ -884,6 +948,7 @@ export const confirmPayment = async (req: Request, res: Response) => {
       );
 
       console.log(`✅ Payment authorized for booking ${booking._id}`);
+      await recordDiscountSnapshotSafely(booking, paymentIntent.id);
 
       // Notify both sides exactly once after payment (idempotent with webhook
       // via per-booking deliveryKey — never on checkout-page forward).

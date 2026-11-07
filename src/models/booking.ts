@@ -69,10 +69,38 @@ export interface IQuotationMilestone {
 export interface IBookingMilestone extends IQuotationMilestone {
   workStatus?: 'pending' | 'in_progress' | 'completed';
   stripePaymentIntentId?: string;
+  /**
+   * The PaymentIntent that actually settled this milestone. Written only by
+   * the payment-success paths (unlike `stripePaymentIntentId`, which the
+   * checkout also sets), so it is a settlement fact; absent on milestones
+   * paid before it existed.
+   */
+  paidStripePaymentIntentId?: string;
   stripeClientSecret?: string;
   startedAt?: Date;
   completedAt?: Date;
   paidAt?: Date;
+}
+
+/**
+ * Immutable discount snapshot of one captured payment (a milestone or the
+ * whole booking). Written once per PaymentIntent when the payment succeeds,
+ * so a later milestone checkout that replaces `booking.payment` cannot erase
+ * it. Amounts are copied from that payment's own checkout snapshot; zero is a
+ * recorded zero, never a guess.
+ */
+export interface IPaymentDiscountLedgerEntry {
+  paymentIntentId: string;
+  milestoneIndex?: number;
+  currency?: string;
+  originalAmount: number;
+  loyaltyAmount: number;
+  repeatBuyerAmount: number;
+  pointsDiscountAmount: number;
+  codeDiscountAmount: number;
+  referralDiscountAmount?: number;
+  totalDiscount: number;
+  recordedAt: Date;
 }
 
 export interface IQuoteMaterial {
@@ -85,7 +113,7 @@ export interface IQuoteMaterial {
 export interface IQuoteCustomerTotals {
   commissionPercent: number;
   professionalNetAmount: number;
-  /** Customer net before VAT and before checkout-only discounts. */
+  /** Customer net after recorded quote-time automatic discounts, before VAT. */
   customerNetAmount: number;
   /** Alias kept for the frontend contract. */
   amountBeforeDiscounts?: number;
@@ -125,6 +153,8 @@ export interface IQuoteVersion {
   rejectedBy?: Types.ObjectId;
   /** Customer-facing amounts frozen at submit/edit; absent for legacy versions. */
   customerTotals?: IQuoteCustomerTotals;
+  /** Earliest feasible execution start computed server-side at submit/edit; null when unavailable. */
+  firstPossibleStart?: Date | null;
   /** Service address as submitted with this version; absent for legacy versions. */
   serviceLocation?: {
     country?: string;
@@ -236,6 +266,7 @@ export interface IBooking extends Document {
    */
   serviceConfigurationId?: string;
 
+  checkoutRevision?: number;
   // Status and lifecycle
   status: BookingStatus;
   statusBeforeDispute?: BookingStatus;
@@ -281,6 +312,8 @@ export interface IBooking extends Document {
   lastReminderSentAt?: Date;
   customerRejectionReason?: string;
   milestonePayments?: IBookingMilestone[];
+  /** Per-payment discount snapshots (see IPaymentDiscountLedgerEntry). Not selected by default. */
+  paymentDiscountLedger?: IPaymentDiscountLedgerEntry[];
   selectedSubprojectIndex?: number;
   selectedExtraOptions?: { extraOptionId: string; bookedPrice: number }[];
   checkoutSnapshot?: {
@@ -486,6 +519,9 @@ export interface IBooking extends Document {
       pointsRedeemed: number;
       pointsDiscountAmount: number;
       codeDiscountAmount?: number;
+      referralDiscountAmount?: number;
+      referralId?: Types.ObjectId;
+      referralReservationToken?: string;
       codeId?: mongoose.Types.ObjectId;
       codeLabel?: string;
       totalDiscount: number;
@@ -797,6 +833,7 @@ const BookingSchema = new Schema({
     type: String,
     enum: ['rfq', 'rfq_accepted', 'draft_quote', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'rescheduling_requested', 'in_progress', 'professional_completed', 'completed', 'cancelled', 'dispute', 'refunded'],
   },
+  checkoutRevision: { type: Number, default: 0 },
   statusHistory: [{
     status: {
       type: String,
@@ -987,6 +1024,7 @@ const BookingSchema = new Schema({
     rejectedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     customerTotals: { type: QuoteCustomerTotalsSchema },
     serviceLocation: { type: QuoteServiceLocationSchema },
+    firstPossibleStart: { type: Date },
   }],
   currentQuoteVersion: { type: Number },
   acceptedQuoteVersion: { type: Number, min: 1 },
@@ -1016,11 +1054,33 @@ const BookingSchema = new Schema({
     status: { type: String, enum: ['pending', 'invoiced', 'paid', 'overdue'], default: 'pending' },
     workStatus: { type: String, enum: ['pending', 'in_progress', 'completed'], default: 'pending' },
     stripePaymentIntentId: { type: String },
+    paidStripePaymentIntentId: { type: String },
     stripeClientSecret: { type: String },
     startedAt: { type: Date },
     completedAt: { type: Date },
     paidAt: { type: Date }
   }],
+  // Customer-only financial history: excluded from default reads so booking
+  // payloads never carry it; the savings read model selects it explicitly.
+  // No default, so loading a booking without it and saving never rewrites it.
+  paymentDiscountLedger: {
+    type: [{
+      paymentIntentId: { type: String, required: true },
+      milestoneIndex: { type: Number, min: 0 },
+      currency: { type: String },
+      originalAmount: { type: Number, default: 0 },
+      loyaltyAmount: { type: Number, default: 0 },
+      repeatBuyerAmount: { type: Number, default: 0 },
+      pointsDiscountAmount: { type: Number, default: 0 },
+      referralDiscountAmount: { type: Number },
+      codeDiscountAmount: { type: Number, default: 0 },
+      totalDiscount: { type: Number, default: 0 },
+      recordedAt: { type: Date, required: true },
+      _id: false,
+    }],
+    select: false,
+    default: undefined,
+  },
   selectedSubprojectIndex: {
     type: Number,
     min: 0,
@@ -1282,7 +1342,10 @@ const BookingSchema = new Schema({
       repeatBuyerAmount: { type: Number, default: 0 },
       pointsRedeemed: { type: Number, default: 0 },
       pointsDiscountAmount: { type: Number, default: 0 },
+      referralDiscountAmount: { type: Number },
       codeDiscountAmount: { type: Number, default: 0 },
+      referralId: { type: Schema.Types.ObjectId, ref: "Referral" },
+      referralReservationToken: { type: String },
       codeId: { type: mongoose.Schema.Types.ObjectId, ref: 'DiscountCode' },
       codeLabel: { type: String },
       totalDiscount: { type: Number, default: 0 },

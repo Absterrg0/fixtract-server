@@ -253,6 +253,8 @@ export function buildPaymentIntentIdempotencyKey(params: {
   pointsToRedeem?: number;
   discountCode?: string | null;
   quoteVersion?: number | null;
+  checkoutRevision?: number;
+  previousIntentId?: string;
 }): string {
   const fingerprint = JSON.stringify({
     amountMinor: convertToStripeAmount(params.amount, params.currency),
@@ -261,6 +263,8 @@ export function buildPaymentIntentIdempotencyKey(params: {
     pointsToRedeem: params.pointsToRedeem ?? 0,
     discountCode: params.discountCode?.trim().toUpperCase() || null,
     quoteVersion: params.quoteVersion ?? null,
+    ...(params.checkoutRevision ? { checkoutRevision: params.checkoutRevision } : {}),
+    ...(params.previousIntentId ? { previousIntentId: params.previousIntentId } : {}),
   });
   const digest = createHash('sha256').update(fingerprint).digest('hex').slice(0, 32);
   return generateIdempotencyKey({

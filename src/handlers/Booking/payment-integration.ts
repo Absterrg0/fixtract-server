@@ -5,6 +5,10 @@
 
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
+import { stripe } from '../../services/stripe';
+import { getReferralReservationToken, releaseReferralReservation } from '../../utils/referralDiscount';
+import { releaseUnpaidReferralSafely } from '../../utils/releaseUnpaidReferral';
+import { quoteAmountIncludesSelectedExtras } from '../../utils/payment';
 import Booking, { BookingStatus } from '../../models/booking';
 import Project from '../../models/project';
 import PlatformSettings from '../../models/platformSettings';
@@ -951,6 +955,8 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       await booking.save(session ? { session } : undefined);
     });
 
+    if (requestedStatus === 'cancelled') await releaseUnpaidReferralSafely(booking, 'booking cancellation');
+
     if (['cancelled', 'refunded', 'completed'].includes(requestedStatus)) {
       try {
         await releaseBookingCalendar(booking._id);
@@ -1197,15 +1203,36 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Only the customer can set the schedule' } });
     }
 
-    if (!['quote_accepted'].includes(booking.status)) {
-      return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'Schedule can only be set for accepted quotes' } });
+    if (!['quote_accepted', 'payment_pending'].includes(booking.status)) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'Only unpaid accepted bookings can be edited' } });
+    }
+
+    if ((booking.payment?.status && !['pending', 'failed'].includes(booking.payment.status)) ||
+        booking.milestonePayments?.some((milestone) => milestone.status === 'paid')) {
+      return res.status(409).json({ success: false, error: { code: 'PAYMENT_ALREADY_PROCESSED', message: 'Paid bookings must use the reschedule flow' } });
+    }
+    const expectedWrite = {
+      status: booking.status,
+      updatedAt: booking.updatedAt,
+      'payment.stripePaymentIntentId': booking.payment?.stripePaymentIntentId ?? null,
+    };
+    // Accepted quotations and legacy all-in quotes cannot safely be repriced
+    // from today's catalog. Their schedule is editable; options stay agreed.
+    const optionsLocked = Boolean(booking.quoteVersions?.length || quoteAmountIncludesSelectedExtras(booking));
+    if (hasExplicitExtraOptions && optionsLocked) {
+      const project = booking.project as any;
+      const requested = normalizeSelectedExtraOptions(selectedExtraOptions, project);
+      const currentIds = (booking.selectedExtraOptions || []).map((option: any) => String(option.extraOptionId)).sort();
+      if (JSON.stringify(requested.map(option => String(option.extraOptionId)).sort()) !== JSON.stringify(currentIds)) {
+        return res.status(409).json({ success: false, error: { code: 'QUOTE_OPTIONS_LOCKED', message: 'Changing options on an agreed quotation requires a revised quotation' } });
+      }
     }
 
     const scheduleUpdate = await buildScheduleUpdatePayload({
       booking,
       scheduledStartDate,
       scheduledStartTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
-      hasExplicitExtraOptions,
+      hasExplicitExtraOptions: hasExplicitExtraOptions && !optionsLocked,
       selectedExtraOptions,
     });
 
@@ -1217,7 +1244,7 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
     if (typeof scheduleUpdate.data.selectedSubprojectIndex === 'number') {
       booking.selectedSubprojectIndex = scheduleUpdate.data.selectedSubprojectIndex;
     }
-    if (hasExplicitExtraOptions) {
+    if (hasExplicitExtraOptions && !optionsLocked) {
       booking.selectedExtraOptions = scheduleUpdate.data.selectedExtraOptions;
     }
 
@@ -1273,11 +1300,37 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       });
     }
 
+    const oldIntentId = booking.payment?.stripePaymentIntentId;
+    const oldReservationToken = oldIntentId
+      ? booking.payment?.discount?.referralReservationToken
+      : await getReferralReservationToken(String(booking._id));
+    if (oldIntentId) {
+      // Never edit while a charge is processing, authorized, or succeeded.
+      // A successful cancellation is authority to invalidate the checkout.
+      const intent = await stripe.paymentIntents.retrieve(oldIntentId);
+      if (intent.status !== 'canceled') {
+        if (!['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(intent.status)) {
+          return res.status(409).json({ success: false, error: { code: 'PAYMENT_IN_PROGRESS', message: 'Payment is processing or already paid. Refresh the booking before editing.' } });
+        }
+        const cancelled = await stripe.paymentIntents.cancel(oldIntentId);
+        if (cancelled.status !== 'canceled') throw new Error('Payment cancellation was not confirmed');
+      }
+    }
+    // The next checkout recalculates totals, VAT and discounts. A revision
+    // prevents Stripe's idempotency cache returning the cancelled intent even
+    // when the edited schedule has the same price.
+    booking.payment = undefined;
+    booking.status = 'quote_accepted';
+    booking.checkoutRevision = (booking.checkoutRevision || 0) + 1;
+    booking.$where = expectedWrite;
+
     const updatedBooking = await withAnonymizationWriteFence([userId], async (session) => {
       await replaceBookingCalendar(candidate as any, session);
       await booking.save(session ? { session } : undefined);
       return booking;
     });
+
+    await releaseReferralReservation(String(booking._id), oldReservationToken);
 
     try {
       const professional = booking.professional as any;
@@ -1306,6 +1359,9 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       data: { message: 'Schedule set successfully', booking: bookingForRequest(updatedBooking, (req as any).user) }
     });
   } catch (error: any) {
+    if (error?.name === 'DocumentNotFoundError') {
+      return res.status(409).json({ success: false, error: { code: 'BOOKING_CHANGED', message: 'The booking or payment changed. Refresh before editing.' } });
+    }
     if (error?.status === 409 || error?.code === 'SCHEDULE_CONFLICT') {
       return res.status(409).json({
         success: false,
@@ -1710,6 +1766,8 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
     await withAnonymizationWriteFence([userId], async (session) => {
       await booking.save(session ? { session } : undefined);
     });
+
+    if (booking.status === 'cancelled') await releaseUnpaidReferralSafely(booking, 'reschedule decline');
 
     if (normalizedAction !== 'accept' && ['cancelled', 'refunded'].includes(booking.status)) {
       try {
