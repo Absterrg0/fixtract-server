@@ -263,7 +263,7 @@ export const sanitizePaymentForViewer = (
   clean.invoiceArtifactHistory = filterArtifactHistory(clean.invoiceArtifactHistory, side);
   clean.manualArtifactClaims = filterManualArtifactClaims(clean.manualArtifactClaims, side);
 
-  return clean;
+  return quotationForViewer(clean, viewerRole);
 };
 
 /**

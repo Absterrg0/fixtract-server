@@ -18,7 +18,7 @@ describe('role-aware quotation serialization', () => {
     customer: id,
     quoteVersions: [{ customerTotals: { commissionPercent: 17, professionalNetAmount: 100, customerNetAmount: 117 } }],
     bookingSnapshot: { checkoutSnapshot: { commission_percentage: 17, amount: 100 } },
-    discount: { bag: [{ platformCommissionRate: 0.17, vatRate: 21, commissionAmount: 17 }] },
+    discount: { bag: [{ platformCommissionRate: 0.17, commission_pct: 17, vatRate: 21, commissionAmount: 17 }] },
     createdAt: at,
   });
   it('recursively strips percentage aliases from customer bags without changing amounts or source facts', () => {

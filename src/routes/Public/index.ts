@@ -1,3 +1,4 @@
+import { previewCustomerPrices } from '../../handlers/Public/customerPrices';
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { getGoogleMapsConfig, validateAddress } from "../../handlers/User/googleMaps";
@@ -77,7 +78,10 @@ const createPublicRateLimiter = (limit: number) =>
 
 const schedulingRateLimiter = createPublicRateLimiter(SCHEDULING_RATE_LIMIT);
 const announcementListRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_LIST_RATE_LIMIT);
+const pricePreviewRateLimiter = createPublicRateLimiter(600);
 const announcementEventRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_EVENT_RATE_LIMIT);
+
+publicRouter.route("/customer-prices").post(pricePreviewRateLimiter, previewCustomerPrices);
 
 // Google Maps configuration (public endpoint)
 publicRouter.route("/google-maps-config").get(getGoogleMapsConfig);

@@ -18,7 +18,7 @@ export const quotationForViewer = <T>(
     const copy: Record<string, any> = {};
     for (const [key, child] of Object.entries(source)) {
       const normalized = key.replace(/[^a-z]/gi, '').toLowerCase();
-      if (normalized.includes('commission') && /percent|percentage|rate/.test(normalized)) continue;
+      if (normalized.includes('commission') && /percent|pct|rate/.test(normalized)) continue;
       copy[key] = visit(child);
     }
     return copy;
