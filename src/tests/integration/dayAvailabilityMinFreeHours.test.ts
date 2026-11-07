@@ -238,4 +238,62 @@ describeDb('day availability requires 3 free working hours (real MongoDB)', () =
     expect(await engineAccepts(nyProject, '2027-03-03')).toBe(true);
     expect(await engineAccepts(nyProject, '2027-03-01')).toBe(true);
   });
+
+  it('uses Brussels working hours without the execution-window fallback', async () => {
+    const projects = mongoose.connection.collection('projects');
+    const id = new Types.ObjectId();
+    const doc: any = projectDoc(id, brusselsPro);
+    delete doc.executionDuration;
+    delete doc.subprojects;
+    await projects.insertOne(doc);
+    const blocked = await blockedLocalDays(id, BXL);
+    expect(blocked.has('2027-03-02')).toBe(true);
+    expect(blocked.has('2027-03-03')).toBe(false);
+  });
+
+  it('clips ranges to the actual local day across the Brussels DST transition', async () => {
+    const pro = new Types.ObjectId(), project = new Types.ObjectId();
+    await mongoose.connection.collection('users').insertOne({ _id: pro, role: 'professional', email: `dst-${pro}@test.example`,
+      businessInfo: { timezone: BXL, country: 'BE' },
+      companyAvailability: { sunday: { available: true, startTime: '00:00', endTime: '08:00' } },
+      blockedRanges: [{ startDate: new Date('2027-03-27T23:00:00Z'), endDate: new Date('2027-03-28T03:30:00Z') }],
+    });
+    await mongoose.connection.collection('projects').insertOne({ _id: project, professionalId: pro,
+      resources: [String(pro)], minResources: 1, status: 'published' });
+    const { body } = await callAvailability(String(project), '2027-03-28T12:00:00Z', '2027-03-29T12:00:00Z');
+    expect(body.success).toBe(true);
+    // Seven real working hours, 4.5 blocked: only 2.5 free.
+    expect(body.blockedDates.map((iso: string) => localYmd(iso, BXL))).toContain('2027-03-28');
+  });
+
+  it('blocks planned members on their planned days rather than the whole booking window', async () => {
+    const a = new Types.ObjectId(), b = new Types.ObjectId(), pro = new Types.ObjectId(), project = new Types.ObjectId();
+    await mongoose.connection.collection('users').insertMany([a, b, pro].map(_id => ({ _id, role: 'professional', email: `plan-${_id}@test.example`,
+      businessInfo: { timezone: 'UTC' }, companyAvailability: weekdays('09:00', '17:00') })));
+    await mongoose.connection.collection('projects').insertOne({ _id: project, professionalId: pro,
+      resources: [String(a), String(b)], minResources: 1, status: 'published' });
+    await mongoose.connection.collection('bookings').insertOne({ bookingNumber: `PLAN-${new Types.ObjectId()}`, professional: pro, project,
+      status: 'booked', assignedTeamMembers: [a, b], scheduledStartDate: new Date('2027-03-01T09:00:00Z'),
+      scheduledExecutionEndDate: new Date('2027-03-03T17:00:00Z'),
+      resourcePlan: [{ resourceId: a, days: [new Date('2027-03-01')] }, { resourceId: b, days: [new Date('2027-03-02')] }],
+    });
+    const { body } = await callAvailability(String(project), '2027-03-01', '2027-03-03');
+    expect(body.blockedDates).toEqual([]);
+  });
+
+  it('finds bookings through a planned resource and leaves gaps in its plan free', async () => {
+    const member = new Types.ObjectId(), pro = new Types.ObjectId(), project = new Types.ObjectId();
+    await mongoose.connection.collection('users').insertMany([member, pro].map(_id => ({ _id, role: 'professional', email: `plan-${_id}@test.example`,
+      businessInfo: { timezone: 'UTC' }, companyAvailability: weekdays('09:00', '17:00') })));
+    await mongoose.connection.collection('projects').insertOne({ _id: project, professionalId: pro,
+      resources: [String(member)], minResources: 1, status: 'published' });
+    await mongoose.connection.collection('bookings').insertOne({ bookingNumber: `PLAN-${new Types.ObjectId()}`, professional: new Types.ObjectId(), project: new Types.ObjectId(),
+      status: 'booked', assignedTeamMembers: [], scheduledStartDate: new Date('2027-03-01T09:00:00Z'),
+      scheduledExecutionEndDate: new Date('2027-03-03T17:00:00Z'),
+      resourcePlan: [{ resourceId: member, days: [new Date('2027-03-01'), new Date('2027-03-03')] }],
+    });
+    const { body } = await callAvailability(String(project), '2027-03-01', '2027-03-03');
+    expect(body.blockedDates.map((iso: string) => localYmd(iso, 'UTC'))).toEqual(['2027-03-01', '2027-03-03']);
+  });
+
 });

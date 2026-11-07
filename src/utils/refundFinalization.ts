@@ -18,7 +18,7 @@ export const isBookingStarted = (booking: any): boolean => {
 
 /** Capture the started state before a refund changes the booking status. */
 export const preparePartialRefundCancellation = (booking: any, wasStarted: boolean): void => {
-  booking.status = 'cancelled';
+  if (isPreCompletionStatus(booking.status)) booking.status = 'cancelled';
   booking.refundPreservesPastPlanning = wasStarted;
   if (wasStarted) pruneFutureResourcePlanDays(booking);
 };
@@ -88,11 +88,25 @@ export const retainPastBookingCalendar = async (booking: any): Promise<void> => 
  */
 export const ensureRefundInvoices = async (bookingId: string): Promise<void> => {
   try {
-    const { ensureBookingInvoiceArtifacts, ensurePartialRefundCreditArtifacts } = await import("../services/invoiceArtifacts");
+    const startedAt = new Date();
+    const { ensureBookingInvoiceArtifacts, ensurePartialRefundCreditArtifacts, CREDIT_GENERATION_CLAIM_TTL_MS } = await import("../services/invoiceArtifacts");
     const outcome = await ensurePartialRefundCreditArtifacts(bookingId);
+    const Booking = (await import('../models/booking')).default;
+    if (outcome === 'busy') {
+      // Durable retry: this survives worker/process shutdown and is picked up
+      // by the existing reminder cron after the competing lease can expire.
+      const retryAt = new Date(Date.now() + CREDIT_GENERATION_CLAIM_TTL_MS + 1000);
+      await Booking.updateOne({ _id: bookingId, $or: [
+        { 'payment.refundInvoiceRetryAt': null },
+        { 'payment.refundInvoiceRetryAt': { $gt: retryAt } },
+      ] }, { $set: { 'payment.refundInvoiceRetryAt': retryAt } });
+      return;
+    }
     if (outcome === "generate") {
       await ensureBookingInvoiceArtifacts(bookingId);
     }
+    await Booking.updateOne({ _id: bookingId, 'payment.refundInvoiceRetryAt': { $lte: startedAt } },
+      { $unset: { 'payment.refundInvoiceRetryAt': '' } });
   } catch (error) {
     console.error(
       `Failed to generate refund invoices for booking ${bookingId}:`,
@@ -138,4 +152,21 @@ export const utcDaysUntil = (value: Date | string | undefined | null, now: Date 
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return null;
   return Math.round((startOfUtcDay(date).getTime() - startOfUtcDay(now).getTime()) / DAY_MS);
+};
+
+
+/** Drain due durable retries in stable pages; a busy attempt moves into the future. */
+export const retryPendingRefundInvoices = async (now = new Date()): Promise<void> => {
+  const Booking = (await import('../models/booking')).default;
+  let after: unknown;
+  while (true) {
+    const due = await Booking.find({ 'payment.refundInvoiceRetryAt': { $lte: now },
+      ...(after ? { _id: { $gt: after } } : {}),
+    }).select('_id').sort({ _id: 1 }).limit(200);
+    if (!due.length) return;
+    for (const candidate of due) {
+      after = candidate._id;
+      await ensureRefundInvoices(String(candidate._id));
+    }
+  }
 };

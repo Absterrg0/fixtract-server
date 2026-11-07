@@ -30,8 +30,7 @@ const finiteNumber = (value: unknown): boolean => typeof value === "number" && N
 export const hasRecordedDispute = (booking: unknown): boolean => {
   const dispute = asRecord(asRecord(booking)?.dispute);
   if (!dispute) return false;
-  return present(dispute.raisedBy) || present(dispute.reason) || present(dispute.description)
-    || present(dispute.resolvedAt) || present(dispute.slaDeadline);
+  return present(dispute.raisedBy);
 };
 
 export const hasRecordedCancellation = (booking: unknown): boolean => {

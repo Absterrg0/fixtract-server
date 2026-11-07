@@ -743,22 +743,22 @@ async function searchProjects(
         // path so a small-radius project on the same street is still found
         // (client bug list #20).
         try {
-          const unlocated = await Project.find({
-            $and: [
+          const streetPart = locationValue || customerAddressValue || '';
+          const unlocated = streetPart ? await Project.aggregate([
+            { $match: { $and: [
               filter,
-              {
-                $or: [
-                  { "distance.location": { $exists: false } },
-                  { "distance.location.coordinates.1": { $exists: false } },
-                ],
-              },
-            ],
-          }).lean();
+              { $or: [
+                { "distance.location": { $exists: false } },
+                { "distance.location.coordinates.1": { $exists: false } },
+              ] },
+              { "distance.address": new RegExp(escapeRegExp(streetPart), "i") },
+            ] } },
+            ...eligibleProjectOwnerStages(),
+          ]) : [];
           const seen = new Set(projects.map((project: any) => String(project._id)));
           // The radius of an unlocated project cannot be verified, so only a
           // street-level address match qualifies (city alone is not enough).
           // Without a street-level part the project stays excluded.
-          const streetPart = locationParts.length > 0 ? locationParts[0] : '';
           const fallbackMatches = streetPart
             ? unlocated.filter(
               (project: any) =>

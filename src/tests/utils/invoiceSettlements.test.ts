@@ -67,3 +67,17 @@ describe('recorded invoice settlements', () => {
   });
 
 });
+
+
+it('reconciles missing ledger settlements while Payment rows stay authoritative for their intents', async () => {
+  const { invoiceSettledPayments } = await import('../../utils/invoiceSettlements');
+  const payments = [row(0, 450, 50), row(1, 500)];
+  const doc = booking(payments);
+  doc.paymentDiscountLedger = payments.map(payment => buildPaymentDiscountLedgerEntry({ ...payment,
+    discount: { originalAmount: 500, totalDiscount: payment.milestoneIndex === 0 ? 50 : 0 } })) as any;
+  doc.__settledPayments = [payments[1]];
+  (doc.paymentDiscountLedger[1] as any).totalWithVat = 999;
+  expect(invoiceSettledPayments(doc)).toHaveLength(2);
+  expect(invoiceSettledPayments(doc).find(p => p.stripePaymentIntentId === 'pi_1').totalWithVat).toBe(605);
+  expect(normalizeInvoiceBasis(doc, 99).serviceTotal).toBe(1149.5);
+});

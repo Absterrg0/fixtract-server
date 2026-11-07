@@ -23,12 +23,12 @@ export async function notifyBookingPaymentConfirmed(args: {
   let customerName: string | undefined;
   let professionalId: string | undefined;
   let professionalName = 'Professional';
-  let recordedPayment: { totalWithVat?: unknown; amount?: unknown; currency?: unknown } | undefined;
+  let recordedPayment: { stripePaymentIntentId?: string; totalWithVat?: unknown; amount?: unknown; currency?: unknown } | undefined;
 
   try {
     const Booking = (await import('../../models/booking')).default;
     const booking = await Booking.findById(bookingId)
-      .select('customer professional payment.totalWithVat payment.amount payment.currency')
+      .select('customer professional payment.totalWithVat payment.amount payment.currency payment.stripePaymentIntentId')
       .populate('customer', 'name')
       .populate('professional', 'name businessInfo username')
       .lean();
@@ -76,7 +76,8 @@ export async function notifyBookingPaymentConfirmed(args: {
   // the same recorded total booking details shows. Prefer the recorded
   // payment gross over whatever the caller passed (callers historically
   // passed the pre-VAT net).
-  const recordedTotal = (recordedPayment as any)?.totalWithVat;
+  const recordedTotal = paymentIntentId && recordedPayment?.stripePaymentIntentId === paymentIntentId
+    ? recordedPayment.totalWithVat : undefined;
   const recordedGross = recordedTotal == null ? NaN : Number(recordedTotal);
   const grossAmount = Number.isFinite(recordedGross)
     ? recordedGross
@@ -85,7 +86,6 @@ export async function notifyBookingPaymentConfirmed(args: {
   // row/email even when both run (and so milestone/second-PI retries don't
   // re-notify). paymentIntentId is accepted for future traceability but must NOT
   // be part of the key, otherwise each milestone PI would create a duplicate.
-  void paymentIntentId;
   const customerKey = `booking:${bookingId}:customer.payment_confirmed`;
   const professionalKey = `booking:${bookingId}:professional.booking_created`;
 

@@ -15,7 +15,6 @@ import {
   ensureRefundInvoices,
   isBookingStarted,
   leavesBillableRemainder,
-  pruneFutureResourcePlanDays,
   retainPastBookingCalendar,
 } from '../../utils/refundFinalization';
 
@@ -92,7 +91,7 @@ const finalizeRefund = async (
   } as any;
   booking.statusHistory = booking.statusHistory || [];
   booking.statusHistory.push({
-    status: REFUND_FINALIZED_BOOKING_STATUS,
+    status: booking.status,
     timestamp: new Date(),
     updatedBy: resolvedBy || request.requestedBy,
     note: `Refund issued (${result.amount}) — ${reason}`,
@@ -106,19 +105,16 @@ const finalizeRefund = async (
   // On a started booking only future days are unplanned while past days stay
   // blocked. Best-effort: the refund above already succeeded, so these steps
   // must not fail the response.
-  try {
-    if (leavesBillableRemainder(booking.payment?.totalWithVat, result.amount)) {
-      if (isBookingStarted(booking)) {
-        pruneFutureResourcePlanDays(booking);
-        await withAnonymizationWriteFence([request.requestedBy, actorId], async (session) => {
-          await booking.save(session ? { session } : undefined);
-        });
-        await retainPastBookingCalendar(booking);
-      }
-      void ensureRefundInvoices(String(booking._id));
+  if (booking.payment?.status === 'partially_refunded'
+    && leavesBillableRemainder(booking.payment.totalWithVat, booking.payment.refundAmount)) {
+    // Money has settled: invoice routing must survive calendar failures and
+    // account removal fences. executeRefund already pruned and saved the plan.
+    void ensureRefundInvoices(String(booking._id));
+    try {
+      if (isBookingStarted(booking)) await retainPastBookingCalendar(booking);
+    } catch (sideEffectError) {
+      console.error('Partial-refund calendar retention failed:', sideEffectError);
     }
-  } catch (sideEffectError) {
-    console.error('Partial-refund side effects failed:', sideEffectError);
   }
 
   return { ok: true, refundAmount: result.amount };

@@ -251,7 +251,8 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
     releaseScheduleSlots(freshBooking, adminId);
     // A partial refund on a started booking keeps past planned days blocked
     // and unplans only future days; anything else releases the whole calendar.
-    const partialRefundRemainder = leavesBillableRemainder(totalWithVat, refundAmount);
+    const partialRefundRemainder = freshBooking.payment?.status === 'partially_refunded'
+      && leavesBillableRemainder(freshBooking.payment.totalWithVat, freshBooking.payment.refundAmount);
     if (partialRefundRemainder && isBookingStarted(freshBooking)) {
       pruneFutureResourcePlanDays(freshBooking);
     }

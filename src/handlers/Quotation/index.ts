@@ -175,10 +175,11 @@ const canonicalizePricingLineVat = async (
 export const syncQuotationVatDecision = async (
   booking: any,
   lines: Array<{ vatRate: number }>,
-) => {  const selectedRate = Number(lines[0]?.vatRate);
+) => {
+  const selectedRate = Number(lines[0]?.vatRate);
   const options = await getAllowedVatOptionsForBooking(booking);
   const selected = options.find((option) => Number(option.rate) === selectedRate);
-  if (!selected) {
+  if (!selected || lines.some(line => !options.some(option => Number(option.rate) === Number(line.vatRate)))) {
     throw new Error(`VAT rate ${selectedRate}% is not available for this booking`);
   }
 
@@ -208,13 +209,13 @@ export const syncQuotationVatDecision = async (
   // as the quotation-wide rate.
   const uniform = lines.length > 0 && lines.every((line) => Number(line.vatRate) === selectedRate);
   const action = !uniform
-    ? base.action
+    ? base.action === 'rfq' ? 'standard_rate' : base.action
     : selected.reverseCharge || selected.source === 'standard' ? 'standard_rate' : 'reduced_rate';
   booking.vatDecision = {
     ...base,
     action,
     country: selected.country || base.country,
-    appliedRate: uniform ? selected.rate : base.appliedRate,
+    appliedRate: uniform ? selected.rate : base.action === 'rfq' ? base.standardRate : base.appliedRate,
     reverseCharge: uniform ? selected.reverseCharge : base.reverseCharge,
     vatLabel: uniform ? selected.label : base.vatLabel,
     explanation: !uniform

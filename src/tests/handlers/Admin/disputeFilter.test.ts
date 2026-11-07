@@ -60,3 +60,14 @@ describe('admin dispute overview filter (client bug list #7)', () => {
     expect(filter['dispute.resolvedAt']).toEqual({ $ne: null });
   });
 });
+
+
+it('requires the recorded dispute raiser rather than stray metadata', async () => {
+  const { hasRecordedDispute } = await import('../../../utils/recordedDispute');
+  for (const dispute of [{ reason: 'old' }, { description: 'old' }, { resolvedAt: new Date() },
+    { slaDeadline: new Date() }, { raisedBy: null }, { raisedBy: '' }]) {
+    expect(hasRecordedDispute({ dispute })).toBe(false);
+  }
+  expect(hasRecordedDispute({ dispute: { raisedBy: 'actor' } })).toBe(true);
+  expect(hasRecordedDispute({})).toBe(false);
+});

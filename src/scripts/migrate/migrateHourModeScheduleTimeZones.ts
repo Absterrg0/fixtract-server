@@ -75,13 +75,13 @@ const toDateOrNull = (value: unknown): Date | null => {
   return Number.isNaN(date.getTime()) ? null : date;
 };
 
-async function main(): Promise<void> {
+async function migrate(applyMode: boolean): Promise<void> {
   const mongoUri = process.env.MONGO_URI || process.env.MONGODB_URI;
   if (!mongoUri) {
     throw new Error('MONGO_URI or MONGODB_URI not found in environment variables');
   }
 
-  console.log(`Hour-mode schedule timezone migration (${APPLY ? 'APPLY' : 'DRY-RUN'})...`);
+  console.log(`Hour-mode schedule timezone migration (${applyMode ? 'APPLY' : 'DRY-RUN'})...`);
   await mongoose.connect(mongoUri);
   console.log('Connected.');
 
@@ -104,7 +104,7 @@ async function main(): Promise<void> {
       proSkipped++;
       continue;
     }
-    if (APPLY) {
+    if (applyMode) {
       await User.updateOne({ _id: pro._id }, { $set: { 'businessInfo.timezone': zone } });
     }
     proBackfilled++;
@@ -198,7 +198,8 @@ async function main(): Promise<void> {
 
     // Collision guard: never move into another source's reserved buckets.
     // Own current rows are released before reserving, so exclude them here.
-    const colliding = await CalendarReservation.find({
+    const terminal = ['completed', 'cancelled', 'refunded'].includes(String(row.status));
+    const colliding = terminal ? [] : await CalendarReservation.find({
       userId: { $in: attendeeIds },
       startAt: { $lt: newEnd },
       endAt: { $gt: newStart },
@@ -247,7 +248,7 @@ async function main(): Promise<void> {
       }
     }
 
-    if (!APPLY) {
+    if (!applyMode) {
       console.log(
         `  would shift booking ${String(row._id)} by ${mismatch.deltaMs / 60000} min ` +
           `(${start.toISOString()} -> ${newStart.toISOString()}, zone ${effectiveZone})`
@@ -256,31 +257,56 @@ async function main(): Promise<void> {
       continue;
     }
 
-    await Booking.updateOne({ _id: row._id }, { $set: setFields });
-    await replaceBookingCalendar({
-      _id: row._id,
-      professional: professionalId || undefined,
-      assignedTeamMembers: attendeeIds,
-      resourcePlan: Array.isArray(row.resourcePlan) ? row.resourcePlan : [],
-      scheduledStartDate: shiftedSchedule.scheduledStartDate,
-      scheduledExecutionEndDate: shiftedSchedule.scheduledExecutionEndDate,
-      scheduledBufferEndDate:
-        shiftedSchedule.scheduledBufferEndDate || shiftedSchedule.scheduledExecutionEndDate,
-    } as never);
+    const apply = async (session?: mongoose.ClientSession) => {
+      // Compare the scanned facts: do not overwrite a concurrent reschedule or
+      // lifecycle change, and do not shift an already repaired row twice.
+      const result = await Booking.updateOne({ _id: row._id, status: row.status,
+        scheduledStartDate: row.scheduledStartDate, scheduleTimeZone: row.scheduleTimeZone ?? null,
+      }, { $set: setFields }, session ? { session } : undefined);
+      if (result.modifiedCount !== 1) return;
+      if (!terminal) await replaceBookingCalendar({
+        _id: row._id,
+        professional: professionalId || undefined,
+        assignedTeamMembers: attendeeIds,
+        resourcePlan: Array.isArray(row.resourcePlan) ? row.resourcePlan : [],
+        scheduledStartDate: shiftedSchedule.scheduledStartDate,
+        scheduledExecutionEndDate: shiftedSchedule.scheduledExecutionEndDate,
+        scheduledBufferEndDate:
+          shiftedSchedule.scheduledBufferEndDate || shiftedSchedule.scheduledExecutionEndDate,
+      } as never, session);
+    };
+    if (terminal) {
+      await apply();
+    } else {
+      const session = await mongoose.startSession();
+      try {
+        await session.withTransaction(() => apply(session));
+      } finally {
+        await session.endSession();
+      }
+    }
     shifted++;
   }
 
   console.log(
     `Bookings scanned: ${scanned}; already correct: ${alreadyCorrect}; ` +
-      `shifted${APPLY ? '' : ' (dry-run)'}: ${shifted}; ` +
+      `shifted${applyMode ? '' : ' (dry-run)'}: ${shifted}; ` +
       `skipped (no zone): ${skippedNoZone}; skipped (conflict): ${skippedConflict}.`
   );
 
-  await mongoose.disconnect();
   console.log('Done.');
 }
 
-main()
+/** Exported for provider-free tests; importing never runs the migration. */
+export async function main(applyMode = APPLY): Promise<void> {
+  try {
+    await migrate(applyMode);
+  } finally {
+    await mongoose.disconnect();
+  }
+}
+
+if (require.main === module) main()
   .then(() => {
     process.exitCode = 0;
   })

@@ -143,3 +143,12 @@ describe('hour schedule repair helpers (client bug list #23b/c, blocker 2)', () 
     expect(resolveProfessionalBackfillZone(null)).toBeNull();
   });
 });
+
+
+it('repairs a late wall time rendered after midnight using the shortest offset', () => {
+  const instant = new Date('2026-07-02T23:30:00Z');
+  const mismatch = computeWallMismatch({ instant, wantTime: '23:30', timeZone: BRUSSELS });
+  expect(mismatch).toEqual({ match: false, deltaMs: -7200000, renderedMinutes: 90 });
+  expect(computeWallMismatch({ instant: new Date(instant.getTime() + mismatch.deltaMs),
+    wantTime: '23:30', timeZone: BRUSSELS }).match).toBe(true);
+});

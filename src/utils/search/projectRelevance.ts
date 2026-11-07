@@ -39,7 +39,7 @@ const normalize = (value: unknown): string =>
 const tokenize = (query: string): string[] => {
   const tokens = query
     .toLowerCase()
-    .split(/[^a-z0-9]+/i)
+    .split(/[^\p{L}\p{N}]+/u)
     .map((token) => token.trim())
     .filter((token) => token.length > 1);
   return Array.from(new Set(tokens)).slice(0, 10);
