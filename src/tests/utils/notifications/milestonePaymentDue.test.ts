@@ -96,6 +96,7 @@ describe("notifyMilestonePaymentDue", () => {
     booking.milestonePayments[1].workStatus = 'completed';
     mocks.findById.mockReturnValue({ select: vi.fn().mockResolvedValue(booking) });
     await notifyMilestonePaymentDue('booking-1');
+    // The 220/330 share of the discounted VAT-inclusive quote total (363) is 242.
     expect(mocks.notify.mock.calls[0][0].context.milestoneAmount).toBe(242);
   });
 
@@ -145,4 +146,18 @@ describe("notifyMilestonePaymentDue", () => {
     expect(await notifyMilestonePaymentDue("booking-1")).toMatchObject({ notified: false });
     expect(mocks.notify).not.toHaveBeenCalled();
   });
+
+  it('logs a charge resolution error and still sends the due notice without an invented amount', async () => {
+    const error = new Error('settings unavailable');
+    mocks.getCurrentConfig.mockRejectedValueOnce(error);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const booking = bookingDoc({ vatDecision: undefined });
+    booking.milestonePayments[1].workStatus = 'completed';
+    mocks.findById.mockReturnValue({ select: vi.fn().mockResolvedValue(booking) });
+    await notifyMilestonePaymentDue('booking-1');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('milestone'), error);
+    expect(mocks.notify.mock.calls[0][0].context).not.toHaveProperty('milestoneAmount');
+    log.mockRestore();
+  });
+
 });

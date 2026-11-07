@@ -27,9 +27,9 @@ describe('paid booking notification retries', () => {
     mocks.lean.mockResolvedValue({
       customer: { _id: 'customer', name: 'Customer' },
       professional: { _id: 'professional', name: 'Professional' },
-      payment: { totalWithVat: 316.11, amount: 261.25, currency: 'EUR' },
+      payment: { stripePaymentIntentId: 'pi_paid', totalWithVat: 316.11, amount: 261.25, currency: 'EUR' },
     });
-    await notifyBookingPaymentConfirmed({ bookingId: 'booking', amount: 261.25, currency: 'EUR' });
+    await notifyBookingPaymentConfirmed({ bookingId: 'booking', paymentIntentId: 'pi_paid', amount: 261.25, currency: 'EUR' });
     expect(mocks.notify).toHaveBeenCalledTimes(2);
     expect(mocks.notify.mock.calls[0][0].context).toMatchObject({ amount: 316.11, currency: 'EUR' });
     expect(mocks.notify.mock.calls[1][0].context).toMatchObject({ amount: 316.11, currency: 'EUR' });
@@ -40,9 +40,18 @@ describe('paid booking notification retries', () => {
       professional: { _id: 'professional', name: 'Professional' },
       payment: { totalWithVat: null, amount: 261.25, currency: 'EUR' },
     });
-    await notifyBookingPaymentConfirmed({ bookingId: 'booking', amount: 261.25, currency: 'EUR' });
+    await notifyBookingPaymentConfirmed({ bookingId: 'booking', paymentIntentId: 'pi_paid', amount: 261.25, currency: 'EUR' });
     expect(mocks.notify).toHaveBeenCalledTimes(2);
     expect(mocks.notify.mock.calls[0][0].context).toMatchObject({ amount: 261.25, currency: 'EUR' });
     expect(mocks.notify.mock.calls[1][0].context).toMatchObject({ amount: 261.25, currency: 'EUR' });
   });
+});
+
+
+it('uses the confirmed intent gross when the booking snapshot belongs to another intent', async () => {
+  vi.clearAllMocks();
+  mocks.lean.mockResolvedValue({ customer: { _id: 'customer' }, professional: { _id: 'professional' },
+    payment: { stripePaymentIntentId: 'pi_new', totalWithVat: 999 } });
+  await notifyBookingPaymentConfirmed({ bookingId: 'booking', paymentIntentId: 'pi_paid', amount: 121 });
+  expect(mocks.notify.mock.calls[0][0].context.amount).toBe(121);
 });

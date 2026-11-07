@@ -1,3 +1,4 @@
+vi.mock('../../models/platformSettings', () => ({ default: { getCurrentConfig: async () => ({ commissionPercent: 10 }) } }));
 import { Types } from 'mongoose';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 

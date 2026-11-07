@@ -29,6 +29,7 @@ import type {
   WarrantyClaimSummaryDto,
 } from './types';
 import { actorForId, isActorRecorded, type ActorMap } from './actors';
+import { getCheckoutCommissionPercent } from '../checkoutCommission';
 import { buildMilestoneChargePlan, milestoneCustomerCharge } from '../milestoneCharges';
 import {
   presignOwnedUrl,
@@ -699,16 +700,16 @@ const buildPayments = async (params: {
     || records[0]
     || null;
 
-  // Client bug list #19b: expected charges from the shared plan, using the
-  // recorded quote commission so the shown amounts match actual charges
-  // (options in full on the first milestone). Empty when unrecorded.
-  const chargeVersions = Array.isArray((booking as any).quoteVersions) ? (booking as any).quoteVersions : [];
-  const chargeVersion = chargeVersions
-    .find((version: any) => Number(version?.version) === Number((booking as any).currentQuoteVersion));
-  const recordedCommission = num(chargeVersion?.customerTotals?.commissionPercent);
-  const milestoneChargePlan = recordedCommission != null
-    ? buildMilestoneChargePlan(booking, recordedCommission)
-    : [];
+  // Unpaid estimates share checkout's current commission source. Recorded
+  // payment totals still take precedence in milestoneCustomerCharge below.
+  let milestoneChargePlan: ReturnType<typeof buildMilestoneChargePlan> = [];
+  if (booking.milestonePayments?.length) {
+    try {
+      milestoneChargePlan = buildMilestoneChargePlan(booking, await getCheckoutCommissionPercent());
+    } catch (error) {
+      console.error('Failed to resolve milestone details charge:', error);
+    }
+  }
   const milestones = (Array.isArray(booking.milestonePayments) ? booking.milestonePayments : []).map(
     (milestone: any, index: number) => {
       const matchingRows = paymentRows.filter(payment => num(payment.milestoneIndex) === index);
@@ -727,7 +728,7 @@ const buildPayments = async (params: {
         startedAt: iso(milestone.startedAt),
         completedAt: iso(milestone.completedAt),
         paidAt: iso(milestone.paidAt),
-        customerChargeTotalWithVat: num(settled?.totalWithVat),
+        customerChargeTotalWithVat: num((settled || matchingRows.find(payment => payment.status === 'authorized'))?.totalWithVat),
         paymentRowPresent: Boolean(matching),
         expectedCustomerCharge: planEntry ? milestoneCustomerCharge(booking, planEntry, paymentRows) : null,
         expectedCustomerNetBeforeDiscount: planEntry?.expectedCustomerGross ?? null,
@@ -1272,7 +1273,7 @@ export const buildBookingDetails = async (params: {
     const rejectedAt = rejection?.at || null;
     const totals = version.customerTotals
       ? {
-          commissionPercent: num(version.customerTotals.commissionPercent),
+          commissionPercent: viewerRole === 'customer' ? null : num(version.customerTotals.commissionPercent),
           professionalNetAmount: num(version.customerTotals.professionalNetAmount),
           customerNetAmount: num(version.customerTotals.customerNetAmount),
           amountBeforeDiscounts: num(version.customerTotals.amountBeforeDiscounts) ?? num(version.customerTotals.customerNetAmount),

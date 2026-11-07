@@ -26,6 +26,7 @@ import {
   computeGrossBookingAmount,
   quoteAmountIncludesSelectedExtras,
 } from '../../utils/payment';
+import { getCheckoutCommissionPercent } from '../../utils/checkoutCommission';
 import { buildMilestoneChargePlan } from '../../utils/milestoneCharges';
 import { canRetryTransfer, getTransferStatus, requireProfessionalPayout } from '../../utils/paymentSafety';
 import { bindReferralReservation, releaseReferralReservation, withReferralDiscount } from '../../utils/referralDiscount';
@@ -407,8 +408,7 @@ export const createPaymentIntent = async (
     // Fetch commission rate from DB early so milestone amounts include it
     let commissionPercent: number;
     try {
-      const platformConfig = await PlatformSettings.getCurrentConfig();
-      commissionPercent = platformConfig.commissionPercent;
+      commissionPercent = await getCheckoutCommissionPercent();
     } catch (configError) {
       console.warn('Failed to fetch platform config from DB, falling back to env var:', configError);
       const parsed = Number.parseFloat(process.env.STRIPE_PLATFORM_COMMISSION_PERCENT || '0');

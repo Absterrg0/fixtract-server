@@ -1,3 +1,5 @@
+vi.mock('../../models/platformSettings', () => ({ default: { getCurrentConfig: async () => ({ commissionPercent: 10 }) } }));
+
 import { Types } from 'mongoose';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -215,11 +217,30 @@ describe('milestone expected charges in booking details (client bug list #19b)',
     expect(details.payments.milestones[1]).toMatchObject({ customerChargeTotalWithVat: null, expectedCustomerCharge: 242 });
   });
 
-  it('reports null expected charges when no commission was recorded', async () => {
+  it('uses the checkout commission source when no quote commission was recorded', async () => {
     const details = await build('customer', {
       booking: { ...milestoneBooking, quoteVersions: [], currentQuoteVersion: undefined },
     });
-    expect(details.payments.milestones[0].expectedCustomerCharge).toBeNull();
-    expect(details.payments.milestones[0].includesSelectedOptions).toBe(false);
+    expect(details.payments.milestones[0].expectedCustomerCharge).toBe(132);
+    expect(details.payments.milestones[0].includesSelectedOptions).toBe(true);
   });
+  it('uses an authorized total, excluding pending attempts from confirmed customer charges', async () => {
+    const details = await build('customer', { booking: milestoneBooking, payments: [
+      { milestoneIndex: 0, status: 'pending', totalWithVat: 999 },
+      { milestoneIndex: 0, status: 'authorized', totalWithVat: 145.2 },
+      { milestoneIndex: 1, status: 'pending', totalWithVat: 242 },
+    ] });
+    expect(details.payments.milestones[0].customerChargeTotalWithVat).toBe(145.2);
+    expect(details.payments.milestones[1].customerChargeTotalWithVat).toBeNull();
+  });
+
+  it('uses current checkout commission for unpaid milestones while keeping recorded totals', async () => {
+    const details = await build('customer', { booking: { ...milestoneBooking,
+      quoteVersions: [{ version: 1, customerTotals: { commissionPercent: 99 } }],
+    }, payments: [{ milestoneIndex: 0, status: 'completed', totalWithVat: 151.23 }] });
+    expect(details.payments.milestones[0].expectedCustomerCharge).toBe(151.23);
+    expect(details.payments.milestones[1].expectedCustomerCharge).toBe(220);
+    expect(details.quotation.versions[0].customerTotals?.commissionPercent).toBeNull();
+  });
+
 });

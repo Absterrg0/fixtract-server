@@ -1,5 +1,5 @@
 import Booking from "../../models/booking";
-import PlatformSettings from "../../models/platformSettings";
+import { getCheckoutCommissionPercent } from "../checkoutCommission";
 import { buildMilestoneChargePlan, milestoneCustomerCharge } from "../milestoneCharges";
 import { notify } from "./notify";
 
@@ -57,14 +57,14 @@ export const findPayableMilestone = (booking: any, now: Date = new Date()): Paya
 
 const customerChargeForMilestone = async (booking: any, milestone: PayableMilestone): Promise<number | undefined> => {
   try {
-    const config = await PlatformSettings.getCurrentConfig();
-    const commissionPercent = Number(config?.commissionPercent) || 0;
+    const commissionPercent = await getCheckoutCommissionPercent();
     // Client bug list #19b: same shared plan as the charge path, so the
     // notified amount always matches what paying this milestone charges.
     const entry = buildMilestoneChargePlan(booking, commissionPercent)
       .find((candidate) => candidate.order === (milestone.order ?? 0));
     return entry ? milestoneCustomerCharge(booking, entry) ?? undefined : undefined;
-  } catch {
+  } catch (error) {
+    console.error("Failed to resolve milestone notification charge:", error);
     return undefined;
   }
 };
