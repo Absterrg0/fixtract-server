@@ -13,7 +13,7 @@ vi.mock('../../../handlers/Stripe/payment', () => ({
   executeRefund: vi.fn(),
   RefundError: class RefundError extends Error {},
 }));
-vi.mock('../../../services/stripe', () => ({ stripe: {}, STRIPE_CONFIG: { environment: 'test' } }));
+vi.mock('../../../services/stripe', () => ({ stripe: {}, STRIPE_CONFIG: { environment: 'test', supportedCurrencies: ['EUR'], defaultCurrency: 'EUR' } }));
 vi.mock('../../../services/invoiceArtifacts', () => ({ ensureBookingInvoiceArtifacts: vi.fn() }));
 vi.mock('../../../utils/refundFinalization', () => ({}));
 vi.mock('../../../utils/referralSystem', () => ({ processReferralCompletion: vi.fn() }));
@@ -59,4 +59,15 @@ describe('admin dispute overview filter (client bug list #7)', () => {
     expect(filter['dispute.raisedAt']).toEqual({ $exists: true });
     expect(filter['dispute.resolvedAt']).toEqual({ $ne: null });
   });
+});
+
+
+it('requires the recorded dispute raiser rather than stray metadata', async () => {
+  const { hasRecordedDispute } = await import('../../../utils/recordedDispute');
+  for (const dispute of [{ reason: 'old' }, { description: 'old' }, { resolvedAt: new Date() },
+    { slaDeadline: new Date() }, { raisedBy: null }, { raisedBy: '' }]) {
+    expect(hasRecordedDispute({ dispute })).toBe(false);
+  }
+  expect(hasRecordedDispute({ dispute: { raisedBy: 'actor' } })).toBe(true);
+  expect(hasRecordedDispute({})).toBe(false);
 });
