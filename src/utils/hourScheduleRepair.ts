@@ -83,7 +83,8 @@ export const computeWallMismatch = (params: {
   if (want == null || rendered == null) {
     return { match: false, deltaMs: 0, renderedMinutes: rendered };
   }
-  return { match: want === rendered, deltaMs: (want - rendered) * 60 * 1000, renderedMinutes: rendered };
+  const deltaMinutes = ((want - rendered + 720 + 1440) % 1440) - 720;
+  return { match: deltaMinutes === 0, deltaMs: deltaMinutes * 60 * 1000, renderedMinutes: rendered };
 };
 
 /**
