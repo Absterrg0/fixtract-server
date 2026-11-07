@@ -1,3 +1,4 @@
+import { quotationForViewer } from '../quotationVisibility';
 import type {
   ActorDto,
   AdminLinksDto,
@@ -2105,7 +2106,7 @@ export const buildBookingDetails = async (params: {
       dataQuality,
     },
   };
-  return details;
+  return quotationForViewer(details, viewerRole, params.adminAccess?.payments === true);
 };
 
 export { mapCheckoutSnapshot, mapScheduleSnapshot, iso, dateOnly, num, str };

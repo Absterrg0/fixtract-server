@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   cancellationFind: vi.fn(),
   warrantyFind: vi.fn(),
   userFind: vi.fn(),
+  userFindById: vi.fn(),
 }));
 
 vi.mock('../../../models/booking', () => ({
@@ -35,11 +36,12 @@ vi.mock('../../../models/warrantyClaim', () => ({
 }));
 
 vi.mock('../../../models/user', () => ({
-  default: { find: mocks.userFind },
+  default: { find: mocks.userFind, findById: mocks.userFindById },
 }));
 
 import { getBookingActivity, getBookingDetails } from '../../../handlers/Booking/details';
 import { getBookingById, submitPostBookingAnswers } from '../../../handlers/Booking';
+import { getQuotationVersions } from '../../../handlers/Quotation';
 import { getAdminBookingDetail } from '../../../handlers/Admin/bookingDetail';
 
 const customerId = new Types.ObjectId('64b000000000000000000001');
@@ -156,6 +158,7 @@ beforeEach(() => {
   mocks.cancellationFind.mockImplementation(() => query([]));
   mocks.warrantyFind.mockImplementation(() => query([]));
   mocks.userFind.mockImplementation(() => query([]));
+  mocks.userFindById.mockImplementation(() => query(null));
 });
 
 describe('booking details route handlers', () => {
@@ -371,4 +374,59 @@ describe('booking details route handlers', () => {
     expect(res.status).toHaveBeenCalledWith(400);
     expect(source.save).not.toHaveBeenCalled();
   });
+});
+
+const assertNoCommission = (value: any): void => {
+  if (!value || typeof value !== 'object') return;
+  for (const [key, child] of Object.entries(value)) {
+    expect(key.replace(/[^a-z]/gi, '').toLowerCase()).not.toMatch(/commission.*(percent|rate)/);
+    assertNoCommission(child);
+  }
+};
+
+describe('booking and quotation alias privacy/IDOR contract', () => {
+  const handlers = [
+    ['booking', getBookingById], ['details', getBookingDetails],
+    ['activity', getBookingActivity], ['quotation details', getBookingDetails],
+    ['versions', getQuotationVersions], ['admin full', getAdminBookingDetail],
+  ] as const;
+  const viewers = [
+    ['customer', { _id: customerId, role: 'customer' }],
+    ['dual-role customer', { _id: customerId, role: 'professional' }],
+    ['professional', { _id: professionalId, role: 'professional' }],
+    ['project owner', { _id: professionalId, role: 'professional' }],
+    ['unrelated', { _id: new Types.ObjectId(), role: 'customer' }],
+    ['anonymous', undefined],
+    ['admin without bookings', { _id: new Types.ObjectId(), role: 'admin', adminPermissionLevels: { payments: 'read' } }],
+    ['admin bookings only', { _id: new Types.ObjectId(), role: 'admin', adminPermissionLevels: { bookings: 'read' } }],
+    ['admin finance', { _id: new Types.ObjectId(), role: 'admin', adminPermissionLevels: { bookings: 'read', payments: 'read' } }],
+  ] as const;
+  for (const [alias, handler] of handlers) {
+    it.each(viewers)(`${alias}: %s`, async (label, user) => {
+      const source: any = booking();
+      source.quotationNumber = 'QT-1';
+      source.currentQuoteVersion = 1;
+      source.quoteVersions = [{ version: 1, scope: 'Recorded scope', description: 'Recorded work', createdAt: source.createdAt,
+        pricingLines: [{ price: 100, vatRate: 21 }], totalAmount: 100, currency: 'EUR',
+        customerTotals: { commissionPercent: 17, professionalNetAmount: 100, customerNetAmount: 117, totalWithVat: 141.57, discount: { nested: { commission_percentage: 17 } } } }];
+      source.bookingSnapshot = { checkoutSnapshot: { nested: { platformCommissionRate: 0.17 } } };
+      if (label === 'project owner') source.professional = undefined;
+      mocks.bookingFindById.mockImplementation(() => query(source));
+      const res = response();
+      const next = vi.fn();
+      await (handler as any)({ ...request(user), params: { bookingId: String(bookingId), id: String(bookingId) } }, res, next);
+      expect(next).not.toHaveBeenCalled();
+      const denied = ['unrelated', 'anonymous', 'admin without bookings'].includes(label) || (alias === 'admin full' && !label.startsWith('admin'));
+      if (denied) {
+        expect(res.body.success).toBe(false);
+        expect(res.body.booking || res.body.data).toBeUndefined();
+      } else {
+        expect(res.body.success).toBe(true);
+        if (['customer', 'dual-role customer', 'admin bookings only'].includes(label)) assertNoCommission(res.body);
+        if (alias === 'versions' && ['professional', 'project owner', 'admin finance'].includes(label)) {
+          expect(res.body.data.versions[0].customerTotals.commissionPercent).toBe(17);
+        }
+      }
+    });
+  }
 });

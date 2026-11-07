@@ -389,7 +389,7 @@ export type QuotationVersionDto = {
   createdBy: ActorDto | null;
   actorRecorded: boolean;
   customerTotals: {
-    commissionPercent: number | null;
+    commissionPercent?: number | null;
     professionalNetAmount: number | null;
     customerNetAmount: number | null;
     amountBeforeDiscounts: number | null;

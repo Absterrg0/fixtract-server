@@ -1,3 +1,5 @@
+import { quotationForViewer } from '../quotationVisibility';
+import { withoutPhantomBookingActivity } from '../bookingActivity';
 import { getEffectiveAccessForUser } from '../adminRbac/roleAccess';
 import { hasAccessLevel } from '../adminRbac/rolePermissions';
 import { stripAllInvoiceFields, stripInternalPaymentDiagnostics } from '../invoiceVisibility';
@@ -102,7 +104,7 @@ export const filterRawBookingForAdminArea = (
   access: BookingAdminAccess,
 ) => {
   if (!booking || typeof booking !== 'object') return booking;
-  const visible = typeof booking.toObject === 'function' ? booking.toObject() : { ...booking };
+  const visible = quotationForViewer(withoutPhantomBookingActivity(booking), 'admin', access.payments);
 
   if (!access.disputes && 'dispute' in visible) delete visible.dispute;
   if (!access.cancellations && 'cancellation' in visible) delete visible.cancellation;
