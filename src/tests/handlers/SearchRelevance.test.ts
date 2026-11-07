@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   ratings: new Map<string, { avgRating: number; totalReviews: number }>(),
   schedules: new Map<string, string>(),
   commission: 10,
+  geo: false,
 }));
 
 vi.mock("../../models/user", () => ({
@@ -30,7 +31,7 @@ vi.mock("../../models/project", () => {
       .map((person) => String(person._id)),
   );
   const runPipeline = (pipeline: any[]) => {
-    if (pipeline.some((stage) => stage.$geoNear)) return [];
+    if (pipeline.some((stage) => stage.$geoNear) && !mocks.geo) return [];
     let rows = [...mocks.projects];
     const eligible = eligibleOwners();
     for (const stage of pipeline) {
@@ -122,6 +123,7 @@ const execute = async (query: Record<string, unknown>) => {
 
 describe("project relevance sort (client bug list #4a)", () => {
   beforeEach(() => {
+    mocks.geo = false;
     mocks.professionals = [
       { _id: proJunior, name: "Junior Pro", role: "professional", professionalStatus: "approved", deletedAt: null, isAnonymized: false, professionalLevel: "Level 1", adminTags: [], businessInfo: { timezone: "UTC" } },
       { _id: proSenior, name: "Senior Pro", role: "professional", professionalStatus: "approved", deletedAt: null, isAnonymized: false, professionalLevel: "Expert", adminTags: ["Verified"], businessInfo: { timezone: "UTC" } },
@@ -150,6 +152,33 @@ describe("project relevance sort (client bug list #4a)", () => {
       "507f1f77bcf86cd799439022",
       "507f1f77bcf86cd799439021",
     ]);
+  });
+
+  it('ranks the full eligible geo set before pagination and keeps distance ordering explicit', async () => {
+    mocks.geo = true;
+    mocks.projects = [
+      project('507f1f77bcf86cd799439021', proJunior, { geoDistanceMeters: 100, createdAt: new Date('2026-06-01') }),
+      project('507f1f77bcf86cd799439022', proSenior, { geoDistanceMeters: 900 }),
+    ];
+    const query = { customerLat: '50.85', customerLon: '4.35', limit: '1', sortBy: 'relevant' };
+    const first = (await execute(query)).json.mock.calls[0][0];
+    const second = (await execute({ ...query, page: '2' })).json.mock.calls[0][0];
+    expect(first.pagination).toMatchObject({ total: 2, totalPages: 2 });
+    expect(first.results[0]._id.toString()).toBe('507f1f77bcf86cd799439022');
+    expect(second.results[0]._id.toString()).toBe('507f1f77bcf86cd799439021');
+    const distance = (await execute({ ...query, sortBy: 'distance' })).json.mock.calls[0][0];
+    expect(distance.results[0]._id.toString()).toBe('507f1f77bcf86cd799439021');
+  });
+
+  it('uses geo distance to break otherwise equal relevance scores', async () => {
+    mocks.geo = true;
+    mocks.ratings.clear();
+    mocks.projects = [
+      project('507f1f77bcf86cd799439021', proSenior, { geoDistanceMeters: 900 }),
+      project('507f1f77bcf86cd799439022', proSenior, { geoDistanceMeters: 100 }),
+    ];
+    const body = (await execute({ customerLat: '50.85', customerLon: '4.35', sortBy: 'relevant' })).json.mock.calls[0][0];
+    expect(body.results.map((row: any) => row._id.toString())).toEqual(['507f1f77bcf86cd799439022', '507f1f77bcf86cd799439021']);
   });
 
   it("keeps explicit newest sort on newest-first order", async () => {

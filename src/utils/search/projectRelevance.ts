@@ -135,7 +135,7 @@ const ratingOf = (entry: RelevanceRankInput): { avg: number; count: number } => 
 /**
  * Sort candidates by relevance (descending). Tie-breakers are deterministic
  * and intentionally independent of creation date so the order differs from
- * "Newest first": score → average rating → review count → id.
+ * "Newest first": score → average rating → review count → geo distance (when available) → id.
  */
 export const sortProjectsByRelevance = (
   entries: RelevanceRankInput[],
@@ -152,6 +152,9 @@ export const sortProjectsByRelevance = (
       const rb = ratingOf(b.entry);
       if (rb.avg !== ra.avg) return rb.avg - ra.avg;
       if (rb.count !== ra.count) return rb.count - ra.count;
+      const distanceA = Number.isFinite(a.entry.project?.geoDistanceMeters) ? a.entry.project.geoDistanceMeters : Infinity;
+      const distanceB = Number.isFinite(b.entry.project?.geoDistanceMeters) ? b.entry.project.geoDistanceMeters : Infinity;
+      if (distanceA !== distanceB) return distanceA - distanceB;
       return idOf(a.entry.project).localeCompare(idOf(b.entry.project));
     })
     .map(({ entry }) => entry);
