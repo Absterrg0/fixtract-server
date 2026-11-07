@@ -1398,12 +1398,18 @@ export const executeRefund = async (
   // fact before calculating capacity (which changes after a partial refund).
   const disputeStartedAt = opts.operationKey?.match(/^dispute-[a-f0-9]{24}-(\d+)$/)?.[1];
   const legacyDisputeRefund = (refund: any) => disputeStartedAt && !refund.operationKey
-    && refund.reason === reason && new Date(refund.refundedAt).getTime() >= Math.floor(Number(disputeStartedAt) / 1000) * 1000;
+    && typeof refund.reason === 'string' && refund.reason.startsWith('Dispute resolution (')
+    && new Date(refund.refundedAt).getTime() >= Math.floor(Number(disputeStartedAt) / 1000) * 1000;
   const recorded = opts.operationKey && basePaymentRows.flatMap(row => row.refunds || [])
     .find(refund => (refund.operationKey === opts.operationKey || legacyDisputeRefund(refund))
       && !['failed', 'canceled'].includes(refund.status));
   if (recorded) return { refundId: recorded.refundId, amount: recorded.amount,
     status: recorded.status, refundSource: recorded.source || 'platform' };
+  if (opts.operationKey && legacyDisputeRefund({ reason: booking.payment.refundReason,
+    refundedAt: booking.payment.refundedAt }) && Number(booking.payment.refundAmount) > 0
+    && booking.payment.refundOperationKey !== opts.operationKey) {
+    throw new RefundError('REFUND_RECONCILIATION_REQUIRED', 'The prior dispute refund lacks a matching ledger fact; reconcile it before issuing another refund', 409);
+  }
   let priorProviderRefund: Stripe.Refund | undefined;
   if (opts.operationKey) {
     let after: string | undefined;

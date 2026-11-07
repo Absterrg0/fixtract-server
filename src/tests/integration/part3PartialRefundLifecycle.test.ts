@@ -289,7 +289,7 @@ describeDb('Part 3 partial refund lifecycle with isolated Mongo and provider fak
       refunds: [{ refundId: 're_legacy', amount: 50, reason, source: 'platform', status: 'succeeded', refundedAt: new Date() }] } as any);
     const res = response();
     await resolveDispute({ user: { _id: adminId }, params: { bookingId: String(booking._id) },
-      body: { forceStatus: 'refunded', action: 'adjust', adjustedAmount: 50, resolution: 'Already paid' } } as any, res as any);
+      body: { forceStatus: 'refunded', action: 'adjust', adjustedAmount: 50, resolution: 'Retry with revised notes' } } as any, res as any);
     expect(res.statusCode).toBe(200); expect(mocks.refund).not.toHaveBeenCalled(); expect(mocks.refundList).not.toHaveBeenCalled();
     expect((await Booking.findById(booking._id))?.payment?.refundAmount).toBe(50);
   });
@@ -306,6 +306,17 @@ describeDb('Part 3 partial refund lifecycle with isolated Mongo and provider fak
     expect(res.statusCode).toBe(200); expect(mocks.refund).not.toHaveBeenCalled();
     expect(mocks.refundList.mock.calls[1][0].starting_after).toBe('re_other');
     expect((await Booking.findById(booking._id))?.payment?.refundAmount).toBe(50);
+  });
+
+  it('blocks ambiguous legacy dispute aggregates without issuing another refund', async () => {
+    const booking = await seedRefund('dispute', { status: 'partially_refunded', refundAmount: 50,
+      refundReason: 'Dispute resolution (refund_request): Previously accepted', refundedAt: new Date() });
+    const res = response();
+    await resolveDispute({ user: { _id: adminId }, params: { bookingId: String(booking._id) },
+      body: { forceStatus: 'refunded', action: 'adjust', adjustedAmount: 50, resolution: 'Retry' } } as any, res as any);
+    expect(res.body.error.code).toBe('REFUND_RECONCILIATION_REQUIRED');
+    expect(mocks.refund).not.toHaveBeenCalled(); expect(mocks.refundList).not.toHaveBeenCalled();
+    expect((await Booking.findById(booking._id))?.dispute?.resolvedAt).toBeTruthy();
   });
 
 });
