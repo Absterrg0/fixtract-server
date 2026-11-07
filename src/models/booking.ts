@@ -90,6 +90,14 @@ export interface IBookingMilestone extends IQuotationMilestone {
  * recorded zero, never a guess.
  */
 export interface IPaymentDiscountLedgerEntry {
+  netAmount?: number;
+  vatAmount?: number;
+  totalWithVat?: number;
+  platformCommission?: number;
+  professionalPayout?: number;
+  vatRate?: number;
+  reverseCharge?: boolean;
+
   paymentIntentId: string;
   milestoneIndex?: number;
   currency?: string;
@@ -1069,6 +1077,14 @@ const BookingSchema = new Schema({
   // No default, so loading a booking without it and saving never rewrites it.
   paymentDiscountLedger: {
     type: [{
+      netAmount: { type: Number },
+      vatAmount: { type: Number },
+      totalWithVat: { type: Number },
+      platformCommission: { type: Number },
+      professionalPayout: { type: Number },
+      vatRate: { type: Number },
+      reverseCharge: { type: Boolean },
+
       paymentIntentId: { type: String, required: true },
       milestoneIndex: { type: Number, min: 0 },
       currency: { type: String },

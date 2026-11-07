@@ -24,6 +24,7 @@ import {
   resolveInvoiceServiceUnit,
   tryNormalizeInvoiceUnit,
 } from "../utils/invoiceUnits";
+import { invoiceSettledServiceLines } from "../utils/invoiceSettlements";
 import { normalizeInvoiceBasis } from "../utils/milestoneInvoice";
 import { quoteAmountIncludesSelectedExtras } from "../utils/payment";
 import { getExtraCostQuantity, reconcileUnitPrice } from "../utils/invoiceLineQuantity";
@@ -162,6 +163,7 @@ export interface InvoiceBooking {
   rfqData?: { description?: string; serviceType?: string };
   quoteVersions?: Array<{
     version?: number;
+    customerTotals?: { commissionPercent?: number };
     scope?: string;
     description?: string;
     pricingLines?: { description: string; price: number; vatRate?: number; vatLabel?: string }[];
@@ -801,7 +803,7 @@ export async function generateBookingInvoice(
   // the full amount of all milestones + options (the stored payment fields
   // only carry the last charged milestone), and a partial refund reduces the
   // service base the lines scale to.
-  const commissionPercent = Number(settings.commissionPercent) || 0;
+  const commissionPercent = Number(currentQuote?.customerTotals?.commissionPercent ?? (booking as any).__commissionPercent) || 0;
   const basis = normalizeInvoiceBasis(booking, commissionPercent);
   const checkoutQuantity = booking.checkoutSnapshot?.pricingType === "unit"
     ? Number(booking.checkoutSnapshot.quantity)
@@ -848,6 +850,8 @@ export async function generateBookingInvoice(
     // Milestone bookings: the stored VAT breakdown only covers the last
     // charged milestone, so the full-scope quote pricing lines describe the
     // billed service instead.
+    : basis.milestoneActive
+    ? scaleLineItemsToTotal(invoiceSettledServiceLines(booking).map(line => ({ ...line, amount: line.amount * sign })), basis.serviceNet * sign)
     : basis.useQuotePricingLines && quotePricingLines.length > 0
     ? quotePricingLines
     : booking.payment.vatBreakdown?.length
@@ -960,7 +964,7 @@ export async function generateBookingInvoice(
   const extraCostGross = booking.payment.extraCostAmount != null
     ? roundInvoiceMoney(Number(booking.payment.extraCostAmount) * resolvedExtraCostScale) * sign
     : extraCostNet + extraCostVat;
-  // Milestone bookings recover the full discount from the stored last-slice;
+  // Milestone discounts are summed from their individual settled snapshots;
   // every other booking renders the stored discount as-is.
   const discount = basis.discount;
   const serviceLoyaltyDiscount = Math.max(0, Number(discount?.loyaltyAmount) || 0);
@@ -1044,7 +1048,10 @@ export async function generateBookingInvoice(
   const supplierVatRate = manualLines?.length && selfBilling
     ? (supplierReverseCharge ? 0 : Number(booking.payment.vatRate ?? 0))
     : (supplierReverseCharge ? 0 : supplierVatDecision.appliedRate);
-  const supplierServiceNet = calculateSupplierInvoiceNet({
+  if (selfBilling && basis.milestoneActive && basis.supplierServiceNet == null) {
+    throw new Error("Cannot invoice milestone supplier amounts without recorded professional payouts.");
+  }
+  const supplierServiceNet = basis.supplierServiceNet ?? calculateSupplierInvoiceNet({
     quoteAmount: currentQuote?.totalAmount ?? booking.quote?.amount,
     checkoutSnapshot: booking.checkoutSnapshot,
     selectedExtraOptions: booking.selectedExtraOptions,

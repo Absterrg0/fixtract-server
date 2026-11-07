@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  getMilestoneFullCustomerGross,
-  normalizeInvoiceBasis,
-  scaleDiscountToFullGross,
-} from "../../utils/milestoneInvoice";
+import { normalizeInvoiceBasis } from "../../utils/milestoneInvoice";
 
 const milestoneBooking = (overrides: any = {}) => ({
   milestonePayments: [
@@ -11,6 +7,10 @@ const milestoneBooking = (overrides: any = {}) => ({
     { title: "Balance", amount: 200, order: 1, status: "pending", dueCondition: "on_start" },
   ],
   selectedExtraOptions: [{ extraOptionId: "opt1", bookedPrice: 50 }],
+  __settledPayments: [
+    { milestoneIndex: 0, status: "completed", stripePaymentIntentId: "pi_first", netAmount: 165, vatAmount: 34.65, totalWithVat: 199.65 },
+    { milestoneIndex: 1, status: "completed", stripePaymentIntentId: "pi_second", netAmount: 220, vatAmount: 46.2, totalWithVat: 266.2 },
+  ],
   quote: { amount: 300 },
   payment: {
     netAmount: 220,
@@ -22,46 +22,6 @@ const milestoneBooking = (overrides: any = {}) => ({
     discount: { loyaltyAmount: 0, totalDiscount: 0, originalAmount: 220 },
   },
   ...overrides,
-});
-
-describe("getMilestoneFullCustomerGross", () => {
-  it("returns null without milestones", () => {
-    expect(getMilestoneFullCustomerGross({}, 10)).toBeNull();
-    expect(getMilestoneFullCustomerGross({ milestonePayments: [] }, 10)).toBeNull();
-  });
-
-  it("sums all milestones plus options with commission", () => {
-    // (100 + 200 + 50) * 1.1 = 385
-    expect(getMilestoneFullCustomerGross(milestoneBooking(), 10)).toBeCloseTo(385, 2);
-  });
-
-  it("excludes options already folded into the quote", () => {
-    const booking = milestoneBooking({
-      quote: { amount: 350, breakdown: [{ item: "checkout_snapshot:computed_total", totalPrice: 350 }] },
-      checkoutSnapshot: { extraOptionsTotal: 50, totalAmount: 350 },
-    });
-    // (100 + 200) * 1.1 = 330
-    expect(getMilestoneFullCustomerGross(booking, 10)).toBeCloseTo(330, 2);
-  });
-});
-
-describe("scaleDiscountToFullGross", () => {
-  it("returns undefined without a discount", () => {
-    expect(scaleDiscountToFullGross(undefined, 220, 385)).toBeUndefined();
-    expect(scaleDiscountToFullGross({ totalDiscount: 0 }, 220, 385)).toBeUndefined();
-  });
-
-  it("scales the slice back up to the full gross", () => {
-    const scaled = scaleDiscountToFullGross(
-      { loyaltyAmount: 5, repeatBuyerAmount: 2, referralDiscountAmount: 3, totalDiscount: 10, originalAmount: 220 },
-      220,
-      440,
-    );
-    expect(scaled?.loyaltyAmount).toBeCloseTo(10, 2);
-    expect(scaled?.repeatBuyerAmount).toBeCloseTo(4, 2);
-    expect(scaled?.referralDiscountAmount).toBeCloseTo(6, 2);
-    expect(scaled?.totalDiscount).toBeCloseTo(20, 2);
-  });
 });
 
 describe("normalizeInvoiceBasis", () => {

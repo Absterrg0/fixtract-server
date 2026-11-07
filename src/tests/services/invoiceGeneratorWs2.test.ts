@@ -202,6 +202,10 @@ describe("quotation milestone bookings", () => {
         discount: { totalDiscount: 0, originalAmount: 220 },
       },
       {
+        __settledPayments: [
+          { milestoneIndex: 0, status: "completed", stripePaymentIntentId: "pi_first", netAmount: 165, vatAmount: 34.65, totalWithVat: 199.65, professionalPayout: 150 },
+          { milestoneIndex: 1, status: "completed", stripePaymentIntentId: "pi_second", netAmount: 220, vatAmount: 46.2, totalWithVat: 266.2, professionalPayout: 200 },
+        ],
         milestonePayments: [
           { title: "Deposit", amount: 100, order: 0, status: "paid", dueCondition: "on_start" },
           { title: "Balance", amount: 200, order: 1, status: "paid", dueCondition: "on_start" },
@@ -243,5 +247,58 @@ describe("quotation milestone bookings", () => {
     expect(text).toContain("465.85");
     expect(text).toContain("Option");
     expect(text).not.toContain("Payment discount adjustment");
+  });
+});
+
+describe('recorded settlement PDF/UBL reconciliation', () => {
+  beforeEach(() => {
+    mocks.platformSettings.mockResolvedValue({
+      companyAddress: { name: 'Fixtract', country: 'BE' }, commissionPercent: 20,
+    });
+    mocks.invoiceSequence.mockResolvedValue({ value: 1 });
+  });
+  const settled = (index: number, netAmount: number, vatAmount: number, professionalPayout: number) => ({
+    milestoneIndex: index, stripePaymentIntentId: `pi_settled_${index}`, status: 'completed',
+    netAmount, vatAmount, totalWithVat: +(netAmount + vatAmount).toFixed(2), professionalPayout, vatRate: 21,
+  });
+  it.each([
+    { name: '#5 earlier discounts', rows: [settled(0, 450, 94.5, 480), settled(1, 500, 105, 500)], total: 1149.5,
+      ledger: [{ paymentIntentId: 'pi_settled_0', totalDiscount: 50, repeatBuyerAmount: 20, codeDiscountAmount: 30 }],
+    },
+    { name: '#6 changed commission', rows: [settled(0, 550, 115.5, 500), settled(1, 550, 115.5, 500)], total: 1331, ledger: [] },
+    { name: '#6 independent VAT rounding', rows: [settled(0, 10.03, 2.11, 10.03), settled(1, 10.03, 2.11, 10.03)], total: 24.28, ledger: [] },
+  ])('reconciles $name to the sum actually collected', async ({ rows, total, ledger }) => {
+    const booking = baseBooking(rows[1], { status: 'completed', __settledPayments: rows, paymentDiscountLedger: ledger,
+      milestonePayments: rows.map((row, order) => ({ amount: row.professionalPayout, order, status: 'paid' })),
+    });
+    expect(rows.reduce((sum, row) => sum + row.totalWithVat, 0)).toBeCloseTo(total, 2);
+    const text = await pdfText(booking, 'customer');
+    const xml = buildUblInvoiceXml(booking, 'FIX-SETTLED', new Date(), { selfBilling: false, platform: { country: 'BE' } });
+    expect(text.replaceAll(',', '')).toContain(total.toFixed(2));
+    expect(xml).toContain(`<cbc:TaxInclusiveAmount currencyID="EUR">${total.toFixed(2)}</cbc:TaxInclusiveAmount>`);
+    const net = rows.reduce((sum, row) => sum + row.netAmount, 0);
+    expect(xml).toContain(`<cbc:TaxExclusiveAmount currencyID="EUR">${net.toFixed(2)}</cbc:TaxExclusiveAmount>`);
+    const vat = rows.reduce((sum, row) => sum + row.vatAmount, 0);
+    const taxSubtotals = [...xml.matchAll(/<cac:TaxSubtotal>[\s\S]*?<cbc:TaxAmount[^>]*>([^<]+)<\/cbc:TaxAmount>/g)]
+      .reduce((sum, match) => sum + Number(match[1]), 0);
+    expect(taxSubtotals).toBeCloseTo(vat, 2);
+    const supplierNet = rows.reduce((sum, row) => sum + row.professionalPayout, 0);
+    const supplierTotal = +(supplierNet + Math.round(supplierNet * 21) / 100).toFixed(2);
+    expect((await pdfText(booking, 'self_bill')).replaceAll(',', '')).toContain(supplierTotal.toFixed(2));
+    expect(buildUblInvoiceXml(booking, 'SUP-SETTLED', new Date(), { selfBilling: true, platform: { country: 'BE' } }))
+      .toContain(`<cbc:TaxInclusiveAmount currencyID="EUR">${supplierTotal.toFixed(2)}</cbc:TaxInclusiveAmount>`);
+  });
+  it('#4 reconciles cancellation invoices to retained work without unpaid future milestones', async () => {
+    const row = { ...settled(0, 100, 0, 100), vatRate: 0, reverseCharge: true };
+    const booking = baseBooking({ ...row, status: 'partially_refunded', refundAmount: 25 }, {
+      status: 'cancelled', quote: { amount: 200, description: 'Service' }, __settledPayments: [row],
+      __supplierVatDecision: { reverseCharge: true, appliedRate: 0 },
+      milestonePayments: [{ order: 0, amount: 100, status: 'paid' }, { order: 1, amount: 100, status: 'pending' }],
+    });
+    for (const selfBilling of [false, true]) {
+      expect(await pdfText(booking, selfBilling ? 'self_bill' : 'customer')).toContain('75.00');
+      expect(buildUblInvoiceXml(booking, 'SETTLEMENT', new Date(), { selfBilling, platform: { country: 'BE' } }))
+        .toContain('<cbc:TaxInclusiveAmount currencyID="EUR">75.00</cbc:TaxInclusiveAmount>');
+    }
   });
 });

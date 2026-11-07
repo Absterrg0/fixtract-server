@@ -365,13 +365,20 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
     expect(first.payment!.discount!.codeDiscountAmount).toBe(5);
     expect(second.payment!.discount!.codeDiscountAmount).toBe(5);
     const { buildUblInvoiceXml } = await import('../../services/invoiceArtifacts');
-    // Part 3 #19d invoices the entire quotation, regardless of which slice
-    // most recently supplied the payment snapshot. Both real checkout totals
-    // include their own referral/loyalty/code allocation and VAT.
+    // The full quotation invoice requires both settled checkouts and their
+    // durable snapshots, rather than extrapolating either installment.
+    second.payment!.status = 'completed';
+    second.milestonePayments![1].status = 'paid';
+    await second.save();
+    await recordPaymentDiscountSnapshot(String(booking._id), second.payment!, second.payment!.stripePaymentIntentId);
+    const settledPayments = [first.payment!, second.payment!].map(payment => ({
+      ...(payment as any).toObject?.() || payment, status: 'completed',
+    }));
+    const ledger = (await Booking.findById(booking._id).select('+paymentDiscountLedger'))!.paymentDiscountLedger;
     const fullBookingTotal = (first.payment!.totalWithVat! + second.payment!.totalWithVat!).toFixed(2);
     for (const installment of [first, second]) {
       await installment.populate('customer professional');
-      const xml = buildUblInvoiceXml(installment.toObject(), 'FIX-MILESTONE', new Date(), { selfBilling: false, platform: { country: 'BE' } });
+      const xml = buildUblInvoiceXml({ ...installment.toObject(), __settledPayments: settledPayments, paymentDiscountLedger: ledger }, 'FIX-MILESTONE', new Date(), { selfBilling: false, platform: { country: 'BE' } });
       expect(xml).toContain('Referral discount');
       expect(xml).toContain(`<cbc:TaxInclusiveAmount currencyID="EUR">${fullBookingTotal}</cbc:TaxInclusiveAmount>`);
     }

@@ -1,85 +1,8 @@
-import { withCommission } from "./customerPricing";
+import { invoiceSettledPayments, invoiceSettlementDiscount, invoiceRefundFacts } from "./invoiceSettlements";
 import { computePostRefundInvoicePayment } from "./invoiceAccounting";
-import { quoteAmountIncludesSelectedExtras } from "./payment";
 
 const roundMoney = (value: number): number =>
   Math.round((Number(value) + Number.EPSILON) * 100) / 100;
-
-const sumMilestoneProfessionalAmounts = (booking: any): number =>
-  (Array.isArray(booking?.milestonePayments) ? booking.milestonePayments : []).reduce(
-    (sum: number, milestone: any) => {
-      const amount = Number(milestone?.amount);
-      return Number.isFinite(amount) && amount > 0 ? sum + amount : sum;
-    },
-    0,
-  );
-
-const sumSelectedOptionPrices = (booking: any): number =>
-  (Array.isArray(booking?.selectedExtraOptions) ? booking.selectedExtraOptions : []).reduce(
-    (sum: number, option: any) => {
-      const price = Number(option?.bookedPrice);
-      return Number.isFinite(price) && price > 0 ? sum + price : sum;
-    },
-    0,
-  );
-
-/**
- * Full pre-discount customer gross for a milestone booking: every milestone's
- * professional amount plus the selected options (unless the quote already
- * folds them in), with the platform commission applied the same way each
- * milestone charge applied it. Returns null when the booking has no usable
- * milestone amounts (caller keeps the legacy payment-field behaviour).
- */
-export const getMilestoneFullCustomerGross = (
-  booking: any,
-  commissionPercent: number,
-): number | null => {
-  if (!Array.isArray(booking?.milestonePayments) || booking.milestonePayments.length === 0) {
-    return null;
-  }
-  const milestoneProSum = sumMilestoneProfessionalAmounts(booking);
-  if (!(milestoneProSum > 0)) return null;
-  const optionsPro = quoteAmountIncludesSelectedExtras(booking) ? 0 : sumSelectedOptionPrices(booking);
-  return withCommission(milestoneProSum + optionsPro, commissionPercent);
-};
-
-export type ScaledInvoiceDiscount = {
-  loyaltyAmount: number;
-  repeatBuyerAmount: number;
-  referralDiscountAmount: number;
-  pointsDiscountAmount: number;
-  codeDiscountAmount: number;
-  codeLabel?: string;
-  totalDiscount: number;
-};
-
-/**
- * Recover the full-booking discount from the stored per-milestone slice. Each
- * milestone payment prorated the whole-booking discount by
- * (milestone charge / full charge); scaling the slice back up by the inverse
- * ratio restores the full amounts (within rounding).
- */
-export const scaleDiscountToFullGross = (
-  discount: any,
-  sliceOriginalAmount: unknown,
-  fullGross: number,
-): ScaledInvoiceDiscount | undefined => {
-  if (!discount) return undefined;
-  const sliceOriginal = Number(sliceOriginalAmount);
-  const total = Number(discount.totalDiscount) || 0;
-  if (total <= 0) return undefined;
-  const factor = sliceOriginal > 0 && fullGross > 0 ? fullGross / sliceOriginal : 1;
-  const scale = (value: unknown): number => roundMoney((Number(value) || 0) * factor);
-  return {
-    loyaltyAmount: scale(discount.loyaltyAmount),
-    repeatBuyerAmount: scale(discount.repeatBuyerAmount),
-    referralDiscountAmount: scale(discount.referralDiscountAmount),
-    pointsDiscountAmount: scale(discount.pointsDiscountAmount),
-    codeDiscountAmount: scale(discount.codeDiscountAmount),
-    codeLabel: discount.codeLabel,
-    totalDiscount: scale(total),
-  };
-};
 
 export type InvoiceRefundBasis = {
   amount: number;
@@ -96,54 +19,67 @@ export type NormalizedInvoiceBasis = {
   serviceNet: number;
   serviceVat: number;
   serviceTotal: number;
-  /** Full discount (recovered from the milestone slice when needed). */
+  /** Recorded professional payout before any refund; null on legacy non-milestone rows. */
+  supplierServiceNet: number | null;
+  /** Sum of the recorded per-payment discount components. */
   discount: any;
-  /** Milestone booking: prefer the quote pricing lines over the last-milestone breakdown. */
+  /** Milestone booking: service lines come from the settled rows. */
   useQuotePricingLines: boolean;
   /** Present only for a partial refund (remaining total still positive). */
   refund?: InvoiceRefundBasis;
   /** Factor the supplier-side lines must be scaled by (1 without a refund). */
   supplierScale: number;
-  /** A milestone gross was resolved (even if it nets to zero). */
+  /** This invoice uses recorded milestone settlements. */
   milestoneActive: boolean;
 };
 
 /**
- * Single source of truth for the invoice service basis, shared by the PDF and
- * UBL builders so the two cannot drift:
- * - milestone bookings use the full amount of all milestones + options (the
- *   stored payment fields only carry the last charged milestone);
- * - a partial refund reduces the service base by the refunded amount with the
- *   refund split proportionally across net/VAT.
- * Non-milestone, non-refunded bookings return the stored payment values
- * untouched.
+ * Shared PDF/UBL basis from recorded settlements. Completed quotations include
+ * all settled milestones; cancellations include only paid work. No price,
+ * discount, commission or rounding is reconstructed from the last checkout.
  */
 export const normalizeInvoiceBasis = (
   booking: any,
-  commissionPercent: number,
+  _commissionPercent: number,
 ): NormalizedInvoiceBasis => {
   const payment = booking?.payment || {};
-  const reverseCharge = Boolean(payment.reverseCharge);
-  const vatRate = reverseCharge ? 0 : Math.max(0, Number(payment.vatRate) || 0);
-  const milestoneGross = getMilestoneFullCustomerGross(booking, commissionPercent);
+  const milestoneActive = Array.isArray(booking?.milestonePayments) && booking.milestonePayments.length > 0;
+  const rows = milestoneActive ? invoiceSettledPayments(booking) : [];
   const storedDiscount = payment.discount;
   let serviceNet = Number(payment.netAmount) || 0;
   let serviceVat = Number(payment.vatAmount) || 0;
   let serviceTotal = Number(payment.totalWithVat) || 0;
   let discount = storedDiscount;
-  let useQuotePricingLines = false;
-  const milestoneActive = milestoneGross != null;
-  if (milestoneActive && milestoneGross != null) {
-    const scaled = scaleDiscountToFullGross(storedDiscount, storedDiscount?.originalAmount, milestoneGross);
-    discount = scaled || storedDiscount;
-    serviceNet = Math.max(0, roundMoney(milestoneGross - (Number(discount?.totalDiscount) || 0)));
-    serviceVat = reverseCharge ? 0 : roundMoney((serviceNet * vatRate) / 100);
-    serviceTotal = roundMoney(serviceNet + serviceVat);
-    useQuotePricingLines = true;
+  let supplierServiceNet: number | null = payment.professionalPayout != null && Number.isFinite(Number(payment.professionalPayout))
+    ? Number(payment.professionalPayout) : null;
+  const useQuotePricingLines = milestoneActive;
+  if (milestoneActive) {
+    if (!rows.length) throw new Error("Cannot invoice milestones without recorded settled payments.");
+    // Each checkout is rounded and discounted independently. Its settled rows
+    // are the only authority for money, including cancelled quotations.
+    if (rows.some(row => ![row.netAmount, row.vatAmount, row.totalWithVat].every(value =>
+      value != null && Number.isFinite(Number(value))))) {
+      throw new Error("Cannot invoice milestones without recorded settlement net, VAT and total.");
+    }
+    const paidMilestones = booking.milestonePayments.filter((milestone: any) => milestone.status === "paid").length;
+    if (paidMilestones > rows.length) {
+      throw new Error("Cannot invoice milestones: historical settled payment rows are missing.");
+    }
+    const sum = (key: string) => roundMoney(rows.reduce((total, row) => total + (Number(row[key]) || 0), 0));
+    serviceNet = sum("netAmount");
+    serviceVat = sum("vatAmount");
+    serviceTotal = sum("totalWithVat");
+    discount = invoiceSettlementDiscount(booking, rows);
+    if (rows.every(row => row.professionalPayout != null && Number.isFinite(Number(row.professionalPayout)))) {
+      supplierServiceNet = sum("professionalPayout");
+    } else {
+      supplierServiceNet = null;
+    }
   }
   let refund: InvoiceRefundBasis | undefined;
   let supplierScale = 1;
-  const refundAmount = Number(payment.refundAmount) || 0;
+  const refundFacts = invoiceRefundFacts(booking);
+  const refundAmount = roundMoney(refundFacts.reduce((sum, fact) => sum + fact.amount, 0));
   // Admit any positive refund up to the service total (plus float dust): the
   // split clamps to the total and money() rounds a sub-cent remainder to zero,
   // so no cent is ever silently dropped — the block is always shown.
@@ -154,8 +90,19 @@ export const normalizeInvoiceBasis = (
       vatAmount: serviceVat,
       totalWithVat: serviceTotal,
       refundAmount,
-      commissionPercent,
+      commissionPercent: 0,
     });
+    if (refundFacts.every(fact => fact.netAmount != null && fact.vatAmount != null)) {
+      const refundNet = roundMoney(refundFacts.reduce((sum, fact) => sum + Number(fact.netAmount), 0));
+      const refundVat = roundMoney(refundFacts.reduce((sum, fact) => sum + Number(fact.vatAmount), 0));
+      if (Math.abs(refundNet + refundVat - refundAmount) >= 0.005 || refundNet > serviceNet || refundVat > serviceVat) {
+        throw new Error("Recorded refund net/VAT does not reconcile with the settled payment.");
+      }
+      adjusted.refundNet = refundNet;
+      adjusted.refundVat = refundVat;
+      adjusted.netAmount = roundMoney(serviceNet - refundNet);
+      adjusted.vatAmount = roundMoney(serviceVat - refundVat);
+    }
     const reason = typeof payment.refundReason === "string" ? payment.refundReason : undefined;
     const description =
       typeof booking?.cancellation?.adminResolutionNote === "string"
@@ -179,6 +126,7 @@ export const normalizeInvoiceBasis = (
     serviceNet,
     serviceVat,
     serviceTotal,
+    supplierServiceNet,
     discount,
     useQuotePricingLines,
     refund,

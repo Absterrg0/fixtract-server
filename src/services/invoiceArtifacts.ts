@@ -31,6 +31,7 @@ import {
   type ManualInvoiceLine,
   type ManualInvoiceOverride,
 } from "./invoiceGenerator";
+import { invoiceSettledServiceLines } from "../utils/invoiceSettlements";
 import { normalizeInvoiceBasis } from "../utils/milestoneInvoice";
 import { quoteAmountIncludesSelectedExtras } from "../utils/payment";
 import { maybeDispatchPeppolInvoice } from "./peppolDispatch";
@@ -578,7 +579,9 @@ const getRawPricingLinesForUbl = (
     && basis.useQuotePricingLines
     && Array.isArray(currentQuote?.pricingLines)
     && currentQuote.pricingLines.length > 0;
-  let baseLines: UblLine[] = preferQuoteLines
+  let baseLines: UblLine[] = basis.milestoneActive && !options.selfBilling
+    ? invoiceSettledServiceLines(booking).map(line => ({ ...line, price: line.amount }))
+    : preferQuoteLines
     ? currentQuote.pricingLines.map((line: any) => ({
       description: line.description,
       amount: moneyNumber(line.price),
@@ -660,25 +663,14 @@ const getRawPricingLinesForUbl = (
     }
   };
 
-  if (!options.selfBilling && preferQuoteLines) {
+  if (!options.selfBilling && !basis.milestoneActive && preferQuoteLines) {
     // Quote pricing lines never contain the selected options; append them
     // scaled to the customer net like the no-lines fallback below does, so
     // the plug line only carries the commission instead of the options too.
     appendScaledOptions();
   }
 
-  if (!options.selfBilling && !preferQuoteLines && basis.milestoneActive
-    && Array.isArray(booking.payment?.vatBreakdown) && booking.payment.vatBreakdown.length > 0) {
-    // A single milestone's breakdown already spans the full net (its options
-    // were charged with it); a later milestone's breakdown does not, so the
-    // options are appended here instead of being folded into the plug line.
-    const breakdownSum = baseLines.reduce((sum: number, line: UblLine) => sum + line.amount, 0);
-    if (Math.abs(breakdownSum - moneyNumber(basis.serviceNet)) >= 0.02) {
-      appendScaledOptions();
-    }
-  }
-
-  if (!options.selfBilling && !preferQuoteLines && !booking.payment?.vatBreakdown?.length && !currentQuote?.pricingLines?.length) {
+  if (!options.selfBilling && !basis.milestoneActive && !preferQuoteLines && !booking.payment?.vatBreakdown?.length && !currentQuote?.pricingLines?.length) {
     const selectedOptions: UblLine[] = (booking.selectedExtraOptions || []).map((option: any, index: number) => {
       const projectOption = booking.project?.extraOptions?.find((entry: any, entryIndex: number) =>
         String(entry?._id || entryIndex) === String(option.extraOptionId) || String(entryIndex) === String(option.extraOptionId)
@@ -692,7 +684,7 @@ const getRawPricingLinesForUbl = (
       } as UblLine;
     });
     const rawOptionTotal = selectedOptions.reduce((sum: number, line: UblLine) => sum + line.amount, 0);
-    const supplierNet = calculateSupplierInvoiceNet({
+    const supplierNet = basis.supplierServiceNet ?? calculateSupplierInvoiceNet({
       quoteAmount: booking.quote?.amount,
       checkoutSnapshot: booking.checkoutSnapshot,
       selectedExtraOptions: booking.selectedExtraOptions,
@@ -740,7 +732,10 @@ const getRawPricingLinesForUbl = (
   }
 
   if (options.selfBilling) {
-    const supplierNet = calculateSupplierInvoiceNet({
+    if (basis.milestoneActive && basis.supplierServiceNet == null) {
+      throw new Error("Cannot invoice milestone supplier amounts without recorded professional payouts.");
+    }
+    const supplierNet = basis.supplierServiceNet ?? calculateSupplierInvoiceNet({
       quoteAmount: currentQuote?.totalAmount ?? booking.quote?.amount,
       checkoutSnapshot: booking.checkoutSnapshot,
       selectedExtraOptions: booking.selectedExtraOptions,
@@ -787,6 +782,9 @@ const getRawPricingLinesForUbl = (
     return { lines: lines.map((line) => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * (line.vatRate ?? vatRate)) / 100 })), totals };
   }
 
+  if (basis.milestoneActive || basis.refund) {
+    baseLines = scaleLineItemsToTotal(baseLines, basis.serviceNet).map(line => ({ ...line, price: line.amount }));
+  }
   const baseNet = baseLines.reduce((sum, line) => sum + line.amount, 0);
   const targetBaseNet = (basis.milestoneActive || basis.serviceNet > 0)
     ? moneyNumber(basis.serviceNet)
@@ -806,7 +804,24 @@ const getRawPricingLinesForUbl = (
   // header note; another negative line would deduct it a second time.
   const lines = serviceAndDiscountLines;
   const totals = calculateInvoiceSideTotals({ lines, reverseCharge, vatRate, vatLabel: booking.payment?.vatLabel });
-  return { lines: lines.map((line) => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * (line.vatRate ?? vatRate)) / 100 })), totals };
+  const reconciledLines = lines.map(line => ({ ...line, vatAmount: reverseCharge ? 0 : Math.round(line.amount * (line.vatRate ?? vatRate)) / 100 }));
+  if (booking.payment?.totalWithVat != null || basis.milestoneActive) {
+    const rawExtra = (booking.extraCosts || []).reduce((sum: number, cost: any) => sum + moneyNumber(cost.amount), 0);
+    const resolved = resolveExtraCostScale(booking.extraCosts, booking.extraCostTotal);
+    const extraNet = roundCreditMoney(getCustomerExtraCostNet(booking.payment, rawExtra) * resolved);
+    const extraGross = booking.payment?.extraCostAmount != null
+      ? roundCreditMoney(Number(booking.payment.extraCostAmount) * resolved)
+      : roundCreditMoney(extraNet * (1 + (reverseCharge ? 0 : vatRate) / 100));
+    totals.netAmount = roundCreditMoney(basis.serviceNet + extraNet);
+    totals.totalWithVat = roundCreditMoney(basis.serviceTotal + extraGross);
+    totals.vatAmount = roundCreditMoney(totals.totalWithVat - totals.netAmount);
+    // Keep independently rounded settlement VAT, rather than recalculating
+    // it from an aggregate and silently losing a cent across installments.
+    const vatDelta = roundCreditMoney(totals.vatAmount - reconciledLines.reduce((sum, line) => sum + line.vatAmount, 0));
+    if (reconciledLines.length && vatDelta) reconciledLines[reconciledLines.length - 1].vatAmount =
+      roundCreditMoney(reconciledLines[reconciledLines.length - 1].vatAmount + vatDelta);
+  }
+  return { lines: reconciledLines, totals };
 };
 
 /**
@@ -1217,6 +1232,7 @@ const hydrateServiceConfigPricingOptions = async (booking: any) => {
 
 const loadBookingForInvoice = async (bookingId: string) => {
   const booking = await Booking.findById(bookingId)
+    .select("+paymentDiscountLedger")
     .populate("customer")
     .populate("professional")
     .populate(
@@ -1226,10 +1242,12 @@ const loadBookingForInvoice = async (bookingId: string) => {
   await hydrateServiceConfigPricingOptions(booking);
   await hydrateSupplierVatDecision(booking);
   if (booking) {
-    try {
-      (booking as any).__commissionPercent = (await PlatformSettings.getCurrentConfig()).commissionPercent;
-    } catch {
-      // Extra costs then keep their proportional split.
+    const quote = getCurrentQuote(booking);
+    (booking as any).__commissionPercent = Number(quote?.customerTotals?.commissionPercent) || 0;
+    if (booking.milestonePayments?.length || booking.payment?.status === "partially_refunded") {
+      (booking as any).__settledPayments = await Payment.find({
+        booking: booking._id, status: { $in: ["completed", "partially_refunded", "refunded"] },
+      }).lean();
     }
   }
   return booking;
