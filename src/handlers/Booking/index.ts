@@ -1019,6 +1019,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           });
         }
 
+        if (window.resourcePlan) bookingData.resourcePlan = window.resourcePlan;
         engineScheduleZone = typeof window.timeZone === 'string' ? window.timeZone : null;
         bookingData.scheduledStartDate = window.scheduledStartDate;
         if (window.scheduledExecutionEndDate) {

@@ -6,6 +6,7 @@ import User from "../models/user";
 import { DEFAULT_AVAILABILITY, resolveAvailability } from "./availabilityHelpers";
 import { BUSINESS_COUNTRY_PRIMARY_TIMEZONES, primaryTimeZoneForCountry } from "./hourScheduleRepair";
 import { DateTime } from "luxon";
+import { bookingCalendarOccupancies } from "./support/bookingCalendar";
 import { loadSharedCalendarBusy } from "./support/calendarBusy";
 
 type DurationUnit = "hours" | "days";
@@ -560,6 +561,7 @@ const buildBlockedData = async (
     if (teamMemberObjectIds.length > 0) {
       bookingFilter.$or.push(
         { assignedTeamMembers: { $in: teamMemberObjectIds } },
+        { 'resourcePlan.resourceId': { $in: teamMemberObjectIds } },
         { professional: { $in: teamMemberObjectIds } }
       );
     }
@@ -761,6 +763,16 @@ const assignBookingBlocks = (
   teamMemberIds: string[]
 ): void => {
   bookings.forEach((booking) => {
+    if (booking.resourcePlan?.some((entry: any) => entry.days?.length)) {
+      for (const occupancy of bookingCalendarOccupancies(booking)) {
+        if (!teamMemberIdsSet.has(occupancy.userId)) continue;
+        memberBlocksMap.get(occupancy.userId)?.blockedRanges.push({
+          // Scheduler ranges have inclusive ends; calendar occupancies are exclusive.
+          start: occupancy.startAt, end: new Date(occupancy.endAt.getTime() - 1), reason: 'booking',
+        });
+      }
+      return;
+    }
     // Determine which team members are affected by this booking
     const affectedMembers = new Set<string>();
 
@@ -880,12 +892,13 @@ export const buildPerMemberBlockedData = async (
   if (teamMemberObjectIds.length > 0) {
     bookingFilter.$or.push(
       { assignedTeamMembers: { $in: teamMemberObjectIds } },
+      { 'resourcePlan.resourceId': { $in: teamMemberObjectIds } },
       { professional: { $in: teamMemberObjectIds } }
     );
   }
 
   const bookings = await Booking.find(bookingFilter).select(
-    "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit assignedTeamMembers professional project status"
+    "scheduledStartDate scheduledExecutionEndDate scheduledBufferStartDate scheduledBufferEndDate scheduledBufferUnit assignedTeamMembers professional project status resourcePlan"
   );
 
   // Step 4: Assign booking blocks to affected members
@@ -1091,6 +1104,7 @@ export const buildPerResourceBlockedDays = async (
     ],
     $or: [
       { assignedTeamMembers: { $in: resourceObjectIds } },
+      { 'resourcePlan.resourceId': { $in: resourceObjectIds } },
       { professional: { $in: resourceObjectIds } },
     ],
   };
@@ -1106,21 +1120,14 @@ export const buildPerResourceBlockedDays = async (
   const resourceIdSet = new Set<string>(orderedIds);
 
   bookings.forEach((booking: any) => {
-    const planByResource = new Map<string, Array<{ start: Date; end: Date }>>();
-    if (Array.isArray(booking.resourcePlan)) {
-      booking.resourcePlan.forEach((entry: any) => {
-        const rid = (entry?.resourceId?._id || entry?.resourceId)?.toString?.();
-        if (!rid || !resourceIdSet.has(rid)) return;
-        if (Array.isArray(entry?.days) && entry.days.length > 0) {
-          entry.days.forEach((day: any) => {
-            const d = new Date(day);
-            if (Number.isNaN(d.getTime())) return;
-            const list = planByResource.get(rid) || [];
-            list.push({ start: d, end: d });
-            planByResource.set(rid, list);
-          });
-        }
-      });
+    if (booking.resourcePlan?.some((entry: any) => entry.days?.length)) {
+      for (const occupancy of bookingCalendarOccupancies(booking)) {
+        memberBlocksMap.get(occupancy.userId)?.blockedRanges.push({
+          // Scheduler ranges have inclusive ends; calendar occupancies are exclusive.
+          start: occupancy.startAt, end: new Date(occupancy.endAt.getTime() - 1), reason: 'booking',
+        });
+      }
+      return;
     }
 
     const affected = new Set<string>();
@@ -1132,19 +1139,10 @@ export const buildPerResourceBlockedDays = async (
     }
     const profId = (booking.professional?._id || booking.professional)?.toString?.();
     if (profId && resourceIdSet.has(profId)) affected.add(profId);
-    planByResource.forEach((_v, rid) => affected.add(rid));
 
     affected.forEach((rid) => {
       const memberData = memberBlocksMap.get(rid);
       if (!memberData) return;
-
-      const planned = planByResource.get(rid);
-      if (planned && planned.length > 0) {
-        planned.forEach((range) => {
-          memberData.blockedRanges.push({ start: range.start, end: range.end, reason: 'booking' });
-        });
-        return;
-      }
 
       if (booking.scheduledStartDate && booking.scheduledExecutionEndDate) {
         memberData.blockedRanges.push({
@@ -3520,6 +3518,7 @@ export const buildProjectScheduleWindow = async ({
         minutes + Math.round(durations.execution.value * 60)
       ),
       assignedTeamMembers,
+      resourcePlan: undefined,
       throughputDays,
       // The effective zone the wall time was converted in (should-fix 4):
       // handlers persist it as scheduleTimeZone so details/timeline carry
@@ -3689,6 +3688,16 @@ export const buildProjectScheduleWindow = async ({
       : executionEndUtc,
     scheduledBufferUnit: durations.buffer?.unit,
     assignedTeamMembers,
+    // Preserve the existing window fallback for a constant team. Only a
+    // changing covering assignment requires exact per-person day planning.
+    resourcePlan: coveringAssignment && coveringAssignment.assignment.some(
+      (day) => day.resourceIds.join(',') !== coveringAssignment!.assignment[0].resourceIds.join(','),
+    ) ? assignedTeamMembers.map((resourceId) => ({
+      resourceId,
+      days: coveringAssignment!.assignment
+        .filter((day) => day.resourceIds.includes(String(resourceId)))
+        .map((day) => new Date(`${day.dayKey}T00:00:00.000Z`)),
+    })) : undefined,
     throughputDays,
     // Effective conversion zone, persisted as scheduleTimeZone (should-fix 4).
     timeZone,
