@@ -240,7 +240,7 @@ describe('milestone expected charges in booking details (client bug list #19b)',
     }, payments: [{ milestoneIndex: 0, status: 'completed', totalWithVat: 151.23 }] });
     expect(details.payments.milestones[0].expectedCustomerCharge).toBe(151.23);
     expect(details.payments.milestones[1].expectedCustomerCharge).toBe(220);
-    expect(details.quotation.versions[0].customerTotals?.commissionPercent).toBeNull();
+    expect(details.quotation.versions[0].customerTotals).not.toHaveProperty('commissionPercent');
   });
 
 });

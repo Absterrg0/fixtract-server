@@ -276,7 +276,7 @@ describe('non-admin booking response serialization', () => {
       project: { title: 'Project' },
       payment: rawPayment(),
       milestonePayments: rawMilestones(),
-      dispute: { reason: 'Work incomplete', raisedAt: new Date('2026-02-01') },
+      dispute: { raisedBy: CUSTOMER_ID, reason: 'Work incomplete', raisedAt: new Date('2026-02-01') },
     };
     mocks.bookingFind.mockReturnValue(query([booking]));
 

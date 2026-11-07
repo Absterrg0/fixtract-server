@@ -2135,10 +2135,10 @@ it('separates a pending refund reservation from returned cash in the read model'
 
 
 it('pins summary dates to the accepted version and leaves a missing pinned version unknown', async () => {
-  const first = { ...booking().quoteVersions[0], firstPossibleStart: '2027-01-04', version: 1, validUntil: '2027-01-08' };
-  const second = { ...first, version: 2, firstPossibleStart: '2027-02-01', validUntil: '2027-02-08' };
+  const first = { ...booking().quoteVersions[0], firstPossibleStart: '2027-01-04', version: 1, validUntil: '2027-01-08', totalAmount: 100, currency: 'EUR' };
+  const second = { ...first, version: 2, firstPossibleStart: '2027-02-01', validUntil: '2027-02-08', totalAmount: 200, currency: 'USD' };
   const pinned = await buildDetails('customer', { booking: { quoteVersions: [first, second], acceptedQuoteVersion: 1, currentQuoteVersion: 2 } });
-  expect(pinned.booking.quote).toMatchObject({ firstPossibleStart: '2027-01-04', validUntil: '2027-01-08T00:00:00.000Z' });
+  expect(pinned.booking.quote).toMatchObject({ firstPossibleStart: '2027-01-04', validUntil: '2027-01-08T00:00:00.000Z', totalAmount: 100, currency: 'EUR' });
   const missing = await buildDetails('customer', { booking: { quoteVersions: [second], acceptedQuoteVersion: 1, currentQuoteVersion: 2 } });
-  expect(missing.booking.quote).toMatchObject({ firstPossibleStart: null, validUntil: null });
+  expect(missing.booking.quote).toMatchObject({ firstPossibleStart: null, validUntil: null, totalAmount: null, currency: null });
 });
