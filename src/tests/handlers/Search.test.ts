@@ -356,7 +356,7 @@ describe("project search handler", () => {
       customerLat: "50.8466",
       customerLon: "4.3523",
     });
-    const pipeline = vi.mocked(Project.aggregate).mock.calls.at(-1)![0] as any[];
+    const pipeline = vi.mocked(Project.aggregate).mock.calls.find(([stages]: any) => stages.some((stage: any) => stage.$geoNear))![0] as any[];
     const radiusStage = pipeline.find((stage) => stage?.$match?.$expr?.$lte);
     // $convert keeps a non-numeric maxKmRange from failing the whole search.
     expect(JSON.stringify(radiusStage)).toContain("$convert");
@@ -372,7 +372,7 @@ describe("project search handler", () => {
       customerLat: "50.8466",
       customerLon: "4.3523",
     });
-    const pipeline = vi.mocked(Project.aggregate).mock.calls.at(-1)![0] as any[];
+    const pipeline = vi.mocked(Project.aggregate).mock.calls.find(([stages]: any) => stages.some((stage: any) => stage.$geoNear))![0] as any[];
     const countryStage = pipeline.find((stage) =>
       JSON.stringify(stage).includes("distance.noBorders")
     );
@@ -390,6 +390,25 @@ describe("project search handler", () => {
     const body = response.json.mock.calls[0][0];
     expect(body.pagination.total).toBe(1);
     expect(body.results[0]._id.toString()).toBe("507f1f77bcf86cd799439082");
+  });
+
+  it.each([{ deletedAt: new Date() }, { isAnonymized: true }])('excludes ineligible owners in the unlocated geo fallback: %s', async flags => {
+    Object.assign(mocks.professionals[0], flags);
+    mocks.projects = [project('507f1f77bcf86cd799439084', {
+      distance: { address: 'Rue de la Loi 1, Bruxelles, Belgium', maxKmRange: 10 },
+    })];
+    const response = await execute({ loc: 'Rue de la Loi 1', customerCountry: 'belgium', customerLat: '50.8466', customerLon: '4.3523' });
+    expect(response.json.mock.calls[0][0].pagination.total).toBe(0);
+    const fallback = vi.mocked(Project.aggregate).mock.calls.find(([stages]: any) =>
+      !stages.some((stage: any) => stage.$geoNear) && JSON.stringify(stages).includes('distance.location'));
+    expect(fallback).toBeDefined();
+    expect(JSON.stringify(fallback)).toContain('eligibleOwner.0');
+  });
+
+  it('does not treat a derived city as a street in the geo fallback', async () => {
+    mocks.projects = [project('507f1f77bcf86cd799439085', { distance: { address: 'Bruxelles, Belgium' } })];
+    const response = await execute({ customerCity: 'Bruxelles', customerCountry: 'Belgium', customerLat: '50.8466', customerLon: '4.3523' });
+    expect(response.json.mock.calls[0][0].pagination.total).toBe(0);
   });
 
   it("excludes location-less projects from the geo fallback without a street-level match", async () => {
