@@ -38,7 +38,7 @@ describe('paid booking notification retries', () => {
     mocks.lean.mockResolvedValue({
       customer: { _id: 'customer', name: 'Customer' },
       professional: { _id: 'professional', name: 'Professional' },
-      payment: { totalWithVat: null, amount: 261.25, currency: 'EUR' },
+      payment: { stripePaymentIntentId: 'pi_paid', totalWithVat: null, amount: 261.25, currency: 'EUR' },
     });
     await notifyBookingPaymentConfirmed({ bookingId: 'booking', paymentIntentId: 'pi_paid', amount: 261.25, currency: 'EUR' });
     expect(mocks.notify).toHaveBeenCalledTimes(2);

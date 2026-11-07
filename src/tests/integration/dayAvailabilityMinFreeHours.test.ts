@@ -19,6 +19,7 @@ vi.hoisted(() => {
 });
 
 import { getProjectTeamAvailability } from '../../handlers/Project';
+import { resolveAvailability } from '../../utils/availabilityHelpers';
 import { validateProjectScheduleSelection } from '../../utils/scheduleEngine';
 
 const TAG = 'minfreehours-it';
@@ -278,7 +279,9 @@ describeDb('day availability requires 3 free working hours (real MongoDB)', () =
       resourcePlan: [{ resourceId: a, days: [new Date('2027-03-01')] }, { resourceId: b, days: [new Date('2027-03-02')] }],
     });
     const { body } = await callAvailability(String(project), '2027-03-01', '2027-03-03');
-    expect(body.blockedDates).toEqual([]);
+    expect(resolveAvailability(weekdays('09:00', '17:00'))).toMatchObject({ saturday: { available: false }, sunday: { available: false } });
+    expect(body.blockedDates.map((iso: string) => localYmd(iso, 'UTC'))
+      .filter((date: string) => date >= '2027-03-01' && date <= '2027-03-03')).toEqual([]);
   });
 
   it('finds bookings through a planned resource and leaves gaps in its plan free', async () => {
@@ -293,7 +296,9 @@ describeDb('day availability requires 3 free working hours (real MongoDB)', () =
       resourcePlan: [{ resourceId: member, days: [new Date('2027-03-01'), new Date('2027-03-03')] }],
     });
     const { body } = await callAvailability(String(project), '2027-03-01', '2027-03-03');
-    expect(body.blockedDates.map((iso: string) => localYmd(iso, 'UTC'))).toEqual(['2027-03-01', '2027-03-03']);
+    expect(resolveAvailability(weekdays('09:00', '17:00'))).toMatchObject({ saturday: { available: false }, sunday: { available: false } });
+    expect(body.blockedDates.map((iso: string) => localYmd(iso, 'UTC'))
+      .filter((date: string) => date >= '2027-03-01' && date <= '2027-03-03')).toEqual(['2027-03-01', '2027-03-03']);
   });
 
 });
