@@ -58,6 +58,7 @@ import {
 import { loadOverviewRefundLedgers } from "../../utils/paymentRefundLedger";
 import { safeErrorSummary } from "../../utils/safeErrorLog";
 import { snapshotQuestionDefinitions } from '../../utils/bookingDetails/snapshot';
+import { RECORDED_DISPUTE_FILTER, withoutPhantomBookingActivity } from '../../utils/bookingActivity';
 
 /** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
 const applyProceedAtStandardVatIfRequested = (
@@ -337,7 +338,10 @@ const snapshotToQuoteBreakdown = (snapshot: NonNullable<ReturnType<typeof buildC
 ];
 
 const presignBookingFiles = async (bookingDoc: any) => {
-  const booking = bookingDoc?.toObject ? bookingDoc.toObject() : { ...bookingDoc };
+  // Legacy records carry schema-default review/cancellation/dispute stamps.
+  const booking = withoutPhantomBookingActivity(
+    bookingDoc?.toObject ? bookingDoc.toObject() : { ...bookingDoc },
+  );
   const customerId = referenceId(booking?.customer);
   const professionalId = referenceId(booking?.professional);
   const projectId = referenceId(booking?.project)
@@ -1558,7 +1562,7 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       const source = !booking.professional && ownerId && projectOwners.has(ownerId)
         ? { ...booking.toObject(), professional: projectOwners.get(ownerId) }
         : booking;
-      const visible: any = bookingForViewer(source, viewerRole);
+      const visible: any = withoutPhantomBookingActivity(bookingForViewer(source, viewerRole));
       if (visible && typeof visible === "object") visible.priceModel = selectedPriceModel(visible);
       // The shared bookings table exposes pro-only payout date/amount
       // columns. Strip the pro payout summary server-side for customers;
@@ -2325,7 +2329,7 @@ export const getMyDisputes = async (req: Request, res: Response, next: NextFunct
     const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 20, 1), 100);
     const filter = {
       status: { $in: ['dispute', 'completed', 'cancelled', 'refunded'] },
-      'dispute.raisedAt': { $exists: true },
+      ...RECORDED_DISPUTE_FILTER,
       $or: [{ customer: objectUserId }, { professional: objectUserId }],
     };
     const [bookings, total] = await Promise.all([Booking.find(filter)

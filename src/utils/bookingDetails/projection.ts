@@ -50,6 +50,7 @@ import {
   maskCancellationRequestForAnonymizedParties,
   maskWarrantyClaimForAnonymizedParties,
 } from '../accountAnonymity';
+import { withoutPhantomBookingActivity } from '../bookingActivity';
 
 const CUSTOMER_INVOICE_KEYS = [
   'invoiceNumber',
@@ -895,7 +896,9 @@ export const buildBookingDetails = async (params: {
   // only reachable through booking.project. Record the flag once so every
   // downstream mask sees it.
   const projectOwnerAnonymized = Boolean(projectProfessionalActor?.isAnonymized);
-  const booking = maskBookingForAnonymizedParties(params.booking, {
+  // Legacy records carry schema-default review/cancellation/dispute stamps;
+  // never project them as activity.
+  const booking = maskBookingForAnonymizedParties(withoutPhantomBookingActivity(params.booking), {
     professional:
       isAnonymizedAccount(params.booking?.professional)
       || projectOwnerAnonymized,

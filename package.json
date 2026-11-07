@@ -22,6 +22,7 @@
     "migrate:marketing-leads": "npx tsx src/scripts/migrate/migrateMarketingLeads.ts",
     "migrate:project-statuses": "npx tsx src/scripts/migrate/migrateProjectStatuses.ts",
     "migrate:preparation-duration": "npx tsx src/scripts/migrate/migratePreparationDuration.ts",
+    "migrate:booking-phantom-activity": "npx tsx src/scripts/migrate/clearPhantomBookingActivity.ts",
     "migrate:support-indexes": "npx tsx src/scripts/migrate/createSupportIndexes.ts",
     "check:stripe-reconciliation": "npx tsx src/scripts/migrate/checkStripeReconciliationItems.ts",
     "migrate:professional-id-objectids": "npx tsx src/scripts/migrate/migrateProfessionalIdObjectIds.ts",

@@ -84,7 +84,7 @@ import {
   validateImageFileBuffer,
   validateVideoFile,
 } from '../../utils/s3Upload';
-import { hasRecordedDispute, RECORDED_DISPUTE_FILTER } from '../../utils/recordedDispute';
+import { hasRecordedDispute, RECORDED_DISPUTE_FILTER } from '../../utils/bookingActivity';
 import { applyReschedulePlanReset } from '../../utils/applyReschedulePlanReset';
 
 const ACTIVE_DISPUTE_STATUS: BookingStatus = 'dispute';
