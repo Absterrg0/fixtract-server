@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
   upload: vi.fn(),
   peppol: vi.fn(),
   notify: vi.fn(),
-  presign: vi.fn(),
+  presign: vi.fn(), download: vi.fn(),
 }));
 
 vi.mock("../../models/platformSettings", () => ({
@@ -38,7 +38,7 @@ vi.mock("../../models/payment", () => ({
 }));
 vi.mock("../../utils/s3Upload", () => ({
   uploadBufferToS3: (...args: unknown[]) => mocks.upload(...args),
-  downloadBufferFromS3: async () => null,
+  downloadBufferFromS3: (...args: unknown[]) => mocks.download(...args),
   presignS3Url: (...args: unknown[]) => mocks.presign(...args),
 }));
 vi.mock("../../services/peppolDispatch", () => ({
@@ -128,6 +128,7 @@ const chainQuery = (doc: any) => {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.activeClaim = undefined;
+  mocks.download.mockResolvedValue(Buffer.from("<CreditNote>original issued credit</CreditNote>"));
   mocks.platformSettings.mockResolvedValue({
     companyAddress: { name: "Fixtract", street: "Main 1", city: "Brussels", postalCode: "1000", country: "BE" },
     companyVatNumber: "BE0123456789",
@@ -413,6 +414,44 @@ describe("ensurePartialRefundCreditArtifacts", () => {
     mocks.bookingFindOneAndUpdate.mockResolvedValueOnce(null);
     expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('busy');
     expect(mocks.bookingUpdateOne.mock.calls.some(([, update]) => update.$unset?.['payment.creditNoteGenerationClaim'] !== undefined)).toBe(false);
+  });
+
+  it.each(['sent', 'queued'])('retries the original queued credit without generating artifacts (provider %s)', async providerStatus => {
+    const fact = { side: 'customer', key: 'recorded', refundAmount: 21, netAmount: 17.36, vatAmount: 3.64,
+      invoiceNumber: 'FIX-CN-ORIGINAL', invoiceUrl: 's3://original.pdf', invoiceUblUrl: 's3://original.xml', generatedAt: new Date('2026-10-29') };
+    const doc = baseBooking(basePayment({
+      creditNoteNumber: fact.invoiceNumber, creditNoteUrl: fact.invoiceUrl, creditNoteUblUrl: fact.invoiceUblUrl,
+      creditNotePeppolDispatchStatus: 'queued', supplierCreditNotePeppolDispatchStatus: 'sent',
+      refundCreditLedger: [fact, { ...fact, side: 'supplier', invoiceNumber: 'SUP-CN-ORIGINAL' }],
+      invoiceSettlementBasis: { customer: { netAmount: 100, vatAmount: 21, totalWithVat: 121, refundAmount: 0 },
+        supplier: { netAmount: 300, vatAmount: 63, totalWithVat: 363, refundAmount: 0 } },
+    }));
+    const originalLedger = JSON.stringify(doc.payment.refundCreditLedger);
+    mocks.bookingFindById.mockImplementation(() => chainQuery(doc));
+    mocks.peppol.mockResolvedValue({ status: providerStatus, reference: 'odoo-account.move-123' });
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe(providerStatus === 'queued' ? 'busy' : 'credited');
+    expect(mocks.download).toHaveBeenCalledWith(fact.invoiceUblUrl);
+    expect(mocks.peppol).toHaveBeenCalledWith(expect.objectContaining({ invoiceNumber: fact.invoiceNumber,
+      ublXml: '<CreditNote>original issued credit</CreditNote>', invoiceUblUrl: fact.invoiceUblUrl,
+      invoicePdfUrl: fact.invoiceUrl, netAmount: 17.36, totalWithVat: 21, issueDate: fact.generatedAt }));
+    expect(mocks.invoiceSequence).not.toHaveBeenCalled(); expect(mocks.upload).not.toHaveBeenCalled();
+    expect(JSON.stringify(doc.payment.refundCreditLedger)).toBe(originalLedger);
+    expect(mocks.bookingUpdateOne.mock.calls.some(([, update]) => update.$set?.['payment.refundInvoiceRetryAt'] instanceof Date)).toBe(true);
+    expect(mocks.bookingUpdateOne.mock.calls.some(([, update]) => update.$push || update.$set?.['payment.creditNoteNumber'])).toBe(false);
+    if (providerStatus === 'sent') {
+      doc.payment.creditNotePeppolDispatchStatus = 'sent'; mocks.peppol.mockClear();
+      expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('credited'); expect(mocks.peppol).not.toHaveBeenCalled();
+    }
+  });
+
+  it('keeps a new queued dispatch durably retryable after recording the artifact and ledger', async () => {
+    mocks.bookingFindById.mockImplementation(() => chainQuery(baseBooking(basePayment())));
+    mocks.peppol.mockResolvedValue({ status: 'queued' });
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('busy');
+    const saved = mocks.bookingUpdateOne.mock.calls.find(([, update]) => update.$push?.['payment.refundCreditLedger']);
+    expect(saved?.[1].$set['payment.refundInvoiceRetryAt']).toBeInstanceOf(Date);
+    expect(saved?.[1].$set['payment.creditNotePeppolDispatchStatus']).toBe('queued');
+    expect(saved?.[1].$push['payment.refundCreditLedger'].invoiceNumber).toMatch(/^FIX-CN-/);
   });
 
 });

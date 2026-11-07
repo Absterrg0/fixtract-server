@@ -1200,6 +1200,7 @@ export const buildUblInvoiceXml = (
   <cbc:ID>${escapeXml(invoiceNumber)}</cbc:ID>
   <cbc:IssueDate>${issuedAt.toISOString().slice(0, 10)}</cbc:IssueDate>
   <cbc:InvoiceTypeCode>${invoiceTypeCode}</cbc:InvoiceTypeCode>
+  ${refundNote ? `<cbc:Note>${escapeXml(refundNote)}</cbc:Note>` : ""}
   ${selfBilling ? `<cbc:Note>${escapeXml(SELF_BILLING_NOTE)}</cbc:Note>` : ""}
   ${reverseCharge ? `<cbc:Note>${escapeXml(REVERSE_CHARGE_LABEL)}</cbc:Note>` : ""}
   <cbc:DocumentCurrencyCode>${escapeXml(currency)}</cbc:DocumentCurrencyCode>
@@ -2390,6 +2391,49 @@ const recordedInvoiceSettlementBasis = (booking: any, platform: UblPlatformParty
   return { customer: side(false), supplier: side(true) };
 };
 
+/** Retry the issued partial credit, never regenerate it from today's balance. */
+const retryRecordedPartialCredit = async (
+  booking: any, side: 'customer' | 'supplier', platform: UblPlatformParty,
+): Promise<boolean> => {
+  const prefix = side === 'customer' ? 'creditNote' : 'supplierCreditNote';
+  const number = booking.payment[`${prefix}Number`];
+  const status = booking.payment[`${prefix}PeppolDispatchStatus`];
+  if (!number || !['queued', 'failed'].includes(status)) return false;
+  const fact = booking.payment.refundCreditLedger?.find((entry: RefundCreditFact) =>
+    entry.side === side && entry.invoiceNumber === number);
+  if (!fact) throw new Error('Partial credit dispatch lacks recorded amounts; reconcile before retry.');
+  // Persist before any provider work, including artifact reads. A crash at any
+  // later point leaves an obligation for the existing refund-invoice cron.
+  await Booking.updateOne({ _id: booking._id }, { $set: {
+    'payment.refundInvoiceRetryAt': new Date(Date.now() + CREDIT_GENERATION_CLAIM_TTL_MS + 1000),
+  } });
+  const xml = fact.invoiceUblUrl && await downloadBufferFromS3(fact.invoiceUblUrl);
+  if (!xml) throw new Error('The original partial credit UBL is unavailable; dispatch remains queued.');
+  const input = buildPartialRefundCreditInput({ side, net: fact.netAmount, vat: fact.vatAmount,
+    vatRate: effectiveVatRateForCredit(fact.netAmount, fact.vatAmount, booking.payment.vatRate),
+    reverseCharge: fact.vatAmount === 0, currency: booking.payment.currency || 'EUR',
+    relatedInvoiceNumber: booking.payment[`${prefix}RelatedInvoiceNumber`], description: 'Partial refund',
+  });
+  const manualBooking = applyManualParty(booking, input);
+  // maybeDispatch reconciles the same invoice number with Odoo's move and EDI
+  // state first; sent/processing/to_send attempts are never submitted again.
+  const result = await maybeDispatchPeppolInvoice({ booking: manualBooking, side,
+    invoiceNumber: fact.invoiceNumber, ublXml: xml.toString('utf8'),
+    invoiceUblUrl: fact.invoiceUblUrl, invoicePdfUrl: fact.invoiceUrl,
+    issueDate: fact.generatedAt, documentType: 'credit_note',
+    netAmount: fact.netAmount, totalWithVat: roundCreditMoney(fact.netAmount + fact.vatAmount),
+    vatRate: input.payment.vatRate, reverseCharge: input.payment.reverseCharge,
+    lineItems: getPeppolLineItems(getPricingLinesForUbl(manualBooking, { selfBilling: side === 'supplier', platform })),
+  });
+  const fields = { [`${prefix}PeppolDispatchStatus`]: result.status,
+    [`${prefix}PeppolDispatchReason`]: result.reason, [`${prefix}PeppolDispatchReference`]: result.reference };
+  await Booking.updateOne({ _id: booking._id, [`payment.${prefix}Number`]: number }, {
+    $set: Object.fromEntries(Object.entries(fields).map(([key, value]) => [`payment.${key}`, value])),
+  });
+  await persistPaymentArtifactUpdate(booking._id, undefined, fields);
+  return result.status === 'queued' || result.status === 'failed';
+};
+
 /**
  * Credit only refunds not yet represented by the issued invoice and credit
  * ledger. Each side has its own durable refund-fact key, so a retry completes
@@ -2416,6 +2460,9 @@ export async function ensurePartialRefundCreditArtifacts(
     const current = recordedInvoiceSettlementBasis(booking, platform);
     let issued = booking.payment.invoiceSettlementBasis;
     const ledger = booking.payment.refundCreditLedger || [];
+    for (const side of ['customer', 'supplier'] as const) {
+      if (await retryRecordedPartialCredit(booking, side, platform)) return 'busy';
+    }
     if (!issued) {
       // Legacy invoices can be reconstructed only from their recorded payments
       // and issue date. Existing credits without coverage metadata need an
@@ -2460,11 +2507,12 @@ export async function ensurePartialRefundCreditArtifacts(
       const description = buildPartialRefundDescription({ amount: delta, currency,
         date: booking.payment.refundedAt, reason: booking.payment.refundReason,
         description: booking.cancellation?.adminResolutionNote });
-      await createManualInvoiceArtifact(bookingId, undefined, buildPartialRefundCreditInput({
+      const artifact = await createManualInvoiceArtifact(bookingId, undefined, buildPartialRefundCreditInput({
         side, net, vat, vatRate: effectiveVatRateForCredit(net, vat, booking.payment.vatRate),
         reverseCharge: vat === 0 && Boolean(side === "customer" ? booking.payment.reverseCharge : getSupplierVatContext(booking, platform).reverseCharge),
         currency, relatedInvoiceNumber, description,
       }), { key, side, refundAmount: delta, netAmount: net, vatAmount: vat, generationClaim: claimed });
+      if (artifact.peppolDispatchStatus === 'queued' || artifact.peppolDispatchStatus === 'failed') return 'busy';
     }
     return "credited";
   } finally {
@@ -2680,6 +2728,8 @@ export async function createManualInvoiceArtifact(
     invoiceNumber: generated.invoiceNumber, invoiceUrl: artifactUrl,
     invoiceUblUrl: ublUrl, generatedAt,
   } : undefined;
+  if (creditFact) (bookingUpdate.$set as Record<string, unknown>)['payment.refundInvoiceRetryAt'] =
+    new Date(Date.now() + CREDIT_GENERATION_CLAIM_TTL_MS + 1000);
   if (creditFact) bookingUpdate.$push = { ...(bookingUpdate.$push as object), "payment.refundCreditLedger": creditFact };
   const artifactFilter: Record<string, unknown> = { _id: booking._id };
   if (refundFact) {

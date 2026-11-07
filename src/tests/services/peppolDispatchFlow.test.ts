@@ -109,7 +109,7 @@ describe("Peppol Odoo dispatch", () => {
     expect(JSON.stringify(errored)).not.toContain("ECONNREFUSED");
   });
 
-  it.each([["sent", "sent"], ["processing", "queued"]])("refreshes an existing %s move without sending it again", async (state, status) => {
+  it.each([["sent", "sent", "invoice"], ["processing", "queued", "invoice"], ["sent", "sent", "credit_note"], ["processing", "queued", "credit_note"]])("refreshes an existing %s move without sending it again", async (state, status, documentType) => {
     const normal = mocks.call.getMockImplementation()!;
     mocks.call.mockImplementation(async (...args) => {
       if (args[1] === "account.move" && args[2] === "search_read") return [{ id: 70, state: "posted" }];
