@@ -2391,6 +2391,15 @@ const recordedInvoiceSettlementBasis = (booking: any, platform: UblPlatformParty
   return { customer: side(false), supplier: side(true) };
 };
 
+/** Automatic retries only refresh provider work that can still progress. */
+const isPartialCreditDispatchRetryable = (status: unknown, reason: unknown): boolean => {
+  const message = typeof reason === 'string' ? reason : '';
+  if (status === 'queued') return !/manual Peppol dispatch required/i.test(message);
+  // Match the existing Peppol cron policy: configuration, tax, recipient and
+  // delivery errors require intervention rather than an endless refund retry.
+  return status === 'failed' && /did not answer|in progress|timed? ?out/i.test(message);
+};
+
 /** Retry the issued partial credit, never regenerate it from today's balance. */
 const retryRecordedPartialCredit = async (
   booking: any, side: 'customer' | 'supplier', platform: UblPlatformParty, claim: string,
@@ -2398,7 +2407,7 @@ const retryRecordedPartialCredit = async (
   const prefix = side === 'customer' ? 'creditNote' : 'supplierCreditNote';
   const number = booking.payment[`${prefix}Number`];
   const status = booking.payment[`${prefix}PeppolDispatchStatus`];
-  if (!number || !['queued', 'failed'].includes(status)) return false;
+  if (!number || !isPartialCreditDispatchRetryable(status, booking.payment[`${prefix}PeppolDispatchReason`])) return false;
   const fact = booking.payment.refundCreditLedger?.find((entry: RefundCreditFact) =>
     entry.side === side && entry.invoiceNumber === number);
   if (!fact) throw new Error('Partial credit dispatch lacks recorded amounts; reconcile before retry.');
@@ -2435,7 +2444,7 @@ const retryRecordedPartialCredit = async (
     $set: Object.fromEntries(Object.entries(fields).map(([key, value]) => [`payment.${key}`, value])),
   });
   await persistPaymentArtifactUpdate(booking._id, undefined, fields);
-  return result.status === 'queued' || result.status === 'failed';
+  return isPartialCreditDispatchRetryable(result.status, result.reason);
 };
 
 /**
@@ -2464,8 +2473,12 @@ export async function ensurePartialRefundCreditArtifacts(
     const current = recordedInvoiceSettlementBasis(booking, platform);
     let issued = booking.payment.invoiceSettlementBasis;
     const ledger = booking.payment.refundCreditLedger || [];
+    let dispatchPending = false;
     for (const side of ['customer', 'supplier'] as const) {
-      if (await retryRecordedPartialCredit(booking, side, platform, claimed)) return 'busy';
+      // Refresh both existing documents independently of issuing new deltas.
+      // A pending send must not prevent either side's next credit.
+      const pending = await retryRecordedPartialCredit(booking, side, platform, claimed);
+      dispatchPending = pending || dispatchPending;
     }
     if (!issued) {
       // Legacy invoices can be reconstructed only from their recorded payments
@@ -2516,9 +2529,9 @@ export async function ensurePartialRefundCreditArtifacts(
         reverseCharge: vat === 0 && Boolean(side === "customer" ? booking.payment.reverseCharge : getSupplierVatContext(booking, platform).reverseCharge),
         currency, relatedInvoiceNumber, description,
       }), { key, side, refundAmount: delta, netAmount: net, vatAmount: vat, generationClaim: claimed });
-      if (artifact.peppolDispatchStatus === 'queued' || artifact.peppolDispatchStatus === 'failed') return 'busy';
+      dispatchPending = isPartialCreditDispatchRetryable(artifact.peppolDispatchStatus, artifact.peppolDispatchReason) || dispatchPending;
     }
-    return "credited";
+    return dispatchPending ? "busy" : "credited";
   } finally {
     await clearCreditNoteGenerationClaim(bookingId, claimed);
   }
