@@ -226,8 +226,8 @@ describe('milestone expected charges in booking details (client bug list #19b)',
   });
   it('uses an authorized total, excluding pending attempts from confirmed customer charges', async () => {
     const details = await build('customer', { booking: milestoneBooking, payments: [
-      { milestoneIndex: 0, status: 'pending', totalWithVat: 999 },
-      { milestoneIndex: 0, status: 'authorized', totalWithVat: 145.2 },
+      { stripePaymentIntentId: 'pi_pending_0', milestoneIndex: 0, status: 'pending', totalWithVat: 999 },
+      { stripePaymentIntentId: 'pi_authorized_0', milestoneIndex: 0, status: 'authorized', totalWithVat: 145.2 },
       { milestoneIndex: 1, status: 'pending', totalWithVat: 242 },
     ] });
     expect(details.payments.milestones[0].customerChargeTotalWithVat).toBe(145.2);
