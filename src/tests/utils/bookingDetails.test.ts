@@ -1943,14 +1943,21 @@ describe('reschedule details', () => {
       reason: 'Material delay',
       description: 'Supplier delay',
       actorRecorded: true,
+      canRespond: false,
       respondedAt: '2026-02-01T11:00:00.000Z',
     });
     expect(details.reschedules[1]).toMatchObject({
       reason: 'New date needed',
       description: 'The building access moved',
       respondedAt: null,
+      canRespond: false,
     });
     expect(details.activity.items.some((item) => item.type === 'reschedule_requested')).toBe(true);
+    const live = await buildDetails('customer', { booking: { ...base, status: 'rescheduling_requested' } });
+    expect(live.reschedules.map(entry => entry.canRespond)).toEqual([false, true]);
+    const pendingHistory = await buildDetails('customer', { booking: { ...base, status: 'rescheduling_requested',
+      rescheduleHistory: [{ ...base.rescheduleHistory[0], status: 'pending' }] } });
+    expect(pendingHistory.reschedules.map(entry => entry.canRespond)).toEqual([false, true]);
   });
 });
 
