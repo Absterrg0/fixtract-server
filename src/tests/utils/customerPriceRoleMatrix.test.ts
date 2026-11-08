@@ -3,6 +3,7 @@ import { Types } from 'mongoose';
 import { publicProjectPricingView, viewerSeesBasePricing } from '../../utils/customerPriceView';
 import { bookingForViewer, paymentForViewer } from '../../utils/invoiceVisibility';
 import { checkoutCustomerTotal, commissionedQuoteAmount, optionsCustomerCharge, withCommission } from '../../utils/customerPricing';
+import { filterRawBookingForAdminArea } from '../../utils/bookingDetails/adminAccess';
 
 // Distinctive professional base values. A base value appearing in a customer or anonymous body is a leak.
 const RATE = 13;
@@ -122,5 +123,38 @@ describe('checkout total equals the customer total shown', () => {
     const snapshot = { pricingType: 'fixed', baseSubtotal: BASE.fixed, extraOptionsTotal: BASE.option, totalAmount: BASE.fixed + BASE.option };
     const checkoutCharge = commissionedQuoteAmount(BASE.fixed, snapshot as any, RATE) + optionsCustomerCharge(BASE.option, RATE);
     expect(checkoutCustomerTotal(snapshot as any, RATE)).toBe(+checkoutCharge.toFixed(2));
+  });
+});
+
+describe('booking endpoints: each viewer receives only what their role may see', () => {
+  const RECORDED = { customerId: new Types.ObjectId(), professionalId: new Types.ObjectId() };
+  const booking = () => ({
+    customer: RECORDED.customerId,
+    professional: RECORDED.professionalId,
+    quote: { amount: BASE.fixed, currency: 'EUR' },
+    checkoutSnapshot: { pricingType: 'fixed', unitAmount: BASE.fixed, quantity: 1, baseSubtotal: BASE.fixed, extraOptionsTotal: 0, totalAmount: BASE.fixed, currency: 'EUR' },
+    quoteVersions: [{ version: 1, totalAmount: BASE.fixed, customerTotals: { commissionPercent: RATE, professionalNetAmount: BASE.payout, customerNetAmount: CUSTOMER.fixed, currency: 'EUR', recordedAt: new Date('2026-01-01T00:00:00Z') } }],
+    payment: { amount: CUSTOMER.fixed, platformCommission: BASE.commission, professionalPayout: BASE.payout, currency: 'EUR', status: 'completed' },
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+  });
+
+  // The handlers only serialize a booking for participants, admins and the owner. The matrix covers each of them.
+  const rows: Array<{ label: string; serialize: () => unknown; sees: { base: boolean; commission: boolean } }> = [
+    { label: 'anonymous (no participation)', serialize: () => bookingForViewer(booking(), 'customer'), sees: { base: false, commission: false } },
+    { label: 'customer (participant)', serialize: () => bookingForViewer(booking(), 'customer'), sees: { base: false, commission: false } },
+    { label: 'other customer', serialize: () => bookingForViewer(booking(), 'customer'), sees: { base: false, commission: false } },
+    { label: 'owner professional', serialize: () => bookingForViewer(booking(), 'professional'), sees: { base: true, commission: true } },
+    { label: 'admin with payments read', serialize: () => filterRawBookingForAdminArea(booking(), { bookings: true, disputes: true, warranty: true, cancellations: true, payments: true }), sees: { base: true, commission: true } },
+    { label: 'admin bookings only', serialize: () => filterRawBookingForAdminArea(booking(), { bookings: true, disputes: true, warranty: true, cancellations: true, payments: false }), sees: { base: true, commission: false } },
+  ];
+
+  it.each(rows)('$label', ({ serialize, sees: expected }) => {
+    const text = body(serialize());
+    expect(sees(text, BASE.fixed)).toBe(expected.base);
+    expect(/platformCommission|commissionPercent|commission_percent/i.test(text)).toBe(expected.commission);
+    if (!expected.base) {
+      // Customer and anonymous responses never pair the base with the customer total.
+      expect(sees(text, CUSTOMER.fixed) && sees(text, BASE.fixed)).toBe(false);
+    }
   });
 });

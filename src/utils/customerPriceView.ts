@@ -1,4 +1,4 @@
-import { withCommission } from './customerPricing';
+import { checkoutCustomerTotal, commissionedQuoteAmount, withCommission } from './customerPricing';
 import { withholdPricingForMode } from './quotationVisibility';
 
 type Obj = { [key: string]: any };
@@ -80,4 +80,34 @@ export const publicProjectPricingView = (
 ): Obj => {
   if (seesBasePricing) return project;
   return withholdPricingForMode(withCustomerPrices(project, commissionPercent), 'customer');
+};
+
+/**
+ * A booking whose populated project carries customer prices (package and option)
+ * for every non-professional viewer, so the booking payload can withhold the base
+ * and still show the option prices a customer chooses from. Professionals and
+ * admins are returned unchanged.
+ */
+export const bookingWithCustomerProjectPrices = async (
+  booking: any,
+  viewerRole: 'admin' | 'customer' | 'professional',
+  getCommissionPercent: () => Promise<number>,
+): Promise<any> => {
+  if (!booking || typeof booking !== 'object' || !booking.project || typeof booking.project !== 'object') return booking;
+  if (viewerRole === 'professional' || viewerRole === 'admin') return booking;
+  const plain = typeof booking.toObject === 'function' ? booking.toObject() : { ...booking };
+  const commissionPercent = await getCommissionPercent();
+  const snapshot = plain.checkoutSnapshot && typeof plain.checkoutSnapshot === 'object' ? plain.checkoutSnapshot : null;
+  return {
+    ...plain,
+    project: withCustomerPrices(booking.project, commissionPercent),
+    // Customer totals of the checkout package alone and with its options (checkout arithmetic).
+    ...(snapshot ? {
+      checkoutSnapshot: {
+        ...snapshot,
+        customerPackageTotal: commissionedQuoteAmount(Number(snapshot.baseSubtotal) || 0, snapshot, commissionPercent),
+        customerTotal: checkoutCustomerTotal(snapshot, commissionPercent),
+      },
+    } : {}),
+  };
 };

@@ -59,6 +59,8 @@ import { loadOverviewRefundLedgers } from "../../utils/paymentRefundLedger";
 import { safeErrorSummary } from "../../utils/safeErrorLog";
 import { snapshotQuestionDefinitions } from '../../utils/bookingDetails/snapshot';
 import { RECORDED_DISPUTE_FILTER, withoutPhantomBookingActivity } from '../../utils/bookingActivity';
+import { bookingWithCustomerProjectPrices } from '../../utils/customerPriceView';
+import { getCheckoutCommissionPercent } from '../../utils/checkoutCommission';
 
 /** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
 const applyProceedAtStandardVatIfRequested = (
@@ -1712,7 +1714,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
             : booking,
           adminAccess!,
         )
-      : bookingForViewer(booking, viewerRole);
+      : bookingForViewer(await bookingWithCustomerProjectPrices(booking, viewerRole, getCheckoutCommissionPercent), viewerRole);
     const maskedBooking = maskBookingForAnonymizedParties(filteredBooking, maskingFlags);
     // Masking must remove target-owned file keys before any presigner sees
     // them. The old order signed first and could return a working URL.
