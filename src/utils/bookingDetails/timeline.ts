@@ -92,25 +92,33 @@ const humanizeType = (type: string): string =>
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ');
 
+type StatusCoverage = Array<{ status: string; timestamp: number | null }>;
+
+/**
+ * Records that an event already represents `status`. An undated fact is kept
+ * with a null timestamp so the undated status-history entry for the same
+ * status is suppressed too: one fact yields one timeline event.
+ */
 const markStatusCovered = (
-  covered: Array<{ status: string; timestamp: number }>,
+  covered: StatusCoverage,
   status: string | null | undefined,
   value: unknown,
 ) => {
+  if (!status) return;
   const date = toDate(value);
-  if (!status || !date) return;
-  covered.push({ status, timestamp: date.getTime() });
+  covered.push({ status, timestamp: date ? date.getTime() : null });
 };
 
 const isStatusCovered = (
-  covered: Array<{ status: string; timestamp: number }>,
+  covered: StatusCoverage,
   status: string,
   value: unknown,
 ): boolean => {
   const date = toDate(value);
-  if (!date) return false;
+  if (!date) return covered.some((entry) => entry.status === status && entry.timestamp === null);
   return covered.some(
-    (entry) => entry.status === status && Math.abs(entry.timestamp - date.getTime()) <= 5000,
+    (entry) => entry.status === status && entry.timestamp !== null
+      && Math.abs(entry.timestamp - date.getTime()) <= 5000,
   );
 };
 
@@ -221,7 +229,7 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
   const booking = withoutPhantomBookingActivity(unfilteredBooking);
   const events: ActivityItem[] = [];
   const seenIds = new Set<string>();
-  const coveredStatus: Array<{ status: string; timestamp: number }> = [];
+  const coveredStatus: StatusCoverage = [];
   const qualityNotes = new Set<string>();
 
   const pushEvent = (event: PushEvent) => {

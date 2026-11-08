@@ -2121,8 +2121,10 @@ describe('phase 1 booking/quotation read-model parity', () => {
       statusHistory: [{ status: 'rfq', timestamp: null }, { status: 'quoted', note: 'Quotation submitted', timestamp: null }],
     } });
     expect(details.activity.items.find(item => item.id === 'quote:1')).toMatchObject({ occurredAt: '', timestampRecorded: false });
-    expect(details.activity.items.find(item => item.id === 'status:1')).toMatchObject({ occurredAt: '', timestampRecorded: false });
-    expect(details.activity.dataQuality.undatedEvents).toBeGreaterThanOrEqual(2);
+    // The undated 'quoted' status entry describes the same fact as quote:1, so it is not repeated.
+    expect(details.activity.items.find(item => item.id === 'status:1')).toBeUndefined();
+    expect(details.activity.items.filter(item => item.id === 'quote:1' || item.statusTo === 'quoted')).toHaveLength(1);
+    expect(details.activity.dataQuality.undatedEvents).toBeGreaterThanOrEqual(1);
   });
 });
 
