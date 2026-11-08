@@ -24,6 +24,7 @@ import {
   listPublicPolicyLinks,
 } from "../../handlers/Public/cms";
 import { getPublicSiteSettings } from "../../handlers/Public/siteSettings";
+import { listPublicSitemapEntities } from "../../handlers/Public/sitemapEntities";
 import { getPublicAutoConversion } from "../../handlers/Public/autoConversion";
 import { getPublicExchangeRates } from "../../handlers/Public/exchangeRates";
 import {
@@ -78,6 +79,12 @@ const createPublicRateLimiter = (limit: number) =>
 const schedulingRateLimiter = createPublicRateLimiter(SCHEDULING_RATE_LIMIT);
 const announcementListRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_LIST_RATE_LIMIT);
 const announcementEventRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_EVENT_RATE_LIMIT);
+/**
+ * Sitemap entity pages are read by the frontend server (one shared egress IP), so they
+ * get their own budget and never draw from the booking calendar budget.
+ */
+export const SITEMAP_ENTITY_RATE_LIMIT = 120;
+const sitemapEntityRateLimiter = createPublicRateLimiter(SITEMAP_ENTITY_RATE_LIMIT);
 
 // Google Maps configuration (public endpoint)
 publicRouter.route("/google-maps-config").get(getGoogleMapsConfig);
@@ -164,6 +171,9 @@ publicRouter
 
 // CMS public endpoints
 publicRouter.route("/cms/sitemap").get(listCmsSitemapEntries);
+
+// Public sitemap entities (published projects and approved professionals): id + updatedAt only
+publicRouter.route("/sitemap/entities").get(sitemapEntityRateLimiter, listPublicSitemapEntities);
 publicRouter.route("/cms/faq").get(listPublicFaq);
 publicRouter.route("/cms/policy-links").get(listPublicPolicyLinks);
 publicRouter.route("/cms/:type").get(listPublicCmsContent);
