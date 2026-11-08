@@ -25,6 +25,7 @@ import {
 } from "../../handlers/Public/cms";
 import { getPublicSiteSettings } from "../../handlers/Public/siteSettings";
 import { listPublicSitemapEntities } from "../../handlers/Public/sitemapEntities";
+import { getPublicProfessionalProfile } from "../../handlers/Public/professionalProfile";
 import { getPublicAutoConversion } from "../../handlers/Public/autoConversion";
 import { getPublicExchangeRates } from "../../handlers/Public/exchangeRates";
 import {
@@ -85,6 +86,14 @@ const announcementEventRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_EVENT_
  */
 export const SITEMAP_ENTITY_RATE_LIMIT = 120;
 const sitemapEntityRateLimiter = createPublicRateLimiter(SITEMAP_ENTITY_RATE_LIMIT);
+/**
+ * Public entity records (the professional profile) that the frontend server renders
+ * into SEO HTML. All of those requests come from one egress IP, so this budget is
+ * much higher than the per-visitor budgets, but it is still capped. It is separate
+ * from the booking calendar and review budgets, and it trusts no client header.
+ */
+export const PUBLIC_ENTITY_READ_RATE_LIMIT = 1000;
+const publicEntityReadRateLimiter = createPublicRateLimiter(PUBLIC_ENTITY_READ_RATE_LIMIT);
 
 // Google Maps configuration (public endpoint)
 publicRouter.route("/google-maps-config").get(getGoogleMapsConfig);
@@ -117,6 +126,11 @@ publicRouter
 
 // Referral code validation (public endpoint for signup)
 publicRouter.route("/referral/validate/:code").get(schedulingRateLimiter, validateReferralCodePublic);
+
+// Professional profile record (public, used by the frontend server for SEO HTML)
+publicRouter
+  .route("/professionals/:id")
+  .get(publicEntityReadRateLimiter, getPublicProfessionalProfile);
 
 // Professional profile and reviews (public)
 publicRouter
