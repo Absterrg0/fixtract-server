@@ -43,6 +43,7 @@ import { getBookingActivity, getBookingDetails } from '../../../handlers/Booking
 import { getBookingById, submitPostBookingAnswers } from '../../../handlers/Booking';
 import { getQuotationVersions } from '../../../handlers/Quotation';
 import { getAdminBookingDetail } from '../../../handlers/Admin/bookingDetail';
+import quotationRouter from '../../../routes/Quotation';
 
 const customerId = new Types.ObjectId('64b000000000000000000001');
 const professionalId = new Types.ObjectId('64b000000000000000000002');
@@ -384,16 +385,28 @@ const assertNoCommission = (value: any): void => {
   }
 };
 
+/** The final handler of GET /:bookingId/details on the quotation router (auth middleware sits before it). */
+const quotationDetailsHandler = () => {
+  const layer = (quotationRouter as any).stack.find((entry: any) => entry.route?.path === '/:bookingId/details' && entry.route.methods?.get);
+  expect(layer, 'quotation router exposes GET /:bookingId/details').toBeDefined();
+  const handler = layer.route.stack.at(-1).handle;
+  expect(handler).toBe(getBookingDetails);
+  return handler;
+};
+
 describe('booking and quotation alias privacy/IDOR contract', () => {
   const handlers = [
     ['booking', getBookingById], ['details', getBookingDetails],
-    ['activity', getBookingActivity], ['quotation details', getBookingDetails],
+    ['activity', getBookingActivity],
+    // Resolved from the mounted quotation router below, so the alias is tested as routed.
+    ['quotation details', quotationDetailsHandler()],
     ['versions', getQuotationVersions], ['admin full', getAdminBookingDetail],
   ] as const;
   const viewers = [
     ['customer', { _id: customerId, role: 'customer' }],
     ['dual-role customer', { _id: customerId, role: 'professional' }],
     ['professional', { _id: professionalId, role: 'professional' }],
+    // Same identity as 'professional'; the case sets `source.professional = undefined` so the project-owner path is taken.
     ['project owner', { _id: professionalId, role: 'professional' }],
     ['unrelated', { _id: new Types.ObjectId(), role: 'customer' }],
     ['anonymous', undefined],
@@ -416,6 +429,7 @@ describe('booking and quotation alias privacy/IDOR contract', () => {
       const next = vi.fn();
       await (handler as any)({ ...request(user), params: { bookingId: String(bookingId), id: String(bookingId) } }, res, next);
       expect(next).not.toHaveBeenCalled();
+      // `startsWith('admin')` only matters for the admin handler: its only allowed viewers are admins.
       const denied = ['unrelated', 'anonymous', 'admin without bookings'].includes(label) || (alias === 'admin full' && !label.startsWith('admin'));
       if (denied) {
         expect(res.body.success).toBe(false);

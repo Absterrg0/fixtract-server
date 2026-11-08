@@ -16,6 +16,9 @@ import {
   type BookingAdminAccess,
 } from '../../utils/bookingDetails/adminAccess';
 
+/** Professional identity fields shown on booking details. Shared by the populate and the project-owner lookup. */
+const PROFESSIONAL_DETAIL_SELECT = 'name username email phone businessInfo vatNumber timeZone role professionalLevel adminTags isAnonymized deletedAt';
+
 const BOOKING_DETAIL_POPULATE = [
   {
     path: 'customer',
@@ -23,7 +26,7 @@ const BOOKING_DETAIL_POPULATE = [
   },
   {
     path: 'professional',
-    select: 'name username email phone businessInfo vatNumber timeZone role professionalLevel adminTags isAnonymized deletedAt',
+    select: PROFESSIONAL_DETAIL_SELECT,
   },
   {
     path: 'project',
@@ -78,7 +81,7 @@ export const buildDetailsForBookingDocument = async (params: {
   // Resolve only the same selected identity/contact fields as the detail populate.
   const ownerProfiles = !plain.professional && professionalIdFromProject
     ? await User.find({ _id: professionalIdFromProject })
-        .select('name username email phone businessInfo vatNumber timeZone role professionalLevel adminTags isAnonymized deletedAt').lean()
+        .select(PROFESSIONAL_DETAIL_SELECT).lean()
     : [];
   const bookingForProjection = {
     ...plain,
