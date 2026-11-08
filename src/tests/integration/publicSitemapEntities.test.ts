@@ -161,5 +161,36 @@ describeDb('public sitemap entities (disposable MongoDB)', () => {
 
     const fallback = await call({ type: 'project', page: 'abc', limit: '-3' });
     expect(fallback.body.data.pagination).toMatchObject({ page: 1, limit: 500 });
+
+    // Exponent and fractional forms are not pages; they fall back instead of erroring.
+    const exponent = await call({ type: 'professional', page: '1e300' });
+    expect(exponent.statusCode).toBe(200);
+    expect(exponent.body.data.pagination.page).toBe(1);
+  });
+
+  it('answers a page beyond the supported range with an empty page, not a 500', async () => {
+    const owner = pro();
+    await User.collection.insertOne(owner as any);
+    await Project.collection.insertOne(project(owner._id) as any);
+
+    for (const type of ['project', 'professional']) {
+      const res = await call({ type, page: '999999999' });
+      expect(res.statusCode).toBe(200);
+      expect(res.body.data.items).toEqual([]);
+      expect(res.body.data.pagination).toMatchObject({ page: 999999999, total: 1, hasMore: false });
+    }
+  });
+
+  it('includes a published project whose legacy owner id is stored as a string', async () => {
+    const owner = pro();
+    await User.collection.insertOne(owner as any);
+    const legacy = project(owner._id, { professionalId: String(owner._id) });
+    const garbage = project(owner._id, { professionalId: 'not-an-object-id' });
+    await Project.collection.insertMany([legacy, garbage] as any[]);
+
+    const res = await call({ type: 'project' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.items).toEqual([{ id: String(legacy._id), updatedAt: RECENT }]);
   });
 });

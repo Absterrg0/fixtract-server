@@ -134,6 +134,9 @@ describe('public sitemap entities handler', () => {
     const lookup = pipeline.find((stage) => '$lookup' in stage).$lookup;
     expect(lookup.from).toBe('users');
     expect(lookup.pipeline[0].$match).toMatchObject(publicProjectOwnerFilter());
+    expect(lookup.let.ownerId).toEqual({
+      $convert: { input: '$professionalId', to: 'objectId', onError: null, onNull: null },
+    });
     expect(pipeline.find((stage) => '$facet' in stage).$facet.items).toEqual([
       { $skip: 50 },
       { $limit: 50 },
