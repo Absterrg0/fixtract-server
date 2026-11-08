@@ -31,6 +31,7 @@ import { normalizePreparationDuration } from "../../utils/projectDurations";
 import { computeProjectDiff, determineReapprovalType } from "../../utils/projectDiff";
 import { toSlug } from "../../utils/slug";
 import { withArticle47ProfessionalQuestion } from "../../utils/vatManagement";
+import { publicProjectOwnerFilter } from "../../utils/publicVisibility";
 import { pruneDraftArticle47Answers } from "../../utils/projectDraftVatAnswers";
 import { withAnonymizationWriteFence, ACCOUNT_WRITE_FENCE_CODE } from "../../utils/support/accountGuard";
 import {
@@ -738,12 +739,7 @@ export const getPublishedProject = async (req: Request, res: Response) => {
 
     const professionalId = (project.professionalId as any)?._id || project.professionalId;
     const ownerIsActive = professionalId
-      ? await User.exists({
-          _id: professionalId,
-          role: "professional",
-          deletedAt: null,
-          isAnonymized: { $ne: true },
-        })
+      ? await User.exists({ _id: professionalId, ...publicProjectOwnerFilter() })
       : null;
     if (!ownerIsActive) {
       return res.status(404).json({

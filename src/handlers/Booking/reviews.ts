@@ -14,6 +14,7 @@ import { getProfessionalId } from '../../utils/bookingHelpers';
 import { maskBookingForAnonymizedParties } from '../../utils/accountAnonymity';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 import { UserFacingError } from '../../utils/appErrors';
+import { isPubliclyViewableProfessional } from '../../utils/publicVisibility';
 
 const MAX_COMMENT_LENGTH = 1000;
 
@@ -451,7 +452,7 @@ export const getProfessionalReviews = async (req: Request, res: Response, next: 
     }
 
     const professional = await User.findById(professionalId).select("name username role businessInfo.description businessInfo.city businessInfo.country businessInfo.website profileImage serviceCategories hourlyRate createdAt location professionalStatus deletedAt isAnonymized");
-    if (!professional || professional.role !== "professional" || professional.professionalStatus !== "approved" || professional.deletedAt || professional.isAnonymized) {
+    if (!isPubliclyViewableProfessional(professional)) {
       return res.status(404).json({ success: false, msg: "Professional not found" });
     }
 
