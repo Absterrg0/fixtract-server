@@ -1294,7 +1294,8 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
         currency: currentVersion?.currency || 'EUR',
         description: currentVersion?.description,
         validUntil: currentVersion?.validUntil,
-        submittedAt: currentVersion?.createdAt || booking.quote?.submittedAt,
+        // Required on IQuote: the final `now` keeps the field set when neither source has a date.
+        submittedAt: currentVersion?.createdAt || booking.quote?.submittedAt || now,
         submittedBy: booking.professional!._id,
       },
     };
