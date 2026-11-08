@@ -57,6 +57,8 @@ import LoyaltyConfig from "../../models/loyaltyConfig";
 import { getCurrentTier } from "../../utils/loyaltySystem";
 import { withSignedProjectMediaList } from "../../utils/projectMedia";
 import { getCountryCode } from "../../utils/geocoding";
+import { getCheckoutCommissionPercent } from "../../utils/checkoutCommission";
+import { publicProjectPricingView, viewerSeesBasePricing } from "../../utils/customerPriceView";
 
 const escapeSearchRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -1074,7 +1076,15 @@ async function searchProjects(
       return subproject?.pricing?.type === "unit" && subproject?.pricing?.durationBasis === "per_unit" ? minQuantity : 1;
     };
 
-    const signedResults = await withSignedProjectMediaList(finalResults as any[]);
+    // Customer prices for every viewer except the owning professional and payments-authorized admins.
+    const commissionForView = await getCheckoutCommissionPercent();
+    const canReadPaymentsForView = res.locals?.canReadPayments === true;
+    const viewer = res.req?.user;
+    const signedResults = await withSignedProjectMediaList(finalResults.map((project: any) => publicProjectPricingView(
+      project,
+      viewerSeesBasePricing(viewer, project.professionalId, canReadPaymentsForView),
+      commissionForView,
+    )) as any[]);
     const resultsWithAvailability = await Promise.all(
       signedResults.map(async (project: any) => {
         try {

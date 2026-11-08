@@ -96,7 +96,7 @@ publicRouter.route("/validate-address").post(validateAddress);
 publicRouter.route("/vat/validate").post(validateVAT);
 
 // Project viewing (public endpoint for customers to view projects)
-publicRouter.route("/projects/:id").get(getPublishedProject);
+publicRouter.route("/projects/:id").get(optionalProtect, getPublishedProject);
 
 // Team availability (public endpoint for booking calendar)
 publicRouter
