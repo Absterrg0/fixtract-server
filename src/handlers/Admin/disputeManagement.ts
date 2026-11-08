@@ -47,6 +47,11 @@ import {
 } from '../../utils/accountAnonymity';
 import { param, params } from '../../utils/requestParams';
 import { notify } from '../../utils/notifications/notify';
+import {
+  resolveDashboardBaseline,
+  toBaselineInfo,
+  withBaselineClause,
+} from '../../utils/adminDashboardBaselines';
 
 const presignAttachments = async (urls?: unknown): Promise<string[]> => {
   if (!Array.isArray(urls) || urls.length === 0) return [];
@@ -330,7 +335,12 @@ export const getDisputes = async (req: Request, res: Response) => {
     const pageNum = Math.max(1, parseInt(page as string) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
 
-    const filter = buildDisputeFilter(typeof status === 'string' ? status : undefined);
+    // Counting-since baseline: the list and its pagination total share one filter.
+    const baseline = await resolveDashboardBaseline(req, 'disputes');
+    const filter = withBaselineClause(
+      buildDisputeFilter(typeof status === 'string' ? status : undefined),
+      baseline.clause,
+    ) as any;
 
     const [disputes, total] = await Promise.all([
       Booking.find(filter)
@@ -374,7 +384,8 @@ export const getDisputes = async (req: Request, res: Response) => {
           limit: limitNum,
           total,
           pages: Math.ceil(total / limitNum),
-        }
+        },
+        baseline: toBaselineInfo(baseline),
       }
     });
   } catch (error: any) {
@@ -1058,21 +1069,23 @@ export const resolveDispute = async (req: Request, res: Response) => {
   });
 };
 
-export const getDisputeAnalytics = async (_req: Request, res: Response) => {
+export const getDisputeAnalytics = async (req: Request, res: Response) => {
   try {
     // totalOpen / totalResolved / totalDisputes count booking disputes only,
-    // with exactly the filters of the Open / Resolved / All list views.
+    // with exactly the filters of the Open / Resolved / All list views, plus the
+    // same counting-since baseline (open work is never excluded by it).
     // Warranty claims and refund requests are reported separately and are
     // never added into these totals.
+    const baseline = await resolveDashboardBaseline(req, 'disputes');
     const [
       totalOpen,
       totalResolved,
       totalDisputes,
       separateQueues,
     ] = await Promise.all([
-      Booking.countDocuments(buildDisputeFilter('open')),
-      Booking.countDocuments(buildDisputeFilter('resolved')),
-      Booking.countDocuments(buildDisputeFilter()),
+      Booking.countDocuments(withBaselineClause(buildDisputeFilter('open'), baseline.clause) as any),
+      Booking.countDocuments(withBaselineClause(buildDisputeFilter('resolved'), baseline.clause) as any),
+      Booking.countDocuments(withBaselineClause(buildDisputeFilter(), baseline.clause) as any),
       countSeparateDisputeQueues(),
     ]);
 
@@ -1083,6 +1096,7 @@ export const getDisputeAnalytics = async (_req: Request, res: Response) => {
         totalResolved,
         totalDisputes,
         separateQueues,
+        baseline: toBaselineInfo(baseline),
       }
     });
   } catch (error: any) {

@@ -13,6 +13,12 @@ import { generateKpiPdf } from '../../utils/kpiReport';
 import { sendKpiReportEmail } from '../../utils/emailService';
 import { uploadBufferToS3 } from '../../utils/s3Upload';
 import { buildSettledTransferExpression } from '../../utils/paymentSafety';
+import {
+  clampKpiFrom,
+  resolveDashboardBaseline,
+  toBaselineInfo,
+  type DashboardBaselineInfo,
+} from '../../utils/adminDashboardBaselines';
 
 const REPORTING_CURRENCY = STRIPE_CONFIG.defaultCurrency || 'EUR';
 
@@ -32,6 +38,21 @@ const parseRange = (req: Request): DateRange => {
     return { from: to, to: from };
   }
   return { from, to };
+};
+
+/**
+ * Requested range clamped to the bookingKpis counting-since baseline. KPIs are
+ * range aggregates, so a reset simply moves the start of the range forward.
+ * `?history=all` turns the clamp off for the request.
+ */
+const parseKpiRange = async (req: Request): Promise<{ from: Date; to: Date; baseline: DashboardBaselineInfo }> => {
+  const range = parseRange(req);
+  const resolved = await resolveDashboardBaseline(req, 'bookingKpis');
+  return {
+    from: resolved.applied && resolved.resetAtDate ? clampKpiFrom(range.from, resolved.resetAtDate) : range.from,
+    to: range.to,
+    baseline: toBaselineInfo(resolved),
+  };
 };
 
 const parseCountry = (req: Request): string | null => {
@@ -279,7 +300,7 @@ export const getKpiCountries = async (_req: Request, res: Response) => {
 
 export const getKpiSummary = async (req: Request, res: Response) => {
   try {
-    const { from, to } = parseRange(req);
+    const { from, to, baseline } = await parseKpiRange(req);
     const country = parseCountry(req);
     const bookingCountryMatch = buildBookingCountryMatch(country);
     const userCountryMatch = buildUserCountryMatch(country);
@@ -497,6 +518,7 @@ export const getKpiSummary = async (req: Request, res: Response) => {
       success: true,
       data: {
         range: { from: from.toISOString(), to: to.toISOString() },
+        baseline,
         reportingCurrency: REPORTING_CURRENCY,
         country: country || 'all',
         signUps,
@@ -537,7 +559,7 @@ export const getKpiSummary = async (req: Request, res: Response) => {
 
 export const getKpiByRegion = async (req: Request, res: Response) => {
   try {
-    const { from, to } = parseRange(req);
+    const { from, to, baseline } = await parseKpiRange(req);
     const country = parseCountry(req);
     const bookingCountryMatch = buildBookingCountryMatch(country);
     const userCountryMatch = buildUserCountryMatch(country);
@@ -641,7 +663,7 @@ export const getKpiByRegion = async (req: Request, res: Response) => {
 
     rows.sort((a, b) => (Number(b.bookedValue) || 0) - (Number(a.bookedValue) || 0) || (Number(b.totalBookings) || 0) - (Number(a.totalBookings) || 0));
 
-    return res.json({ success: true, data: { range: { from, to }, reportingCurrency: REPORTING_CURRENCY, rows } });
+    return res.json({ success: true, data: { range: { from, to }, baseline, reportingCurrency: REPORTING_CURRENCY, rows } });
   } catch (error) {
     console.error('KPI by-region error:', error);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to compute KPI by region' } });
@@ -652,7 +674,7 @@ export const getKpiByRegion = async (req: Request, res: Response) => {
 
 export const getKpiByService = async (req: Request, res: Response) => {
   try {
-    const { from, to } = parseRange(req);
+    const { from, to, baseline } = await parseKpiRange(req);
     const country = parseCountry(req);
     const bookingCountryMatch = buildBookingCountryMatch(country);
 
@@ -818,7 +840,7 @@ export const getKpiByService = async (req: Request, res: Response) => {
       })
       .sort((a, b) => (b.platformRevenue || 0) - (a.platformRevenue || 0) || b.bookingsCount - a.bookingsCount);
 
-    return res.json({ success: true, data: { range: { from, to }, serviceViews, serviceBookings } });
+    return res.json({ success: true, data: { range: { from, to }, baseline, serviceViews, serviceBookings } });
   } catch (error) {
     console.error('KPI by-service error:', error);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to compute KPI by service' } });
@@ -829,7 +851,7 @@ export const getKpiByService = async (req: Request, res: Response) => {
 
 export const getKpiBySubproject = async (req: Request, res: Response) => {
   try {
-    const { from, to } = parseRange(req);
+    const { from, to, baseline } = await parseKpiRange(req);
     const country = parseCountry(req);
     const bookingCountryMatch = buildBookingCountryMatch(country);
 
@@ -906,7 +928,7 @@ export const getKpiBySubproject = async (req: Request, res: Response) => {
       })
       .sort((a, b) => (b.bookingsCount || 0) - (a.bookingsCount || 0) || (b.totalRfqs || 0) - (a.totalRfqs || 0));
 
-    return res.json({ success: true, data: { range: { from, to }, rows } });
+    return res.json({ success: true, data: { range: { from, to }, baseline, rows } });
   } catch (error) {
     console.error('KPI by-subproject error:', error);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to compute KPI by subproject' } });
@@ -917,7 +939,7 @@ export const getKpiBySubproject = async (req: Request, res: Response) => {
 
 export const getKpiByProfessional = async (req: Request, res: Response) => {
   try {
-    const { from, to } = parseRange(req);
+    const { from, to, baseline } = await parseKpiRange(req);
     const country = parseCountry(req);
     const bookingCountryMatch = buildBookingCountryMatch(country);
 
@@ -994,7 +1016,7 @@ export const getKpiByProfessional = async (req: Request, res: Response) => {
       })
       .sort((a, b) => (b.platformRevenue || 0) - (a.platformRevenue || 0) || (b.grossRevenue || 0) - (a.grossRevenue || 0) || (b.bookingsCount || 0) - (a.bookingsCount || 0));
 
-    return res.json({ success: true, data: { range: { from, to }, rows } });
+    return res.json({ success: true, data: { range: { from, to }, baseline, rows } });
   } catch (error) {
     console.error('KPI by-professional error:', error);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to compute KPI by professional' } });
@@ -1005,7 +1027,7 @@ export const getKpiByProfessional = async (req: Request, res: Response) => {
 
 export const getKpiByCustomer = async (req: Request, res: Response) => {
   try {
-    const { from, to } = parseRange(req);
+    const { from, to, baseline } = await parseKpiRange(req);
     const country = parseCountry(req);
     const bookingCountryMatch = buildBookingCountryMatch(country);
 
@@ -1083,7 +1105,7 @@ export const getKpiByCustomer = async (req: Request, res: Response) => {
       })
       .sort((a, b) => (b.platformRevenue || 0) - (a.platformRevenue || 0) || (b.grossSpend || 0) - (a.grossSpend || 0) || (b.bookingsCount || 0) - (a.bookingsCount || 0));
 
-    return res.json({ success: true, data: { range: { from, to }, rows } });
+    return res.json({ success: true, data: { range: { from, to }, baseline, rows } });
   } catch (error) {
     console.error('KPI by-customer error:', error);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to compute KPI by customer' } });
@@ -1094,7 +1116,7 @@ export const getKpiByCustomer = async (req: Request, res: Response) => {
 
 export const getKpiProfessionalResponse = async (req: Request, res: Response) => {
   try {
-    const { from, to } = parseRange(req);
+    const { from, to, baseline } = await parseKpiRange(req);
     const country = parseCountry(req);
     const bookingCountryMatch = buildBookingCountryMatch(country);
     const limit = Math.min(Math.max(parseInt(String(req.query.limit || '20'), 10) || 20, 1), 100);
@@ -1133,7 +1155,7 @@ export const getKpiProfessionalResponse = async (req: Request, res: Response) =>
       },
     ]);
 
-    return res.json({ success: true, data: { range: { from, to }, rows } });
+    return res.json({ success: true, data: { range: { from, to }, baseline, rows } });
   } catch (error) {
     console.error('KPI professional-response error:', error);
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Failed to compute professional response KPIs' } });
@@ -1146,7 +1168,7 @@ export const exportKpiCsv = async (req: Request, res: Response) => {
   try {
     const section = String(req.query.section || 'region');
     const format = String(req.query.format || 'csv').toLowerCase();
-    const { from, to } = parseRange(req);
+    const { from, to, baseline } = await parseKpiRange(req);
     const dateSlug = `${from.toISOString().slice(0, 10)}_to_${to.toISOString().slice(0, 10)}`;
 
     let headers: string[] = [];
@@ -1251,7 +1273,7 @@ export const triggerKpiEmailReport = async (req: Request, res: Response) => {
       return res.status(401).json({ success: false, msg: 'Admin authentication required' });
     }
 
-    const { from, to } = parseRange(req);
+    const { from, to, baseline } = await parseKpiRange(req);
     const adminId = String(adminUser._id);
     const adminEmail = String(adminUser.email);
 
