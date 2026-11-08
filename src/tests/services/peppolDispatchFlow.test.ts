@@ -57,6 +57,15 @@ describe("Peppol Odoo dispatch", () => {
       invoice_line_ids: [[0, 0, expect.objectContaining({ account_id: 20, tax_ids: [[6, 0, [61]]] })]],
     });
   });
+  it('does not resend an existing credit when neither provider delivery read can be reconciled', async () => {
+    mocks.call.mockImplementation(async (_config, model, method) => {
+      if (model === 'account.move' && method === 'search_read') return [{ id: 70, state: 'posted' }];
+      throw new Error('provider read unavailable');
+    });
+    expect(await dispatch('customer', 'credit_note')).toMatchObject({ status: 'queued', attempts: 0 });
+    expect(mocks.call.mock.calls.some(call => ['create', 'button_process_edi_web_services'].includes(call[2]))).toBe(false);
+  });
+
   it("keeps customer invoices in the sales journal", async () => {
     expect((await dispatch("customer")).status).toBe("sent");
     const create = mocks.call.mock.calls.find((call) => call[1] === "account.move" && call[2] === "create");
@@ -109,14 +118,14 @@ describe("Peppol Odoo dispatch", () => {
     expect(JSON.stringify(errored)).not.toContain("ECONNREFUSED");
   });
 
-  it.each([["sent", "sent"], ["processing", "queued"]])("refreshes an existing %s move without sending it again", async (state, status) => {
+  it.each([["sent", "sent", "invoice"], ["processing", "queued", "invoice"], ["sent", "sent", "credit_note"], ["processing", "queued", "credit_note"], ["to_send", "queued", "credit_note"]] as const)("refreshes an existing %s move without sending it again", async (state, status, documentType) => {
     const normal = mocks.call.getMockImplementation()!;
     mocks.call.mockImplementation(async (...args) => {
       if (args[1] === "account.move" && args[2] === "search_read") return [{ id: 70, state: "posted" }];
       if (args[1] === "account.edi.document") return [{ state }];
       return normal(...args);
     });
-    expect(await dispatch("supplier")).toMatchObject({ status });
+    expect(await dispatch("supplier", documentType)).toMatchObject({ status });
     expect(mocks.call.mock.calls.some((call) => call[2] === "button_process_edi_web_services")).toBe(false);
     expect(mocks.call.mock.calls.some((call) => call[2] === "create")).toBe(false);
   });

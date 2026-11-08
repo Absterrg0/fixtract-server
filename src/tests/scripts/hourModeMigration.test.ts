@@ -17,14 +17,14 @@ import { main } from '../../scripts/migrate/migrateHourModeScheduleTimeZones';
 describe('hour-mode migration safety', () => {
   let oldArgs: string[], oldUri: string | undefined;
   beforeEach(() => {
-    vi.clearAllMocks(); oldArgs = process.argv; oldUri = process.env.MONGO_URI;
+    vi.clearAllMocks(); vi.spyOn(console, 'log').mockImplementation(() => {}); oldArgs = process.argv; oldUri = process.env.MONGO_URI;
     process.env.MONGO_URI = 'mongodb://unused.invalid/test';
     mocks.users.mockReturnValue({ select: () => ({ lean: async () => [] }) });
     mocks.collisions.mockReturnValue({ select: () => ({ lean: async () => [] }) });
     mocks.update.mockResolvedValue({ modifiedCount: 1 });
     mocks.replace.mockResolvedValue(undefined);
   });
-  afterEach(() => { process.argv = oldArgs; if (oldUri === undefined) delete process.env.MONGO_URI; else process.env.MONGO_URI = oldUri; });
+  afterEach(() => { vi.restoreAllMocks(); process.argv = oldArgs; if (oldUri === undefined) delete process.env.MONGO_URI; else process.env.MONGO_URI = oldUri; });
   it('disconnects once when a post-connect read fails', async () => {
     mocks.users.mockImplementation(() => { throw new Error('read failed'); });
     await expect(main()).rejects.toThrow('read failed');
@@ -66,6 +66,20 @@ describe('hour-mode migration safety', () => {
     mocks.session.mockResolvedValue({ withTransaction: async callback => callback(), endSession: vi.fn() });
     await main(true);
     expect(mocks.replace).not.toHaveBeenCalled();
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('shifted: 0;'));
   });
 
+  it('counts only the final transaction retry result', async () => {
+    rows('booked');
+    mocks.update.mockResolvedValueOnce({ modifiedCount: 1 }).mockResolvedValueOnce({ modifiedCount: 0 });
+    mocks.session.mockResolvedValue({ withTransaction: async callback => { await callback(); await callback(); }, endSession: vi.fn() });
+    await main(true);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('shifted: 0;'));
+  });
+
+  it('does not count a terminal booking changed concurrently', async () => {
+    rows('cancelled'); mocks.update.mockResolvedValueOnce({ modifiedCount: 0 });
+    await main(true);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('shifted: 0;'));
+  });
 });

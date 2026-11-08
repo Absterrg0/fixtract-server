@@ -15,6 +15,7 @@ import {
   buildTransferIdempotencyKey,
   generateIdempotencyKey,
   convertToStripeAmount,
+  convertFromStripeAmount,
   calculateProfessionalPayout,
   calculatePlatformCommission,
   calculateStripeFee,
@@ -222,7 +223,7 @@ const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {
   };
 };
 
-const getQuotePricingVatCalculation = (booking: any, amount: number, commissionPercent: number) => {
+export const getQuotePricingVatCalculation = (booking: any, amount: number, commissionPercent: number) => {
   const quoteVersions = Array.isArray(booking.quoteVersions) ? booking.quoteVersions : [];
   const currentVersion = quoteVersions.find((version: any) => version.version === booking.currentQuoteVersion)
     || quoteVersions[quoteVersions.length - 1];
@@ -258,8 +259,20 @@ const getQuotePricingVatCalculation = (booking: any, amount: number, commissionP
     customerNet,
     commissionPercent,
   );
+  if (!quoteAmountIncludesSelectedExtras(booking)) {
+    const options = (booking.selectedExtraOptions || []).filter((option: any) => Number(option.bookedPrice) > 0);
+    const optionRate = Number(booking.vatDecision?.appliedRate ?? booking.payment?.vatRate ?? pricingLines[0].vatRate);
+    if (!Number.isFinite(optionRate) || optionRate < 0 || optionRate > 100) return null;
+    const optionsTotal = options.reduce((sum: number, option: any) => sum + Number(option.bookedPrice), 0);
+    commissionedLines.push(...commissionedPricingLines(options.map((option: any) => ({
+      description: String(option.name || option.extraOptionId || 'Option'),
+      price: Number(option.bookedPrice), vatRate: optionRate,
+      vatCountry: booking.vatDecision?.country,
+    })), commissionedQuoteAmount(optionsTotal, undefined, commissionPercent), commissionPercent));
+  }
   const commissionedNet = commissionedLines.reduce((sum, line) => sum + Number(line.price), 0);
-  const discountedNet = commissionedNet > 0 && amount > 0 && amount <= commissionedNet ? amount : undefined;
+  if (amount > commissionedNet + 0.005) return null;
+  const discountedNet = commissionedNet > 0 && amount > 0 ? amount : undefined;
   return calculateVatFromPricingLines(commissionedLines, discountedNet);
 };
 
@@ -1336,7 +1349,7 @@ export interface RefundResult {
 
 export const executeRefund = async (
   bookingId: string,
-  opts: { amount?: number; reason?: string; actorId?: string | mongoose.Types.ObjectId | null }
+  opts: { amount?: number; reason?: string; actorId?: string | mongoose.Types.ObjectId | null; operationKey?: string }
 ): Promise<RefundResult> => {
   const { amount, reason } = opts;
   const refundActorId = opts.actorId && mongoose.Types.ObjectId.isValid(String(opts.actorId))
@@ -1381,11 +1394,50 @@ export const executeRefund = async (
     booking,
     booking.payment.stripePaymentIntentId,
   );
+  // A dispute is one refund obligation across retries. Reconcile its recorded
+  // fact before calculating capacity (which changes after a partial refund).
+  const disputeStartedAt = opts.operationKey?.match(/^dispute-[a-f0-9]{24}-(\d+)$/)?.[1];
+  const legacyDisputeRefund = (refund: any) => disputeStartedAt && !refund.operationKey
+    && typeof refund.reason === 'string' && refund.reason.startsWith('Dispute resolution (')
+    && new Date(refund.refundedAt).getTime() >= Math.floor(Number(disputeStartedAt) / 1000) * 1000;
+  const recorded = opts.operationKey && basePaymentRows.flatMap(row => row.refunds || [])
+    .find(refund => (refund.operationKey === opts.operationKey || legacyDisputeRefund(refund))
+      && !['failed', 'canceled'].includes(refund.status));
+  if (recorded) return { refundId: recorded.refundId, amount: recorded.amount,
+    status: recorded.status, refundSource: recorded.source || 'platform' };
+  if (opts.operationKey && legacyDisputeRefund({ reason: booking.payment.refundReason,
+    refundedAt: booking.payment.refundedAt }) && Number(booking.payment.refundAmount) > 0
+    && booking.payment.refundOperationKey !== opts.operationKey) {
+    throw new RefundError('REFUND_RECONCILIATION_REQUIRED', 'The prior dispute refund lacks a matching ledger fact; reconcile it before issuing another refund', 409);
+  }
+  let priorProviderRefund: Stripe.Refund | undefined;
+  if (opts.operationKey) {
+    let after: string | undefined;
+    do {
+      const page = await stripe.refunds.list({ payment_intent: booking.payment.stripePaymentIntentId,
+        limit: 100, ...(after ? { starting_after: after } : {}) }).catch(() => {
+        throw new RefundError('REFUND_RECONCILIATION_REQUIRED', 'Refund history is unavailable; retry reconciliation before issuing the refund', 503);
+      });
+      priorProviderRefund = page.data.find(refund => refund.metadata?.operationKey === opts.operationKey);
+      if (priorProviderRefund || !page.has_more) break;
+      const next = page.data[page.data.length - 1]?.id;
+      if (!next || next === after) throw new RefundError('REFUND_RECONCILIATION_REQUIRED', 'Refund reconciliation could not complete', 503);
+      after = next;
+    } while (true);
+    if (priorProviderRefund && ['failed', 'canceled'].includes(String(priorProviderRefund.status))) {
+      throw new RefundError('REFUND_RECONCILIATION_REQUIRED', 'The recorded dispute refund needs reconciliation before another refund can be issued', 409);
+    }
+  }
   const baseRefunds = summarizeBaseRefunds(basePaymentRows);
   const existingBookingRefunds = baseRefunds.refunds.filter(
     (refund: any) => refund?.kind !== 'extra_cost',
   );
-  const aggregateRefundTotal = Number(booking.payment?.refundAmount);
+  // A prior attempt may have saved the booking but failed to write the ledger.
+  // Remove only that identified operation from the baseline before replaying it.
+  const alreadySaved = priorProviderRefund && booking.payment.refundOperationKey === opts.operationKey
+    ? convertFromStripeAmount(priorProviderRefund.amount, booking.payment.currency || 'EUR') : 0;
+  const aggregateRefundTotal = Number(booking.payment?.refundAmount || 0) - alreadySaved;
+  if (priorProviderRefund) normalizedAmount = convertFromStripeAmount(priorProviderRefund.amount, booking.payment.currency || 'EUR');
   const aggregateBookingRefund = Number.isFinite(aggregateRefundTotal) && aggregateRefundTotal > 0
     ? roundMoneyLocal(aggregateRefundTotal)
     : 0;
@@ -1412,9 +1464,9 @@ export const executeRefund = async (
     );
   }
   const refundAmount = normalizedAmount ?? remainingRefundable;
-  const refundIntentVersion = normalizedAmount
+  const refundIntentVersion = opts.operationKey || (normalizedAmount
     ? `partial-${booking.payment.stripePaymentIntentId}-${previousRefundTotal}-${normalizedAmount}`
-    : `full-${booking.payment.stripePaymentIntentId}-${previousRefundTotal}`;
+    : `full-${booking.payment.stripePaymentIntentId}-${previousRefundTotal}`);
   // The only stored authoritative split is the payment-level net/VAT. When
   // earlier partial refunds each recorded their split, the remaining split is
   // arithmetic over those recorded facts. Never proportionally invent a split
@@ -1456,13 +1508,14 @@ export const executeRefund = async (
   })();
 
   if (booking.payment.status === 'authorized') {
-    const refund = await stripe.refunds.create(
+    const refund = priorProviderRefund || await stripe.refunds.create(
       {
         payment_intent: booking.payment.stripePaymentIntentId,
         amount: convertToStripeAmount(refundAmount, booking.payment.currency || 'EUR'),
         metadata: {
           bookingId: booking._id.toString(),
           refundKind: 'booking',
+          ...(opts.operationKey ? { operationKey: opts.operationKey } : {}),
         },
       },
       {
@@ -1490,41 +1543,50 @@ export const executeRefund = async (
     } else {
       preparePartialRefundCancellation(booking, wasStarted);
     }
-    await booking.save();
-
-    await recordBasePaymentRefund({
-      booking,
-      set: {
-        status: booking.payment.status,
-        refundedAt: booking.payment.refundedAt,
-      },
-      refund: {
-        amount: refundAmount,
-        reason,
-        refundId: refund.id,
-        refundedAt: refundCreatedAt,
-        source: 'platform',
-        notes: 'Refund issued before transfer to professional',
-        kind: 'booking',
-        status: refund.status || undefined,
-        ...(refundActorId ? { refundedBy: refundActorId } : {}),
-        ...refundVatSplit,
-      },
-    });
+    if (opts.operationKey) booking.payment.refundOperationKey = opts.operationKey;
+    try {
+      await booking.save();
+      await recordBasePaymentRefund({
+        booking,
+        set: {
+          status: booking.payment.status,
+          refundedAt: booking.payment.refundedAt,
+        },
+        refund: {
+          amount: refundAmount,
+          reason,
+          refundId: refund.id,
+          refundedAt: refundCreatedAt,
+          source: 'platform',
+          notes: 'Refund issued before transfer to professional',
+          kind: 'booking',
+          ...(opts.operationKey ? { operationKey: opts.operationKey } : {}),
+          status: refund.status || undefined,
+          ...(refundActorId ? { refundedBy: refundActorId } : {}),
+          ...refundVatSplit,
+        },
+      });
+    } catch (error) {
+      if (!opts.operationKey) throw error;
+      // Stripe accepted the refund; callers must keep the dispute closed and
+      // retry reconciliation with this operation, never treat this as a denial.
+      throw new RefundError('REFUND_RECONCILIATION_REQUIRED', 'Refund accepted; recording is pending. Retry to reconcile the same refund.', 503);
+    }
 
     console.log(`✅ Payment refunded for booking ${booking._id}: ${refund.id}`);
 
     return { refundId: refund.id, amount: refundAmount, status: refund.status || undefined, refundSource: 'platform' };
   }
 
-  if (['completed', 'partially_refunded', 'captured'].includes(String(booking.payment.status))) {
-    const refund = await stripe.refunds.create(
+  if (priorProviderRefund || ['completed', 'partially_refunded', 'captured'].includes(String(booking.payment.status))) {
+    const refund = priorProviderRefund || await stripe.refunds.create(
       {
         payment_intent: booking.payment.stripePaymentIntentId,
         amount: convertToStripeAmount(refundAmount, booking.payment.currency || 'EUR'),
         metadata: {
           bookingId: booking._id.toString(),
           refundKind: 'booking',
+          ...(opts.operationKey ? { operationKey: opts.operationKey } : {}),
         },
       },
       {
@@ -1536,7 +1598,7 @@ export const executeRefund = async (
       }
     );
 
-    if (booking.payment.stripeTransferId) {
+    if (booking.payment.stripeTransferId && !priorProviderRefund) {
       try {
         const reversalCurrency =
           booking.payment.transferCurrency || booking.payment.currency || 'EUR';
@@ -1564,7 +1626,7 @@ export const executeRefund = async (
         booking.payment.refundSource = 'platform';
         booking.payment.refundNotes = 'Platform-funded refund (transfer reversal failed)';
       }
-    } else {
+    } else if (!priorProviderRefund) {
       booking.payment.refundSource = 'platform';
     }
 
@@ -1582,27 +1644,35 @@ export const executeRefund = async (
     } else {
       preparePartialRefundCancellation(booking, wasStarted);
     }
-    await booking.save();
-
-    await recordBasePaymentRefund({
-      booking,
-      set: {
-        status: booking.payment.status,
-        refundedAt: booking.payment.refundedAt,
-      },
-      refund: {
-        amount: refundAmount,
-        reason,
-        refundId: refund.id,
-        refundedAt: refundCreatedAt,
-        source: booking.payment.refundSource || 'platform',
-        notes: booking.payment.refundNotes,
-        kind: 'booking',
-        status: refund.status || undefined,
-        ...(refundActorId ? { refundedBy: refundActorId } : {}),
-        ...refundVatSplit,
-      },
-    });
+    if (opts.operationKey) booking.payment.refundOperationKey = opts.operationKey;
+    try {
+      await booking.save();
+      await recordBasePaymentRefund({
+        booking,
+        set: {
+          status: booking.payment.status,
+          refundedAt: booking.payment.refundedAt,
+        },
+        refund: {
+          amount: refundAmount,
+          reason,
+          refundId: refund.id,
+          refundedAt: refundCreatedAt,
+          source: booking.payment.refundSource || 'platform',
+          notes: booking.payment.refundNotes,
+          kind: 'booking',
+          ...(opts.operationKey ? { operationKey: opts.operationKey } : {}),
+          status: refund.status || undefined,
+          ...(refundActorId ? { refundedBy: refundActorId } : {}),
+          ...refundVatSplit,
+        },
+      });
+    } catch (error) {
+      if (!opts.operationKey) throw error;
+      // Stripe accepted the refund; callers must keep the dispute closed and
+      // retry reconciliation with this operation, never treat this as a denial.
+      throw new RefundError('REFUND_RECONCILIATION_REQUIRED', 'Refund accepted; recording is pending. Retry to reconcile the same refund.', 503);
+    }
 
     console.log(`✅ Refund processed for booking ${booking._id}: ${refund.id}`);
 

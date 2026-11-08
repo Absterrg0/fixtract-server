@@ -433,6 +433,7 @@ export interface IBooking extends Document {
     // Refund
     refundAmount?: number;
     refundReason?: string;
+    refundOperationKey?: string;
     refundSource?: 'professional' | 'platform' | 'mixed';
     refundNotes?: string;
     disputeId?: string;
@@ -671,6 +672,8 @@ export interface IBooking extends Document {
     description: string;
     raisedAt: Date;
     resolvedAt?: Date;
+    refundPending?: boolean;
+    refundRequestedAmount?: number;
     resolution?: string;
     resolvedBy?: Types.ObjectId; // Admin who resolved
     adminAdjustedAmount?: number;
@@ -1276,6 +1279,7 @@ const BookingSchema = new Schema({
     // Refund metadata
     refundAmount: { type: Number, min: 0 },
     refundReason: { type: String, maxlength: 500 },
+    refundOperationKey: { type: String, maxlength: 200 },
     refundSource: {
       type: String,
       enum: ['professional', 'platform', 'mixed']
@@ -1701,6 +1705,8 @@ const BookingSchema = new Schema({
       type: Date
     },
     resolvedAt: { type: Date },
+    refundPending: { type: Boolean },
+    refundRequestedAmount: { type: Number },
     resolution: { type: String, maxlength: 2000 },
     resolvedBy: {
       type: Schema.Types.ObjectId,

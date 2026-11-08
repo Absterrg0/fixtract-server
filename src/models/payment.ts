@@ -31,6 +31,7 @@ export interface IPaymentRefund {
   amount: number;
   reason?: string;
   refundId?: string;
+  operationKey?: string;
   refundedAt: Date;
   source: "professional" | "platform" | "mixed";
   notes?: string;
@@ -162,6 +163,7 @@ const PaymentRefundSchema = new Schema<IPaymentRefund>(
     amount: { type: Number, required: true },
     reason: { type: String, maxlength: 500 },
     refundId: { type: String },
+    operationKey: { type: String, maxlength: 200 },
     refundedAt: { type: Date, default: Date.now },
     source: {
       type: String,

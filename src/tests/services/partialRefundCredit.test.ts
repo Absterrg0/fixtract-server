@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
   upload: vi.fn(),
   peppol: vi.fn(),
   notify: vi.fn(),
-  presign: vi.fn(),
+  presign: vi.fn(), download: vi.fn(),
 }));
 
 vi.mock("../../models/platformSettings", () => ({
@@ -38,7 +38,7 @@ vi.mock("../../models/payment", () => ({
 }));
 vi.mock("../../utils/s3Upload", () => ({
   uploadBufferToS3: (...args: unknown[]) => mocks.upload(...args),
-  downloadBufferFromS3: async () => null,
+  downloadBufferFromS3: (...args: unknown[]) => mocks.download(...args),
   presignS3Url: (...args: unknown[]) => mocks.presign(...args),
 }));
 vi.mock("../../services/peppolDispatch", () => ({
@@ -125,9 +125,34 @@ const chainQuery = (doc: any) => {
   return query;
 };
 
+// Apply the filters and positional ledger writes used by the service so tests
+// exercise older-credit updates without accidentally replacing the latest mirror.
+const applyBookingUpdate = (doc: any) => async (filter: any, update: any) => {
+  for (const [key, value] of Object.entries(filter)) {
+    if (key.startsWith('payment.') && typeof value === 'string'
+      && doc.payment[key.slice('payment.'.length)] !== value) return { modifiedCount: 0 };
+  }
+  for (const [key, value] of Object.entries(update.$set || {})) {
+    if (key === 'payment.refundCreditLedger.$.dispatch') {
+      const identity = filter['payment.refundCreditLedger'].$elemMatch;
+      const fact = doc.payment.refundCreditLedger.find((entry: any) =>
+        entry.side === identity.side && entry.invoiceNumber === identity.invoiceNumber);
+      if (fact) fact.dispatch = value;
+    } else if (key.startsWith('payment.')) doc.payment[key.slice('payment.'.length)] = value;
+  }
+  for (const key of Object.keys(update.$unset || {})) {
+    if (key.startsWith('payment.')) delete doc.payment[key.slice('payment.'.length)];
+  }
+  const fact = update.$push?.['payment.refundCreditLedger'];
+  if (fact) (doc.payment.refundCreditLedger ||= []).push(fact);
+  return { modifiedCount: 1 };
+};
+const issuedFacts = (ledger: any[]) => JSON.stringify(ledger.map(({ dispatch, ...fact }) => fact));
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.activeClaim = undefined;
+  mocks.download.mockResolvedValue(Buffer.from("<CreditNote>original issued credit</CreditNote>"));
   mocks.platformSettings.mockResolvedValue({
     companyAddress: { name: "Fixtract", street: "Main 1", city: "Brussels", postalCode: "1000", country: "BE" },
     companyVatNumber: "BE0123456789",
@@ -318,6 +343,59 @@ describe("ensurePartialRefundCreditArtifacts", () => {
     expect(mocks.upload).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { status: 'queued', reason: 'UBL artifact stored; manual Peppol dispatch required', pending: false },
+    { status: 'queued', reason: 'Invoice posted in Odoo; Peppol send requested and delivery status is still pending', pending: true },
+    { status: 'failed', reason: 'Missing active Odoo sales tax for VAT rates 21', pending: false },
+  ])('issues both sides of a second refund while the prior dispatch is $status ($reason)', async ({ status, reason, pending }) => {
+    const firstFacts = [
+      { side: 'customer', key: 're_first', refundAmount: 24.2, netAmount: 20, vatAmount: 4.2,
+        invoiceNumber: 'FIX-CN-FIRST', invoiceUrl: 's3://first.pdf', invoiceUblUrl: 's3://first.xml', generatedAt: new Date('2026-10-29') },
+      { side: 'supplier', key: 're_first', refundAmount: 24.2, netAmount: 60, vatAmount: 12.6,
+        invoiceNumber: 'SUP-CN-FIRST', invoiceUrl: 's3://supplier-first.pdf', invoiceUblUrl: 's3://supplier-first.xml', generatedAt: new Date('2026-10-29') },
+    ];
+    const originalFacts = issuedFacts(firstFacts);
+    const doc = baseBooking(basePayment({ refundAmount: 36.3,
+      creditNoteNumber: firstFacts[0].invoiceNumber, creditNoteUrl: firstFacts[0].invoiceUrl,
+      creditNotePeppolDispatchStatus: status, creditNotePeppolDispatchReason: reason,
+      supplierCreditNoteNumber: firstFacts[1].invoiceNumber, supplierCreditNoteUrl: firstFacts[1].invoiceUrl,
+      supplierCreditNotePeppolDispatchStatus: status, supplierCreditNotePeppolDispatchReason: reason,
+      invoiceSettlementBasis: {
+        customer: { netAmount: 100, vatAmount: 21, totalWithVat: 121, refundAmount: 0 },
+        supplier: { netAmount: 300, vatAmount: 63, totalWithVat: 363, refundAmount: 0 },
+      },
+      refundCreditLedger: [...firstFacts],
+    }));
+    mocks.paymentFind.mockReturnValue(chainQuery([{ status: 'completed', stripePaymentIntentId: 'pi_paid',
+      refunds: [{ refundId: 're_first', amount: 24.2, netAmount: 20, vatAmount: 4.2 },
+        { refundId: 're_second', amount: 12.1, netAmount: 10, vatAmount: 2.1 }] }]));
+    mocks.bookingFindById.mockImplementation(() => chainQuery(doc));
+    mocks.bookingUpdateOne.mockImplementation(applyBookingUpdate(doc));
+    mocks.peppol.mockResolvedValue({ status, reason });
+
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe(pending ? 'busy' : 'credited');
+    const xmls = mocks.upload.mock.calls.filter(call => String(call[1]).endsWith('.xml')).map(call => (call[0] as Buffer).toString());
+    expect(xmls).toHaveLength(2);
+    expect(xmls[0]).toContain('<cbc:TaxInclusiveAmount currencyID="EUR">-12.10</cbc:TaxInclusiveAmount>');
+    expect(xmls[1]).toContain('<cbc:TaxInclusiveAmount currencyID="EUR">-36.30</cbc:TaxInclusiveAmount>');
+    expect(mocks.peppol).toHaveBeenCalledTimes(pending ? 4 : 2);
+    expect(mocks.download).toHaveBeenCalledTimes(pending ? 2 : 0);
+    expect(mocks.invoiceSequence).toHaveBeenCalledTimes(2);
+    expect(doc.payment.refundCreditLedger).toHaveLength(4);
+    expect(issuedFacts((doc.payment.refundCreditLedger as any[]).slice(0, 2))).toBe(originalFacts);
+    expect(mocks.bookingUpdateOne.mock.calls.filter(([, update]) => update.$push?.['payment.invoiceArtifactHistory'])).toHaveLength(2);
+
+    mocks.peppol.mockClear(); mocks.upload.mockClear(); mocks.download.mockClear(); mocks.invoiceSequence.mockClear();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe(pending ? 'busy' : 'credited');
+    }
+    expect(mocks.peppol).toHaveBeenCalledTimes(pending ? 12 : 0);
+    expect(mocks.download).toHaveBeenCalledTimes(pending ? 12 : 0);
+    expect(mocks.upload).not.toHaveBeenCalled();
+    expect(mocks.invoiceSequence).not.toHaveBeenCalled();
+    expect(doc.payment.refundCreditLedger).toHaveLength(4);
+  });
+
   it('#3 credits only the increment after the first refund was included in net invoices', async () => {
     const doc = baseBooking(basePayment({ refundAmount: 36.3,
       invoiceSettlementBasis: {
@@ -413,6 +491,144 @@ describe("ensurePartialRefundCreditArtifacts", () => {
     mocks.bookingFindOneAndUpdate.mockResolvedValueOnce(null);
     expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('busy');
     expect(mocks.bookingUpdateOne.mock.calls.some(([, update]) => update.$unset?.['payment.creditNoteGenerationClaim'] !== undefined)).toBe(false);
+  });
+
+  it.each([
+    { recordedStatus: 'queued', providerStatus: 'sent' },
+    { recordedStatus: 'queued', providerStatus: 'queued' },
+    { recordedStatus: 'queued', providerStatus: 'failed' },
+    { recordedStatus: 'queued', providerStatus: 'lost-claim' },
+    { recordedStatus: 'failed', providerStatus: 'sent' },
+  ])('retries the original $recordedStatus credit without generating artifacts (provider $providerStatus)', async ({ recordedStatus, providerStatus }) => {
+    const fact = { side: 'customer', key: 'recorded', refundAmount: 21, netAmount: 17.36, vatAmount: 3.64,
+      invoiceNumber: 'FIX-CN-ORIGINAL', invoiceUrl: 's3://original.pdf', invoiceUblUrl: 's3://original.xml', generatedAt: new Date('2026-10-29') };
+    const doc = baseBooking(basePayment({
+      creditNoteNumber: fact.invoiceNumber, creditNoteUrl: fact.invoiceUrl, creditNoteUblUrl: fact.invoiceUblUrl,
+      creditNotePeppolDispatchStatus: recordedStatus, creditNotePeppolDispatchReason: 'The Peppol send request timed out; Odoo may still be processing it.',
+      supplierCreditNotePeppolDispatchStatus: 'sent',
+      refundCreditLedger: [fact, { ...fact, side: 'supplier', invoiceNumber: 'SUP-CN-ORIGINAL' }],
+      invoiceSettlementBasis: { customer: { netAmount: 100, vatAmount: 21, totalWithVat: 121, refundAmount: 0 },
+        supplier: { netAmount: 300, vatAmount: 63, totalWithVat: 363, refundAmount: 0 } },
+    }));
+    const originalLedger = issuedFacts(doc.payment.refundCreditLedger as any[]);
+    mocks.bookingFindById.mockImplementation(() => chainQuery(doc));
+    mocks.peppol.mockResolvedValue({ status: providerStatus, reason: providerStatus === 'failed' ? 'Odoo reported a Peppol delivery error. Check the EDI documents in Odoo, then generate the invoice again.' : undefined, reference: 'odoo-account.move-123' });
+    if (providerStatus === 'lost-claim') {
+      mocks.download.mockImplementationOnce(async () => { mocks.activeClaim = 'another-worker'; return Buffer.from('<CreditNote/>'); });
+      await expect(ensurePartialRefundCreditArtifacts('booking-1')).rejects.toThrow('claim expired');
+      expect(mocks.peppol).not.toHaveBeenCalled(); expect(mocks.upload).not.toHaveBeenCalled(); return;
+    }
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe(providerStatus === 'queued' ? 'busy' : 'credited');
+    expect(mocks.download).toHaveBeenCalledWith(fact.invoiceUblUrl);
+    expect(mocks.peppol).toHaveBeenCalledWith(expect.objectContaining({ invoiceNumber: fact.invoiceNumber,
+      ublXml: '<CreditNote>original issued credit</CreditNote>', invoiceUblUrl: fact.invoiceUblUrl,
+      invoicePdfUrl: fact.invoiceUrl, netAmount: 17.36, totalWithVat: 21, issueDate: fact.generatedAt }));
+    expect(mocks.invoiceSequence).not.toHaveBeenCalled(); expect(mocks.upload).not.toHaveBeenCalled();
+    expect(issuedFacts(doc.payment.refundCreditLedger as any[])).toBe(originalLedger);
+    expect(mocks.bookingUpdateOne.mock.calls.some(([, update]) => update.$set?.['payment.refundInvoiceRetryAt'] instanceof Date)).toBe(true);
+    expect(mocks.bookingUpdateOne.mock.calls.some(([, update]) => update.$push || update.$set?.['payment.creditNoteNumber'])).toBe(false);
+    if (providerStatus === 'sent') {
+      doc.payment.creditNotePeppolDispatchStatus = 'sent'; mocks.peppol.mockClear();
+      expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('credited'); expect(mocks.peppol).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(['customer', 'supplier'] as const)('retries two pending %s credits independently and preserves the latest mirror', async side => {
+    const fact = (invoiceNumber: string, factSide = side, dispatch: any = { status: 'queued', reference: `odoo-${invoiceNumber}` }) => ({
+      side: factSide, key: invoiceNumber, refundAmount: 12.1, netAmount: factSide === 'customer' ? 10 : 30,
+      vatAmount: factSide === 'customer' ? 2.1 : 6.3, invoiceNumber,
+      invoiceUrl: `s3://${invoiceNumber}.pdf`, invoiceUblUrl: `s3://${invoiceNumber}.xml`, generatedAt: new Date('2026-10-29'), dispatch,
+    });
+    const other = side === 'customer' ? 'supplier' : 'customer';
+    const ledger = [fact('FIRST'), fact('SECOND'),
+      { ...fact('OTHER', other, { status: 'sent' }), refundAmount: 24.2 }];
+    const prefix = side === 'customer' ? 'creditNote' : 'supplierCreditNote';
+    const doc = baseBooking(basePayment({ refundAmount: 24.2,
+      [`${prefix}Number`]: 'SECOND', [`${prefix}PeppolDispatchStatus`]: 'sent',
+      [`${prefix}PeppolDispatchReason`]: 'Old pending reason',
+      refundCreditLedger: ledger, invoiceSettlementBasis: {
+        customer: { netAmount: 100, vatAmount: 21, totalWithVat: 121, refundAmount: 0 },
+        supplier: { netAmount: 300, vatAmount: 63, totalWithVat: 363, refundAmount: 0 },
+      },
+    }));
+    const original = issuedFacts(ledger);
+    mocks.bookingFindById.mockImplementation(() => chainQuery(doc));
+    mocks.bookingUpdateOne.mockImplementation(applyBookingUpdate(doc));
+    mocks.peppol.mockImplementation(async ({ invoiceNumber }) => ({
+      status: invoiceNumber === 'FIRST' ? 'queued' : 'sent', provider: 'odoo', attempts: 0,
+      reference: `odoo-${invoiceNumber}`, reason: invoiceNumber === 'FIRST' ? 'Delivery in progress' : undefined,
+    }));
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('busy');
+    expect(mocks.peppol.mock.calls.map(([args]) => args.invoiceNumber)).toEqual(['FIRST', 'SECOND']);
+    expect(ledger[0].dispatch).toMatchObject({ status: 'queued', reference: 'odoo-FIRST', provider: 'odoo', attempts: 0, lastAttemptAt: expect.any(Date) });
+    expect(ledger[1].dispatch.status).toBe('sent');
+    expect(doc.payment[`${prefix}PeppolDispatchStatus`]).toBe('sent');
+    expect(doc.payment[`${prefix}PeppolDispatchReference`]).toBe('odoo-SECOND');
+    expect(doc.payment[`${prefix}PeppolDispatchReason`]).toBeUndefined();
+    expect(mocks.paymentFindOneAndUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      refundCreditLedger: { $elemMatch: { side, invoiceNumber: 'FIRST' } },
+    }), expect.objectContaining({ $set: { 'refundCreditLedger.$.dispatch': expect.objectContaining({ status: 'queued' }) } }));
+    mocks.peppol.mockClear();
+    mocks.peppol.mockResolvedValue({ status: 'sent', provider: 'odoo', reference: 'odoo-FIRST', attempts: 0 });
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('credited');
+    expect(mocks.peppol.mock.calls.map(([args]) => args.invoiceNumber)).toEqual(['FIRST']);
+    expect(doc.payment[`${prefix}PeppolDispatchReference`]).toBe('odoo-SECOND');
+    expect(doc.payment[`${prefix}PeppolDispatchReason`]).toBeUndefined();
+    mocks.peppol.mockClear();
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('credited');
+    expect(mocks.peppol).not.toHaveBeenCalled();
+    expect(issuedFacts(ledger)).toBe(original);
+    expect(mocks.upload).not.toHaveBeenCalled();
+    expect(mocks.invoiceSequence).not.toHaveBeenCalled();
+  });
+
+  it('adopts legacy dispatch state only for the matching latest invoice number', async () => {
+    const ledger: any[] = ['OLD-UNKNOWN', 'LATEST'].map(invoiceNumber => ({
+      side: 'customer', key: invoiceNumber, refundAmount: 10.5, netAmount: 8.68, vatAmount: 1.82,
+      invoiceNumber, invoiceUblUrl: `s3://${invoiceNumber}.xml`, generatedAt: new Date('2026-10-29'),
+    }));
+    const doc = baseBooking(basePayment({ refundCreditLedger: ledger,
+      creditNoteNumber: 'LATEST', creditNotePeppolDispatchStatus: 'queued', creditNotePeppolDispatchReference: 'odoo-latest',
+      invoiceSettlementBasis: { customer: { netAmount: 100, vatAmount: 21, totalWithVat: 121, refundAmount: 0 } },
+    }));
+    mocks.bookingFindById.mockImplementation(() => chainQuery(doc));
+    mocks.bookingUpdateOne.mockImplementation(applyBookingUpdate(doc));
+    mocks.peppol.mockResolvedValue({ status: 'sent', attempts: 0 });
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('credited');
+    expect(mocks.peppol.mock.calls.map(([args]) => args.invoiceNumber)).toEqual(['LATEST']);
+    expect(ledger[0].dispatch).toBeUndefined();
+    expect(ledger[1].dispatch).toMatchObject({ status: 'sent', reference: 'odoo-latest', attempts: 0 });
+    expect(mocks.upload).not.toHaveBeenCalled();
+  });
+
+  it('creates and dispatches a new delta even if an older credit artifact cannot be read', async () => {
+    const ledger: any[] = [{ side: 'customer', key: 'first', refundAmount: 12.1, netAmount: 10, vatAmount: 2.1,
+      invoiceNumber: 'OLD', invoiceUblUrl: 's3://old.xml', generatedAt: new Date('2026-10-29'), dispatch: { status: 'queued' } }];
+    const doc = baseBooking(basePayment({ refundAmount: 24.2, refundCreditLedger: ledger,
+      invoiceSettlementBasis: { customer: { netAmount: 100, vatAmount: 21, totalWithVat: 121, refundAmount: 0 } },
+    }));
+    mocks.bookingFindById.mockImplementation(() => chainQuery(doc));
+    mocks.bookingUpdateOne.mockImplementation(applyBookingUpdate(doc));
+    mocks.download.mockRejectedValueOnce(new Error('Artifact storage unavailable'));
+    mocks.peppol.mockResolvedValue({ status: 'sent' });
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('busy');
+    expect(mocks.peppol).toHaveBeenCalledTimes(1);
+    expect(mocks.peppol).toHaveBeenCalledWith(expect.objectContaining({ invoiceNumber: expect.stringMatching(/^FIX-CN-/), totalWithVat: 12.1 }));
+    expect(ledger[0].dispatch.status).toBe('queued');
+    expect(ledger).toHaveLength(2);
+    expect(ledger[1].dispatch.status).toBe('sent');
+  });
+
+  it('keeps a new queued dispatch durably retryable after recording the artifact and ledger', async () => {
+    mocks.bookingFindById.mockImplementation(() => chainQuery(baseBooking(basePayment())));
+    mocks.peppol.mockResolvedValue({ status: 'queued' });
+    expect(await ensurePartialRefundCreditArtifacts('booking-1')).toBe('busy');
+    expect(mocks.peppol).toHaveBeenCalledTimes(2);
+    expect(mocks.bookingUpdateOne.mock.calls.filter(([, update]) => update.$push?.['payment.refundCreditLedger'])).toHaveLength(2);
+    const saved = mocks.bookingUpdateOne.mock.calls.find(([, update]) => update.$push?.['payment.refundCreditLedger']);
+    expect(saved?.[1].$set['payment.refundInvoiceRetryAt']).toBeInstanceOf(Date);
+    expect(saved?.[1].$set['payment.creditNotePeppolDispatchStatus']).toBe('queued');
+    expect(saved?.[1].$push['payment.refundCreditLedger'].invoiceNumber).toMatch(/^FIX-CN-/);
   });
 
 });

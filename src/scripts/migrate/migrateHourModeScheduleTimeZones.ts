@@ -263,7 +263,7 @@ async function migrate(applyMode: boolean): Promise<void> {
       const result = await Booking.updateOne({ _id: row._id, status: row.status,
         scheduledStartDate: row.scheduledStartDate, scheduleTimeZone: row.scheduleTimeZone ?? null,
       }, { $set: setFields }, session ? { session } : undefined);
-      if (result.modifiedCount !== 1) return;
+      if (result.modifiedCount !== 1) return false;
       if (!terminal) await replaceBookingCalendar({
         _id: row._id,
         professional: professionalId || undefined,
@@ -274,18 +274,20 @@ async function migrate(applyMode: boolean): Promise<void> {
         scheduledBufferEndDate:
           shiftedSchedule.scheduledBufferEndDate || shiftedSchedule.scheduledExecutionEndDate,
       } as never, session);
+      return true;
     };
+    let applied = false;
     if (terminal) {
-      await apply();
+      applied = await apply();
     } else {
       const session = await mongoose.startSession();
       try {
-        await session.withTransaction(() => apply(session));
+        await session.withTransaction(async () => { applied = await apply(session); });
       } finally {
         await session.endSession();
       }
     }
-    shifted++;
+    if (applied) shifted++;
   }
 
   console.log(

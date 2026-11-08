@@ -29,7 +29,7 @@ export interface ILoyaltyConfig extends Document {
 
 export interface ILoyaltyConfigModel extends Model<ILoyaltyConfig> {
   getCurrentConfig(): Promise<ILoyaltyConfig>;
-  backfillConfirmedLegacyConfig(id: string, expectedVersion: number): Promise<boolean>;
+  backfillConfirmedLegacyConfig(id: string, expectedVersion: number, apply?: boolean): Promise<boolean>;
 }
 
 const loyaltyTierSchema = new Schema<ILoyaltyTier>({
@@ -259,10 +259,10 @@ loyaltyConfigSchema.statics.getCurrentConfig = async function(): Promise<ILoyalt
  * reconciliation; the durable marker preserves later intentional removals.
  */
 loyaltyConfigSchema.statics.backfillConfirmedLegacyConfig = async function(
-  id: string, expectedVersion: number,
+  id: string, expectedVersion: number, apply = true,
 ): Promise<boolean> {
   const config = await this.findOne({ _id: id, version: expectedVersion,
-    legacyTierBackfilledAt: { $exists: false } });
+    legacyTierBackfilledAt: { $exists: false } }).lean();
   if (!config) return false;
   const defaults = defaultLoyaltyTiers();
   const tiers = [...config.tiers].sort((a, b) => a.minSpendingAmount - b.minSpendingAmount);
@@ -280,11 +280,15 @@ loyaltyConfigSchema.statics.backfillConfirmedLegacyConfig = async function(
       throw new Error('Legacy tier ranges overlap.');
     }
   }
-  const result = await this.updateOne({ _id: config._id, version: expectedVersion,
+  if (!apply) return true;
+  // Native collection CAS preserves the exact stored snapshot: Mongoose's
+  // subdocument casting would insert defaults into absent legacy fields.
+  await this.hydrate({ ...config, tiers: planned }).validate(['tiers']);
+  const result = await this.collection.updateOne({ _id: config._id, version: expectedVersion,
     tiers: config.tiers, legacyTierBackfilledAt: { $exists: false } }, {
     $set: { tiers: planned, legacyTierBackfilledAt: new Date(), lastModified: new Date() },
     $inc: { version: 1 },
-  }, { runValidators: true });
+  });
   return result.modifiedCount === 1;
 };
 
