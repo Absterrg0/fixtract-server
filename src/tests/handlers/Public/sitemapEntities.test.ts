@@ -20,7 +20,7 @@ vi.mock('../../../models/project', () => ({
   default: { aggregate: projectAggregate },
 }));
 
-import { listPublicSitemapEntities } from '../../../handlers/Public/sitemapEntities';
+import { listPublicSitemapEntities, SITEMAP_ENTITY_MAX_PAGE } from '../../../handlers/Public/sitemapEntities';
 
 const fakeRes = () => {
   const res: any = { statusCode: 200, body: undefined, headers: {} as Record<string, string> };
@@ -183,5 +183,34 @@ describe('public visibility helpers', () => {
     expect(isPubliclyViewableProfessional({ ...base, isAnonymized: true })).toBe(false);
     expect(isPubliclyViewableProfessional({ ...base, role: 'customer' })).toBe(false);
     expect(isPubliclyViewableProfessional(null)).toBe(false);
+  });
+
+  it('never reports hasMore beyond the last servable page', async () => {
+    userCountDocuments.mockResolvedValue(SITEMAP_ENTITY_MAX_PAGE + 2);
+    userFind.mockReturnValue(queryChain([{ _id: 'a' }]));
+
+    const last = fakeRes();
+    await listPublicSitemapEntities(
+      { query: { type: 'professional', page: String(SITEMAP_ENTITY_MAX_PAGE), limit: '1' } } as any,
+      last,
+    );
+    expect(last.body.data.items).toHaveLength(1);
+    expect(last.body.data.pagination.hasMore).toBe(false);
+
+    const before = fakeRes();
+    await listPublicSitemapEntities(
+      { query: { type: 'professional', page: String(SITEMAP_ENTITY_MAX_PAGE - 1), limit: '1' } } as any,
+      before,
+    );
+    expect(before.body.data.pagination.hasMore).toBe(true);
+
+    const beyond = fakeRes();
+    await listPublicSitemapEntities(
+      { query: { type: 'professional', page: String(SITEMAP_ENTITY_MAX_PAGE + 1), limit: '1' } } as any,
+      beyond,
+    );
+    expect(beyond.statusCode).toBe(200);
+    expect(beyond.body.data.items).toEqual([]);
+    expect(beyond.body.data.pagination.hasMore).toBe(false);
   });
 });

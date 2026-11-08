@@ -141,7 +141,8 @@ export const listPublicSitemapEntities = async (req: Request, res: Response) => 
           limit,
           total,
           totalPages,
-          hasMore: page < totalPages,
+          // Pages past SITEMAP_ENTITY_MAX_PAGE are never served, so never promise one.
+          hasMore: page < Math.min(totalPages, SITEMAP_ENTITY_MAX_PAGE),
         },
       },
     });
