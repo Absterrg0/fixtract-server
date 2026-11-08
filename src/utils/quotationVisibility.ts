@@ -3,39 +3,81 @@ import type { InvoiceViewerRole } from './invoiceVisibility';
 /** Depth bound for the customer-view walk. Real payloads are shallow; deeper subtrees are withheld. */
 export const CUSTOMER_VIEW_MAX_DEPTH = 40;
 
+export type ViewerPricingMode = 'customer' | 'commission-only';
+
 /**
- * Professional-side money and commission amounts. Withheld from every viewer
- * who is not the professional or a payments-authorized admin, wherever they
- * appear in the payload. A rule with `within` only matches under those keys.
- * Customer amounts (`customerTotals.customerNetAmount`, `payment.amount`,
- * VAT) are not listed and stay visible.
+ * Professional-side amounts, withheld from customer and anonymous viewers. A
+ * rule with `within` matches only when the object path ends with those keys
+ * (array indices are not part of the path). Customer-side amounts such as
+ * `customerTotals.customerNetAmount`, `payment.amount` and VAT stay visible.
  */
-const WITHHELD_FIELDS: ReadonlyArray<{ key: string; within?: readonly string[] }> = [
+const PROFESSIONAL_AMOUNT_RULES: ReadonlyArray<{ key: string; within?: readonly string[] }> = [
   { key: 'professionalNetAmount' },
   { key: 'totalAmountProfessional' },
   { key: 'totalProfessionalAmount' },
   { key: 'professionalAmount' },
-  { key: 'platformCommission' },
   { key: 'professionalPayout' },
-  { key: 'extraCostPlatformCommission' },
-  { key: 'extraCostPlatformFee' },
   { key: 'extraCostProfessionalPayout' },
   { key: 'extraCostNetAmount' },
+  { key: 'bookedPrice' },
+  { key: 'extraCostTotal' },
+  // Base (pre-commission) prices carried by quote, versions, checkout, extra costs and milestones.
+  { key: 'amount', within: ['quote'] },
+  { key: 'totalAmount', within: ['quoteVersions'] },
+  { key: 'totalAmount', within: ['versions'] },
+  { key: 'price', within: ['pricingLines'] },
+  { key: 'unitPrice', within: ['breakdown'] },
+  { key: 'totalPrice', within: ['breakdown'] },
+  { key: 'unitPrice', within: ['selectedOptions'] },
+  { key: 'totalPrice', within: ['selectedOptions'] },
+  { key: 'unitAmount', within: ['checkoutSnapshot'] },
+  { key: 'baseSubtotal', within: ['checkoutSnapshot'] },
+  { key: 'extraOptionsTotal', within: ['checkoutSnapshot'] },
+  { key: 'totalAmount', within: ['checkoutSnapshot'] },
+  { key: 'unitAmount', within: ['checkout'] },
+  { key: 'baseSubtotal', within: ['checkout'] },
+  { key: 'extraOptionsTotal', within: ['checkout'] },
+  { key: 'totalAmount', within: ['checkout'] },
+  // Terms carry a professional add-on cost; customers get customerAdditionalCost instead.
+  { key: 'additionalCost' },
+  { key: 'unitPrice', within: ['extraCosts'] },
+  { key: 'amount', within: ['extraCosts'] },
+  { key: 'unitPrice', within: ['items'] },
+  { key: 'totalPrice', within: ['items'] },
+  // Activity events carry the recorded quote amounts under `amounts`.
+  { key: 'amount', within: ['amounts'] },
+  { key: 'totalAmount', within: ['amounts'] },
+  { key: 'amount', within: ['milestonePayments'] },
+  { key: 'amount', within: ['milestones'] },
+  // Public project pricing (subprojects[].pricing, extraOptions[]).
+  { key: 'amount', within: ['pricing'] },
+  { key: 'priceRange', within: ['pricing'] },
+  { key: 'price', within: ['extraOptions'] },
 ];
+
+/** Commission amounts: withheld from everyone except professionals and payments-authorized admins. */
+const COMMISSION_AMOUNT_RULES: ReadonlyArray<{ key: string; within?: readonly string[] }> = [
+  { key: 'platformCommission' },
+  { key: 'extraCostPlatformCommission' },
+  { key: 'extraCostPlatformFee' },
+];
+
+const pathEndsWith = (path: readonly string[], suffix: readonly string[]): boolean => path.length >= suffix.length
+  && suffix.every((segment, index) => path[path.length - suffix.length + index] === segment);
+
+const matchesRule = (rules: ReadonlyArray<{ key: string; within?: readonly string[] }>, key: string, path: readonly string[]) =>
+  rules.some((rule) => rule.key === key && (!rule.within || pathEndsWith(path, rule.within)));
 
 const isCommissionPercentKey = (key: string): boolean => {
   const normalized = key.replace(/[^a-z]/gi, '').toLowerCase();
   return normalized.includes('commission') && /percent|pct|rate/.test(normalized);
 };
 
-/** True when the object path ends with `suffix` (array indices are not part of the path). */
-const pathEndsWith = (path: readonly string[], suffix: readonly string[]): boolean => path.length >= suffix.length
-  && suffix.every((segment, index) => path[path.length - suffix.length + index] === segment);
-
 /** `path` holds the object keys above `key`. */
-const isWithheld = (key: string, path: readonly string[]): boolean => {
+const isWithheld = (key: string, path: readonly string[], mode: ViewerPricingMode): boolean => {
   if (isCommissionPercentKey(key)) return true;
-  return WITHHELD_FIELDS.some((rule) => rule.key === key && (!rule.within || pathEndsWith(path, rule.within)));
+  if (matchesRule(COMMISSION_AMOUNT_RULES, key, path)) return true;
+  return mode === 'customer' && matchesRule(PROFESSIONAL_AMOUNT_RULES, key, path);
 };
 
 const isLeaf = (value: object): boolean => value instanceof Date
@@ -51,7 +93,7 @@ const isLeaf = (value: object): boolean => value instanceof Date
  * A back-edge (cycle) or a subtree deeper than CUSTOMER_VIEW_MAX_DEPTH is
  * withheld rather than traversed.
  */
-const customerView = (value: unknown, path: readonly string[], ancestors: readonly object[]): unknown => {
+const customerView = (value: unknown, path: readonly string[], ancestors: readonly object[], mode: ViewerPricingMode): unknown => {
   if (value === null || typeof value !== 'object') return value;
   if (isLeaf(value as object)) return value;
   if (ancestors.length >= CUSTOMER_VIEW_MAX_DEPTH || ancestors.includes(value as object)) return undefined;
@@ -63,7 +105,7 @@ const customerView = (value: unknown, path: readonly string[], ancestors: readon
   if (Array.isArray(source)) {
     let changed = source !== value;
     const out = source.map((item) => {
-      const next = customerView(item, path, nextAncestors);
+      const next = customerView(item, path, nextAncestors, mode);
       if (next !== item) changed = true;
       return next;
     });
@@ -73,20 +115,23 @@ const customerView = (value: unknown, path: readonly string[], ancestors: readon
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(source)) {
     const child = source[key];
-    if (isWithheld(key, path)) {
+    if (isWithheld(key, path, mode)) {
       changed = true;
       continue;
     }
-    const next = customerView(child, [...path, key], nextAncestors);
+    const next = customerView(child, [...path, key], nextAncestors, mode);
     if (next !== child) changed = true;
     out[key] = next;
   }
   return changed ? out : source;
 };
 
-/** One response boundary for recorded quote data, including legacy nested bags.
- * Amounts remain as recorded; percentage and professional-side amounts are
- * withheld from every viewer except the professional and payments-authorized admins.
+/**
+ * Withholds professional-side and commission amounts for a viewer.
+ * - professional (own data) and payments-authorized admins: unchanged.
+ * - `commission-only`: an admin without payments read; commission amounts go, professional amounts stay.
+ * - customer or anonymous (`role: 'customer'`): professional-side amounts and commission amounts go.
+ * Amounts remain as recorded; use `customerTotals` and the explicit customer* fields for customer-side money.
  */
 export const quotationForViewer = <T>(
   value: T,
@@ -94,8 +139,13 @@ export const quotationForViewer = <T>(
   canReadPayments = true,
 ): T => {
   if (role === 'professional' || (role === 'admin' && canReadPayments)) return value;
-  return customerView(value, [], []) as T;
+  const mode: ViewerPricingMode = role === 'admin' ? 'commission-only' : 'customer';
+  return customerView(value, [], [], mode) as T;
 };
+
+/** Explicit viewer-mode withholding, for public handlers whose viewer may be a non-owner professional. */
+export const withholdPricingForMode = <T>(value: T, mode: ViewerPricingMode): T =>
+  customerView(value, [], [], mode) as T;
 
 /** Only the existing public badge presets belong in the participant DTO. */
 export const publicProfessionalTags = (tags: unknown): string[] => Array.isArray(tags)

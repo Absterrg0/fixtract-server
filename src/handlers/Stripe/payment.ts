@@ -45,7 +45,7 @@ import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discoun
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
 import { recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger';
-import { commissionedPricingLines, commissionedQuoteAmount } from '../../utils/customerPricing';
+import { commissionedPricingLines, commissionedQuoteAmount, optionsCustomerCharge } from '../../utils/customerPricing';
 import { auditLog } from '../../utils/auditLogger';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
 
@@ -472,7 +472,7 @@ export const createPaymentIntent = async (
         .find((entry) => entry.index === milestoneIndex) || null;
       if (planEntry) chargeAmount = planEntry.expectedCustomerGross;
     } else if (selectedExtraOptionsTotal > 0 && !quoteAmountIncludesSelectedExtras(booking)) {
-      chargeAmount += +(selectedExtraOptionsTotal * (1 + commissionPercent / 100)).toFixed(2);
+      chargeAmount += optionsCustomerCharge(selectedExtraOptionsTotal, commissionPercent);
     }
 
     if (booking.payment?.stripePaymentIntentId && booking.payment?.stripeClientSecret) {

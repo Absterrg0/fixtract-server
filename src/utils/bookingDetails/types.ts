@@ -277,6 +277,8 @@ export type BookingSnapshotDto = {
 };
 
 export type CheckoutSnapshotDto = {
+  /** Customer total of the package and its options (checkout arithmetic, live commission). Null for professionals. */
+  customerTotal?: number | null;
   pricingType: 'fixed' | 'unit';
   unitAmount: number;
   quantity: number;
@@ -632,6 +634,8 @@ export type PaymentsDetailsDto = {
 export type ExtraCostsDetailsDto = {
   status: 'pending' | 'confirmed' | 'disputed' | null;
   totalProfessionalAmount: number | null;
+  /** Customer-side total of the extra costs (commission-inclusive, before discounts). Null for professionals. */
+  totalCustomerAmount: number | null;
   currency: string | null;
   currencySource: 'payment' | 'quote' | 'not_recorded';
   items: Array<{
@@ -639,6 +643,8 @@ export type ExtraCostsDetailsDto = {
     name: string;
     justification: string;
     professionalAmount: number;
+    /** Customer-side amount of this line (commission-inclusive, before discounts). Null for professionals. */
+    customerAmount: number | null;
     unitPrice: number | null;
     estimatedUnits: number | null;
     actualUnits: number | null;

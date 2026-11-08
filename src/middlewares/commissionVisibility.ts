@@ -19,7 +19,7 @@ export const commissionVisibility = (req: Request, res: Response, next: NextFunc
     const role: InvoiceViewerRole = isAdmin
       ? 'admin'
       : req.user?.role === 'professional' ? 'professional' : 'customer';
-    const canReadPayments = isAdmin && res.locals.canReadPayments === true;
+    const canReadPayments = isAdmin && res.locals?.canReadPayments === true;
     return json.call(this, quotationForViewer(body, role, canReadPayments));
   };
   next();

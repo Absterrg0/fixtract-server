@@ -500,8 +500,9 @@ describe('quote provenance and totals', () => {
     const details = await buildDetails('customer', { booking: base });
     const version = details.quotation!.versions[0];
     expect(version.materialsIncluded).toBeNull();
-    expect(version.totalAmount).toBeNull();
-    expect(version.milestones[0].amount).toBeNull();
+    // Professional-side totals are withheld from customers; the customer totals stay in customerTotals.
+    expect(version).not.toHaveProperty('totalAmount');
+    expect(version.milestones[0]).not.toHaveProperty('amount');
     expect(version.preparationDuration).toBeNull();
     expect(version.executionDuration).toBeNull();
     expect(version.validUntil).toBeNull();
@@ -690,7 +691,7 @@ describe('quote provenance and totals', () => {
     const accepted = details.quotation!.versions.find((version) => version.version === 1)!;
     const later = details.quotation!.versions.find((version) => version.version === 2)!;
     expect(accepted.accepted).toBe(true);
-    expect(accepted.totalAmount).toBe(100);
+    expect(accepted).not.toHaveProperty('totalAmount');
     expect(accepted.customerTotals).toMatchObject({ customerNetAmount: 110, totalWithVat: 131 });
     expect(later.accepted).toBe(false);
     expect(later.customerTotals).toMatchObject({ customerNetAmount: 625, totalWithVat: 756.25 });

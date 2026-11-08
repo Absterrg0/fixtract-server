@@ -32,6 +32,7 @@ import type {
 } from './types';
 import { actorForId, isActorRecorded, type ActorMap } from './actors';
 import { getCheckoutCommissionPercent } from '../checkoutCommission';
+import { checkoutCustomerTotal, commissionedExtraCostAmount, commissionedExtraCostTotal } from '../customerPricing';
 import { buildMilestoneChargePlan, milestoneCustomerCharge } from '../milestoneCharges';
 import {
   presignOwnedUrl,
@@ -163,6 +164,17 @@ const mapScheduleSnapshot = (schedule: any): ScheduleSnapshotDto | null => {
         }
       : {}),
   };
+};
+
+/** Adds the customer checkout total for non-professional viewers, with the same arithmetic as checkout. */
+const withCustomerCheckoutTotal = async (
+  checkout: CheckoutSnapshotDto | null,
+  snapshot: any,
+  viewerRole: 'admin' | 'customer' | 'professional',
+): Promise<CheckoutSnapshotDto | null> => {
+  if (!checkout) return checkout;
+  if (viewerRole === 'professional') return { ...checkout, customerTotal: null };
+  return { ...checkout, customerTotal: checkoutCustomerTotal(snapshot, await getCheckoutCommissionPercent()) };
 };
 
 const mapCheckoutSnapshot = (snapshot: any): CheckoutSnapshotDto | null => {
@@ -705,10 +717,11 @@ const buildPayments = async (params: {
 
   // Unpaid estimates share checkout's current commission source. Recorded
   // payment totals still take precedence in milestoneCustomerCharge below.
+  const liveCommissionPercent = await getCheckoutCommissionPercent();
   let milestoneChargePlan: ReturnType<typeof buildMilestoneChargePlan> = [];
   if (booking.milestonePayments?.length) {
     try {
-      milestoneChargePlan = buildMilestoneChargePlan(booking, await getCheckoutCommissionPercent());
+      milestoneChargePlan = buildMilestoneChargePlan(booking, liveCommissionPercent);
     } catch (error) {
       console.error('Failed to resolve milestone details charge:', error);
     }
@@ -859,7 +872,7 @@ const buildPayments = async (params: {
     complete: bucket.complete,
   }));
 
-  const checkout = mapCheckoutSnapshot(booking.checkoutSnapshot);
+  const checkout = await withCustomerCheckoutTotal(mapCheckoutSnapshot(booking.checkoutSnapshot), booking.checkoutSnapshot, viewerRole);
   if (!checkout && booking.checkoutSnapshot) {
     notices.push(notice('CHECKOUT_SNAPSHOT_INCOMPLETE', 'warning', 'booking_snapshot'));
   }
@@ -947,7 +960,11 @@ export const buildBookingDetails = async (params: {
     snapshotNotices.push(notice('BOOKING_SNAPSHOT_NOT_RECORDED', 'warning', 'booking_snapshot'));
     if (project) snapshotNotices.push(notice('LIVE_PROJECT_MAY_HAVE_CHANGED', 'info', 'booking_snapshot'));
   }
-  const checkout = mapCheckoutSnapshot(captured?.checkoutSnapshot || booking.checkoutSnapshot);
+  const checkout = await withCustomerCheckoutTotal(
+    mapCheckoutSnapshot(captured?.checkoutSnapshot || booking.checkoutSnapshot),
+    captured?.checkoutSnapshot || booking.checkoutSnapshot,
+    viewerRole,
+  );
   if (!checkout && (captured?.checkoutSnapshot || booking.checkoutSnapshot)) {
     snapshotNotices.push(notice('CHECKOUT_SNAPSHOT_INCOMPLETE', 'warning', 'booking_snapshot'));
   }
@@ -1484,6 +1501,9 @@ export const buildBookingDetails = async (params: {
   });
 
   const extraCostPayment = paymentsDto.extraCost;
+  const extraCostCommissionPercent = viewerRole === 'professional' ? 0 : await getCheckoutCommissionPercent();
+  // Customer-side extra-cost amounts, computed here with the live commission so the
+  // customer never needs the professional base. Professionals see the base and commission.
   const extraCostItems = (Array.isArray(booking.extraCosts) ? booking.extraCosts : []).map((item: any) => ({
     type: item.type || 'other',
     name: String(item.name || ''),
@@ -1495,6 +1515,7 @@ export const buildBookingDetails = async (params: {
     actualUnits: num(item.actualUnits),
     referenceIndex: num(item.referenceIndex),
     customerCharge: null,
+    customerAmount: viewerRole === 'professional' ? null : commissionedExtraCostAmount(item, extraCostCommissionPercent),
   }));
   const extraCostNotices: DetailsNotice[] = [];
   if (num(booking.extraCostTotal) != null && booking.extraCostTotal !== 0 && !extraCostPayment) {
@@ -1524,6 +1545,9 @@ export const buildBookingDetails = async (params: {
   const extraCosts: ExtraCostsDetailsDto = {
     status: booking.extraCostStatus || null,
     totalProfessionalAmount: num(booking.extraCostTotal),
+    totalCustomerAmount: viewerRole === 'professional' || num(booking.extraCostTotal) == null
+      ? null
+      : commissionedExtraCostTotal(booking.extraCosts, num(booking.extraCostTotal) ?? 0, extraCostCommissionPercent),
     currency: paymentCurrency,
     currencySource: booking.payment?.currency ? 'payment' : quoteCurrency ? 'quote' : 'not_recorded',
     items: extraCostItems,

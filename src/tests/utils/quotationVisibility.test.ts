@@ -78,7 +78,8 @@ describe('customer-view walk is bounded and matches JSON serialization', () => {
   it('withholds professional and commission amounts from anonymous and non-finance admin viewers', () => {
     const payload = { payment: { amount: 115, platformCommission: 15, professionalPayout: 100 } };
     expect(quotationForViewer(payload, 'customer')).toEqual({ payment: { amount: 115 } });
-    expect(quotationForViewer(payload, 'admin', false)).toEqual({ payment: { amount: 115 } });
+    // An admin without payments read keeps professional amounts but loses commission amounts.
+    expect(quotationForViewer(payload, 'admin', false)).toEqual({ payment: { amount: 115, professionalPayout: 100 } });
     expect(quotationForViewer(payload, 'admin', true)).toBe(payload);
     expect(quotationForViewer(payload, 'professional')).toBe(payload);
   });
