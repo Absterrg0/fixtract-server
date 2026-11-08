@@ -100,3 +100,13 @@ it('does not manufacture a legacy status-history timestamp', () => {
   const hydrated = Booking.hydrate({ _id: new Types.ObjectId(), statusHistory: [{ status: 'quoted' }] });
   expect(hydrated.statusHistory[0].timestamp).toBeUndefined();
 });
+
+describe('undated recorded disputes follow hasRecordedDispute', () => {
+  it('keeps a dispute with a recorded actor in the dispute filters and cohort count, even without raisedAt', async () => {
+    const { RECORDED_DISPUTE_FILTER, RECORDED_DISPUTE_EXPR, hasRecordedDispute } = await import('../../utils/bookingActivity');
+    const undated = { dispute: { raisedBy: '6650a0000000000000000001' } };
+    expect(hasRecordedDispute(undated)).toBe(true);
+    expect(RECORDED_DISPUTE_FILTER).toEqual({ 'dispute.raisedBy': { $exists: true, $ne: null } });
+    expect(RECORDED_DISPUTE_EXPR).toEqual({ $ne: [{ $ifNull: ['$dispute.raisedBy', null] }, null] });
+  });
+});

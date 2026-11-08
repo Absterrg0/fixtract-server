@@ -72,9 +72,13 @@ export const withoutPhantomBookingActivity = <T>(booking: T): T => {
   return next as T;
 };
 
-/** Mongo filters that only match recorded activity (legacy phantom values excluded). */
+/**
+ * Mongo filters that only match recorded activity (legacy phantom values excluded).
+ * Mirrors `hasRecordedDispute`: the actor is the evidence. A dispute with a recorded
+ * actor but no `raisedAt` is real and stays in lists and counts. Date-range metrics
+ * add their own `dispute.raisedAt` bounds, so they still require a date.
+ */
 export const RECORDED_DISPUTE_FILTER = Object.freeze({
-  "dispute.raisedAt": { $exists: true },
   "dispute.raisedBy": { $exists: true, $ne: null },
 });
 
@@ -85,10 +89,7 @@ export const RECORDED_CUSTOMER_REVIEW_FILTER = Object.freeze({
 
 /** Aggregation expression: true when the row carries a recorded dispute. */
 export const RECORDED_DISPUTE_EXPR = {
-  $and: [
-    { $ne: [{ $ifNull: ["$dispute.raisedAt", null] }, null] },
-    { $ne: [{ $ifNull: ["$dispute.raisedBy", null] }, null] },
-  ],
+  $ne: [{ $ifNull: ["$dispute.raisedBy", null] }, null],
 };
 
 /** Aggregation expression: true when the row carries a recorded customer review. */

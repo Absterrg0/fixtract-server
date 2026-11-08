@@ -402,7 +402,7 @@ export const getDisputeDetails = async (req: Request, res: Response) => {
       });
     }
 
-    if (!booking.dispute?.raisedAt || !hasRecordedDispute(booking)) {
+    if (!hasRecordedDispute(booking)) {
       return res.status(400).json({
         success: false,
         error: {
@@ -493,7 +493,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
       });
     }
 
-    const hasOpenDispute = hasRecordedDispute(booking) && Boolean((booking.dispute as any)?.raisedAt) && !(booking.dispute as any)?.resolvedAt;
+    const hasOpenDispute = hasRecordedDispute(booking) && !(booking.dispute as any)?.resolvedAt;
     if (booking.status !== ACTIVE_DISPUTE_STATUS && !hasOpenDispute && !booking.dispute?.refundPending) {
       return res.status(400).json({
         success: false,

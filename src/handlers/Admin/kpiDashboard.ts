@@ -146,7 +146,8 @@ const bookingMetricsProjection = (currencyField: string) => ({
   rescheduleRequestAt: '$rescheduleRequest.requestedAt',
   noShowAt: '$noShow.markedAt',
   // Legacy schema defaults stored phantom timestamps on every booking; count recorded activity only.
-  disputeAt: { $cond: [RECORDED_DISPUTE_EXPR, '$dispute.raisedAt', null] },
+  // Follows hasRecordedDispute (actor evidence), so an undated recorded dispute still counts.
+  disputeRecorded: { $cond: [RECORDED_DISPUTE_EXPR, true, false] },
   reviewedAt: { $cond: [RECORDED_CUSTOMER_REVIEW_EXPR, '$customerReview.reviewedAt', null] },
   reviewAvg: reviewAvgExpr,
   isRfq: { $eq: ['$bookingType', 'professional'] },
@@ -164,7 +165,7 @@ const bookingMetricsAccumulators = {
   completedBookings: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
   quotedCount: { $sum: { $cond: ['$quoted', 1, 0] } },
   bookingsCount: { $sum: { $cond: [{ $in: ['$status', PAID_STATUSES] }, 1, 0] } },
-  disputeCount: { $sum: { $cond: [{ $ifNull: ['$disputeAt', false] }, 1, 0] } },
+  disputeCount: { $sum: { $cond: ['$disputeRecorded', 1, 0] } },
   noShowCount: { $sum: { $cond: [{ $ifNull: ['$noShowAt', false] }, 1, 0] } },
   refundCount: { $sum: { $cond: [{ $in: ['$paymentStatus', ['refunded', 'partially_refunded']] }, 1, 0] } },
   refundAmount: { $sum: { $cond: [{ $and: [{ $in: ['$paymentStatus', ['refunded', 'partially_refunded']] }, { $eq: [{ $ifNull: ['$paymentCurrency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, '$refundAmount', 0] } },
