@@ -1,3 +1,4 @@
+import { InvoiceSettlementBasisSchema, RefundCreditFactSchema, type InvoiceSettlementBasis, type RefundCreditFact } from "./invoiceSettlement";
 import { Schema, model, Document, Types } from "mongoose";
 import { STRIPE_CONFIG } from "../services/stripe";
 import { VatBreakdownLine } from "../Types/stripe";
@@ -30,6 +31,7 @@ export interface IPaymentRefund {
   amount: number;
   reason?: string;
   refundId?: string;
+  operationKey?: string;
   refundedAt: Date;
   source: "professional" | "platform" | "mixed";
   notes?: string;
@@ -145,6 +147,8 @@ export interface IPayment extends Document {
   supplierCreditNotePeppolDispatchReference?: string;
 
   invoiceArtifactHistory?: InvoiceArtifactHistoryEntry[];
+  invoiceSettlementBasis?: InvoiceSettlementBasis;
+  refundCreditLedger?: RefundCreditFact[];
 
   manualArtifactClaims?: ManualArtifactClaim[];
 
@@ -159,6 +163,7 @@ const PaymentRefundSchema = new Schema<IPaymentRefund>(
     amount: { type: Number, required: true },
     reason: { type: String, maxlength: 500 },
     refundId: { type: String },
+    operationKey: { type: String, maxlength: 200 },
     refundedAt: { type: Date, default: Date.now },
     source: {
       type: String,
@@ -323,6 +328,8 @@ const PaymentSchema = new Schema<IPayment>(
     supplierCreditNotePeppolDispatchReason: { type: String },
     supplierCreditNotePeppolDispatchReference: { type: String },
     invoiceArtifactHistory: { type: [InvoiceArtifactHistorySchema], default: [] },
+    invoiceSettlementBasis: { type: InvoiceSettlementBasisSchema, select: false },
+    refundCreditLedger: { type: [RefundCreditFactSchema], default: undefined, select: false },
     manualArtifactClaims: { type: [ManualArtifactClaimSchema], default: [] },
 
     metadata: { type: Schema.Types.Mixed },

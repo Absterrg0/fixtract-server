@@ -85,3 +85,17 @@ describe("platform UBL unit prices in whole cents", () => {
     expect(xml).toMatch(/<cbc:TaxExclusiveAmount currencyID="EUR">538\.44<\/cbc:TaxExclusiveAmount>/);
   });
 });
+
+describe('refund header notes', () => {
+  it.each([false, true])('emits escaped refund facts after InvoiceTypeCode (self billing %s)', selfBilling => {
+    const value = { ...booking, payment: { ...booking.payment, status: 'partially_refunded', refundAmount: 21,
+      refundedAt: new Date('2026-10-29'), refundReason: 'Work <missed> & "agreed"' },
+      cancellation: { adminResolutionNote: 'Fix <details>' } };
+    const xml = buildUblInvoiceXml(value, 'FIX-REFUND', new Date('2026-10-30'), { selfBilling, platform });
+    expect(xml).toMatch(/<cbc:InvoiceTypeCode>\d+<\/cbc:InvoiceTypeCode>\s*<cbc:Note>Partial refund of 21.00 EUR on 2026-10-29: Work &lt;missed&gt; &amp; &quot;agreed&quot; — Fix &lt;details&gt;<\/cbc:Note>/);
+  });
+  it('omits the refund note when there is no partial refund', () => {
+    const xml = buildUblInvoiceXml(booking, 'FIX-NO-REFUND', new Date('2026-10-30'), { selfBilling: false, platform });
+    expect(xml).not.toContain('<cbc:Note>');
+  });
+});

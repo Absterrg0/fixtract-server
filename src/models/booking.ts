@@ -1,3 +1,4 @@
+import { InvoiceSettlementBasisSchema, RefundCreditFactSchema, type InvoiceSettlementBasis, type RefundCreditFact } from "./invoiceSettlement";
 import mongoose, { Schema, model, Document, Types } from "mongoose";
 import { getNextSequence } from "../utils/counterSequence";
 import { STRIPE_CONFIG } from "../services/stripe";
@@ -90,6 +91,14 @@ export interface IBookingMilestone extends IQuotationMilestone {
  * recorded zero, never a guess.
  */
 export interface IPaymentDiscountLedgerEntry {
+  netAmount?: number;
+  vatAmount?: number;
+  totalWithVat?: number;
+  platformCommission?: number;
+  professionalPayout?: number;
+  vatRate?: number;
+  reverseCharge?: boolean;
+
   paymentIntentId: string;
   milestoneIndex?: number;
   currency?: string;
@@ -118,6 +127,7 @@ export interface IQuoteCustomerTotals {
   /** Alias kept for the frontend contract. */
   amountBeforeDiscounts?: number;
   vatAmount?: number;
+  vatBreakdown?: VatBreakdownLine[];
   vatRate?: number;
   totalWithVat?: number;
   /** Alias kept for the frontend contract. */
@@ -250,6 +260,7 @@ export interface IBookingScheduleSnapshot {
   scheduledStartTime?: string;
   scheduledEndTime?: string;
   assignedTeamMembers?: Types.ObjectId[];
+  resourcePlan?: { resourceId: Types.ObjectId; days: Date[] }[];
 }
 
 export interface IBooking extends Document {
@@ -422,6 +433,7 @@ export interface IBooking extends Document {
     // Refund
     refundAmount?: number;
     refundReason?: string;
+    refundOperationKey?: string;
     refundSource?: 'professional' | 'platform' | 'mixed';
     refundNotes?: string;
     disputeId?: string;
@@ -498,6 +510,7 @@ export interface IBooking extends Document {
     creditNotePeppolDispatchReason?: string;
     creditNotePeppolDispatchReference?: string;
     creditNoteGenerationClaim?: string;
+    refundInvoiceRetryAt?: Date;
     supplierInvoiceGenerationClaim?: string;
     supplierCreditNoteNumber?: string;
     supplierCreditNoteUrl?: string;
@@ -508,6 +521,8 @@ export interface IBooking extends Document {
     supplierCreditNotePeppolDispatchReason?: string;
     supplierCreditNotePeppolDispatchReference?: string;
     invoiceArtifactHistory?: InvoiceArtifactHistoryEntry[];
+    invoiceSettlementBasis?: InvoiceSettlementBasis;
+    refundCreditLedger?: RefundCreditFact[];
 
     // Auto-discount breakdown
     discount?: {
@@ -542,7 +557,7 @@ export interface IBooking extends Document {
   actualStartDate?: Date;
   actualEndDate?: Date;
   rescheduleRequest?: {
-    status: 'pending' | 'accepted' | 'declined';
+    status: 'pending' | 'accepted' | 'declined' | 'disputed';
     requestedBy: Types.ObjectId;
     requestedAt: Date;
     reason: string;
@@ -562,7 +577,7 @@ export interface IBooking extends Document {
     note?: string;
     previousSchedule?: IBookingScheduleSnapshot;
     proposedSchedule: IBookingScheduleSnapshot;
-    status: 'accepted' | 'declined' | 'auto_cancelled';
+    status: 'accepted' | 'declined' | 'disputed' | 'auto_cancelled';
     respondedAt?: Date;
     respondedBy?: Types.ObjectId;
     responseNote?: string;
@@ -657,6 +672,8 @@ export interface IBooking extends Document {
     description: string;
     raisedAt: Date;
     resolvedAt?: Date;
+    refundPending?: boolean;
+    refundRequestedAmount?: number;
     resolution?: string;
     resolvedBy?: Types.ObjectId; // Admin who resolved
     adminAdjustedAmount?: number;
@@ -694,6 +711,8 @@ export interface IBooking extends Document {
   notes?: string; // Internal notes
   /** Terminal-state calendar release did not complete; retried on the next save. */
   calendarReleasePending?: boolean;
+  /** A started partial-refund cancellation retains only its historical resource plan. */
+  refundPreservesPastPlanning?: boolean;
   professionalCompletedAt?: Date;
   notificationReminders?: {
     unfinishedCheckoutLastSentAt?: Date;
@@ -770,6 +789,7 @@ const QuoteCustomerTotalsSchema = new Schema(
     customerNetAmount: { type: Number, min: 0 },
     amountBeforeDiscounts: { type: Number, min: 0 },
     vatAmount: { type: Number, min: 0 },
+    vatBreakdown: { type: [Schema.Types.Mixed], default: undefined },
     vatRate: { type: Number, min: 0, max: 100 },
     totalWithVat: { type: Number, min: 0 },
     totalAmount: { type: Number, min: 0 },
@@ -1065,6 +1085,14 @@ const BookingSchema = new Schema({
   // No default, so loading a booking without it and saving never rewrites it.
   paymentDiscountLedger: {
     type: [{
+      netAmount: { type: Number },
+      vatAmount: { type: Number },
+      totalWithVat: { type: Number },
+      platformCommission: { type: Number },
+      professionalPayout: { type: Number },
+      vatRate: { type: Number },
+      reverseCharge: { type: Boolean },
+
       paymentIntentId: { type: String, required: true },
       milestoneIndex: { type: Number, min: 0 },
       currency: { type: String },
@@ -1251,6 +1279,7 @@ const BookingSchema = new Schema({
     // Refund metadata
     refundAmount: { type: Number, min: 0 },
     refundReason: { type: String, maxlength: 500 },
+    refundOperationKey: { type: String, maxlength: 200 },
     refundSource: {
       type: String,
       enum: ['professional', 'platform', 'mixed']
@@ -1322,6 +1351,7 @@ const BookingSchema = new Schema({
     creditNotePeppolDispatchReason: { type: String },
     creditNotePeppolDispatchReference: { type: String },
     creditNoteGenerationClaim: { type: String },
+    refundInvoiceRetryAt: { type: Date, select: false },
     supplierInvoiceGenerationClaim: { type: String },
     supplierCreditNoteNumber: { type: String },
     supplierCreditNoteUrl: { type: String },
@@ -1332,6 +1362,8 @@ const BookingSchema = new Schema({
     supplierCreditNotePeppolDispatchReason: { type: String },
     supplierCreditNotePeppolDispatchReference: { type: String },
     invoiceArtifactHistory: { type: [InvoiceArtifactHistorySchema], default: [] },
+    invoiceSettlementBasis: { type: InvoiceSettlementBasisSchema, select: false },
+    refundCreditLedger: { type: [RefundCreditFactSchema], default: undefined, select: false },
 
     // Auto-discount breakdown
     discount: {
@@ -1375,7 +1407,7 @@ const BookingSchema = new Schema({
   rescheduleRequest: {
     status: {
       type: String,
-      enum: ['pending', 'accepted', 'declined'],
+      enum: ['pending', 'accepted', 'declined', 'disputed'],
     },
     requestedBy: {
       type: Schema.Types.ObjectId,
@@ -1393,6 +1425,7 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      resourcePlan: { type: [{ resourceId: { type: Schema.Types.ObjectId, ref: 'User', required: true }, days: [Date] }], default: undefined },
       assignedTeamMembers: [{
         type: Schema.Types.ObjectId,
         ref: 'User',
@@ -1406,6 +1439,7 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      resourcePlan: { type: [{ resourceId: { type: Schema.Types.ObjectId, ref: 'User', required: true }, days: [Date] }], default: undefined },
       assignedTeamMembers: [{
         type: Schema.Types.ObjectId,
         ref: 'User',
@@ -1432,6 +1466,7 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      resourcePlan: { type: [{ resourceId: { type: Schema.Types.ObjectId, ref: 'User', required: true }, days: [Date] }], default: undefined },
       assignedTeamMembers: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     },
     proposedSchedule: {
@@ -1442,9 +1477,10 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      resourcePlan: { type: [{ resourceId: { type: Schema.Types.ObjectId, ref: 'User', required: true }, days: [Date] }], default: undefined },
       assignedTeamMembers: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     },
-    status: { type: String, enum: ['accepted', 'declined', 'auto_cancelled'], required: true },
+    status: { type: String, enum: ['accepted', 'declined', 'disputed', 'auto_cancelled'], required: true },
     respondedAt: {
       type: Date,
       required: function (this: any) {
@@ -1671,6 +1707,8 @@ const BookingSchema = new Schema({
       default: Date.now
     },
     resolvedAt: { type: Date },
+    refundPending: { type: Boolean },
+    refundRequestedAmount: { type: Number },
     resolution: { type: String, maxlength: 2000 },
     resolvedBy: {
       type: Schema.Types.ObjectId,
@@ -1732,6 +1770,7 @@ const BookingSchema = new Schema({
     type: String
   },
   calendarReleasePending: { type: Boolean, default: undefined },
+  refundPreservesPastPlanning: { type: Boolean, default: undefined },
   notes: {
     type: String,
     maxlength: 2000
@@ -1807,7 +1846,14 @@ BookingSchema.post("save", async function (doc) {
   if (!["cancelled", "refunded", "completed"].includes(String(doc.status))) return;
   try {
     const session = typeof (doc as any).$session === "function" ? (doc as any).$session() : undefined;
-    await releaseCalendarReservations("booking", doc._id, session || undefined);
+    if (doc.status === 'cancelled' && doc.payment?.status === 'partially_refunded'
+      && doc.refundPreservesPastPlanning
+      && doc.resourcePlan?.some((entry) => entry.days?.length > 0)) {
+      const { replaceBookingCalendar } = await import('../utils/support/bookingCalendar');
+      await replaceBookingCalendar(doc as unknown as IBooking, session || undefined);
+    } else {
+      await releaseCalendarReservations("booking", doc._id, session || undefined);
+    }
     if (doc.calendarReleasePending) {
       await Booking.updateOne({ _id: doc._id }, { $unset: { calendarReleasePending: 1 } });
       doc.calendarReleasePending = undefined;

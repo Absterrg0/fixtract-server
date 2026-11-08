@@ -1132,6 +1132,7 @@ const readOdooMovePeppolState = async (
     if (rawState) {
       return [{ state: rawState }];
     }
+    if (move.peppol_is_sent === true) return [{ state: "processing" }];
     return [];
   } catch {
     return undefined;
@@ -1433,6 +1434,10 @@ const dispatchToOdoo = async (
     const existingMove = await findExistingOdooMove(config, payload);
     if (existingMove?.state === "posted") {
       const documents = await readOdooEdiDeliveryState(config, existingMove.id);
+      if (documents === undefined) {
+        return { status: "queued", provider: "odoo", reference: `odoo-account.move-${existingMove.id}`,
+          reason: "The prior Peppol attempt could not be reconciled; retry later to refresh its status.", attempts: 0 };
+      }
       if (documents?.some((document) =>
         ["sent", "done", "delivered", "processing", "to_send"].includes(String(document.state || "").toLowerCase())
       )) {
