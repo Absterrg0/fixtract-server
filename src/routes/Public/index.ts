@@ -62,6 +62,8 @@ export const SCHEDULING_RATE_LIMIT = 60;
  */
 export const ANNOUNCEMENT_LIST_RATE_LIMIT = 300;
 export const ANNOUNCEMENT_EVENT_RATE_LIMIT = 600;
+/** Per-IP budget for public customer price lookups (see handlers/Public/customerPrices). */
+export const PRICE_PREVIEW_RATE_LIMIT = 600;
 
 const createPublicRateLimiter = (limit: number) =>
   rateLimit({
@@ -78,9 +80,10 @@ const createPublicRateLimiter = (limit: number) =>
 
 const schedulingRateLimiter = createPublicRateLimiter(SCHEDULING_RATE_LIMIT);
 const announcementListRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_LIST_RATE_LIMIT);
-const pricePreviewRateLimiter = createPublicRateLimiter(600);
+const pricePreviewRateLimiter = createPublicRateLimiter(PRICE_PREVIEW_RATE_LIMIT);
 const announcementEventRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_EVENT_RATE_LIMIT);
 
+// Customer price lookup (entity-keyed; rate limited, see PRICE_PREVIEW_RATE_LIMIT)
 publicRouter.route("/customer-prices").post(pricePreviewRateLimiter, previewCustomerPrices);
 
 // Google Maps configuration (public endpoint)

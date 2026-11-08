@@ -715,8 +715,9 @@ describe('details privacy', () => {
     expect(details.parties.customer.vatNumber).toBeNull();
     expect(details.payments.records[0].providerIds).toBeUndefined();
     expect(details.payments.records[0].diagnostics).toBeUndefined();
-    expect(details.payments.records[0].platformCommission).toBeNull();
-    expect(details.payments.records[0].professionalPayout).toBeNull();
+    // Participant payloads omit professional-side and commission amounts rather than null-filling them.
+    expect(details.payments.records[0]).not.toHaveProperty('platformCommission');
+    expect(details.payments.records[0]).not.toHaveProperty('professionalPayout');
   });
 
   it('gives each party only its own invoice side', async () => {

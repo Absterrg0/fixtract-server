@@ -719,6 +719,6 @@ describe('payment history and quotation response serialization', () => {
     expect(res.body.data.booking.payment.supplierInvoiceNumber).toBeUndefined();
     expect(res.body.data.booking.customerRejectionReason).toBe('Too expensive');
     expect(JSON.stringify(res.body)).not.toMatch(/commissionPercent|platformCommissionPercentage/);
-    expect(res.body.data.booking.quoteVersions[0].customerTotals.professionalNetAmount).toBe(100);
+    expect(res.body.data.booking.quoteVersions[0].customerTotals).not.toHaveProperty('professionalNetAmount');
   });
 });

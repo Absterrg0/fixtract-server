@@ -3,16 +3,27 @@ import express from 'express';
 import type { Server } from 'node:http';
 const mocks = vi.hoisted(() => ({ config: vi.fn(), access: vi.fn() }));
 vi.mock('../../../models/platformSettings', () => ({ default: { getCurrentConfig: mocks.config } }));
-vi.mock('../../../utils/bookingDetails/adminAccess', () => ({ resolveBookingAdminAccess: mocks.access }));
+vi.mock('../../../utils/bookingDetails/adminAccess', () => ({
+  isAdminUser: (user: any) => user?.role === 'admin' || user?.isAdmin === true,
+  resolveBookingAdminAccess: mocks.access,
+}));
 import { getCommissionRate, previewCustomerPrices } from '../../../handlers/Public/customerPrices';
 import { commissionVisibility } from '../../../middlewares/commissionVisibility';
+import { attachAdminPaymentsAccess } from '../../../middlewares/auth';
 import { commissionedExtraCostTotal, commissionedQuoteAmount } from '../../../utils/customerPricing';
 let server: Server;
 let base: string;
 beforeAll(async () => {
   const app = express();
+  // Production mounts commissionVisibility on /api before the auth middleware sets req.user. The
+  // middleware reads req.user lazily inside res.json, so this test's earlier user injection behaves the same.
   app.use(express.json(), commissionVisibility);
-  app.use((req, _res, next) => { if (req.headers['x-role']) req.user = { role: req.headers['x-role'] } as any; next(); });
+  // Stands in for the auth middleware: sets req.user, then resolves admin payments access as protect does.
+  app.use(async (req, res, next) => {
+    if (req.headers['x-role']) req.user = { role: req.headers['x-role'] } as any;
+    await attachAdminPaymentsAccess(req.user, res);
+    next();
+  });
   app.get('/rate', getCommissionRate);
   app.post('/prices', previewCustomerPrices);
   app.get('/legacy', (_req, res) => res.json({ nested: [{ commissionPercent: 17, platform_commission_percentage: 17, commissionRate: .17, professionalNetAmount: 100, customerNetAmount: 117 }] }));
@@ -63,6 +74,6 @@ describe('amount-only pricing HTTP contract', () => {
   });
   it.each([undefined, 'customer'])('scrubs percentage aliases at the final JSON boundary for %s', async role => {
     const result = await (await fetch(`${base}/legacy`, { headers: role ? { 'x-role': role } : {} })).json();
-    expect(result).toEqual({ nested: [{ professionalNetAmount: 100, customerNetAmount: 117 }] });
+    expect(result).toEqual({ nested: [{ customerNetAmount: 117 }] });
   });
 });

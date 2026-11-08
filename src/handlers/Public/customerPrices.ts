@@ -38,6 +38,9 @@ export const previewCustomerPrices = async (req: Request, res: Response) => {
 /** Customer displays use amount previews, never a commission-setting response. */
 export const getCommissionRate = async (req: Request, res: Response) => {
   const user = req.user;
+  // This check must stay in the handler. commissionVisibility maps roles only (admin/professional/customer)
+  // and does not carry the payments permission, so it cannot decide whether this response is allowed.
+  // If the middleware default changes, the endpoint would stop returning data.
   const authorized = user?.role === 'professional'
     || ((user?.role === 'admin' || (user as any)?.isAdmin) && (await resolveBookingAdminAccess(user)).payments);
   if (!authorized) return res.status(403).json({ success: false, msg: 'Not authorized' });

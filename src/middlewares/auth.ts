@@ -2,6 +2,16 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import User, { IUser } from '../models/user';
 import connectToDatabase from '../config/db'; // Import your database connection
+import { isAdminUser, resolveBookingAdminAccess } from '../utils/bookingDetails/adminAccess';
+
+/**
+ * Records whether an admin may read payment-area amounts, for the final JSON
+ * boundary (`commissionVisibility`). Non-admins are left unset.
+ */
+export const attachAdminPaymentsAccess = async (user: any, res: Response): Promise<void> => {
+  if (!isAdminUser(user)) return;
+  res.locals.canReadPayments = (await resolveBookingAdminAccess(user)).payments;
+};
 
 export const protect = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -57,6 +67,7 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
 
     // 7. Attach user to request object
     req.user = user;
+    await attachAdminPaymentsAccess(user, res);
 
     // 8. Continue to next middleware
     next();
@@ -100,7 +111,7 @@ export const protect = async (req: Request, res: Response, next: NextFunction) =
 /** Attach an active user when a valid token is present without making auth mandatory. */
 export const optionalProtect = async (
   req: Request,
-  _res: Response,
+  res: Response,
   next: NextFunction,
 ) => {
   try {
@@ -120,6 +131,7 @@ export const optionalProtect = async (
       !['suspended', 'rejected'].includes(user.accountStatus || '')
     ) {
       req.user = user;
+      await attachAdminPaymentsAccess(user, res);
     }
   } catch {
     // Public endpoints remain public when an optional credential is stale.
@@ -205,6 +217,7 @@ export const authMiddleware = (allowedRoles: string[]) => {
       } else {
         req.user = user;
       }
+      await attachAdminPaymentsAccess(user, res);
 
       next();
 
