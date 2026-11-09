@@ -1,3 +1,5 @@
+import { selectedPriceModel, resolvePinnedQuoteVersion } from './overviewRows';
+import { quotationForViewer, publicProfessionalTags } from '../quotationVisibility';
 import type {
   ActorDto,
   AdminLinksDto,
@@ -30,6 +32,7 @@ import type {
 } from './types';
 import { actorForId, isActorRecorded, type ActorMap } from './actors';
 import { getCheckoutCommissionPercent } from '../checkoutCommission';
+import { checkoutCustomerTotal, commissionedExtraCostAmount, commissionedExtraCostTotal } from '../customerPricing';
 import { buildMilestoneChargePlan, milestoneCustomerCharge } from '../milestoneCharges';
 import {
   presignOwnedUrl,
@@ -51,6 +54,7 @@ import {
   maskCancellationRequestForAnonymizedParties,
   maskWarrantyClaimForAnonymizedParties,
 } from '../accountAnonymity';
+import { withoutPhantomBookingActivity } from '../bookingActivity';
 
 const CUSTOMER_INVOICE_KEYS = [
   'invoiceNumber',
@@ -160,6 +164,17 @@ const mapScheduleSnapshot = (schedule: any): ScheduleSnapshotDto | null => {
         }
       : {}),
   };
+};
+
+/** Adds the customer checkout total for non-professional viewers, with the same arithmetic as checkout. */
+const withCustomerCheckoutTotal = async (
+  checkout: CheckoutSnapshotDto | null,
+  snapshot: any,
+  viewerRole: 'admin' | 'customer' | 'professional',
+): Promise<CheckoutSnapshotDto | null> => {
+  if (!checkout) return checkout;
+  if (viewerRole === 'professional') return { ...checkout, customerTotal: null };
+  return { ...checkout, customerTotal: checkoutCustomerTotal(snapshot, await getCheckoutCommissionPercent()) };
 };
 
 const mapCheckoutSnapshot = (snapshot: any): CheckoutSnapshotDto | null => {
@@ -702,10 +717,11 @@ const buildPayments = async (params: {
 
   // Unpaid estimates share checkout's current commission source. Recorded
   // payment totals still take precedence in milestoneCustomerCharge below.
+  const liveCommissionPercent = await getCheckoutCommissionPercent();
   let milestoneChargePlan: ReturnType<typeof buildMilestoneChargePlan> = [];
   if (booking.milestonePayments?.length) {
     try {
-      milestoneChargePlan = buildMilestoneChargePlan(booking, await getCheckoutCommissionPercent());
+      milestoneChargePlan = buildMilestoneChargePlan(booking, liveCommissionPercent);
     } catch (error) {
       console.error('Failed to resolve milestone details charge:', error);
     }
@@ -799,6 +815,8 @@ const buildPayments = async (params: {
       refundedAt: fact.refundedAt,
       source: fact.source,
       status: fact.status,
+      providerStatus: fact.providerStatus,
+      cashReturned: !fact.providerStatus || fact.providerStatus === 'succeeded',
       justification: fact.justification,
       justificationRecorded: fact.justificationRecorded,
       vatAmount: fact.vatAmount,
@@ -841,7 +859,7 @@ const buildPayments = async (params: {
     }
   }
   for (const refund of refunds) {
-    if (refund.kind !== 'booking') continue;
+    if (refund.kind !== 'booking' || !refund.cashReturned) continue;
     if (!byCurrencyMap.has(refund.currency)) byCurrencyMap.set(refund.currency, { charged: 0, refunded: 0, complete: true });
     byCurrencyMap.get(refund.currency)!.refunded += refund.amount;
   }
@@ -854,7 +872,7 @@ const buildPayments = async (params: {
     complete: bucket.complete,
   }));
 
-  const checkout = mapCheckoutSnapshot(booking.checkoutSnapshot);
+  const checkout = await withCustomerCheckoutTotal(mapCheckoutSnapshot(booking.checkoutSnapshot), booking.checkoutSnapshot, viewerRole);
   if (!checkout && booking.checkoutSnapshot) {
     notices.push(notice('CHECKOUT_SNAPSHOT_INCOMPLETE', 'warning', 'booking_snapshot'));
   }
@@ -885,6 +903,7 @@ export const buildBookingDetails = async (params: {
   viewerRole: DetailsViewerRole;
   adminAccess?: { bookings?: boolean; disputes: boolean; warranty: boolean; cancellations: boolean; payments: boolean };
   quotationAlias?: boolean;
+  viewerId?: string | null;
 }): Promise<BookingDetailsDto> => {
   const { payments, cancellations, warrantyClaims, actors, viewerRole } = params;
   const rawProject = params.booking?.project && typeof params.booking.project === 'object'
@@ -896,7 +915,9 @@ export const buildBookingDetails = async (params: {
   // only reachable through booking.project. Record the flag once so every
   // downstream mask sees it.
   const projectOwnerAnonymized = Boolean(projectProfessionalActor?.isAnonymized);
-  const booking = maskBookingForAnonymizedParties(params.booking, {
+  // Legacy records carry schema-default review/cancellation/dispute stamps;
+  // never project them as activity.
+  const booking = maskBookingForAnonymizedParties(withoutPhantomBookingActivity(params.booking), {
     professional:
       isAnonymizedAccount(params.booking?.professional)
       || projectOwnerAnonymized,
@@ -909,7 +930,9 @@ export const buildBookingDetails = async (params: {
   // participant can otherwise read.
   const maySeeAdminNotes = isAdminViewer && params.adminAccess?.cancellations === true;
   const customer = booking.customer && typeof booking.customer === 'object' ? booking.customer : null;
-  const professional = booking.professional && typeof booking.professional === 'object' ? booking.professional : null;
+  const professional = booking.professional && typeof booking.professional === 'object' && !booking.professional.toHexString
+    ? booking.professional
+    : projectProfessionalActor ? { _id: projectProfessionalId, name: projectProfessionalActor.name, username: projectProfessionalActor.username, businessInfo: { companyName: projectProfessionalActor.companyName } } : null;
   const project = booking.project && typeof booking.project === 'object' ? booking.project : null;
   const customerId = objectId(booking.customer);
   const professionalId = objectId(booking.professional || project?.professionalId);
@@ -937,7 +960,11 @@ export const buildBookingDetails = async (params: {
     snapshotNotices.push(notice('BOOKING_SNAPSHOT_NOT_RECORDED', 'warning', 'booking_snapshot'));
     if (project) snapshotNotices.push(notice('LIVE_PROJECT_MAY_HAVE_CHANGED', 'info', 'booking_snapshot'));
   }
-  const checkout = mapCheckoutSnapshot(captured?.checkoutSnapshot || booking.checkoutSnapshot);
+  const checkout = await withCustomerCheckoutTotal(
+    mapCheckoutSnapshot(captured?.checkoutSnapshot || booking.checkoutSnapshot),
+    captured?.checkoutSnapshot || booking.checkoutSnapshot,
+    viewerRole,
+  );
   if (!checkout && (captured?.checkoutSnapshot || booking.checkoutSnapshot)) {
     snapshotNotices.push(notice('CHECKOUT_SNAPSHOT_INCOMPLETE', 'warning', 'booking_snapshot'));
   }
@@ -1283,7 +1310,7 @@ export const buildBookingDetails = async (params: {
           totalAmount: num(version.customerTotals.totalAmount) ?? num(version.customerTotals.totalWithVat),
           ...(Array.isArray(version.customerTotals.vatBreakdown) ? { vatBreakdown: version.customerTotals.vatBreakdown } : {}),
           currency: version.customerTotals.currency || version.currency || 'EUR',
-          recordedAt: iso(version.customerTotals.recordedAt) || createdAt || new Date().toISOString(),
+          recordedAt: iso(version.customerTotals.recordedAt),
           ...(version.customerTotals.discount ? { discount: version.customerTotals.discount } : {}),
         }
       : null;
@@ -1348,6 +1375,7 @@ export const buildBookingDetails = async (params: {
         && version.bufferDuration.unit
         ? { value: num(version.bufferDuration.value)!, unit: version.bufferDuration.unit }
         : null,
+      firstPossibleStart: dateOnly(version.firstPossibleStart),
       validUntil: iso(version.validUntil),
       createdAt,
       changeNote: str(version.changeNote),
@@ -1473,6 +1501,9 @@ export const buildBookingDetails = async (params: {
   });
 
   const extraCostPayment = paymentsDto.extraCost;
+  const extraCostCommissionPercent = viewerRole === 'professional' ? 0 : await getCheckoutCommissionPercent();
+  // Customer-side extra-cost amounts, computed here with the live commission so the
+  // customer never needs the professional base. Professionals see the base and commission.
   const extraCostItems = (Array.isArray(booking.extraCosts) ? booking.extraCosts : []).map((item: any) => ({
     type: item.type || 'other',
     name: String(item.name || ''),
@@ -1484,6 +1515,7 @@ export const buildBookingDetails = async (params: {
     actualUnits: num(item.actualUnits),
     referenceIndex: num(item.referenceIndex),
     customerCharge: null,
+    customerAmount: viewerRole === 'professional' ? null : commissionedExtraCostAmount(item, extraCostCommissionPercent),
   }));
   const extraCostNotices: DetailsNotice[] = [];
   if (num(booking.extraCostTotal) != null && booking.extraCostTotal !== 0 && !extraCostPayment) {
@@ -1513,6 +1545,9 @@ export const buildBookingDetails = async (params: {
   const extraCosts: ExtraCostsDetailsDto = {
     status: booking.extraCostStatus || null,
     totalProfessionalAmount: num(booking.extraCostTotal),
+    totalCustomerAmount: viewerRole === 'professional' || num(booking.extraCostTotal) == null
+      ? null
+      : commissionedExtraCostTotal(booking.extraCosts, num(booking.extraCostTotal) ?? 0, extraCostCommissionPercent),
     currency: paymentCurrency,
     currencySource: booking.payment?.currency ? 'payment' : quoteCurrency ? 'quote' : 'not_recorded',
     items: extraCostItems,
@@ -1690,6 +1725,7 @@ export const buildBookingDetails = async (params: {
     customerId,
     professionalId,
     adminAccess: params.adminAccess,
+    viewerId: params.viewerId,
   });
 
   if (quotation) {
@@ -1702,6 +1738,8 @@ export const buildBookingDetails = async (params: {
   const snapshotProject = captured?.project || null;
   const projectTitle = snapshotProject?.title || str(project?.title);
   const overviewStatus = booking.status as string;
+  const pinnedNumber = resolvePinnedQuoteVersion(booking).pinnedVersion;
+  const pinnedVersion = quotationVersions.find((version) => version.version === pinnedNumber) || null;
   const quoteDto: BookingOverviewDto['quote'] = quotation
     ? {
         quotationNumber: quotation.quotationNumber,
@@ -1709,9 +1747,11 @@ export const buildBookingDetails = async (params: {
         acceptedVersion: quotation.acceptedVersion?.version ?? null,
         acceptedVersionSource: quotation.acceptedVersion?.source || 'not_recorded',
         status: quotation.status,
-        totalAmount: quotation.totalAmountProfessional,
-        currency: quotation.currency,
-        validUntil: currentVersion?.validUntil || iso(booking.quote?.validUntil),
+        totalAmount: pinnedVersion?.totalAmount ?? (quotationVersions.length === 0 ? num(booking.quote?.amount) : null),
+        currency: pinnedVersion?.currency || (quotationVersions.length === 0 ? quoteCurrency : null),
+        validUntil: pinnedVersion?.validUntil || (quotationVersions.length === 0 ? iso(booking.quote?.validUntil) : null),
+        firstPossibleStart: pinnedVersion?.firstPossibleStart || null,
+        createdAt: pinnedVersion?.createdAt || null,
       }
     : null;
   const basePayment = paymentsDto.base;
@@ -1719,7 +1759,7 @@ export const buildBookingDetails = async (params: {
     || basePayment?.currency
     || paymentCurrency;
   const overviewRefundedTotal = paymentsDto.refunds
-    .filter((refund) => refund.kind === 'booking')
+    .filter((refund) => refund.kind === 'booking' && refund.cashReturned)
     .filter((refund) => !overviewPaymentCurrency || refund.currency === overviewPaymentCurrency)
     .reduce((sum, refund) => sum + refund.amount, 0);
   const bookingOverview: BookingOverviewDto = {
@@ -1730,6 +1770,7 @@ export const buildBookingDetails = async (params: {
     statusBeforeDispute: booking.statusBeforeDispute || null,
     title: projectTitle || str(booking.rfqData?.serviceType) || 'Booking',
     projectTitle,
+    priceModel: selectedPriceModel(booking),
     serviceType: str(booking.rfqData?.serviceType),
     category: snapshotProject?.category || str(project?.category),
     service: snapshotProject?.service || str(project?.service),
@@ -1881,6 +1922,9 @@ export const buildBookingDetails = async (params: {
         ? null
         : professionalContactVisible ? str(professional?.vatNumber) : null,
       website: professionalAnonymized ? null : str(professional?.businessInfo?.website),
+      professionalLevel: professionalAnonymized ? null : str(professional?.professionalLevel),
+      publicTags: professionalAnonymized ? [] : publicProfessionalTags(professional?.adminTags),
+      metadataSource: 'current_profile',
       address: professionalAnonymized
         ? professional?.businessInfo
           ? { city: null, country: str(professional.businessInfo.country), postalCode: null }
@@ -2103,7 +2147,7 @@ export const buildBookingDetails = async (params: {
       dataQuality,
     },
   };
-  return details;
+  return quotationForViewer(details, viewerRole, params.adminAccess?.payments === true);
 };
 
 export { mapCheckoutSnapshot, mapScheduleSnapshot, iso, dateOnly, num, str };

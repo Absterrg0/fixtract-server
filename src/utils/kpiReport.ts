@@ -5,6 +5,7 @@ import WarrantyClaim from '../models/warrantyClaim';
 import ServiceView from '../models/serviceView';
 import { STRIPE_CONFIG } from '../services/stripe';
 import { buildSettledTransferExpression } from './paymentSafety';
+import { RECORDED_DISPUTE_EXPR, RECORDED_DISPUTE_FILTER } from './bookingActivity';
 
 const REPORTING_CURRENCY = STRIPE_CONFIG.defaultCurrency || 'EUR';
 const settledPayoutExpr = buildSettledTransferExpression('payment');
@@ -30,7 +31,7 @@ async function aggregateSummary({ from, to }: KpiRange) {
         },
       },
     ]),
-    Booking.countDocuments({ 'dispute.raisedAt': { $gte: from, $lte: to } }),
+    Booking.countDocuments({ ...RECORDED_DISPUTE_FILTER, 'dispute.raisedAt': { $gte: from, $lte: to } }),
     WarrantyClaim.countDocuments({ openedAt: { $gte: from, $lte: to } }),
     Booking.countDocuments({ status: 'refunded', updatedAt: { $gte: from, $lte: to } }),
     Booking.countDocuments({ createdAt: { $gte: from, $lte: to } }),
@@ -137,7 +138,7 @@ async function aggregateByRegion({ from, to }: KpiRange) {
           totalBookings: { $sum: 1 },
           bookedValue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, settledPayoutExpr, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.amount', 0] }, 0] } },
           platformRevenue: { $sum: { $cond: [{ $and: [{ $eq: ['$status', 'completed'] }, settledPayoutExpr, { $eq: [{ $ifNull: ['$payment.currency', REPORTING_CURRENCY] }, REPORTING_CURRENCY] }] }, { $ifNull: ['$payment.platformCommission', 0] }, 0] } },
-          disputeCount: { $sum: { $cond: [{ $ifNull: ['$dispute.raisedAt', false] }, 1, 0] } },
+          disputeCount: { $sum: { $cond: [RECORDED_DISPUTE_EXPR, 1, 0] } },
           refundCount: { $sum: { $cond: [{ $eq: ['$status', 'refunded'] }, 1, 0] } },
           quotedCount: {
             $sum: {

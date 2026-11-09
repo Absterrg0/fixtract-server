@@ -1,5 +1,6 @@
+vi.mock('../../models/platformSettings', () => ({ default: { getCurrentConfig: async () => ({ commissionPercent: 10 }) } }));
 import mongoose from "mongoose";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   bookingForViewer,
   filterInvoiceFieldsByRole,
@@ -258,7 +259,9 @@ describe("non-admin payment diagnostics", () => {
     };
     const result = bookingForViewer(booking, "customer");
     expect(result.milestonePayments[0].stripeClientSecret).toBeUndefined();
-    expect(result.milestonePayments[0].amount).toBe(50);
+    // The professional base milestone amount is withheld from customers; the professional view keeps it.
+    expect(result.milestonePayments[0]).not.toHaveProperty("amount");
+    expect(bookingForViewer(booking, "professional").milestonePayments[0].amount).toBe(50);
     expect(booking.milestonePayments[0].stripeClientSecret).toBe("pi_milestone_secret");
   });
 

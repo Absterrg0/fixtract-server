@@ -84,7 +84,7 @@ import {
   validateImageFileBuffer,
   validateVideoFile,
 } from '../../utils/s3Upload';
-import { hasRecordedDispute, RECORDED_DISPUTE_FILTER } from '../../utils/recordedDispute';
+import { hasRecordedDispute, RECORDED_DISPUTE_FILTER } from '../../utils/bookingActivity';
 import { applyReschedulePlanReset } from '../../utils/applyReschedulePlanReset';
 
 const ACTIVE_DISPUTE_STATUS: BookingStatus = 'dispute';
@@ -402,7 +402,7 @@ export const getDisputeDetails = async (req: Request, res: Response) => {
       });
     }
 
-    if (!booking.dispute?.raisedAt || !hasRecordedDispute(booking)) {
+    if (!hasRecordedDispute(booking)) {
       return res.status(400).json({
         success: false,
         error: {
@@ -493,7 +493,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
       });
     }
 
-    const hasOpenDispute = hasRecordedDispute(booking) && Boolean((booking.dispute as any)?.raisedAt) && !(booking.dispute as any)?.resolvedAt;
+    const hasOpenDispute = hasRecordedDispute(booking) && !(booking.dispute as any)?.resolvedAt;
     if (booking.status !== ACTIVE_DISPUTE_STATUS && !hasOpenDispute && !booking.dispute?.refundPending) {
       return res.status(400).json({
         success: false,

@@ -1,3 +1,4 @@
+vi.mock('../../../models/platformSettings', () => ({ default: { getCurrentConfig: async () => ({ commissionPercent: 10 }) } }));
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Types } from 'mongoose';
 
@@ -16,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   cancellationFind: vi.fn(),
   warrantyFind: vi.fn(),
   userFind: vi.fn(),
+  userFindById: vi.fn(),
 }));
 
 vi.mock('../../../models/booking', () => ({
@@ -35,12 +37,14 @@ vi.mock('../../../models/warrantyClaim', () => ({
 }));
 
 vi.mock('../../../models/user', () => ({
-  default: { find: mocks.userFind },
+  default: { find: mocks.userFind, findById: mocks.userFindById },
 }));
 
 import { getBookingActivity, getBookingDetails } from '../../../handlers/Booking/details';
 import { getBookingById, submitPostBookingAnswers } from '../../../handlers/Booking';
+import { getQuotationVersions } from '../../../handlers/Quotation';
 import { getAdminBookingDetail } from '../../../handlers/Admin/bookingDetail';
+import quotationRouter from '../../../routes/Quotation';
 
 const customerId = new Types.ObjectId('64b000000000000000000001');
 const professionalId = new Types.ObjectId('64b000000000000000000002');
@@ -156,6 +160,7 @@ beforeEach(() => {
   mocks.cancellationFind.mockImplementation(() => query([]));
   mocks.warrantyFind.mockImplementation(() => query([]));
   mocks.userFind.mockImplementation(() => query([]));
+  mocks.userFindById.mockImplementation(() => query(null));
 });
 
 describe('booking details route handlers', () => {
@@ -370,5 +375,90 @@ describe('booking details route handlers', () => {
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(source.save).not.toHaveBeenCalled();
+  });
+});
+
+const assertNoCommission = (value: any): void => {
+  if (!value || typeof value !== 'object') return;
+  for (const [key, child] of Object.entries(value)) {
+    expect(key.replace(/[^a-z]/gi, '').toLowerCase()).not.toMatch(/commission.*(percent|rate)/);
+    assertNoCommission(child);
+  }
+};
+
+/** The final handler of GET /:bookingId/details on the quotation router (auth middleware sits before it). */
+const quotationDetailsHandler = () => {
+  const layer = (quotationRouter as any).stack.find((entry: any) => entry.route?.path === '/:bookingId/details' && entry.route.methods?.get);
+  expect(layer, 'quotation router exposes GET /:bookingId/details').toBeDefined();
+  const handler = layer.route.stack.at(-1).handle;
+  expect(handler).toBe(getBookingDetails);
+  return handler;
+};
+
+describe('booking and quotation alias privacy/IDOR contract', () => {
+  const handlers = [
+    ['booking', getBookingById], ['details', getBookingDetails],
+    ['activity', getBookingActivity],
+    // Resolved from the mounted quotation router below, so the alias is tested as routed.
+    ['quotation details', quotationDetailsHandler()],
+    ['versions', getQuotationVersions], ['admin full', getAdminBookingDetail],
+  ] as const;
+  const viewers = [
+    ['customer', { _id: customerId, role: 'customer' }],
+    ['dual-role customer', { _id: customerId, role: 'professional' }],
+    ['professional', { _id: professionalId, role: 'professional' }],
+    // Same identity as 'professional'; the case sets `source.professional = undefined` so the project-owner path is taken.
+    ['project owner', { _id: professionalId, role: 'professional' }],
+    ['unrelated', { _id: new Types.ObjectId(), role: 'customer' }],
+    // A professional who is not on the booking or its project. The handlers deny this role; the wrapper trusts the role.
+    ['other professional', { _id: new Types.ObjectId(), role: 'professional' }],
+    ['anonymous', undefined],
+    ['admin without bookings', { _id: new Types.ObjectId(), role: 'admin', adminPermissionLevels: { payments: 'read' } }],
+    ['admin bookings only', { _id: new Types.ObjectId(), role: 'admin', adminPermissionLevels: { bookings: 'read' } }],
+    ['admin finance', { _id: new Types.ObjectId(), role: 'admin', adminPermissionLevels: { bookings: 'read', payments: 'read' } }],
+  ] as const;
+  for (const [alias, handler] of handlers) {
+    it.each(viewers)(`${alias}: %s`, async (label, user) => {
+      const source: any = booking();
+      source.quotationNumber = 'QT-1';
+      source.currentQuoteVersion = 1;
+      source.quoteVersions = [{ version: 1, scope: 'Recorded scope', description: 'Recorded work', createdAt: source.createdAt,
+        pricingLines: [{ price: 100, vatRate: 21 }], totalAmount: 100, currency: 'EUR',
+        customerTotals: { commissionPercent: 17, professionalNetAmount: 100, customerNetAmount: 117, totalWithVat: 141.57, discount: { nested: { commission_percentage: 17 } } } }];
+      source.bookingSnapshot = { checkoutSnapshot: { nested: { platformCommissionRate: 0.17 } } };
+      if (label === 'project owner') source.professional = undefined;
+      mocks.bookingFindById.mockImplementation(() => query(source));
+      const res = response();
+      const next = vi.fn();
+      await (handler as any)({ ...request(user), params: { bookingId: String(bookingId), id: String(bookingId) } }, res, next);
+      expect(next).not.toHaveBeenCalled();
+      // `startsWith('admin')` only matters for the admin handler: its only allowed viewers are admins.
+      const denied = ['unrelated', 'other professional', 'anonymous', 'admin without bookings'].includes(label) || (alias === 'admin full' && !label.startsWith('admin'));
+      if (denied) {
+        expect(res.body.success).toBe(false);
+        expect(res.body.booking || res.body.data).toBeUndefined();
+      } else {
+        expect(res.body.success).toBe(true);
+        if (['customer', 'dual-role customer', 'admin bookings only'].includes(label)) assertNoCommission(res.body);
+        if (alias === 'versions' && ['professional', 'project owner', 'admin finance'].includes(label)) {
+          expect(res.body.data.versions[0].customerTotals.commissionPercent).toBe(17);
+        }
+      }
+    });
+  }
+});
+
+
+describe('owned warranty navigation evidence', () => {
+  it.each([
+    ['customer', customerId, customerId, true],
+    ['professional', professionalId, professionalId, true],
+    ['professional', professionalId, new Types.ObjectId(), false],
+  ] as const)('grants claim navigation only to the claim participant (%s)', async (role, viewerId, claimPartyId, expected) => {
+    mocks.warrantyFind.mockReturnValue(query([{ _id: new Types.ObjectId(), claimNumber: 'WC-1', status: 'open', openedAt: new Date(),
+      customer: role === 'customer' ? claimPartyId : customerId, professional: role === 'professional' ? claimPartyId : professionalId }]));
+    const res = response();
+    await getBookingDetails(request({ _id: viewerId, role }) as any, res, vi.fn());
+    expect(res.body.data.activity.items.find((item: any) => item.type === 'warranty_claim_opened').metadata.participantCanOpen).toBe(expected);
   });
 });

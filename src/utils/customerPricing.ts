@@ -147,3 +147,24 @@ export const commissionedExtraCostTotal = (
   }
   return roundMoney(costs.reduce((sum, cost) => sum + commissionedExtraCostAmount(cost, commissionPercent), 0));
 };
+
+/**
+ * Customer charge for the selected extra options of a checkout booking. Checkout
+ * (handlers/Stripe/payment.ts) and the public price preview both use this, so the
+ * displayed total is the charged total.
+ */
+export const optionsCustomerCharge = (optionsTotal: number, commissionPercent: number): number =>
+  +(optionsTotal * (1 + commissionPercent / 100)).toFixed(2);
+
+/**
+ * Customer total of a checkout package: the package charge plus its selected
+ * options, as checkout computes it when the options are not already in the quote.
+ */
+export const checkoutCustomerTotal = (
+  snapshot: UnitPricedSnapshot & { baseSubtotal?: number; extraOptionsTotal?: number },
+  commissionPercent: number,
+): number => {
+  const base = commissionedQuoteAmount(Number(snapshot.baseSubtotal) || 0, snapshot, commissionPercent);
+  const options = Number(snapshot.extraOptionsTotal) || 0;
+  return options > 0 ? base + optionsCustomerCharge(options, commissionPercent) : base;
+};

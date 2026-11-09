@@ -1,3 +1,4 @@
+import User from '../../models/user';
 import { NextFunction, Request, Response } from 'express';
 import mongoose from 'mongoose';
 import Booking from '../../models/booking';
@@ -15,6 +16,9 @@ import {
   type BookingAdminAccess,
 } from '../../utils/bookingDetails/adminAccess';
 
+/** Professional identity fields shown on booking details. Shared by the populate and the project-owner lookup. */
+const PROFESSIONAL_DETAIL_SELECT = 'name username email phone businessInfo vatNumber timeZone role professionalLevel adminTags isAnonymized deletedAt';
+
 const BOOKING_DETAIL_POPULATE = [
   {
     path: 'customer',
@@ -22,7 +26,7 @@ const BOOKING_DETAIL_POPULATE = [
   },
   {
     path: 'professional',
-    select: 'name username email phone businessInfo vatNumber timeZone role isAnonymized deletedAt',
+    select: PROFESSIONAL_DETAIL_SELECT,
   },
   {
     path: 'project',
@@ -73,8 +77,15 @@ export const buildDetailsForBookingDocument = async (params: {
 
   // Cancellation-request refunds need to be visible to the refund ledger even
   // when no Payment row recorded them. They are attached non-persistently.
+  // Project-owned legacy bookings may omit the direct professional reference.
+  // Resolve only the same selected identity/contact fields as the detail populate.
+  const ownerProfiles = !plain.professional && professionalIdFromProject
+    ? await User.find({ _id: professionalIdFromProject })
+        .select(PROFESSIONAL_DETAIL_SELECT).lean()
+    : [];
   const bookingForProjection = {
     ...plain,
+    ...(!plain.professional && ownerProfiles[0] ? { professional: ownerProfiles[0] } : {}),
     paymentDiscountLedger: viewerRole === 'customer' ? discountHistory?.paymentDiscountLedger : undefined,
     __cancellationRequests: adminAccess && !adminAccess.cancellations ? [] : cancellations,
   };
@@ -85,6 +96,7 @@ export const buildDetailsForBookingDocument = async (params: {
     cancellations,
     warrantyClaims,
     actors,
+    viewerId: referenceId(user?._id ?? user?.id),
     viewerRole,
     adminAccess,
   });

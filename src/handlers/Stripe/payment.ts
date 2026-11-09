@@ -435,7 +435,8 @@ export const createPaymentIntent = async (
       customer.location?.country
     );
 
-    let chargeAmount = commissionedQuoteAmount(booking.quote.amount, (booking as any).checkoutSnapshot, commissionPercent);
+    // The customer charge for the booking, the same amount the booking read shows as customerTotal (computeGrossBookingAmount).
+    let chargeAmount = computeGrossBookingAmount(booking as any, commissionPercent);
     let milestoneIndex: number | null = null;
     if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
       const sorted = normalizeBookingMilestones(booking.milestonePayments as any[]);
@@ -471,8 +472,6 @@ export const createPaymentIntent = async (
       const planEntry = buildMilestoneChargePlan(booking, commissionPercent)
         .find((entry) => entry.index === milestoneIndex) || null;
       if (planEntry) chargeAmount = planEntry.expectedCustomerGross;
-    } else if (selectedExtraOptionsTotal > 0 && !quoteAmountIncludesSelectedExtras(booking)) {
-      chargeAmount += +(selectedExtraOptionsTotal * (1 + commissionPercent / 100)).toFixed(2);
     }
 
     if (booking.payment?.stripePaymentIntentId && booking.payment?.stripeClientSecret) {
