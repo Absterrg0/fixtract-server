@@ -294,6 +294,101 @@ describeDb('dashboard baselines (Mongo)', () => {
     });
   });
 
+  describe('undo guard (expectedResetAt)', () => {
+    const DASHBOARD_UNDO = { method: 'POST', params: { key: 'disputes' } };
+    const undoWith = (admin: any, body: Record<string, unknown>) =>
+      call(undoDashboardBaseline, makeReq({ ...DASHBOARD_UNDO, admin, body }));
+    const resetDisputes = (admin: any, note: string) =>
+      call(resetDashboardBaseline, makeReq({ ...DASHBOARD_UNDO, admin, body: { note } }));
+    const currentResetAt = async () =>
+      (await AdminDashboardBaseline.findById('disputes').lean())!.resetAt as Date;
+    const undoEvents = () => AdminDashboardBaselineEvent.countDocuments({ dashboardKey: 'disputes', action: 'undo' });
+    const undoAudits = () => AuditLog.countDocuments({ action: 'admin.dashboard_baseline.undo' });
+
+    /** Two resets in a row. Returns the instants of the first and the second. */
+    const resetTwice = async (admin: any) => {
+      await resetDisputes(admin, 'first');
+      const first = await currentResetAt();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await resetDisputes(admin, 'second');
+      return { first, second: await currentResetAt() };
+    };
+
+    it('undo succeeds when expectedResetAt matches the current baseline', async () => {
+      const sara = superAdmin();
+      const { first, second } = await resetTwice(sara);
+      const { statusCode, body } = await undoWith(sara, { expectedResetAt: second.toISOString() });
+      expect(statusCode).toBe(200);
+      const restored = body.data.dashboards.find((d: any) => d.key === 'disputes');
+      expect(new Date(restored.resetAt).getTime()).toBe(first.getTime());
+      expect(restored.note).toBe('first');
+      expect(await undoEvents()).toBe(1);
+      expect(await undoAudits()).toBe(1);
+    });
+
+    it('a mismatched expectedResetAt returns 409 BASELINE_CHANGED with the current baseline, changes nothing and writes no event', async () => {
+      const sara = superAdmin();
+      const bruno = { _id: id(), name: 'Bruno Other', email: 'bruno@baselines.test', role: 'admin', adminRole: 'super' } as any;
+      // Sara sees the first reset; Bruno resets again before she clicks Undo.
+      await resetDisputes(sara, 'seen by Sara');
+      const seenBySara = await currentResetAt();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await resetDisputes(bruno, 'reset by Bruno');
+      const before = await AdminDashboardBaseline.findById('disputes').lean();
+      const eventsBefore = await AdminDashboardBaselineEvent.countDocuments({});
+      const undoAuditsBefore = await undoAudits();
+
+      const { statusCode, body } = await undoWith(sara, { expectedResetAt: seenBySara.toISOString() });
+
+      expect(statusCode).toBe(409);
+      expect(body).toMatchObject({ success: false, code: 'BASELINE_CHANGED' });
+      const shown = body.data.dashboards.find((d: any) => d.key === 'disputes');
+      expect(shown).toMatchObject({ note: 'reset by Bruno', canUndo: true, resetBy: { name: 'Bruno Other' } });
+      expect(new Date(shown.resetAt).getTime()).toBe((before!.resetAt as Date).getTime());
+
+      const after = await AdminDashboardBaseline.findById('disputes').lean();
+      expect(after!.note).toBe('reset by Bruno');
+      expect(new Date(after!.resetAt as Date).getTime()).toBe((before!.resetAt as Date).getTime());
+      expect(await AdminDashboardBaselineEvent.countDocuments({})).toBe(eventsBefore);
+      expect(await undoAudits()).toBe(undoAuditsBefore);
+    });
+
+    it('an undo without expectedResetAt works as before', async () => {
+      const sara = superAdmin();
+      const { first } = await resetTwice(sara);
+      const { statusCode, body } = await undoWith(sara, {});
+      expect(statusCode).toBe(200);
+      const restored = body.data.dashboards.find((d: any) => d.key === 'disputes');
+      expect(new Date(restored.resetAt).getTime()).toBe(first.getTime());
+    });
+
+    it('an expectedResetAt that is not a timestamp is refused without writing', async () => {
+      const sara = superAdmin();
+      await resetDisputes(sara, 'only');
+      const { statusCode, body } = await undoWith(sara, { expectedResetAt: 'not-a-date' });
+      expect(statusCode).toBe(400);
+      expect(body).toMatchObject({ code: 'VALIDATION', field: 'expectedResetAt' });
+      expect(await undoEvents()).toBe(0);
+    });
+
+    it('of two concurrent undos on the same reset, only one applies', async () => {
+      const sara = superAdmin();
+      const { first, second } = await resetTwice(sara);
+      const body = { expectedResetAt: second.toISOString() };
+      const [a, b] = await Promise.all([undoWith(sara, body), undoWith(sara, body)]);
+
+      const statuses = [a.statusCode, b.statusCode].sort();
+      expect(statuses).toEqual([200, 409]);
+      const loser = a.statusCode === 409 ? a : b;
+      // The loser sees either the moved baseline or, if it read after the winner
+      // finished, no reset left to undo. Either way it changed nothing.
+      expect(['BASELINE_CHANGED', 'NOTHING_TO_UNDO']).toContain(loser.body.code);
+      expect(await undoEvents()).toBe(1);
+      expect(await undoAudits()).toBe(1);
+      expect((await currentResetAt()).getTime()).toBe(first.getTime());
+    });
+  });
+
   describe('audit trail', () => {
     it('writes one audit entry per reset, reset-all and undo, with the note', async () => {
       const sara = superAdmin();

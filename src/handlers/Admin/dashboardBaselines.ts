@@ -214,9 +214,42 @@ export const resetAllDashboardBaselines = async (req: Request, res: Response) =>
 };
 
 /**
+ * Optional `expectedResetAt` from the undo body: `undefined` when the field is
+ * absent, `null` when the caller expects no baseline, otherwise the instant.
+ * Throws for anything that is not an ISO timestamp.
+ */
+const parseExpectedResetAt = (value: unknown): Date | null | undefined => {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'string') throw new Error('expectedResetAt must be an ISO timestamp');
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error('expectedResetAt must be an ISO timestamp');
+  return date;
+};
+
+const sameInstant = (a: Date | null, b: Date | null): boolean => {
+  if (!a || !b) return a === b;
+  return a.getTime() === b.getTime();
+};
+
+/** 409 for an undo aimed at a baseline that changed since the admin saw it. Returns the current snapshot. */
+const sendBaselineChanged = async (res: Response) =>
+  res.status(409).json({
+    success: false,
+    msg: 'This dashboard was reset again. Refresh before undoing.',
+    code: 'BASELINE_CHANGED',
+    data: await buildSnapshot(),
+  });
+
+/**
  * POST /api/admin/platform-settings/dashboard-baselines/:key/undo (super only).
  * Restores the baseline that the latest reset replaced. Only available while the
  * latest event for the dashboard is a reset; an undo is itself recorded.
+ *
+ * An optional body field `expectedResetAt` names the reset the admin is undoing.
+ * If the baseline has moved on since, the undo is refused with 409
+ * `BASELINE_CHANGED` and nothing is written. The write itself is conditional on
+ * the `resetAt` it read, so two concurrent undos cannot both apply.
  */
 export const undoDashboardBaseline = async (req: Request, res: Response) => {
   if (!isSuperAdmin(req)) return denySuper(res);
@@ -224,8 +257,20 @@ export const undoDashboardBaseline = async (req: Request, res: Response) => {
   if (!isAdminDashboardKey(key)) {
     return res.status(404).json({ success: false, msg: 'Unknown dashboard', code: 'UNKNOWN_DASHBOARD' });
   }
+  let expectedResetAt: Date | null | undefined;
+  try {
+    expectedResetAt = parseExpectedResetAt((req.body as any)?.expectedResetAt);
+  } catch (error: any) {
+    return res.status(400).json({ success: false, msg: error.message, code: 'VALIDATION', field: 'expectedResetAt' });
+  }
 
   try {
+    const current = await AdminDashboardBaseline.findById(key).select('resetAt').lean();
+    const currentResetAt = current?.resetAt ? new Date(current.resetAt) : null;
+    if (expectedResetAt !== undefined && !sameInstant(expectedResetAt, currentResetAt)) {
+      return sendBaselineChanged(res);
+    }
+
     const latest = (await AdminDashboardBaselineEvent.find({ dashboardKey: key })
       .sort({ createdAt: -1, _id: -1 })
       .limit(1)
@@ -250,8 +295,11 @@ export const undoDashboardBaseline = async (req: Request, res: Response) => {
 
     const actor = actorOf(req);
     const undoAt = new Date();
-    await AdminDashboardBaseline.updateOne(
-      { _id: key },
+    // Conditional write: it applies only while the baseline still holds the value
+    // read above. A reset or undo that landed in between matches nothing, so this
+    // undo changes nothing and the caller is told to refresh.
+    const applied = await AdminDashboardBaseline.findOneAndUpdate(
+      { _id: key, resetAt: currentResetAt },
       {
         $set: {
           resetAt: restoreAt,
@@ -261,8 +309,9 @@ export const undoDashboardBaseline = async (req: Request, res: Response) => {
           previousResetAt: null,
         },
       },
-      { upsert: true },
     );
+    if (!applied) return sendBaselineChanged(res);
+
     await AdminDashboardBaselineEvent.create({
       dashboardKey: key,
       action: 'undo',
