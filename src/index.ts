@@ -1,3 +1,4 @@
+import { commissionVisibility } from './middlewares/commissionVisibility';
 import dotenv from 'dotenv';
 import path from 'path';
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
@@ -67,6 +68,7 @@ app.get('/health', (req: Request, res: Response) => {
 });
 
 // API routes
+app.use('/api', commissionVisibility);
 app.use('/api/public', publicRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/user', userRouter);

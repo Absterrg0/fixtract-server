@@ -1,3 +1,7 @@
+import { quotationForViewer } from '../../utils/quotationVisibility';
+import { canViewBooking } from '../Booking/details';
+import { resolveBookingViewerRole } from '../../utils/invoiceVisibility';
+import { resolveBookingAdminAccess } from '../../utils/bookingDetails/adminAccess';
 /**
  * Quotation Handlers
  * Handles RFQ response, quotation wizard submission, editing, customer response,
@@ -1290,7 +1294,8 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
         currency: currentVersion?.currency || 'EUR',
         description: currentVersion?.description,
         validUntil: currentVersion?.validUntil,
-        submittedAt: currentVersion?.createdAt || now,
+        // Required on IQuote: the final `now` keeps the field set when neither source has a date.
+        submittedAt: currentVersion?.createdAt || booking.quote?.submittedAt || now,
         submittedBy: booking.professional!._id,
       },
     };
@@ -1622,18 +1627,22 @@ export const getQuotationVersions = async (req: Request, res: Response) => {
       return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
     }
 
-    const booking = await Booking.findById(bookingId).select('quoteVersions currentQuoteVersion quotationNumber customer professional');
+    const booking = await Booking.findById(bookingId).select('quoteVersions currentQuoteVersion quotationNumber customer professional project')
+      .populate('project', 'professionalId')
+      .populate('customer', '_id isAnonymized deletedAt')
+      .populate('professional', '_id isAnonymized deletedAt');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
     }
 
-    // Authorization: customer or professional
-    const isCustomer = booking.customer.toString() === userId;
-    const isProfessional = booking.professional?.toString() === userId;
-
-    if (!isCustomer && !isProfessional) {
+    if (!canViewBooking(req.user, booking)) {
       return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Not authorized to view this quotation' } });
+    }
+    const viewerRole = resolveBookingViewerRole(req.user, booking);
+    const adminAccess = viewerRole === 'admin' ? await resolveBookingAdminAccess(req.user) : undefined;
+    if (viewerRole === 'admin' && !adminAccess?.bookings) {
+      return res.status(403).json({ success: false, error: { code: 'ADMIN_PERMISSION_DENIED', message: 'Not authorized to view this quotation' } });
     }
 
     return res.json({
@@ -1641,7 +1650,7 @@ export const getQuotationVersions = async (req: Request, res: Response) => {
       data: {
         quotationNumber: booking.quotationNumber,
         currentVersion: booking.currentQuoteVersion,
-        versions: booking.quoteVersions || [],
+        versions: quotationForViewer(bookingForRequest(booking, req.user).quoteVersions || [], viewerRole, adminAccess?.payments === true),
       }
     });
   } catch (error: any) {

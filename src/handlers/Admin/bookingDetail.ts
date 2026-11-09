@@ -35,7 +35,7 @@ export const getAdminBookingDetail = async (req: Request, res: Response) => {
 
     const booking = await Booking.findById(id)
       .populate("customer", "name username email phone role customerType location vatNumber totalSpent timeZone businessName isAnonymized deletedAt")
-      .populate("professional", "name username email phone role businessInfo vatNumber timeZone isAnonymized deletedAt")
+      .populate("professional", "name username email phone role businessInfo vatNumber timeZone professionalLevel adminTags isAnonymized deletedAt")
       .populate("project", "title description pricing category service areaOfWork timeMode priceModel media rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects minResources minOverlapPercentage executionDuration services customConfirmationMessage resources")
       .populate("rescheduleHistory.requestedBy", "name email isAnonymized deletedAt")
       .populate("rescheduleHistory.respondedBy", "name email isAnonymized deletedAt")

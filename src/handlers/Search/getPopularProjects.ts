@@ -5,6 +5,8 @@ import { popularServiceMatch } from "../../utils/popularServiceMatch";
 import { aggregateProjectRatings } from "./aggregateRatings";
 import { eligibleProjectOwnerStages } from "./eligibleOwner";
 import { signProjectMediaUrl } from "../../utils/projectMedia";
+import { getCheckoutCommissionPercent } from "../../utils/checkoutCommission";
+import { startingPriceForView, viewerSeesBasePricing } from "../../utils/customerPriceView";
 
 /**
  * Get popular published projects for the homepage / service carousels.
@@ -197,6 +199,7 @@ export const getPopularProjects = async (req: Request, res: Response) => {
       })
     );
 
+    const commissionForView = await getCheckoutCommissionPercent();
     const results = projects.map((project: any, index: number) => {
       const profId = project.professionalId?.toString();
       const professional = profId ? professionalMap.get(profId) : null;
@@ -205,30 +208,12 @@ export const getPopularProjects = async (req: Request, res: Response) => {
         totalReviews: 0,
       };
 
-      // Get the lowest starting price from subprojects
-      let startingPrice: number | null = null;
-      let priceType: string = "rfq";
-      if (project.subprojects?.length) {
-        for (const sp of project.subprojects) {
-          if (sp.pricing?.type === "fixed" && sp.pricing.amount != null) {
-            if (startingPrice === null || sp.pricing.amount < startingPrice) {
-              startingPrice = sp.pricing.amount;
-              priceType = "fixed";
-            }
-          } else if (
-            sp.pricing?.type === "unit" &&
-            sp.pricing.amount != null
-          ) {
-            if (
-              startingPrice === null ||
-              sp.pricing.amount < startingPrice
-            ) {
-              startingPrice = sp.pricing.amount;
-              priceType = "unit";
-            }
-          }
-        }
-      }
+      // Lowest package price for the card. Customers and anonymous visitors get the customer price, never the base.
+      const { startingPrice, priceType } = startingPriceForView(
+        project.subprojects,
+        viewerSeesBasePricing(req.user, project.professionalId, res.locals?.canReadPayments === true),
+        commissionForView,
+      );
 
       return {
         _id: project._id,

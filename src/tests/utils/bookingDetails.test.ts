@@ -500,8 +500,9 @@ describe('quote provenance and totals', () => {
     const details = await buildDetails('customer', { booking: base });
     const version = details.quotation!.versions[0];
     expect(version.materialsIncluded).toBeNull();
-    expect(version.totalAmount).toBeNull();
-    expect(version.milestones[0].amount).toBeNull();
+    // Professional-side totals are withheld from customers; the customer totals stay in customerTotals.
+    expect(version).not.toHaveProperty('totalAmount');
+    expect(version.milestones[0]).not.toHaveProperty('amount');
     expect(version.preparationDuration).toBeNull();
     expect(version.executionDuration).toBeNull();
     expect(version.validUntil).toBeNull();
@@ -690,7 +691,7 @@ describe('quote provenance and totals', () => {
     const accepted = details.quotation!.versions.find((version) => version.version === 1)!;
     const later = details.quotation!.versions.find((version) => version.version === 2)!;
     expect(accepted.accepted).toBe(true);
-    expect(accepted.totalAmount).toBe(100);
+    expect(accepted).not.toHaveProperty('totalAmount');
     expect(accepted.customerTotals).toMatchObject({ customerNetAmount: 110, totalWithVat: 131 });
     expect(later.accepted).toBe(false);
     expect(later.customerTotals).toMatchObject({ customerNetAmount: 625, totalWithVat: 756.25 });
@@ -715,8 +716,9 @@ describe('details privacy', () => {
     expect(details.parties.customer.vatNumber).toBeNull();
     expect(details.payments.records[0].providerIds).toBeUndefined();
     expect(details.payments.records[0].diagnostics).toBeUndefined();
-    expect(details.payments.records[0].platformCommission).toBeNull();
-    expect(details.payments.records[0].professionalPayout).toBeNull();
+    // Participant payloads omit professional-side and commission amounts rather than null-filling them.
+    expect(details.payments.records[0]).not.toHaveProperty('platformCommission');
+    expect(details.payments.records[0]).not.toHaveProperty('professionalPayout');
   });
 
   it('gives each party only its own invoice side', async () => {
@@ -1855,7 +1857,7 @@ describe('activity', () => {
     expect(adminEvent.actor).toMatchObject({ role: 'admin', id: null });
   });
 
-  it('omits undated sources instead of giving them today’s timestamp', async () => {
+  it('keeps undated surviving sources without giving them today’s timestamp', async () => {
     const base = booking();
     base.postBookingData = [{ questionId: 'pq-1', question: 'Parking?', answer: 'Yes' }];
     base.postBookingSubmittedAt = undefined;
@@ -1872,7 +1874,7 @@ describe('activity', () => {
     expect(activity.complete).toBe(false);
     expect(activity.dataQuality.undatedEvents).toBeGreaterThan(0);
     expect(activity.dataQuality.notes).toContain('POST_BOOKING_TIMESTAMP_NOT_RECORDED');
-    expect(activity.items.every((item) => Boolean(item.occurredAt))).toBe(true);
+    expect(activity.items.find(item => item.type === 'post_booking_answers_submitted')).toMatchObject({ occurredAt: '', timestampRecorded: false });
   });
 });
 
@@ -2027,4 +2029,123 @@ it('keeps customer ledger discounts out of professional and admin payment projec
     });
     expect(details.payments.records[0].discount).toBeNull();
   }
+});
+
+describe('legacy schema-default activity', () => {
+  // Before the fix every saved booking stored these defaults at creation time.
+  const createdAt = new Date('2026-01-20T09:00:00.000Z');
+  const phantom = {
+    customerReview: { images: [], isHidden: false, reviewedAt: createdAt },
+    professionalReview: { reviewedAt: createdAt },
+    cancellation: { cancelledAt: createdAt },
+    dispute: { type: 'extra_costs', attachments: [], resolutionAttachments: [], raisedAt: createdAt },
+  };
+  const phantomTypes = ['review_submitted', 'dispute_opened', 'extra_costs_disputed', 'dispute_resolved'];
+
+  it.each(['customer', 'professional', 'admin'] as const)(
+    'adds no review/dispute activity or extra-cost dispute for a %s viewer',
+    async (role) => {
+      const details = await buildDetails(role, { booking: phantom });
+      const types = details.activity.items.map((item) => item.type);
+      for (const type of phantomTypes) expect(types).not.toContain(type);
+      expect(details.extraCosts.dispute).toBeNull();
+    },
+  );
+
+  it('still reports recorded disputes and reviews', async () => {
+    const raisedAt = new Date('2026-02-10T10:00:00.000Z');
+    const reviewedAt = new Date('2026-02-20T10:00:00.000Z');
+    const details = await buildDetails('admin', {
+      booking: {
+        status: 'completed',
+        customerReview: {
+          communicationLevel: 5,
+          valueOfDelivery: 4,
+          qualityOfService: 5,
+          comment: 'Great work',
+          reviewedAt,
+        },
+        dispute: {
+          raisedBy: customerId,
+          reason: 'Extra costs too high',
+          description: 'Disagree with extra cost',
+          type: 'extra_costs',
+          raisedAt,
+          resolvedAt: new Date('2026-02-12T10:00:00.000Z'),
+          resolvedBy: adminId,
+        },
+      },
+    });
+    const byType = new Map(details.activity.items.map((item) => [item.type, item]));
+    expect(byType.get('extra_costs_disputed')?.occurredAt).toBe(raisedAt.toISOString());
+    expect(byType.get('dispute_resolved')).toBeDefined();
+    expect(byType.get('review_submitted')?.occurredAt).toBe(reviewedAt.toISOString());
+    expect(details.extraCosts.dispute?.reason).toBe('Extra costs too high');
+  });
+});
+
+describe('phase 1 booking/quotation read-model parity', () => {
+  it('projects the table price model and current public professional metadata without private tags', async () => {
+    const details = await buildDetails('customer', { booking: {
+      professional: { ...professional(), professionalLevel: 'Expert', adminTags: ['verified', 'our choice', 'internal fraud investigation'] },
+    } });
+    expect(details.booking.priceModel).toBe('fixed');
+    expect(details.parties.professional).toMatchObject({ professionalLevel: 'Expert', publicTags: ['verified', 'our choice'], metadataSource: 'current_profile' });
+    expect(JSON.stringify(details)).not.toContain('internal fraud investigation');
+  });
+  it('preserves version-specific start and milestone facts, and never invents a totals timestamp', async () => {
+    const version = { ...booking().quoteVersions[0], firstPossibleStart: '2027-01-04',
+      customerTotals: { professionalNetAmount: 100, customerNetAmount: 110, commissionPercent: 10 },
+      milestones: [{ title: 'Finish', amount: 100, description: 'Inspect the installation', customDueDate: '2027-01-10', dueCondition: 'custom_date', status: 'pending', order: 2 }] };
+    const details = await buildDetails('customer', { booking: { quoteVersions: [version], currentQuoteVersion: 1 } });
+    expect(details.quotation?.versions[0]).toMatchObject({ firstPossibleStart: '2027-01-04', customerTotals: { recordedAt: null }, milestones: [{ description: 'Inspect the installation', customDueDate: '2027-01-10T00:00:00.000Z', status: 'pending', order: 2 }] });
+    expect(details.quotation?.versions[0].customerTotals).not.toHaveProperty('commissionPercent');
+  });
+  it('keeps RFQ submission description and only owned evidence under the timeline attachment policy', async () => {
+    const own = `https://fixera-uploads.s3.us-east-1.amazonaws.com/rfq-attachments/${customerId}/brief.pdf`;
+    const foreign = `https://fixera-uploads.s3.us-east-1.amazonaws.com/rfq-attachments/${adminId}/private.pdf`;
+    const details = await buildDetails('customer', { booking: { rfqData: { description: 'Original RFQ brief', attachments: [own, foreign] } } });
+    const event = details.activity.items.find(item => item.type === 'rfq_submitted')!;
+    expect(event.description).toBe('Original RFQ brief');
+    expect(event.descriptionSource).toBe('user');
+    expect(event.attachments[0]).toMatchObject({ signed: true });
+    expect(event.attachments[1]).toMatchObject({ url: null, signed: false });
+  });
+  it('never claims complete historical coverage from surviving dated records', async () => {
+    const details = await buildDetails('customer');
+    expect(details.activity).toMatchObject({ complete: false, coverage: { status: 'unknown', source: 'surviving_records', appendOnlyArchive: false } });
+    expect(details.activity.items.every(item => item.provenance === 'surviving_record')).toBe(true);
+  });
+  it('retains undated quote/status/refund evidence without inserting a current timestamp', async () => {
+    const details = await buildDetails('customer', { booking: {
+      quoteVersions: [{ ...booking().quoteVersions[0], createdAt: undefined }],
+      statusHistory: [{ status: 'rfq', timestamp: null }, { status: 'quoted', note: 'Quotation submitted', timestamp: null }],
+    } });
+    expect(details.activity.items.find(item => item.id === 'quote:1')).toMatchObject({ occurredAt: '', timestampRecorded: false });
+    // The undated 'quoted' status entry describes the same fact as quote:1, so it is not repeated.
+    expect(details.activity.items.find(item => item.id === 'status:1')).toBeUndefined();
+    expect(details.activity.items.filter(item => item.id === 'quote:1' || item.statusTo === 'quoted')).toHaveLength(1);
+    // The undated first 'rfq' entry is the same fact as rfq:submitted, so it is not repeated as status:0.
+    expect(details.activity.items.find(item => item.id === 'status:0')).toBeUndefined();
+    expect(details.activity.items.filter(item => item.id?.startsWith('rfq:') || item.statusTo === 'rfq')).toHaveLength(1);
+    expect(details.activity.dataQuality.undatedEvents).toBeGreaterThanOrEqual(1);
+  });
+});
+
+
+it('separates a pending refund reservation from returned cash in the read model', async () => {
+  const details = await buildDetails('customer', { payments: [payment({ refunds: [{ refundId: 're_pending', amount: 12, refundedAt: paidTime, status: 'pending', kind: 'booking' }] })] });
+  expect(details.payments.refunds.find(refund => refund.amount === 12)).toMatchObject({ providerStatus: 'pending', cashReturned: false });
+  expect(details.activity.items.some(item => item.type === 'refund_pending')).toBe(true);
+  expect(details.payments.byCurrency[0].recordedRefunded).toBe(0);
+});
+
+
+it('pins summary dates to the accepted version and leaves a missing pinned version unknown', async () => {
+  const first = { ...booking().quoteVersions[0], firstPossibleStart: '2027-01-04', version: 1, validUntil: '2027-01-08', totalAmount: 100, currency: 'EUR' };
+  const second = { ...first, version: 2, firstPossibleStart: '2027-02-01', validUntil: '2027-02-08', totalAmount: 200, currency: 'USD' };
+  const pinned = await buildDetails('customer', { booking: { quoteVersions: [first, second], acceptedQuoteVersion: 1, currentQuoteVersion: 2 } });
+  expect(pinned.booking.quote).toMatchObject({ firstPossibleStart: '2027-01-04', validUntil: '2027-01-08T00:00:00.000Z', totalAmount: 100, currency: 'EUR' });
+  const missing = await buildDetails('customer', { booking: { quoteVersions: [second], acceptedQuoteVersion: 1, currentQuoteVersion: 2 } });
+  expect(missing.booking.quote).toMatchObject({ firstPossibleStart: null, validUntil: null, totalAmount: null, currency: null });
 });

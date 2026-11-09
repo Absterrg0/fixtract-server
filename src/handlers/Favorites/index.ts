@@ -6,6 +6,8 @@ import Project from "../../models/project";
 import connectToDatabase from "../../config/db";
 import { invalidateFavoritesOverviewCache } from "../Admin/favoritesAdmin";
 import { withSignedProjectMediaList } from "../../utils/projectMedia";
+import { getCheckoutCommissionPercent } from "../../utils/checkoutCommission";
+import { publicProjectPricingView, viewerSeesBasePricing } from "../../utils/customerPriceView";
 
 const VALID_TARGET_TYPES: FavoriteTargetType[] = ["professional", "project"];
 
@@ -140,7 +142,13 @@ export const listUserFavorites = async (req: Request, res: Response) => {
     ]);
 
     const profMap = new Map(profs.map((p: any) => [p._id.toString(), p]));
-    const signedProjects = await withSignedProjectMediaList(projects as any[]);
+    const commissionForView = await getCheckoutCommissionPercent();
+    const canReadPaymentsForView = res.locals?.canReadPayments === true;
+    const signedProjects = await withSignedProjectMediaList(projects.map((project: any) => publicProjectPricingView(
+      project,
+      viewerSeesBasePricing(req.user, project.professionalId, canReadPaymentsForView),
+      commissionForView,
+    )) as any[]);
     const projectMap = new Map(signedProjects.map((p: any) => [p._id.toString(), p]));
 
     const professionalIdsForProjects = Array.from(

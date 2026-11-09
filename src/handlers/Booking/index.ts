@@ -58,6 +58,9 @@ import {
 import { loadOverviewRefundLedgers } from "../../utils/paymentRefundLedger";
 import { safeErrorSummary } from "../../utils/safeErrorLog";
 import { snapshotQuestionDefinitions } from '../../utils/bookingDetails/snapshot';
+import { RECORDED_DISPUTE_FILTER, withoutPhantomBookingActivity } from '../../utils/bookingActivity';
+import { bookingWithCustomerProjectPrices } from '../../utils/customerPriceView';
+import { getCheckoutCommissionPercent } from '../../utils/checkoutCommission';
 
 /** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
 const applyProceedAtStandardVatIfRequested = (
@@ -337,7 +340,10 @@ const snapshotToQuoteBreakdown = (snapshot: NonNullable<ReturnType<typeof buildC
 ];
 
 const presignBookingFiles = async (bookingDoc: any) => {
-  const booking = bookingDoc?.toObject ? bookingDoc.toObject() : { ...bookingDoc };
+  // Legacy records carry schema-default review/cancellation/dispute stamps.
+  const booking = withoutPhantomBookingActivity(
+    bookingDoc?.toObject ? bookingDoc.toObject() : { ...bookingDoc },
+  );
   const customerId = referenceId(booking?.customer);
   const professionalId = referenceId(booking?.professional);
   const projectId = referenceId(booking?.project)
@@ -1558,7 +1564,7 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       const source = !booking.professional && ownerId && projectOwners.has(ownerId)
         ? { ...booking.toObject(), professional: projectOwners.get(ownerId) }
         : booking;
-      const visible: any = bookingForViewer(source, viewerRole);
+      const visible: any = withoutPhantomBookingActivity(bookingForViewer(source, viewerRole));
       if (visible && typeof visible === "object") visible.priceModel = selectedPriceModel(visible);
       // The shared bookings table exposes pro-only payout date/amount
       // columns. Strip the pro payout summary server-side for customers;
@@ -1654,10 +1660,10 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       .populate('customer', isAdmin
         ? 'name username email phone customerType location vatNumber totalSpent businessName timeZone isAnonymized deletedAt'
         : 'name username email phone customerType location businessName timeZone isAnonymized deletedAt')
-      .populate('professional', professionalFields)
+      .populate('professional', `${professionalFields} professionalLevel adminTags`)
       .populate(
         'project',
-        `title description pricing category service team timeMode rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects minResources minOverlapPercentage executionDuration${isAdmin ? ' resources' : ''}`
+        `title description pricing category service team timeMode priceModel rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects minResources minOverlapPercentage executionDuration${isAdmin ? ' resources' : ''}`
       )
       .populate('assignedTeamMembers', 'name email');
 
@@ -1708,7 +1714,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
             : booking,
           adminAccess!,
         )
-      : bookingForViewer(booking, viewerRole);
+      : bookingForViewer(await bookingWithCustomerProjectPrices(booking, viewerRole, getCheckoutCommissionPercent), viewerRole);
     const maskedBooking = maskBookingForAnonymizedParties(filteredBooking, maskingFlags);
     // Masking must remove target-owned file keys before any presigner sees
     // them. The old order signed first and could return a working URL.
@@ -2325,7 +2331,7 @@ export const getMyDisputes = async (req: Request, res: Response, next: NextFunct
     const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 20, 1), 100);
     const filter = {
       status: { $in: ['dispute', 'completed', 'cancelled', 'refunded'] },
-      'dispute.raisedAt': { $exists: true },
+      ...RECORDED_DISPUTE_FILTER,
       $or: [{ customer: objectUserId }, { professional: objectUserId }],
     };
     const [bookings, total] = await Promise.all([Booking.find(filter)

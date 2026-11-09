@@ -34,6 +34,8 @@ import { withArticle47ProfessionalQuestion } from "../../utils/vatManagement";
 import { publicProjectOwnerFilter } from "../../utils/publicVisibility";
 import { pruneDraftArticle47Answers } from "../../utils/projectDraftVatAnswers";
 import { withAnonymizationWriteFence, ACCOUNT_WRITE_FENCE_CODE } from "../../utils/support/accountGuard";
+import { getCheckoutCommissionPercent } from "../../utils/checkoutCommission";
+import { publicProjectPricingView, viewerSeesBasePricing } from "../../utils/customerPriceView";
 import {
   canonicalizeProjectMedia,
   withSignedProjectMedia,
@@ -758,7 +760,13 @@ export const getPublishedProject = async (req: Request, res: Response) => {
           .select("vatManagement.enabled vatManagement.rateRuleGroup vatManagement.reducedVatQuestions vatManagement.professionalVatQuestions vatManagement.article47Classification vatManagement.exemptFromBelgianReverseCharge")
           .lean()
       : null;
-    const serialized = await withSignedProjectMedia(serializePublicProject(project));
+    // Owner and payments-authorized admins keep stored prices; everyone else gets customer prices only.
+    const seesBasePricing = viewerSeesBasePricing(req.user, project.professionalId, res.locals?.canReadPayments === true);
+    const serialized = await withSignedProjectMedia(publicProjectPricingView(
+      serializePublicProject(project),
+      seesBasePricing,
+      await getCheckoutCommissionPercent(),
+    ));
     res.json({
       success: true,
       project: {
