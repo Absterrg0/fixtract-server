@@ -458,6 +458,17 @@ describeDb('dashboard baselines (Mongo)', () => {
       expect(body.data.baseline).toMatchObject({ key: 'bookingKpis', applied: true, showAll: false });
     });
 
+    it('a range that ends before the reset collapses to the reset instead of inverting', async () => {
+      await setBaseline('bookingKpis', RESET_AT);
+      const from = new Date(RESET_AT.getTime() - 20 * DAY).toISOString();
+      const to = new Date(RESET_AT.getTime() - 10 * DAY).toISOString();
+      const { statusCode, body } = await call(getKpiSummary, makeReq({ admin: superAdmin(), query: { from, to } }));
+      expect(statusCode).toBe(200);
+      const range = { from: new Date(body.data.range.from).getTime(), to: new Date(body.data.range.to).getTime() };
+      expect(range.from).toBe(RESET_AT.getTime());
+      expect(range.to).toBe(RESET_AT.getTime());
+    });
+
     it('history=all keeps the requested range start', async () => {
       await setBaseline('bookingKpis', RESET_AT);
       const from = new Date(NOW - 30 * DAY).toISOString();
@@ -483,6 +494,20 @@ describeDb('dashboard baselines (Mongo)', () => {
       const counts = await computeAdminNavigationBadges(superAdmin());
       expect(counts.disputes).toBe(1);
       expect(counts.cancellationRequests).toBe(1);
+    });
+    it('a failed baseline read does not take down the badges', async () => {
+      await CancellationRequest.collection.insertOne(
+        { booking: id(), requestedBy: id(), requestedRole: 'customer', status: 'pending', reason: 'r', createdAt: BEFORE, updatedAt: BEFORE } as any,
+      );
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const findSpy = vi.spyOn(AdminDashboardBaseline, 'find').mockImplementationOnce(() => {
+        throw new Error('baseline read failed');
+      });
+      const counts = await computeAdminNavigationBadges(superAdmin());
+      expect(findSpy).toHaveBeenCalled();
+      expect(counts.cancellationRequests).toBe(1);
+      expect(counts.disputes).toBe(0);
+      findSpy.mockRestore();
     });
   });
 

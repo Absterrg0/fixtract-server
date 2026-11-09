@@ -166,7 +166,12 @@ export async function computeAdminNavigationBadges(admin: IUser): Promise<AdminN
   const keys = ADMIN_NAVIGATION_BADGE_KEYS.filter((key) =>
     NAVIGATION_BADGE_QUEUES[key].authorized({ admin, levels }),
   );
-  const baselines = await loadDashboardBaselines();
+  // A failed baseline read must not take down every badge: fall back to no
+  // baselines (count all), which keeps per-queue failure isolation intact.
+  const baselines = await loadDashboardBaselines().catch((error: unknown) => {
+    console.error("[Admin] navigation badge baselines failed:", (error as Error)?.message);
+    return new Map() as Awaited<ReturnType<typeof loadDashboardBaselines>>;
+  });
   const results = await Promise.allSettled(keys.map((key) => NAVIGATION_BADGE_QUEUES[key].count(baselines)));
   const counts: AdminNavigationBadgeCounts = {};
   keys.forEach((key, index) => {

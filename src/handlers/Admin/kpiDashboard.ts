@@ -48,11 +48,11 @@ const parseRange = (req: Request): DateRange => {
 const parseKpiRange = async (req: Request): Promise<{ from: Date; to: Date; baseline: DashboardBaselineInfo }> => {
   const range = parseRange(req);
   const resolved = await resolveDashboardBaseline(req, 'bookingKpis');
-  return {
-    from: resolved.applied && resolved.resetAtDate ? clampKpiFrom(range.from, resolved.resetAtDate) : range.from,
-    to: range.to,
-    baseline: toBaselineInfo(resolved),
-  };
+  const from = resolved.applied && resolved.resetAtDate ? clampKpiFrom(range.from, resolved.resetAtDate) : range.from;
+  // A range that ends before the baseline collapses to an empty range at the
+  // baseline instead of inverting (from > to) in responses, PDFs and emails.
+  const to = from.getTime() > range.to.getTime() ? from : range.to;
+  return { from, to, baseline: toBaselineInfo(resolved) };
 };
 
 const parseCountry = (req: Request): string | null => {
