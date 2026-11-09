@@ -478,6 +478,83 @@ describeDb('dashboard baselines (Mongo)', () => {
     });
   });
 
+  describe('disputes compose with the recorded-dispute rule', () => {
+    /**
+     * Main's recorded-dispute rule hides phantom dispute sub-documents (no
+     * `raisedBy`). The baseline clause is an `$or` that would admit any row with
+     * `raisedAt >= reset` or `resolvedAt: null`, so it must be ANDed onto the
+     * recorded filter and never replace it. Phantoms here sit inside the window
+     * (after the reset, or open) to prove the clause cannot re-admit them.
+     *
+     * P-OPEN-OLD, P-OPEN-NEW:      phantom (no actor), open         → never shown
+     * R-OPEN-OLD:                  recorded, open, raised before     → always shown
+     * R-OPEN-UNDATED:              recorded, open, no raisedAt       → always shown
+     * R-RESOLVED-OLD:              recorded, resolved before reset   → hidden by default
+     * R-RESOLVED-NEW:              recorded, resolved after reset    → shown
+     * P-RESOLVED-NEW:              phantom, resolved after reset     → never shown
+     */
+    const seedComposed = async () => {
+      const customer = id();
+      const base = { customer, professional: id(), project: id(), payment: { amount: 10 } };
+      await Booking.collection.insertMany([
+        { ...base, bookingNumber: 'P-OPEN-OLD', status: 'dispute', dispute: { reason: 'p', raisedAt: BEFORE } },
+        { ...base, bookingNumber: 'P-OPEN-NEW', status: 'dispute', dispute: { reason: 'p', raisedAt: AFTER } },
+        { ...base, bookingNumber: 'R-OPEN-OLD', status: 'dispute', dispute: { raisedBy: customer, reason: 'a', raisedAt: BEFORE } },
+        { ...base, bookingNumber: 'R-OPEN-UNDATED', status: 'dispute', dispute: { raisedBy: customer, reason: 'u' } },
+        { ...base, bookingNumber: 'R-RESOLVED-OLD', status: 'completed', dispute: { raisedBy: customer, reason: 'b', raisedAt: BEFORE, resolvedAt: BEFORE } },
+        { ...base, bookingNumber: 'R-RESOLVED-NEW', status: 'completed', dispute: { raisedBy: customer, reason: 'c', raisedAt: AFTER, resolvedAt: AFTER } },
+        { ...base, bookingNumber: 'P-RESOLVED-NEW', status: 'completed', dispute: { reason: 'p', raisedAt: AFTER, resolvedAt: AFTER } },
+      ]);
+    };
+    const bookingNumbersOf = (result: any) => result.body.data.disputes.map((d: any) => d.bookingNumber).sort();
+
+    it('with a baseline: phantoms never appear, recorded open work always does, and the badge agrees with the lists', async () => {
+      await seedComposed();
+      await setBaseline('disputes', RESET_AT);
+
+      const all = await call(getDisputes, makeReq({ admin: superAdmin(), query: {} }));
+      expect(bookingNumbersOf(all)).toEqual(['R-OPEN-OLD', 'R-OPEN-UNDATED']);
+      expect(all.body.data.pagination.total).toBe(2);
+
+      const open = await call(getDisputes, makeReq({ admin: superAdmin(), query: { status: 'open' } }));
+      expect(bookingNumbersOf(open)).toEqual(['R-OPEN-OLD', 'R-OPEN-UNDATED']);
+
+      const resolved = await call(getDisputes, makeReq({ admin: superAdmin(), query: { status: 'resolved' } }));
+      expect(bookingNumbersOf(resolved)).toEqual(['R-RESOLVED-NEW']);
+      expect(resolved.body.data.pagination.total).toBe(1);
+
+      const analytics = await call(getDisputeAnalytics, makeReq({ admin: superAdmin(), query: {} }));
+      expect(analytics.body.data).toMatchObject({ totalOpen: 2, totalResolved: 1, totalDisputes: 2 });
+
+      const badges = await computeAdminNavigationBadges(superAdmin());
+      expect(badges.disputes).toBe(analytics.body.data.totalOpen);
+    });
+
+    it('history=all widens only the closed side: the old resolved dispute returns, phantoms still never do', async () => {
+      await seedComposed();
+      await setBaseline('disputes', RESET_AT);
+
+      const resolved = await call(getDisputes, makeReq({ admin: superAdmin(), query: { status: 'resolved', history: 'all' } }));
+      expect(bookingNumbersOf(resolved)).toEqual(['R-RESOLVED-NEW', 'R-RESOLVED-OLD']);
+
+      const all = await call(getDisputes, makeReq({ admin: superAdmin(), query: { history: 'all' } }));
+      expect(bookingNumbersOf(all)).toEqual(['R-OPEN-OLD', 'R-OPEN-UNDATED']);
+
+      const analytics = await call(getDisputeAnalytics, makeReq({ admin: superAdmin(), query: { history: 'all' } }));
+      expect(analytics.body.data).toMatchObject({ totalOpen: 2, totalResolved: 2, totalDisputes: 2 });
+    });
+
+    it('without a baseline the recorded rule alone applies: phantoms stay hidden, resolved history is complete', async () => {
+      await seedComposed();
+
+      const resolved = await call(getDisputes, makeReq({ admin: superAdmin(), query: { status: 'resolved' } }));
+      expect(bookingNumbersOf(resolved)).toEqual(['R-RESOLVED-NEW', 'R-RESOLVED-OLD']);
+
+      const analytics = await call(getDisputeAnalytics, makeReq({ admin: superAdmin(), query: {} }));
+      expect(analytics.body.data).toMatchObject({ totalOpen: 2, totalResolved: 2, totalDisputes: 2 });
+    });
+  });
+
   describe('warranty claims dashboard', () => {
     const seedClaims = async () => {
       const base = { booking: id(), customer: id(), professional: id(), reason: 'defect', description: 'd', evidence: [] };

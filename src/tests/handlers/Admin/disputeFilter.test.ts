@@ -44,7 +44,8 @@ describe('admin dispute overview filter (client bug list #7)', () => {
   it('lists only dispute-status bookings in the default overview', () => {
     expect(buildDisputeFilter(undefined)).toMatchObject({
       status: 'dispute',
-      'dispute.raisedAt': { $exists: true },
+      // The recorded actor is the evidence (hasRecordedDispute); an undated dispute still lists.
+      'dispute.raisedBy': { $exists: true, $ne: null },
     });
   });
 
@@ -56,7 +57,7 @@ describe('admin dispute overview filter (client bug list #7)', () => {
 
   it('keeps the resolved view as history of settled disputes', () => {
     const filter = buildDisputeFilter('resolved') as Record<string, unknown>;
-    expect(filter['dispute.raisedAt']).toEqual({ $exists: true });
+    expect(filter['dispute.raisedBy']).toEqual({ $exists: true, $ne: null });
     expect(filter['dispute.resolvedAt']).toEqual({ $ne: null });
   });
 });

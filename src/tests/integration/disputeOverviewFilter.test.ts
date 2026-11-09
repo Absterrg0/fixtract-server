@@ -36,7 +36,6 @@ describe('buildDisputeFilter keeps both rules', () => {
     for (const view of [undefined, 'open']) {
       const filter = buildDisputeFilter(view) as Record<string, unknown>;
       expect(filter.status).toBe('dispute');
-      expect(filter['dispute.raisedAt']).toEqual({ $exists: true });
       expect(filter['dispute.raisedBy']).toEqual({ $exists: true, $ne: null });
     }
     expect((buildDisputeFilter('open') as any)['dispute.resolvedAt']).toBeNull();

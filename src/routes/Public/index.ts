@@ -1,3 +1,4 @@
+import { previewCustomerPrices } from '../../handlers/Public/customerPrices';
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { getGoogleMapsConfig, validateAddress } from "../../handlers/User/googleMaps";
@@ -61,6 +62,8 @@ export const SCHEDULING_RATE_LIMIT = 60;
  */
 export const ANNOUNCEMENT_LIST_RATE_LIMIT = 300;
 export const ANNOUNCEMENT_EVENT_RATE_LIMIT = 600;
+/** Per-IP budget for public customer price lookups (see handlers/Public/customerPrices). */
+export const PRICE_PREVIEW_RATE_LIMIT = 600;
 
 const createPublicRateLimiter = (limit: number) =>
   rateLimit({
@@ -77,6 +80,7 @@ const createPublicRateLimiter = (limit: number) =>
 
 const schedulingRateLimiter = createPublicRateLimiter(SCHEDULING_RATE_LIMIT);
 const announcementListRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_LIST_RATE_LIMIT);
+const pricePreviewRateLimiter = createPublicRateLimiter(PRICE_PREVIEW_RATE_LIMIT);
 const announcementEventRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_EVENT_RATE_LIMIT);
 
 // Google Maps configuration (public endpoint)
@@ -89,7 +93,11 @@ publicRouter.route("/validate-address").post(validateAddress);
 publicRouter.route("/vat/validate").post(validateVAT);
 
 // Project viewing (public endpoint for customers to view projects)
-publicRouter.route("/projects/:id").get(getPublishedProject);
+publicRouter.route("/projects/:id").get(optionalProtect, getPublishedProject);
+
+// Customer price lookup: entity-keyed (project, package, usage, options). Rate limited by PRICE_PREVIEW_RATE_LIMIT.
+// Each call reads the platform commission setting, which is not cached (see handlers/Public/customerPrices).
+publicRouter.route("/customer-prices").post(pricePreviewRateLimiter, previewCustomerPrices);
 
 // Team availability (public endpoint for booking calendar)
 publicRouter

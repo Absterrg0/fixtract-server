@@ -1,3 +1,4 @@
+vi.mock('../../models/platformSettings', () => ({ default: { getCurrentConfig: async () => ({ commissionPercent: 10 }) } }));
 /**
  * WS4 (final touches part 3) — hour-mode scheduling.
  *

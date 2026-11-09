@@ -78,6 +78,7 @@ export type BookingOverviewDto = {
   statusBeforeDispute: string | null;
   title: string;
   projectTitle: string | null;
+  priceModel: string | null;
   serviceType: string | null;
   category: string | null;
   service: string | null;
@@ -120,6 +121,8 @@ export type BookingOverviewDto = {
     totalAmount: number | null;
     currency: string | null;
     validUntil: string | null;
+    firstPossibleStart: string | null;
+    createdAt: string | null;
   } | null;
   payment: {
     status: string | null;
@@ -172,6 +175,9 @@ export type PartiesDto = {
     phone: string | null;
     vatNumber: string | null;
     website: string | null;
+    professionalLevel: string | null;
+    publicTags: string[];
+    metadataSource: 'current_profile';
     address: { city: string | null; country: string | null; postalCode: string | null } | null;
     timeZone: string | null;
     isAnonymized?: boolean;
@@ -271,6 +277,8 @@ export type BookingSnapshotDto = {
 };
 
 export type CheckoutSnapshotDto = {
+  /** Customer total of the package and its options (checkout arithmetic, live commission). Null for professionals. */
+  customerTotal?: number | null;
   pricingType: 'fixed' | 'unit';
   unitAmount: number;
   quantity: number;
@@ -374,6 +382,7 @@ export type QuotationVersionDto = {
   preparationDuration: { value: number; unit: 'hours' | 'days' } | null;
   executionDuration: { value: number; unit: 'hours' | 'days' } | null;
   bufferDuration: { value: number; unit: 'hours' | 'days' } | null;
+  firstPossibleStart: string | null;
   validUntil: string | null;
   createdAt: string | null;
   changeNote: string | null;
@@ -389,7 +398,7 @@ export type QuotationVersionDto = {
   createdBy: ActorDto | null;
   actorRecorded: boolean;
   customerTotals: {
-    commissionPercent: number | null;
+    commissionPercent?: number | null;
     professionalNetAmount: number | null;
     customerNetAmount: number | null;
     amountBeforeDiscounts: number | null;
@@ -399,7 +408,7 @@ export type QuotationVersionDto = {
     totalAmount: number | null;
     vatBreakdown?: Array<{ description: string; netAmount: number; vatRate: number; vatAmount: number; totalAmount: number }>;
     currency: string;
-    recordedAt: string;
+    recordedAt: string | null;
     discount?: Record<string, unknown>;
   } | null;
   customerTotalsRecorded: boolean;
@@ -561,6 +570,8 @@ export type MilestonePaymentDto = {
 };
 
 export type RefundDto = {
+  providerStatus: string | null;
+  cashReturned: boolean;
   id: string;
   amount: number;
   currency: string;
@@ -623,6 +634,8 @@ export type PaymentsDetailsDto = {
 export type ExtraCostsDetailsDto = {
   status: 'pending' | 'confirmed' | 'disputed' | null;
   totalProfessionalAmount: number | null;
+  /** Customer-side total of the extra costs (commission-inclusive, before discounts). Null for professionals. */
+  totalCustomerAmount: number | null;
   currency: string | null;
   currencySource: 'payment' | 'quote' | 'not_recorded';
   items: Array<{
@@ -630,6 +643,8 @@ export type ExtraCostsDetailsDto = {
     name: string;
     justification: string;
     professionalAmount: number;
+    /** Customer-side amount of this line (commission-inclusive, before discounts). Null for professionals. */
+    customerAmount: number | null;
     unitPrice: number | null;
     estimatedUnits: number | null;
     actualUnits: number | null;
@@ -743,6 +758,8 @@ export type ActivityItem = {
   type: string;
   category: 'lifecycle' | 'rfq' | 'quotation' | 'payment' | 'refund' | 'schedule' | 'completion' | 'extra_cost' | 'cancellation' | 'warranty' | 'dispute' | 'review' | 'system';
   occurredAt: string;
+  timestampRecorded?: boolean;
+  provenance?: 'surviving_record';
   actor: ActorDto | null;
   actorRecorded: boolean;
   titleKey: string;
@@ -775,6 +792,7 @@ export type ActivityItem = {
 };
 
 export type BookingActivityDto = {
+  coverage: { status: 'unknown'; source: 'surviving_records'; appendOnlyArchive: false };
   generatedAt: string;
   complete: boolean;
   order: 'asc';

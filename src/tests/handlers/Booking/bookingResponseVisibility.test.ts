@@ -276,7 +276,7 @@ describe('non-admin booking response serialization', () => {
       project: { title: 'Project' },
       payment: rawPayment(),
       milestonePayments: rawMilestones(),
-      dispute: { reason: 'Work incomplete', raisedAt: new Date('2026-02-01') },
+      dispute: { raisedBy: CUSTOMER_ID, reason: 'Work incomplete', raisedAt: new Date('2026-02-01') },
     };
     mocks.bookingFind.mockReturnValue(query([booking]));
 
@@ -689,9 +689,10 @@ describe('payment history and quotation response serialization', () => {
     expect(res.body.data.booking.payment.supplierInvoiceNumber).toBe('SUP-1');
   });
 
-  it('sanitizes the quotation-rejection response for a customer', async () => {
+  it.each(['accepted', 'rejected'])('sanitizes the quotation %s response for a customer', async action => {
     const booking = makeBooking({
       status: 'quoted',
+      quoteVersions: [{ version: 1, customerTotals: { commissionPercent: 17, professionalNetAmount: 100, discount: { legacy: { platformCommissionPercentage: 17 } } } }],
       customer: { _id: CUSTOMER_ID, name: 'Customer' },
       professional: { _id: PROFESSIONAL_ID, name: 'Professional', businessInfo: {} },
     });
@@ -706,7 +707,7 @@ describe('payment history and quotation response serialization', () => {
     await customerRespondToQuotation(
       {
         params: { bookingId: 'booking-1' },
-        body: { action: 'rejected', rejectionReason: 'Too expensive' },
+        body: { action, rejectionReason: 'Too expensive' },
         user: user('customer', CUSTOMER_ID),
       } as any,
       res as any
@@ -717,5 +718,7 @@ describe('payment history and quotation response serialization', () => {
     expect(res.body.data.booking.payment.invoiceNumber).toBe('FIX-1');
     expect(res.body.data.booking.payment.supplierInvoiceNumber).toBeUndefined();
     expect(res.body.data.booking.customerRejectionReason).toBe('Too expensive');
+    expect(JSON.stringify(res.body)).not.toMatch(/commissionPercent|platformCommissionPercentage/);
+    expect(res.body.data.booking.quoteVersions[0].customerTotals).not.toHaveProperty('professionalNetAmount');
   });
 });
