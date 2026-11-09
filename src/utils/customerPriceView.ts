@@ -1,4 +1,5 @@
-import { checkoutCustomerTotal, commissionedQuoteAmount, withCommission } from './customerPricing';
+import { commissionedQuoteAmount, withCommission } from './customerPricing';
+import { computeGrossBookingAmount } from './payment';
 import { withholdPricingForMode } from './quotationVisibility';
 
 type Obj = { [key: string]: any };
@@ -55,6 +56,35 @@ export const withCustomerPrices = (project: Obj, commissionPercent: number): Obj
   return next;
 };
 
+/**
+ * Lowest package price across a project's subprojects (fixed or unit), for list
+ * cards. The owner and payments-authorized admins get the stored professional
+ * price. Everyone else gets the customer price (the same arithmetic as
+ * `customerAmount`), so a card never shows a base price that a customer could
+ * compare with the customer preview.
+ */
+export const startingPriceForView = (
+  subprojects: ReadonlyArray<{ pricing?: { type?: string; amount?: unknown } | null }> | null | undefined,
+  seesBasePricing: boolean,
+  commissionPercent: number,
+): { startingPrice: number | null; priceType: string } => {
+  let startingPrice: number | null = null;
+  let priceType = 'rfq';
+  for (const subproject of Array.isArray(subprojects) ? subprojects : []) {
+    const pricing = subproject?.pricing;
+    const type = pricing?.type;
+    if ((type !== 'fixed' && type !== 'unit') || pricing?.amount == null) continue;
+    const amount = Number(pricing.amount);
+    if (!Number.isFinite(amount)) continue;
+    if (startingPrice === null || amount < startingPrice) {
+      startingPrice = amount;
+      priceType = type;
+    }
+  }
+  if (startingPrice !== null && !seesBasePricing) startingPrice = withCommission(startingPrice, commissionPercent);
+  return { startingPrice, priceType };
+};
+
 /** True when the viewer owns the project (the professional) or may read payment-area amounts. */
 export const viewerSeesBasePricing = (
   user: unknown,
@@ -101,12 +131,13 @@ export const bookingWithCustomerProjectPrices = async (
   return {
     ...plain,
     project: withCustomerPrices(booking.project, commissionPercent),
-    // Customer totals of the checkout package alone and with its options (checkout arithmetic).
+    // Customer totals: the package alone, and the whole booking as checkout charges it (computeGrossBookingAmount,
+    // which also handles legacy quotes that already include the options).
     ...(snapshot ? {
       checkoutSnapshot: {
         ...snapshot,
         customerPackageTotal: commissionedQuoteAmount(Number(snapshot.baseSubtotal) || 0, snapshot, commissionPercent),
-        customerTotal: checkoutCustomerTotal(snapshot, commissionPercent),
+        customerTotal: computeGrossBookingAmount(plain as any, commissionPercent),
       },
     } : {}),
   };

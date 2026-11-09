@@ -38,6 +38,9 @@ let server: Server;
 let base: string;
 beforeAll(async () => {
   const app = express();
+  // commissionVisibility is mounted before the user injection below, which is the same order as production:
+  // src/index.ts mounts it on /api before the routers, and protect runs inside them. The role is read lazily,
+  // when res.json runs, so both orders resolve the same user. Keep that read lazy; an eager read would break this.
   app.use(express.json(), commissionVisibility);
   // Stands in for the auth middleware: sets req.user, then resolves admin payments access as protect does.
   app.use(async (req, res, next) => {
@@ -133,5 +136,38 @@ describe('commission-rate endpoint', () => {
     expect((await fetch(`${base}/rate`, { headers: { 'x-role': 'admin' } })).status).toBe(403);
     mocks.access.mockResolvedValue({ payments: true });
     expect((await (await fetch(`${base}/rate`, { headers: { 'x-role': 'admin' } })).json()).data.commissionPercent).toBe(13);
+  });
+});
+
+/** Same seven viewers as the endpoint matrix. The preview is one response for everyone; the rate is role-gated. */
+describe('price endpoints: every viewer', () => {
+  const viewers = [
+    { label: 'anonymous', role: undefined, payments: false, ratePassed: false },
+    { label: 'customer', role: 'customer', payments: false, ratePassed: false },
+    { label: 'other customer', role: 'customer', payments: false, ratePassed: false },
+    { label: 'owner professional', role: 'professional', payments: false, ratePassed: true },
+    { label: 'other professional', role: 'professional', payments: false, ratePassed: true },
+    { label: 'bookings-only admin', role: 'admin', payments: false, ratePassed: false },
+    { label: 'finance admin', role: 'admin', payments: true, ratePassed: true },
+  ] as const;
+
+  it.each(viewers)('$label: preview carries customer totals only; the rate only where entitled', async ({ role, payments, ratePassed }) => {
+    mocks.access.mockResolvedValue({ payments });
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (role) headers['x-role'] = role;
+    const previewResponse = await fetch(`${base}/prices`, {
+      method: 'POST', headers, body: JSON.stringify({ requests: [{ projectId: String(projectId), subprojectIndex: 0 }, { projectId: String(projectId), subprojectIndex: 1, estimatedUsage: 2 }] }),
+    });
+    expect(previewResponse.status).toBe(200);
+    const previewText = await previewResponse.text();
+    expect(previewText).not.toMatch(/commission/i);
+    expect(previewText).not.toMatch(/873\.37|12\.34|77\.77/);
+    expect(JSON.parse(previewText).data.prices).toHaveLength(2);
+
+    const rateHeaders: Record<string, string> = {};
+    if (role) rateHeaders['x-role'] = role;
+    const rateResponse = await fetch(`${base}/rate`, { headers: rateHeaders });
+    expect(rateResponse.status).toBe(ratePassed ? 200 : 403);
+    if (!ratePassed) expect(await rateResponse.text()).not.toMatch(/commissionPercent|13/);
   });
 });

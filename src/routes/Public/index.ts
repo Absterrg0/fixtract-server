@@ -83,9 +83,6 @@ const announcementListRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_LIST_RA
 const pricePreviewRateLimiter = createPublicRateLimiter(PRICE_PREVIEW_RATE_LIMIT);
 const announcementEventRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_EVENT_RATE_LIMIT);
 
-// Customer price lookup (entity-keyed; rate limited, see PRICE_PREVIEW_RATE_LIMIT)
-publicRouter.route("/customer-prices").post(pricePreviewRateLimiter, previewCustomerPrices);
-
 // Google Maps configuration (public endpoint)
 publicRouter.route("/google-maps-config").get(getGoogleMapsConfig);
 
@@ -97,6 +94,10 @@ publicRouter.route("/vat/validate").post(validateVAT);
 
 // Project viewing (public endpoint for customers to view projects)
 publicRouter.route("/projects/:id").get(optionalProtect, getPublishedProject);
+
+// Customer price lookup: entity-keyed (project, package, usage, options). Rate limited by PRICE_PREVIEW_RATE_LIMIT.
+// Each call reads the platform commission setting, which is not cached (see handlers/Public/customerPrices).
+publicRouter.route("/customer-prices").post(pricePreviewRateLimiter, previewCustomerPrices);
 
 // Team availability (public endpoint for booking calendar)
 publicRouter

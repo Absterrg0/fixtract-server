@@ -55,11 +55,22 @@ const PROFESSIONAL_AMOUNT_RULES: ReadonlyArray<{ key: string; within?: readonly 
   { key: 'price', within: ['extraOptions'] },
 ];
 
-/** Commission amounts: withheld from everyone except professionals and payments-authorized admins. */
+/**
+ * Commission amounts and commission reductions: withheld from everyone except
+ * professionals and payments-authorized admins. Keys are matched exactly, so
+ * every commission-derived amount the code emits needs its own entry here.
+ * `commissionReduction` and `referredProfessionalCommissionReduction` are
+ * percentage points off the rate, so they count as rate disclosure.
+ */
 const COMMISSION_AMOUNT_RULES: ReadonlyArray<{ key: string; within?: readonly string[] }> = [
   { key: 'platformCommission' },
+  { key: 'platformCommissionAmount' },
+  { key: 'platformCommissionOnBase' },
   { key: 'extraCostPlatformCommission' },
   { key: 'extraCostPlatformFee' },
+  { key: 'platformFeeAmount' },
+  { key: 'commissionReduction' },
+  { key: 'referredProfessionalCommissionReduction' },
 ];
 
 const pathEndsWith = (path: readonly string[], suffix: readonly string[]): boolean => path.length >= suffix.length
@@ -79,6 +90,12 @@ const isWithheld = (key: string, path: readonly string[], mode: ViewerPricingMod
   if (matchesRule(COMMISSION_AMOUNT_RULES, key, path)) return true;
   return mode === 'customer' && matchesRule(PROFESSIONAL_AMOUNT_RULES, key, path);
 };
+
+/** Activity event types whose `amounts` are customer-side money (refunds paid to the customer). */
+const CUSTOMER_SIDE_EVENT_TYPES: ReadonlySet<string> = new Set(['refund_issued', 'refund_pending']);
+const CUSTOMER_SIDE_AMOUNTS = '__customerSideAmounts';
+
+const isCustomerSideEvent = (value: object): boolean => CUSTOMER_SIDE_EVENT_TYPES.has(String((value as { type?: unknown }).type));
 
 const isLeaf = (value: object): boolean => value instanceof Date
   || Buffer.isBuffer(value)
@@ -113,13 +130,17 @@ const customerView = (value: unknown, path: readonly string[], ancestors: readon
   }
   let changed = source !== value;
   const out: Record<string, unknown> = {};
+  // A refund event's `amounts` is customer-side money. Its subtree is walked under a path segment that the
+  // professional amount rules (`within: ['amounts']`) cannot match. Commission rules still apply to it.
+  const customerSideAmounts = mode === 'customer' && isCustomerSideEvent(source);
   for (const key of Object.keys(source)) {
     const child = source[key];
     if (isWithheld(key, path, mode)) {
       changed = true;
       continue;
     }
-    const next = customerView(child, [...path, key], nextAncestors, mode);
+    const childPath = customerSideAmounts && key === 'amounts' ? [...path, CUSTOMER_SIDE_AMOUNTS] : [...path, key];
+    const next = customerView(child, childPath, nextAncestors, mode);
     if (next !== child) changed = true;
     out[key] = next;
   }

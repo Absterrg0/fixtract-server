@@ -2125,6 +2125,9 @@ describe('phase 1 booking/quotation read-model parity', () => {
     // The undated 'quoted' status entry describes the same fact as quote:1, so it is not repeated.
     expect(details.activity.items.find(item => item.id === 'status:1')).toBeUndefined();
     expect(details.activity.items.filter(item => item.id === 'quote:1' || item.statusTo === 'quoted')).toHaveLength(1);
+    // The undated first 'rfq' entry is the same fact as rfq:submitted, so it is not repeated as status:0.
+    expect(details.activity.items.find(item => item.id === 'status:0')).toBeUndefined();
+    expect(details.activity.items.filter(item => item.id?.startsWith('rfq:') || item.statusTo === 'rfq')).toHaveLength(1);
     expect(details.activity.dataQuality.undatedEvents).toBeGreaterThanOrEqual(1);
   });
 });

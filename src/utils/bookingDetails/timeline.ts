@@ -360,7 +360,9 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
       visibility: 'participants',
       legacyDerived: !actorRecorded || !firstStatus,
     });
-    markStatusCovered(coveredStatus, 'rfq', firstStatus?.timestamp || booking.createdAt);
+    // Coverage uses the same value as the event: an undated first status entry is recorded undated, so its
+    // undated status:0 entry is suppressed. The createdAt fallback only applies when there is no status entry.
+    markStatusCovered(coveredStatus, 'rfq', firstStatus ? firstStatus.timestamp : booking.createdAt);
   }
 
   // ── RFQ response ────────────────────────────────────────────────────────

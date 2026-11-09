@@ -410,6 +410,8 @@ describe('booking and quotation alias privacy/IDOR contract', () => {
     // Same identity as 'professional'; the case sets `source.professional = undefined` so the project-owner path is taken.
     ['project owner', { _id: professionalId, role: 'professional' }],
     ['unrelated', { _id: new Types.ObjectId(), role: 'customer' }],
+    // A professional who is not on the booking or its project. The handlers deny this role; the wrapper trusts the role.
+    ['other professional', { _id: new Types.ObjectId(), role: 'professional' }],
     ['anonymous', undefined],
     ['admin without bookings', { _id: new Types.ObjectId(), role: 'admin', adminPermissionLevels: { payments: 'read' } }],
     ['admin bookings only', { _id: new Types.ObjectId(), role: 'admin', adminPermissionLevels: { bookings: 'read' } }],
@@ -431,7 +433,7 @@ describe('booking and quotation alias privacy/IDOR contract', () => {
       await (handler as any)({ ...request(user), params: { bookingId: String(bookingId), id: String(bookingId) } }, res, next);
       expect(next).not.toHaveBeenCalled();
       // `startsWith('admin')` only matters for the admin handler: its only allowed viewers are admins.
-      const denied = ['unrelated', 'anonymous', 'admin without bookings'].includes(label) || (alias === 'admin full' && !label.startsWith('admin'));
+      const denied = ['unrelated', 'other professional', 'anonymous', 'admin without bookings'].includes(label) || (alias === 'admin full' && !label.startsWith('admin'));
       if (denied) {
         expect(res.body.success).toBe(false);
         expect(res.body.booking || res.body.data).toBeUndefined();

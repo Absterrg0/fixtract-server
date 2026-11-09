@@ -63,6 +63,26 @@ describe('customer-view walk is bounded and matches JSON serialization', () => {
     expect(visible).not.toMatch(/professionalNetAmount/);
   });
 
+  it('keeps a refund event amount for the customer, and still withholds commission under it', () => {
+    const activity = { items: [
+      { type: 'refund_issued', amounts: { amount: 30, currency: 'EUR', platformCommission: 4 } },
+      { type: 'quotation_submitted', amounts: { amount: 100, currency: 'EUR' } },
+    ] };
+    const visible = quotationForViewer({ activity }, 'customer') as any;
+    expect(visible.activity.items[0].amounts).toEqual({ amount: 30, currency: 'EUR' });
+    expect(visible.activity.items[1]).toEqual({ type: 'quotation_submitted', amounts: { currency: 'EUR' } });
+  });
+
+  it('terminates on a cyclic object or array and still withholds professional amounts', () => {
+    const node: any = { professionalNetAmount: 1, customerNetAmount: 2 };
+    node.self = node;
+    const list: any[] = [{ professionalNetAmount: 3, customerNetAmount: 4 }];
+    list.push(list);
+    const visible = JSON.stringify(quotationForViewer({ node, list }, 'customer'));
+    expect(visible).not.toMatch(/professionalNetAmount/);
+    expect(visible).toMatch(/customerNetAmount/);
+  });
+
   it('reads Mongoose-style toJSON the way JSON serialization does', () => {
     const doc = { toJSON: () => ({ customerNetAmount: 117, professionalNetAmount: 100, when: new Date('2026-01-01T00:00:00Z') }) };
     const visible = JSON.parse(JSON.stringify(quotationForViewer({ doc }, 'customer')));
