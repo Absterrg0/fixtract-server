@@ -45,6 +45,7 @@ vi.mock('../../utils/s3Upload', async (importOriginal) => {
 import adminRouter from '../../routes/Admin';
 import publicRouter from '../../routes/Public';
 import CmsContent from '../../models/cmsContent';
+import { settleCmsResponse, skipTranslatorBackoff } from './cmsTranslationSettle';
 import User from '../../models/user';
 
 const TAG = 'cmsautotr-it';
@@ -142,7 +143,10 @@ const call = async (
   });
   const text = await response.text();
   expect(text).not.toContain(FIXTURE_KEY); // the key never reaches a response
-  return { status: response.status, body: text ? JSON.parse(text) : undefined };
+  // Async translation: wait for the background run and fold its outcome into
+  // `translations` (immediate results stay on body.immediate).
+  const body = await settleCmsResponse(text ? JSON.parse(text) : undefined);
+  return { status: response.status, body };
 };
 
 const configureTranslator = (on: boolean) => {
@@ -175,6 +179,7 @@ const blog = (over: Record<string, unknown> = {}) => {
 
 describeDb('CMS auto-translation (real MongoDB, local translator transport fixture)', () => {
   beforeAll(async () => {
+    skipTranslatorBackoff();
     await mongoose.connect(testUri!);
     await CmsContent.deleteMany({ $or: [{ tags: TAG }, { slug: new RegExp(`^${TAG}`) }] });
     await User.deleteMany({ email: new RegExp(`@${TAG}\\.example$`) });
@@ -236,8 +241,16 @@ describeDb('CMS auto-translation (real MongoDB, local translator transport fixtu
     const retry = await call('POST', `/api/admin/cms/${id}/translate`, { cookie: superCookie, body: {} });
     expect(retry.status).toBe(200);
     expect(retry.body.success).toBe(true);
-    expect(retry.body.data).toBeUndefined();
+    // The status says the translator is off; nothing is pending or queued.
+    expect(retry.body.data).toMatchObject({ enabled: false, sourceId: id, running: false, queued: false });
+    expect(retry.body.data.locales.map((l: any) => [l.locale, l.state])).toEqual([
+      ['en', 'source'],
+      ['nl', 'missing'],
+      ['fr', 'missing'],
+    ]);
     expect(byLocale(retry.body.translations)).toEqual({ nl: 'disabled', fr: 'disabled' });
+    expect(retry.body.immediate).toBeUndefined(); // nothing was ever pending
+    expect((await CmsContent.findById(id).lean())!.translationRun).toBeUndefined();
 
     const updated = await call('PUT', `/api/admin/cms/${id}`, { cookie: superCookie, body: { title: 'Changed while unconfigured' } });
     expect(updated.status).toBe(200);
@@ -384,10 +397,28 @@ describeDb('CMS auto-translation (real MongoDB, local translator transport fixtu
     const input = blog();
     const created = await call('POST', '/api/admin/cms', { cookie: superCookie, body: input });
     expect(created.status).toBe(201);
+    expect(created.body.immediate).toEqual([
+      { locale: 'nl', status: 'pending' },
+      { locale: 'fr', status: 'pending' },
+    ]);
+    // 5xx is retried (backoff stubbed), then reported with a safe message.
     expect(created.body.translations).toEqual([
       { locale: 'nl', status: 'created' },
-      { locale: 'fr', status: 'failed', error: 'Translation failed. Check server logs for details.' },
+      {
+        locale: 'fr',
+        status: 'failed',
+        errorCode: 'provider_error',
+        error: 'The translation service returned an error. Retry later.',
+      },
     ]);
+    expect(fixture.requests.filter((r) => r.query.to === 'fr')).toHaveLength(4);
+    const failedStatus = (await call('GET', `/api/admin/cms/${created.body.data._id}/translations`, { cookie: superCookie })).body.data;
+    expect(failedStatus.locales.map((l: any) => [l.locale, l.state])).toEqual([
+      ['en', 'source'],
+      ['nl', 'up_to_date'],
+      ['fr', 'failed'],
+    ]);
+    expect(failedStatus.locales[2].lastResult).toMatchObject({ status: 'failed', errorCode: 'provider_error' });
     const id = created.body.data._id;
     expect(await CmsContent.countDocuments({ _id: id })).toBe(1);
     expect((await family(id)).map((v) => v.locale)).toEqual(['nl']);
@@ -406,7 +437,9 @@ describeDb('CMS auto-translation (real MongoDB, local translator transport fixtu
     expect(updated.status).toBe(200);
     expect(updated.body.data.title).toBe('Retitled during outage');
     expect(byLocale(updated.body.translations)).toEqual({ nl: 'failed', fr: 'failed' });
-    expect(JSON.stringify(updated.body)).not.toMatch(/credentials|401000/);
+    expect(updated.body.translations.map((t: any) => t.errorCode)).toEqual(['auth', 'auth']);
+    // Only the safe admin sentence is surfaced, never the provider's raw error.
+    expect(JSON.stringify(updated.body)).not.toMatch(/401000|not authorized/);
     const nlAfter = await CmsContent.findById(nlBefore._id).lean();
     expect(nlAfter!.title).toBe(nlBefore.title);
     expect(nlAfter!.sourceHash).toBe(nlBefore.sourceHash); // still stale -> next save retries

@@ -48,6 +48,7 @@ vi.mock('../../utils/s3Upload', async (importOriginal) => {
 import adminRouter from '../../routes/Admin';
 import publicRouter from '../../routes/Public';
 import CmsContent from '../../models/cmsContent';
+import { settleCmsResponse, skipTranslatorBackoff } from './cmsTranslationSettle';
 import User from '../../models/user';
 
 const TAG = 'cmspubfix-it';
@@ -145,7 +146,10 @@ const call = async (
   });
   const text = await response.text();
   expect(text).not.toContain(FIXTURE_KEY); // the key never reaches a response
-  return { status: response.status, body: text ? JSON.parse(text) : undefined };
+  // Async translation: wait for the background run and fold its outcome into
+  // `translations` (immediate results stay on body.immediate).
+  const body = await settleCmsResponse(text ? JSON.parse(text) : undefined);
+  return { status: response.status, body };
 };
 
 const configureTranslator = (on: boolean) => {
@@ -189,6 +193,7 @@ describeDb('CMS translation publication rules + localeVariants (real MongoDB, lo
   let readOnlyCookie = '';
 
   beforeAll(async () => {
+    skipTranslatorBackoff();
     await mongoose.connect(testUri!);
     await CmsContent.deleteMany({ $or: [{ tags: TAG }, { slug: new RegExp(`^${TAG}`) }] });
     await User.deleteMany({ email: new RegExp(`@${TAG}\\.example$`) });

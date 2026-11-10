@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { findOne, updateOne, create, find, deleteMany, updateMany, exists } = vi.hoisted(() => ({
+const { findOne, findById, updateOne, create, find, deleteMany, updateMany, exists } = vi.hoisted(() => ({
   exists: vi.fn(),
+  findById: vi.fn(),
   findOne: vi.fn(),
   updateOne: vi.fn(),
   create: vi.fn(),
@@ -16,19 +17,29 @@ const { translateTexts, isTranslatorConfigured } = vi.hoisted(() => ({
 }));
 
 vi.mock('../../../models/cmsContent', () => ({
-  default: { findOne, updateOne, create, find, deleteMany, updateMany, exists },
+  default: { findOne, findById, updateOne, create, find, deleteMany, updateMany, exists },
 }));
 
-vi.mock('../../../utils/cms/azureTranslator', () => ({
-  isTranslatorConfigured,
-  translateTexts,
-}));
+vi.mock('../../../utils/cms/azureTranslator', () => {
+  class TranslatorError extends Error {
+    status?: number;
+    code: string;
+    constructor(message: string, status?: number, code = 'provider_error') {
+      super(message);
+      this.status = status;
+      this.code = code;
+    }
+  }
+  return { isTranslatorConfigured, translateTexts, TranslatorError };
+});
 
 import {
+  clampTranslatedText,
   computeSourceHash,
   deleteAutoTranslatedSiblings,
   moveAutoTranslatedSiblings,
   syncCmsTranslations,
+  TRANSLATED_FIELD_MAX_LENGTH,
 } from '../../../utils/cms/syncTranslations';
 
 function makeSource(overrides: Record<string, any> = {}) {
@@ -116,6 +127,10 @@ beforeEach(() => {
     },
   }));
 
+  findById.mockImplementation((id: unknown) => {
+    const row = () => siblings.find((doc) => String(doc._id) === String(id)) ?? null;
+    return { select: () => ({ lean: async () => row() }), lean: async () => row() };
+  });
   updateOne.mockResolvedValue({ matchedCount: 1, modifiedCount: 1 });
   create.mockImplementation(async (payload: Record<string, any>) => payload);
   find.mockReturnValue({ lean: async () => [] });
@@ -143,7 +158,7 @@ describe('syncCmsTranslations', () => {
     expect(updateOne).toHaveBeenCalledTimes(2);
 
     const [query, update] = updateOne.mock.calls[0];
-    expect(query).toEqual({ _id: "nl-manual-1" });
+    expect(query).toEqual({ _id: "nl-manual-1", autoTranslated: { $ne: true } });
     expect(update.$set).toEqual({
       status: "draft",
       activeCountries: ["BE"],
@@ -226,7 +241,7 @@ describe('syncCmsTranslations', () => {
     ]);
     expect(updateOne).toHaveBeenCalledTimes(1);
     const [query, update] = updateOne.mock.calls[0];
-    expect(query).toEqual({ _id: "nl-manual-1" });
+    expect(query).toEqual({ _id: "nl-manual-1", autoTranslated: { $ne: true } });
     expect(update.$set).toEqual({ status: "draft", activeCountries: ["NL"], translatedFrom: "source-1" });
     expect(update.$unset).toEqual({ publishedAt: 1 });
     warn.mockRestore();
@@ -295,9 +310,10 @@ describe('syncCmsTranslations', () => {
       'seo.ogImage': 'https://cdn.example.test/og.jpg',
       'seo.noindex': false,
       autoTranslated: true,
-      sourceHash: hash,
       translatedFrom: 'source-1',
     });
+    // Mirroring never marks text as fresh; only a translated write sets the hash.
+    expect(update.$set.sourceHash).toBeUndefined();
     expect(update.$set['seo.canonical']).toBeUndefined();
     expect(update.$set.title).toBeUndefined();
     expect(update.$set.body).toBeUndefined();
@@ -372,19 +388,21 @@ describe('syncCmsTranslations', () => {
     expect(payload.seo.canonical).toBeUndefined();
   });
 
-  it('returns disabled for every locale (with a single warning) when the translator is not configured', async () => {
+  it('returns disabled for every locale, quietly, when the translator is not configured', async () => {
     isTranslatorConfigured.mockReturnValue(false);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const results = await syncCmsTranslations(makeSource());
-
-    expect(results).toEqual([
-      { locale: 'nl', status: 'disabled' },
-      { locale: 'fr', status: 'disabled' },
-    ]);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0][0])).toContain('AZURE_TRANSLATOR_KEY');
+    for (const translate of [true, false]) {
+      const results = await syncCmsTranslations(makeSource(), { translate });
+      expect(results).toEqual([
+        { locale: 'nl', status: 'disabled' },
+        { locale: 'fr', status: 'disabled' },
+      ]);
+    }
+    // An unconfigured translator is a supported setup, not a warning per save.
+    expect(warn).not.toHaveBeenCalled();
     expect(translateTexts).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 
@@ -408,7 +426,7 @@ describe('syncCmsTranslations', () => {
     expect(translateTexts).not.toHaveBeenCalled();
     expect(create).not.toHaveBeenCalled();
     expect(updateOne).toHaveBeenCalledTimes(2);
-    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 
@@ -426,7 +444,7 @@ describe('syncCmsTranslations', () => {
     const results = await syncCmsTranslations(makeSource());
 
     expect(results).toHaveLength(2);
-    expect(results[0]).toMatchObject({ locale: 'nl', status: 'failed' });
+    expect(results[0]).toMatchObject({ locale: 'nl', status: 'failed', errorCode: 'slug_conflict' });
     expect(results[0].error).toContain('solar-guide');
     expect(results[1]).toEqual({ locale: 'fr', status: 'created' });
   });
@@ -451,7 +469,8 @@ describe('syncCmsTranslations', () => {
     const machineWrites = updateOne.mock.calls.filter(([, update]) => update.$set.autoTranslated === true);
     expect(machineWrites).toHaveLength(2);
     const [query, update] = machineWrites[0];
-    expect(query).toEqual({ _id: 'nl-manual-1' });
+    // Conditional: still manual (and unedited when it carries an updatedAt).
+    expect(query).toEqual({ _id: 'nl-manual-1', autoTranslated: { $ne: true } });
     expect(update.$set.title).toBe('[nl] Solar guide');
   });
 
@@ -506,7 +525,7 @@ describe('syncCmsTranslations', () => {
       { locale: 'fr', status: 'created' },
     ]);
     const [query, update] = updateOne.mock.calls[0];
-    expect(query).toEqual({ _id: 'nl-auto-1' });
+    expect(query).toEqual({ _id: 'nl-auto-1', autoTranslated: true });
     expect(update.$set).toMatchObject({ translatedFrom: 'source-1', autoTranslated: true, title: '[nl] Solar guide' });
   });
 
@@ -611,7 +630,12 @@ describe('translation sibling maintenance', () => {
 
     expect(results).toEqual([
       { locale: 'nl', status: 'updated' },
-      { locale: 'fr', status: 'failed', error: 'Slug "new-slug" already exists in locale fr' },
+      {
+        locale: 'fr',
+        status: 'failed',
+        errorCode: 'slug_conflict',
+        error: 'Slug "new-slug" already exists in locale fr.',
+      },
     ]);
     expect(updateOne).toHaveBeenCalledTimes(2); // manual sibling untouched
     const [query, update] = updateOne.mock.calls[0];
@@ -636,3 +660,187 @@ describe('translation sibling maintenance', () => {
     );
   });
 });
+
+describe('clampTranslatedText', () => {
+  it('returns text that fits unchanged (trimmed)', () => {
+    expect(clampTranslatedText('  Hallo wereld  ', 20)).toBe('Hallo wereld');
+    expect(clampTranslatedText('x'.repeat(20), 20)).toBe('x'.repeat(20));
+  });
+
+  it('cuts at the last word boundary and adds an ellipsis within the limit', () => {
+    const text = 'Isolation thermique du toit, guide complet pour les propriétaires';
+    const out = clampTranslatedText(text, 40);
+    expect(out.length).toBeLessThanOrEqual(40);
+    expect(out.endsWith('…')).toBe(true);
+    expect(text.startsWith(out.slice(0, -1))).toBe(true);
+    expect(out).toBe('Isolation thermique du toit, guide…'); // trailing punctuation dropped
+  });
+
+  it('hard-cuts a long word with no usable boundary', () => {
+    const out = clampTranslatedText('a'.repeat(50), 10);
+    expect(out).toBe(`${'a'.repeat(9)}…`);
+  });
+
+  it('clamps every translated plain field to its schema limit on write', async () => {
+    translateTexts.mockImplementation(async (texts: string[], opts: { to: string; html: boolean }) =>
+      texts.map((text) => (opts.html ? text : `${text} ${'langer '.repeat(80)}`))
+    );
+    siblings = [];
+    await syncCmsTranslations(makeSource());
+    const payload = create.mock.calls[0][0];
+    expect(payload.title.length).toBeLessThanOrEqual(TRANSLATED_FIELD_MAX_LENGTH.title);
+    expect(payload.excerpt.length).toBeLessThanOrEqual(TRANSLATED_FIELD_MAX_LENGTH.excerpt);
+    expect(payload.coverImageAlt.length).toBeLessThanOrEqual(TRANSLATED_FIELD_MAX_LENGTH.coverImageAlt);
+    expect(payload.seo.titleTag.length).toBeLessThanOrEqual(TRANSLATED_FIELD_MAX_LENGTH['seo.titleTag']);
+    expect(payload.seo.ogTitle.length).toBeLessThanOrEqual(TRANSLATED_FIELD_MAX_LENGTH['seo.ogTitle']);
+    expect(payload.title.endsWith('…')).toBe(true);
+    // The HTML body has no schema limit and is never clamped.
+    expect(payload.body).toBe('<p>Hello <strong>world</strong></p>');
+  });
+});
+
+describe('syncCmsTranslations — request-time pass and background safety', () => {
+  it('translate:false never calls the provider and reports text work as pending', async () => {
+    const source = makeSource();
+    siblings = [
+      autoSibling('nl', 'stale-hash'),
+      manualSibling('fr', { translatedFrom: 'source-1' }),
+    ];
+
+    const results = await syncCmsTranslations(source, { translate: false });
+
+    expect(results).toEqual([
+      { locale: 'nl', status: 'pending' },
+      { locale: 'fr', status: 'skipped_manual' },
+    ]);
+    expect(translateTexts).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    // The stale machine row still gets the source's controls right away, without a hash.
+    const nlWrite = updateOne.mock.calls.find(([query]) => query._id === 'nl-auto-1');
+    expect(nlWrite![1].$set).toMatchObject({ status: 'published', coverImage: source.coverImage });
+    expect(nlWrite![1].$set.sourceHash).toBeUndefined();
+    expect(nlWrite![1].$set.title).toBeUndefined();
+  });
+
+  it('translate:false reports a forced linked manual translation as pending (and missing rows too)', async () => {
+    siblings = [manualSibling('nl', { translatedFrom: 'source-1' })];
+    const results = await syncCmsTranslations(makeSource(), { translate: false, forceLocales: ['nl'] });
+    expect(results).toEqual([
+      { locale: 'nl', status: 'pending' },
+      { locale: 'fr', status: 'pending' },
+    ]);
+    expect(translateTexts).not.toHaveBeenCalled();
+  });
+
+  it('forceLocales forces only the listed locales', async () => {
+    siblings = [
+      manualSibling('nl', { translatedFrom: 'source-1' }),
+      manualSibling('fr', { translatedFrom: 'source-1' }),
+    ];
+    const results = await syncCmsTranslations(makeSource(), { forceLocales: ['fr'] });
+    expect(results).toEqual([
+      { locale: 'nl', status: 'skipped_manual' },
+      { locale: 'fr', status: 'updated' },
+    ]);
+    expect(translateTexts.mock.calls.every(([, opts]) => opts.to === 'fr')).toBe(true);
+  });
+
+  it('a machine row taken over by an admin during the provider call is reported skipped_manual', async () => {
+    siblings = [autoSibling('nl', 'stale-hash')];
+    updateOne.mockImplementation(async (query: Record<string, any>, update: Record<string, any>) => {
+      // The translated write (it carries the new title) finds the row manual now.
+      if (query._id === 'nl-auto-1' && update.$set?.title) {
+        siblings[0] = { ...siblings[0], autoTranslated: false };
+        return { matchedCount: 0, modifiedCount: 0 };
+      }
+      return { matchedCount: 1, modifiedCount: 1 };
+    });
+
+    const results = await syncCmsTranslations(makeSource());
+
+    expect(results[0]).toEqual({ locale: 'nl', status: 'skipped_manual' });
+    const write = updateOne.mock.calls.find(([q, u]) => q._id === 'nl-auto-1' && u.$set?.title);
+    expect(write![0]).toEqual({ _id: 'nl-auto-1', autoTranslated: true });
+  });
+
+  it('a forced manual row is written only if its updatedAt is unchanged since the control update', async () => {
+    const readAt = new Date('2026-05-01T10:00:00.000Z');
+    const afterControls = new Date('2026-05-01T10:00:01.000Z');
+    siblings = [manualSibling('nl', { translatedFrom: 'source-1', updatedAt: readAt })];
+    findById.mockImplementation(() => ({
+      select: () => ({ lean: async () => ({ _id: 'nl-manual-1', updatedAt: afterControls }) }),
+      lean: async () => ({ _id: 'nl-manual-1', autoTranslated: false }),
+    }));
+    updateOne.mockImplementation(async (query: Record<string, any>, update: Record<string, any>) =>
+      update.$set?.title ? { matchedCount: 0, modifiedCount: 0 } : { matchedCount: 1, modifiedCount: 1 }
+    );
+
+    const results = await syncCmsTranslations(makeSource(), { forceLocales: ['nl'] });
+
+    const write = updateOne.mock.calls.find(([, u]) => u.$set?.title);
+    // Filters on the timestamp read AFTER the control update, not the stale one.
+    expect(write![0]).toEqual({ _id: 'nl-manual-1', autoTranslated: { $ne: true }, updatedAt: afterControls });
+    expect(results[0]).toEqual({
+      locale: 'nl',
+      status: 'failed',
+      errorCode: 'changed_during_run',
+      error: expect.any(String),
+    });
+  });
+
+  it('a failing guard aborts the remaining locales as interrupted', async () => {
+    siblings = [];
+    const guard = vi.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
+    const results = await syncCmsTranslations(makeSource(), { guard });
+    expect(results.map((r) => [r.locale, r.status, r.errorCode])).toEqual([
+      ['nl', 'failed', 'interrupted'], // guard lost after translating, before the write
+      ['fr', 'failed', 'interrupted'],
+    ]);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('reloadSource writes the latest controls/slug with the translated snapshot text', async () => {
+    const snapshot = makeSource({ title: 'Old title' });
+    const latest = makeSource({ title: 'New title', status: 'draft', publishedAt: undefined, slug: 'moved-slug' });
+    let reads = 0;
+    findById.mockImplementation(() => {
+      reads += 1;
+      // First read (start of nl) = snapshot; later reads = the newer save.
+      const doc = reads === 1 ? snapshot : latest;
+      return { select: () => ({ lean: async () => doc }), lean: async () => doc };
+    });
+    siblings = [];
+
+    await syncCmsTranslations(snapshot, { reloadSource: true });
+
+    const nl = create.mock.calls.find(([payload]) => payload.locale === 'nl')![0];
+    expect(nl).toMatchObject({ title: '[nl] Old title', status: 'draft', slug: 'moved-slug' });
+    expect(nl.publishedAt).toBeUndefined();
+    expect(nl.sourceHash).toBe(computeSourceHash(snapshot)); // stale on purpose: re-run fixes the text
+    const fr = create.mock.calls.find(([payload]) => payload.locale === 'fr')![0];
+    expect(fr).toMatchObject({ title: '[fr] New title', sourceHash: computeSourceHash(latest) });
+  });
+
+  it('reloadSource stops when the source is gone', async () => {
+    findById.mockImplementation(() => ({ lean: async () => null, select: () => ({ lean: async () => null }) }));
+    const results = await syncCmsTranslations(makeSource(), { reloadSource: true });
+    expect(results.map((r) => r.errorCode)).toEqual(['interrupted', 'interrupted']);
+    expect(translateTexts).not.toHaveBeenCalled();
+  });
+
+  it('maps provider error codes onto failed results with safe messages', async () => {
+    const { TranslatorError } = await import('../../../utils/cms/azureTranslator');
+    siblings = [];
+    translateTexts.mockImplementation(async (_texts: string[], opts: { to: string }) => {
+      throw new (TranslatorError as any)('HTTP 403 403001 raw provider text', 403, opts.to === 'nl' ? 'quota_exceeded' : 'auth');
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const results = await syncCmsTranslations(makeSource());
+    expect(results).toEqual([
+      { locale: 'nl', status: 'failed', errorCode: 'quota_exceeded', error: 'The monthly translation quota is used up.' },
+      { locale: 'fr', status: 'failed', errorCode: 'auth', error: "The translation service rejected the server's credentials." },
+    ]);
+    error.mockRestore();
+  });
+});
+

@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_CHARS_PER_REQUEST,
+  MAX_RETRIES,
+  TranslatorError,
   TranslatorNotConfiguredError,
   isTranslatorConfigured,
   splitHtmlIntoChunks,
   translateTexts,
+  translatorTiming,
 } from '../../../utils/cms/azureTranslator';
 
 const ENV_KEYS = [
@@ -17,6 +20,28 @@ const originalEnv: Record<string, string | undefined> = {};
 for (const key of ENV_KEYS) originalEnv[key] = process.env[key];
 
 const fetchMock = vi.fn();
+const realTiming = { ...translatorTiming };
+let sleeps: number[] = [];
+let clock = 0;
+
+function errorResponse(status: number, body: unknown, headers: Record<string, string> = {}) {
+  const lower = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+  return {
+    ok: false,
+    status,
+    headers: { get: (name: string) => lower[name.toLowerCase()] ?? null },
+    text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
+  };
+}
+
+function okResponse(texts: string[], to: string) {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    text: async () => JSON.stringify(texts.map((text) => ({ translations: [{ text: `[${to}] ${text}`, to }] }))),
+  };
+}
 
 function clearTranslatorEnv() {
   for (const key of ENV_KEYS) delete process.env[key];
@@ -46,9 +71,19 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock);
   clearTranslatorEnv();
   process.env.AZURE_TRANSLATOR_KEY = 'test-key';
+  // Never really wait: record the requested sleeps and advance a fake clock.
+  sleeps = [];
+  clock = 1_000_000;
+  translatorTiming.now = () => clock;
+  translatorTiming.sleep = async (ms: number) => {
+    sleeps.push(ms);
+    clock += ms;
+  };
 });
 
 afterEach(() => {
+  translatorTiming.now = realTiming.now;
+  translatorTiming.sleep = realTiming.sleep;
   vi.unstubAllGlobals();
   clearTranslatorEnv();
   for (const key of ENV_KEYS) {
@@ -197,16 +232,125 @@ describe('Azure translator client', () => {
     expect(message).not.toContain('test-key');
   });
 
-  it('surfaces 429 rate-limit failures as errors', async () => {
-    fetchMock.mockResolvedValueOnce({
-      ok: false,
-      status: 429,
-      text: async () => JSON.stringify({ error: { code: 429001, message: 'Rate limit exceeded' } }),
-    });
-
-    await expect(translateTexts(['Hello'], { from: 'en', to: 'fr', html: false })).rejects.toThrow(
-      /HTTP status 429.*Rate limit exceeded/s
+  it('surfaces 429 rate-limit failures as rate_limited after bounded retries', async () => {
+    fetchMock.mockImplementation(async () =>
+      errorResponse(429, { error: { code: 429001, message: 'Rate limit exceeded' } })
     );
+
+    const err = await translateTexts(['Hello'], { from: 'en', to: 'fr', html: false }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(TranslatorError);
+    expect(err.message).toMatch(/HTTP status 429.*Rate limit exceeded/s);
+    expect(err.code).toBe('rate_limited');
+    expect(err.status).toBe(429);
+    expect(fetchMock).toHaveBeenCalledTimes(MAX_RETRIES + 1);
+    // No Retry-After: the fixed backoff schedule.
+    expect(sleeps).toEqual([2_000, 6_000, 15_000]);
+  });
+
+  it('honours Retry-After (seconds) and succeeds on a later attempt', async () => {
+    fetchMock
+      .mockResolvedValueOnce(errorResponse(429, { error: { code: 429001, message: 'slow down' } }, { 'Retry-After': '7' }))
+      .mockResolvedValueOnce(errorResponse(503, 'upstream unavailable'))
+      .mockImplementation(async (url: string, init: any) =>
+        okResponse(
+          (JSON.parse(init.body) as Array<{ Text: string }>).map((item) => item.Text),
+          new URL(url).searchParams.get('to') ?? ''
+        )
+      );
+
+    await expect(translateTexts(['Hello'], { from: 'en', to: 'nl', html: false })).resolves.toEqual([
+      '[nl] Hello',
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // 7s from Retry-After, then the second backoff step for the 503.
+    expect(sleeps).toEqual([7_000, 6_000]);
+  });
+
+  it('caps a long Retry-After at 30 seconds', async () => {
+    fetchMock
+      .mockResolvedValueOnce(errorResponse(429, {}, { 'retry-after': '3600' }))
+      .mockImplementation(async (url: string, init: any) =>
+        okResponse(
+          (JSON.parse(init.body) as Array<{ Text: string }>).map((item) => item.Text),
+          new URL(url).searchParams.get('to') ?? ''
+        )
+      );
+
+    await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false });
+    expect(sleeps).toEqual([30_000]);
+  });
+
+  it('retries network errors and timeouts, then reports timeout', async () => {
+    fetchMock.mockRejectedValue(Object.assign(new Error('The operation was aborted'), { name: 'TimeoutError' }));
+
+    const err = await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false }).catch((e) => e);
+
+    expect(err.code).toBe('timeout');
+    expect(fetchMock).toHaveBeenCalledTimes(MAX_RETRIES + 1);
+    expect(err.message).not.toContain('test-key');
+  });
+
+  it('retries 5xx as provider_error but never retries auth or quota failures', async () => {
+    fetchMock.mockResolvedValue(errorResponse(502, 'bad gateway'));
+    const fiveXX = await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false }).catch((e) => e);
+    expect(fiveXX.code).toBe('provider_error');
+    expect(fetchMock).toHaveBeenCalledTimes(MAX_RETRIES + 1);
+
+    for (const [status, code, expected] of [
+      [401, 401000, 'auth'],
+      [403, 403001, 'quota_exceeded'],
+      [403, undefined, 'auth'],
+      [400, 400036, 'provider_error'],
+    ] as const) {
+      fetchMock.mockReset();
+      sleeps = [];
+      fetchMock.mockResolvedValue(errorResponse(status, { error: { code, message: 'nope' } }));
+      const err = await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false }).catch((e) => e);
+      expect(err.code).toBe(expected);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(sleeps).toEqual([]);
+    }
+  });
+
+  it('does not wait past the deadline: a retry that would overrun fails fast', async () => {
+    fetchMock.mockResolvedValue(errorResponse(503, 'unavailable'));
+    const err = await translateTexts(['Hello'], {
+      from: 'en',
+      to: 'nl',
+      html: false,
+      deadline: clock + 5_000, // first backoff (2s) fits, the second (6s) does not
+    }).catch((e) => e);
+
+    expect(err.code).toBe('budget_exceeded');
+    expect(err.message).toContain('no time left to retry');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleeps).toEqual([2_000]);
+
+    // A rate limit that cannot be waited out stays a rate_limited failure.
+    fetchMock.mockReset();
+    sleeps = [];
+    fetchMock.mockResolvedValue(errorResponse(429, {}, { 'Retry-After': '20' }));
+    const limited = await translateTexts(['Hello'], {
+      from: 'en',
+      to: 'nl',
+      html: false,
+      deadline: clock + 10_000,
+    }).catch((e) => e);
+    expect(limited.code).toBe('rate_limited');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts no request once the deadline has passed', async () => {
+    mockTranslation();
+    const err = await translateTexts(['Hello'], {
+      from: 'en',
+      to: 'nl',
+      html: false,
+      deadline: clock - 1,
+    }).catch((e) => e);
+    expect(err.code).toBe('budget_exceeded');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('throws when the provider is not configured', async () => {

@@ -41,12 +41,21 @@ vi.mock('../../../utils/cmsPresign', () => ({
   presignCmsDocs: vi.fn(async (docs: unknown[]) => docs),
 }));
 
-vi.mock('../../../utils/cms/syncTranslations', () => ({
+vi.mock('../../../utils/cms/syncTranslations', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../utils/cms/syncTranslations')>()),
   syncCmsTranslations,
   deleteAutoTranslatedSiblings,
   moveAutoTranslatedSiblings,
-  mergeTranslationResults: vi.fn((...groups: any[][]) => groups.flat()),
   isTranslationSource,
+}));
+
+vi.mock('../../../utils/cms/translationQueue', () => ({
+  requestCmsTranslationRun: vi.fn(async () => undefined),
+}));
+
+vi.mock('../../../utils/cms/translationStatus', () => ({
+  loadCmsTranslationStatus: vi.fn(async () => null),
+  tryLoadCmsTranslationStatus: vi.fn(async () => undefined),
 }));
 
 import {
@@ -180,7 +189,7 @@ describe('CMS cover cleanup on update', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.body.translations).toEqual([
-      { locale: '*', status: 'failed', error: 'Translation sync crashed' },
+      { locale: '*', status: 'failed', errorCode: 'internal', error: 'Translation sync crashed' },
     ]);
     expect(deleteFromS3).not.toHaveBeenCalled();
     error.mockRestore();
