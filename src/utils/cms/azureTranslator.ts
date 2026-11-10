@@ -38,21 +38,78 @@ export const MAX_ELEMENTS_PER_REQUEST = 1_000;
  */
 const BLOCK_BOUNDARY_SOURCE = "</(?:p|h[1-6]|ul|ol|table|blockquote|pre|figure)>";
 
+/**
+ * Machine-readable failure class, surfaced to the admin UI as `errorCode`.
+ * Only the provider-facing subset is produced here; the sync layer adds its own
+ * codes (slug_conflict, changed_during_run, interrupted, internal).
+ */
+export type TranslatorErrorCode =
+  | "rate_limited"
+  | "quota_exceeded"
+  | "auth"
+  | "timeout"
+  | "provider_error"
+  | "budget_exceeded"
+  | "not_configured";
+
 export class TranslatorError extends Error {
   status?: number;
+  code: TranslatorErrorCode;
 
-  constructor(message: string, status?: number) {
+  constructor(message: string, status?: number, code: TranslatorErrorCode = "provider_error") {
     super(message);
     this.name = "TranslatorError";
     this.status = status;
+    this.code = code;
   }
 }
 
 export class TranslatorNotConfiguredError extends TranslatorError {
   constructor() {
-    super("AZURE_TRANSLATOR_KEY is not configured");
+    super("AZURE_TRANSLATOR_KEY is not configured", undefined, "not_configured");
     this.name = "TranslatorNotConfiguredError";
   }
+}
+
+/** Retries after the first attempt for retryable failures (429, 408, 5xx, network/timeout). */
+export const MAX_RETRIES = 3;
+/** Backoff when Azure sends no Retry-After header. */
+const BACKOFF_MS = [2_000, 6_000, 15_000];
+/** Never wait longer than this for one Retry-After. */
+const MAX_RETRY_AFTER_MS = 30_000;
+
+/** Indirection so tests can skip real waiting. */
+export const translatorTiming = {
+  sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+  now: () => Date.now(),
+};
+
+function classifyHttpStatus(status: number, azureCode: unknown): TranslatorErrorCode {
+  if (status === 429) return "rate_limited";
+  if (status === 401) return "auth";
+  // 403000/403001: free tier / subscription quota exhausted.
+  if (status === 403) return String(azureCode ?? "").startsWith("403") ? "quota_exceeded" : "auth";
+  if (status === 408) return "timeout";
+  return "provider_error";
+}
+
+function isRetryable(err: unknown): boolean {
+  if (!(err instanceof TranslatorError)) return false;
+  if (err.code === "rate_limited" || err.code === "timeout") return true;
+  return err.code === "provider_error" && typeof err.status === "number" && err.status >= 500;
+}
+
+function retryAfterMs(header: string | null | undefined): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, MAX_RETRY_AFTER_MS);
+  const date = Date.parse(header);
+  if (Number.isFinite(date)) return Math.min(Math.max(0, date - Date.now()), MAX_RETRY_AFTER_MS);
+  return undefined;
+}
+
+class RetryableHttpError extends TranslatorError {
+  retryAfter?: number;
 }
 
 export function isTranslatorConfigured(): boolean {
@@ -256,7 +313,7 @@ async function requestTranslations(
   } catch (err: any) {
     // Timeout / abort / DNS — never include the key in the message.
     const reason = err?.name === "TimeoutError" ? "timeout" : err?.message ?? "network error";
-    throw new TranslatorError(`Azure Translator request failed: ${reason}`);
+    throw new TranslatorError(`Azure Translator request failed: ${reason}`, undefined, "timeout");
   }
 
   const rawBody = await response.text().catch(() => "");
@@ -279,10 +336,13 @@ async function requestTranslations(
         : rawBody
           ? ` - ${rawBody.slice(0, 300)}`
           : "";
-    throw new TranslatorError(
+    const error = new RetryableHttpError(
       `Azure Translator request failed with HTTP status ${response.status}${detail}`,
-      response.status
+      response.status,
+      classifyHttpStatus(response.status, code)
     );
+    error.retryAfter = retryAfterMs(response.headers?.get?.("retry-after"));
+    throw error;
   }
 
   const results = parsed as AzureTranslationResult[] | undefined;
@@ -302,6 +362,46 @@ async function requestTranslations(
 }
 
 /**
+ * {@link requestTranslations} with bounded retries for 429 / 408 / 5xx /
+ * network errors. Honours Retry-After (capped) and the caller's deadline: a
+ * wait that would end past the deadline fails fast with `budget_exceeded`.
+ */
+async function requestWithRetry(
+  texts: string[],
+  from: string,
+  to: string,
+  html: boolean,
+  deadline?: number
+): Promise<string[]> {
+  for (let attempt = 0; ; attempt += 1) {
+    if (deadline !== undefined && translatorTiming.now() >= deadline) {
+      throw new TranslatorError(
+        "Translation time budget exceeded before the request could be sent",
+        undefined,
+        "budget_exceeded"
+      );
+    }
+    try {
+      return await requestTranslations(texts, from, to, html);
+    } catch (err) {
+      if (!isRetryable(err) || attempt >= MAX_RETRIES) throw err;
+      const wait =
+        (err instanceof RetryableHttpError ? err.retryAfter : undefined) ??
+        BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)];
+      if (deadline !== undefined && translatorTiming.now() + wait >= deadline) {
+        const original = err as TranslatorError;
+        throw new TranslatorError(
+          `${original.message} (no time left to retry)`,
+          original.status,
+          original.code === "rate_limited" ? "rate_limited" : "budget_exceeded"
+        );
+      }
+      await translatorTiming.sleep(wait);
+    }
+  }
+}
+
+/**
  * Translates a list of texts, mapping results back by index.
  *
  * - Empty / whitespace-only inputs are skipped and returned as "".
@@ -309,10 +409,12 @@ async function requestTranslations(
  * - HTML bodies that exceed the request cap are split at block boundaries,
  *   translated in order, and re-joined.
  * - One target language per request (`from`/`to` must be en, nl or fr).
+ * - Retryable failures (429, 408, 5xx, network) are retried up to MAX_RETRIES
+ *   times; `deadline` (epoch ms) bounds the total time spent waiting.
  */
 export async function translateTexts(
   texts: string[],
-  opts: { from: string; to: string; html: boolean }
+  opts: { from: string; to: string; html: boolean; deadline?: number }
 ): Promise<string[]> {
   const from = normalizeLanguage(opts.from, "from");
   const to = normalizeLanguage(opts.to, "to");
@@ -339,7 +441,7 @@ export async function translateTexts(
 
   for (const batch of packRequests(units)) {
     const batchTexts = batch.map(({ unit, part }) => units[unit].parts[part]);
-    const translated = await requestTranslations(batchTexts, from, to, opts.html);
+    const translated = await requestWithRetry(batchTexts, from, to, opts.html, opts.deadline);
     batch.forEach(({ unit, part }, i) => {
       translatedParts[unit][part] = translated[i] ?? "";
     });

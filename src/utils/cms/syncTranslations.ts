@@ -2,20 +2,119 @@ import { createHash } from "crypto";
 
 import CmsContent, { ICmsContent } from "../../models/cmsContent";
 import { CMS_LOCALES } from "./locales";
-import { isTranslatorConfigured, translateTexts } from "./azureTranslator";
+import { isTranslatorConfigured, translateTexts, TranslatorError } from "./azureTranslator";
 
 export type TranslationStatus =
   | "created"
   | "updated"
   | "synced"
+  | "pending"
   | "skipped_manual"
   | "failed"
   | "disabled";
 
+/** Machine-readable failure class for `failed` results (see API contract). */
+export type TranslationErrorCode =
+  | "rate_limited"
+  | "quota_exceeded"
+  | "auth"
+  | "timeout"
+  | "provider_error"
+  | "budget_exceeded"
+  | "slug_conflict"
+  | "changed_during_run"
+  | "interrupted"
+  | "internal";
+
 export interface TranslationResult {
   locale: string;
   status: TranslationStatus;
+  errorCode?: TranslationErrorCode;
   error?: string;
+}
+
+export interface SyncTranslationOptions {
+  /** Replace every LINKED manual translation with machine text. */
+  force?: boolean;
+  /** Replace the LINKED manual translations of only these locales. */
+  forceLocales?: string[];
+  /**
+   * false = request-time pass: mirror control/non-text fields only and report
+   * locales whose text needs the provider as `pending` (never calls Azure).
+   * Defaults to true (the background run).
+   */
+  translate?: boolean;
+  /** Epoch ms after which no new provider request is started. */
+  deadline?: number;
+  /**
+   * Checked before each locale and before each translated write; false aborts
+   * the rest of the run (the source was deleted or the run lost its lease).
+   */
+  guard?: () => Promise<boolean>;
+}
+
+/** Schema maxlength of each translated plain field (French runs ~20% longer than English). */
+export const TRANSLATED_FIELD_MAX_LENGTH: Record<string, number> = {
+  title: 300,
+  excerpt: 500,
+  coverImageAlt: 200,
+  "seo.titleTag": 120,
+  "seo.metaDescription": 300,
+  "seo.ogTitle": 120,
+};
+
+/**
+ * Fits a translated plain field into its schema maxlength: cut at the last
+ * word boundary that leaves room for an ellipsis. Without this a longer
+ * translation fails validation on create, and leaves the doc unsaveable from
+ * the admin form on update.
+ */
+export function clampTranslatedText(text: string, maxLength: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxLength) return trimmed;
+  const room = trimmed.slice(0, maxLength - 1);
+  const lastSpace = room.lastIndexOf(" ");
+  const cut = lastSpace > maxLength * 0.6 ? room.slice(0, lastSpace) : room;
+  return `${cut.replace(/[\s.,;:!?-]+$/, "")}…`;
+}
+
+const ERROR_MESSAGES: Record<TranslationErrorCode, string> = {
+  rate_limited: "The translation service is rate limiting requests. Retry in a minute.",
+  quota_exceeded: "The monthly translation quota is used up.",
+  auth: "The translation service rejected the server's credentials.",
+  timeout: "The translation service did not answer in time. Retry later.",
+  provider_error: "The translation service returned an error. Retry later.",
+  budget_exceeded: "The translation run ran out of time. Retry to continue.",
+  slug_conflict: "Another document already uses this slug in that locale.",
+  changed_during_run: "The translation changed while it was being translated. Retry.",
+  interrupted: "The translation run was interrupted. Retry.",
+  internal: "Translation failed. Check server logs for details.",
+};
+
+export function translationErrorMessage(code: TranslationErrorCode): string {
+  return ERROR_MESSAGES[code];
+}
+
+export function failedResult(
+  locale: string,
+  errorCode: TranslationErrorCode,
+  error: string = ERROR_MESSAGES[errorCode]
+): TranslationResult {
+  return { locale, status: "failed", errorCode, error };
+}
+
+function resultForError(err: any, source: Record<string, any>, locale: string): TranslationResult {
+  if (err?.code === 11000) {
+    return failedResult(
+      locale,
+      "slug_conflict",
+      `A ${String(source.type)} with slug "${String(source.slug)}" already exists in locale ${locale}.`
+    );
+  }
+  if (err instanceof TranslatorError && err.code !== "not_configured") {
+    return failedResult(locale, err.code);
+  }
+  return failedResult(locale, "internal");
 }
 
 /** Plain-text fields translated in one batched request (all go as textType=plain). */
@@ -173,7 +272,8 @@ export function manualTranslationControlUpdate(
  */
 async function translateSourceFields(
   source: Record<string, any>,
-  targetLocale: string
+  targetLocale: string,
+  deadline?: number
 ): Promise<Record<string, unknown>> {
   const from = String(source.locale);
   const translated: Record<string, unknown> = {};
@@ -188,10 +288,12 @@ async function translateSourceFields(
   if (present.length > 0) {
     const results = await translateTexts(
       present.map((field) => field.value),
-      { from, to: targetLocale, html: false }
+      { from, to: targetLocale, html: false, deadline }
     );
     present.forEach((field, index) => {
-      translated[field.name] = results[index] ?? "";
+      const max = TRANSLATED_FIELD_MAX_LENGTH[field.name];
+      const value = results[index] ?? "";
+      translated[field.name] = max ? clampTranslatedText(value, max) : value;
     });
   }
 
@@ -201,6 +303,7 @@ async function translateSourceFields(
       from,
       to: targetLocale,
       html: true,
+      deadline,
     });
     translated.body = translatedBody ?? "";
   } else {
@@ -230,6 +333,14 @@ export function isTranslationSource(
 /**
  * Syncs a saved source CMS document into every other CMS_LOCALES entry.
  *
+ * Runs in two modes:
+ * - `translate: false` (inside the admin request): never calls the provider.
+ *   Mirrors control/non-text fields onto existing translations right away and
+ *   reports every locale whose text must be (re)translated as `pending`
+ *   (`disabled` when no translator is configured).
+ * - `translate: true` (default; the background run): does the same and also
+ *   translates and writes the pending locales.
+ *
  * Rules:
  * - Only originals (autoTranslated !== true and no translatedFrom) are sources;
  *   every other doc returns [] (even with force), so a translation can never
@@ -241,46 +352,51 @@ export function isTranslationSource(
  *   (reported skipped_manual). Only machine rows without a live owner may be
  *   adopted.
  * - Manual translations (autoTranslated: false) always win for text, unless
- *   force=true. A manual translation LINKED to this source (translatedFrom)
- *   still receives the restricting source controls
+ *   forced for their locale. A manual translation LINKED to this source
+ *   (translatedFrom) still receives the restricting source controls
  *   ({@link manualTranslationControlUpdate}): country targeting is mirrored
  *   and an unpublished source demotes it to draft, but publishing the source
  *   never publishes it or changes its own publishedAt. These controls apply
  *   before the force/translator checks, so they hold even when the provider
  *   is unconfigured or fails.
- * - Machine translations follow the source's status and publishedAt.
- * - force=true replaces a LINKED manual translation's text with machine text
- *   and turns it into a machine translation, which from then on follows the
+ * - Machine translations follow the source's status, publishedAt and the
+ *   other copied non-text fields.
+ * - force replaces a LINKED manual translation's text with machine text and
+ *   turns it into a machine translation, which from then on follows the
  *   source's publication like any other machine translation.
  * - Unchanged sourceHash → sync non-text fields only; no translator call.
  * - New/stale → translate and upsert with the SAME type/slug as the source
  *   (the frontend switches language on one URL, so slugs stay identical).
- * - Missing AZURE_TRANSLATOR_KEY → every target "disabled"; logs once, never throws.
- * - Per-locale failures (e.g. unique-index conflicts) surface as `failed`.
+ * - Translated writes are conditional: a machine row an admin took over while
+ *   the provider call was in flight (autoTranslated flipped to false), or a
+ *   forced manual row edited meanwhile, is never overwritten.
+ * - Missing AZURE_TRANSLATOR_KEY → text locales "disabled"; never throws.
+ * - Per-locale failures surface as `failed` with an errorCode.
  *
  * Returns one result per target locale; never throws.
  */
 export async function syncCmsTranslations(
   sourceArg: ICmsContent | Record<string, any>,
-  options: { force?: boolean } = {}
+  options: SyncTranslationOptions = {}
 ): Promise<TranslationResult[]> {
   const source = toPlain(sourceArg as Record<string, any>);
 
   if (!isTranslationSource(source)) return [];
 
   const targetLocales = targetLocalesFor(source.locale);
+  const translate = options.translate !== false;
+  const isForced = (locale: string) =>
+    options.force === true || (options.forceLocales ?? []).includes(locale);
 
   const translatorEnabled = isTranslatorConfigured();
-  if (!translatorEnabled) {
-    console.warn(
-      "[cmsTranslations] AZURE_TRANSLATOR_KEY not set; CMS auto-translation disabled"
-    );
-  }
-
   const sourceHash = computeSourceHash(source);
   const results: TranslationResult[] = [];
 
   for (const locale of targetLocales) {
+    if (options.guard && !(await options.guard().catch(() => false))) {
+      results.push(failedResult(locale, "interrupted"));
+      continue;
+    }
     try {
       // Prefer the managed sibling (translatedFrom); otherwise same-slug doc.
       const managed = source._id
@@ -338,29 +454,32 @@ export async function syncCmsTranslations(
         // unpublished source demotes it). A source publish never promotes it.
         const controls = manualTranslationControlUpdate(source, sibling!);
         await CmsContent.updateOne(
-          { _id: sibling!._id },
+          { _id: sibling!._id, autoTranslated: { $ne: true } },
           {
             $set: { ...controls.$set, translatedFrom: source._id },
             ...(Object.keys(controls.$unset).length ? { $unset: controls.$unset } : {}),
           }
         );
+        if (!isForced(locale)) {
+          results.push({ locale, status: "skipped_manual" });
+          continue;
+        }
       }
 
-      if (isManual && !options.force) {
-        results.push({ locale, status: "skipped_manual" });
-        continue;
-      }
+      const forced = isManual && isForced(locale);
+      const machineSibling = sibling && sibling.autoTranslated === true ? sibling : null;
+      const needsText =
+        !sibling ||
+        isForced(locale) ||
+        (machineSibling !== null && machineSibling.sourceHash !== sourceHash);
 
-      if (
-        !options.force &&
-        sibling &&
-        sibling.autoTranslated === true &&
-        sibling.sourceHash === sourceHash
-      ) {
-        // Text unchanged — mirror non-text fields only, never call the provider.
+      // Machine translations mirror non-text fields immediately, even when
+      // their text has to wait for the provider (or the provider is off).
+      // Skipped when this pass is about to rewrite the row anyway.
+      if (machineSibling && !(needsText && translate && translatorEnabled)) {
         const copied = buildUpdate(copiedFields(source));
         await CmsContent.updateOne(
-          { _id: sibling._id },
+          { _id: machineSibling._id, autoTranslated: true },
           {
             $set: {
               ...copied.$set,
@@ -368,25 +487,34 @@ export async function syncCmsTranslations(
               slug: source.slug,
               translatedFrom: source._id,
               autoTranslated: true,
-              sourceHash,
             },
             ...(Object.keys(copied.$unset).length ? { $unset: copied.$unset } : {}),
           }
         );
+      }
+
+      if (!needsText) {
         results.push({ locale, status: "synced" });
         continue;
       }
-
-      const translatedFields = translatorEnabled
-        ? await translateSourceFields(source, locale)
-        : null;
-      if (!translatedFields) {
-        // No translator: text cannot be created or refreshed, but the
-        // skipped_manual/synced paths above already mirrored control and
-        // non-text fields for this locale.
+      if (!translatorEnabled) {
+        // No translator: text cannot be created or refreshed, but control and
+        // non-text fields were already mirrored above.
         results.push({ locale, status: "disabled" });
         continue;
       }
+      if (!translate) {
+        results.push({ locale, status: "pending" });
+        continue;
+      }
+
+      const translatedFields = await translateSourceFields(source, locale, options.deadline);
+
+      if (options.guard && !(await options.guard().catch(() => false))) {
+        results.push(failedResult(locale, "interrupted"));
+        continue;
+      }
+
       const copied = buildUpdate(copiedFields(source));
       const meta = {
         autoTranslated: true,
@@ -396,21 +524,37 @@ export async function syncCmsTranslations(
 
       if (sibling) {
         const translated = buildUpdate(translatedFields);
-        await CmsContent.updateOne(
-          { _id: sibling._id },
-          {
-            $set: {
-              ...copied.$set,
-              ...translated.$set,
-              type: source.type,
-              slug: source.slug,
-              ...meta,
-            },
-            ...(Object.keys(copied.$unset).length || Object.keys(translated.$unset).length
-              ? { $unset: { ...copied.$unset, ...translated.$unset } }
-              : {}),
-          }
-        );
+        // Conditional write: a machine row must still be machine (an admin
+        // may have taken it over during the provider call); a forced manual
+        // row must not have been edited since it was read.
+        const filter: Record<string, unknown> = forced
+          ? {
+              _id: sibling._id,
+              autoTranslated: { $ne: true },
+              ...(sibling.updatedAt ? { updatedAt: sibling.updatedAt } : {}),
+            }
+          : { _id: sibling._id, autoTranslated: true };
+        const write = await CmsContent.updateOne(filter, {
+          $set: {
+            ...copied.$set,
+            ...translated.$set,
+            type: source.type,
+            slug: source.slug,
+            ...meta,
+          },
+          ...(Object.keys(copied.$unset).length || Object.keys(translated.$unset).length
+            ? { $unset: { ...copied.$unset, ...translated.$unset } }
+            : {}),
+        });
+        if (write && typeof write.matchedCount === "number" && write.matchedCount === 0) {
+          const now = await CmsContent.findById(sibling._id).select("autoTranslated").lean();
+          results.push(
+            now && now.autoTranslated !== true && !forced
+              ? { locale, status: "skipped_manual" }
+              : failedResult(locale, "changed_during_run")
+          );
+          continue;
+        }
         results.push({ locale, status: "updated" });
       } else {
         // canonical is per-locale; intentionally not set on fresh translations.
@@ -426,12 +570,11 @@ export async function syncCmsTranslations(
         results.push({ locale, status: "created" });
       }
     } catch (err: any) {
-      const isDuplicateKey = err?.code === 11000;
-      const message = isDuplicateKey
-        ? `A ${String(source.type)} with slug "${String(source.slug)}" already exists in locale ${locale}`
-        : 'Translation failed. Check server logs for details.';
-      console.error(`[cmsTranslations] sync failed for locale ${locale} (slug ${source.slug}):`, err);
-      results.push({ locale, status: "failed", error: message });
+      console.error(
+        `[cmsTranslations] sync failed for locale ${locale} (slug ${source.slug}):`,
+        err instanceof TranslatorError ? `${err.code}: ${err.message}` : err
+      );
+      results.push(resultForError(err, source, locale));
     }
   }
 
@@ -461,11 +604,14 @@ export async function moveAutoTranslatedSiblings(
       );
       results.push({ locale, status: "updated" });
     } catch (err: any) {
-      const message =
+      if (err?.code !== 11000) {
+        console.error(`[cmsTranslations] slug move failed for locale ${locale}:`, err);
+      }
+      results.push(
         err?.code === 11000
-          ? `Slug "${String(source.slug)}" already exists in locale ${locale}`
-          : 'Translation update failed. Check server logs for details.';
-      results.push({ locale, status: "failed", error: message });
+          ? failedResult(locale, "slug_conflict", `Slug "${String(source.slug)}" already exists in locale ${locale}.`)
+          : failedResult(locale, "internal")
+      );
     }
   }
   return results;

@@ -28,6 +28,31 @@ export interface ICmsSeo {
   noindex?: boolean;
 }
 
+/**
+ * Background translation run bookkeeping, kept on the SOURCE doc. Written with
+ * `timestamps: false` so it never changes the content's updatedAt.
+ */
+export interface ICmsTranslationRun {
+  /** A run is wanted (set by saves/retries, cleared when a worker claims it). */
+  requested?: boolean;
+  /** Locales whose LINKED manual translation the pending request forces. */
+  forceLocales?: string[];
+  requestedAt?: Date;
+  /** Lease holder; set while a worker runs. */
+  runId?: string;
+  leaseUntil?: Date;
+  startedAt?: Date;
+  finishedAt?: Date;
+}
+
+export interface ICmsTranslationResult {
+  locale: string;
+  status: string;
+  errorCode?: string;
+  error?: string;
+  at: Date;
+}
+
 export interface ICmsContent extends Document {
   _id: Types.ObjectId;
   type: CmsContentType;
@@ -57,6 +82,10 @@ export interface ICmsContent extends Document {
   autoTranslated: boolean;
   /** Hash of the source doc's translatable fields used to produce this translation. */
   sourceHash?: string;
+  /** Source docs only: background translation run state. */
+  translationRun?: ICmsTranslationRun;
+  /** Source docs only: per-locale outcome of the last background run. */
+  translationResults?: ICmsTranslationResult[];
   viewCount: number;
   createdAt: Date;
   updatedAt: Date;
@@ -70,6 +99,30 @@ const CmsSeoSchema = new Schema<ICmsSeo>(
     ogImage: { type: String, trim: true },
     canonical: { type: String, trim: true },
     noindex: { type: Boolean, default: false },
+  },
+  { _id: false }
+);
+
+const CmsTranslationRunSchema = new Schema<ICmsTranslationRun>(
+  {
+    requested: { type: Boolean },
+    forceLocales: { type: [String], default: undefined },
+    requestedAt: { type: Date },
+    runId: { type: String, maxlength: 64 },
+    leaseUntil: { type: Date },
+    startedAt: { type: Date },
+    finishedAt: { type: Date },
+  },
+  { _id: false }
+);
+
+const CmsTranslationResultSchema = new Schema<ICmsTranslationResult>(
+  {
+    locale: { type: String, required: true },
+    status: { type: String, required: true },
+    errorCode: { type: String },
+    error: { type: String, maxlength: 500 },
+    at: { type: Date, required: true },
   },
   { _id: false }
 );
@@ -125,6 +178,8 @@ const CmsContentSchema = new Schema<ICmsContent>(
     },
     autoTranslated: { type: Boolean, default: false },
     sourceHash: { type: String, maxlength: 64 },
+    translationRun: { type: CmsTranslationRunSchema, default: undefined },
+    translationResults: { type: [CmsTranslationResultSchema], default: undefined },
   },
   { timestamps: true }
 );
