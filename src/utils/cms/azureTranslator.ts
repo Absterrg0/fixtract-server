@@ -87,8 +87,9 @@ export const translatorTiming = {
 function classifyHttpStatus(status: number, azureCode: unknown): TranslatorErrorCode {
   if (status === 429) return "rate_limited";
   if (status === 401) return "auth";
-  // 403000/403001: free tier / subscription quota exhausted.
-  if (status === 403) return String(azureCode ?? "").startsWith("403") ? "quota_exceeded" : "auth";
+  // Only 403001 means the free-tier quota is exhausted; every other 403
+  // (e.g. 403000 forbidden, missing/invalid subscription) is an auth/config failure.
+  if (status === 403) return String(azureCode ?? "").trim() === "403001" ? "quota_exceeded" : "auth";
   if (status === 408) return "timeout";
   return "provider_error";
 }

@@ -313,6 +313,42 @@ describe('Azure translator client', () => {
     }
   });
 
+  it('maps only Azure 403001 (free-tier quota) to quota_exceeded', async () => {
+    for (const code of [403001, '403001']) {
+      fetchMock.mockReset();
+      sleeps = [];
+      fetchMock.mockResolvedValue(
+        errorResponse(403, { error: { code, message: 'The free tier quota has been exceeded.' } })
+      );
+      const err = await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false }).catch((e) => e);
+      expect(err).toBeInstanceOf(TranslatorError);
+      expect(err.code).toBe('quota_exceeded');
+      expect(err.status).toBe(403);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(sleeps).toEqual([]);
+    }
+  });
+
+  it('maps every other 403 to auth, even when the Azure code starts with 403', async () => {
+    for (const code of [403000, 403002, '403013', 'Forbidden', undefined]) {
+      fetchMock.mockReset();
+      sleeps = [];
+      fetchMock.mockResolvedValue(errorResponse(403, { error: { code, message: 'forbidden' } }));
+      const err = await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false }).catch((e) => e);
+      expect(err).toBeInstanceOf(TranslatorError);
+      expect(err.code).toBe('auth');
+      expect(err.status).toBe(403);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(sleeps).toEqual([]);
+    }
+
+    // A 403 with a non-JSON body (no Azure code at all) is also auth.
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue({ ok: false, status: 403, text: async () => 'Forbidden' });
+    const plain = await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false }).catch((e) => e);
+    expect(plain.code).toBe('auth');
+  });
+
   it('does not wait past the deadline: a retry that would overrun fails fast', async () => {
     fetchMock.mockResolvedValue(errorResponse(503, 'unavailable'));
     const err = await translateTexts(['Hello'], {
