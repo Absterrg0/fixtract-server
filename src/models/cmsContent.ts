@@ -37,6 +37,8 @@ export interface ICmsTranslationRun {
   requested?: boolean;
   /** Locales whose LINKED manual translation the pending request forces. */
   forceLocales?: string[];
+  /** Locales the RUNNING worker forces (moved from forceLocales on claim). */
+  activeForceLocales?: string[];
   requestedAt?: Date;
   /** Lease holder; set while a worker runs. */
   runId?: string;
@@ -107,6 +109,7 @@ const CmsTranslationRunSchema = new Schema<ICmsTranslationRun>(
   {
     requested: { type: Boolean },
     forceLocales: { type: [String], default: undefined },
+    activeForceLocales: { type: [String], default: undefined },
     requestedAt: { type: Date },
     runId: { type: String, maxlength: 64 },
     leaseUntil: { type: Date },

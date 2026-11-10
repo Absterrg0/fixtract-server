@@ -110,7 +110,11 @@ export async function loadCmsTranslationStatus(docId: unknown): Promise<CmsTrans
   const now = Date.now();
   const running = Boolean(run.runId && run.leaseUntil && new Date(run.leaseUntil).getTime() > now);
   const queued = run.requested === true;
-  const forceLocales: string[] = Array.isArray(run.forceLocales) ? run.forceLocales : [];
+  // Forced locales still to do: queued with the request, or held by the running worker.
+  const forceLocales: string[] = [
+    ...(queued && Array.isArray(run.forceLocales) ? run.forceLocales : []),
+    ...(running && Array.isArray(run.activeForceLocales) ? run.activeForceLocales : []),
+  ];
   const hash = computeSourceHash(source);
   const sourceId = String(source._id);
 

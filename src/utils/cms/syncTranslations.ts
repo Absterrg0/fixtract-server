@@ -51,6 +51,14 @@ export interface SyncTranslationOptions {
    * the rest of the run (the source was deleted or the run lost its lease).
    */
   guard?: () => Promise<boolean>;
+  /**
+   * Re-read the source from the database before each locale and again right
+   * before each translated write (background runs). A run translates a
+   * snapshot for seconds to minutes; without this its write would put back
+   * the snapshot's publication, cover, countries or slug over a newer save
+   * that the request-time pass already mirrored.
+   */
+  reloadSource?: boolean;
 }
 
 /** Schema maxlength of each translated plain field (French runs ~20% longer than English). */
@@ -389,8 +397,11 @@ export async function syncCmsTranslations(
     options.force === true || (options.forceLocales ?? []).includes(locale);
 
   const translatorEnabled = isTranslatorConfigured();
-  const sourceHash = computeSourceHash(source);
   const results: TranslationResult[] = [];
+  const reload = async (): Promise<Record<string, any> | null> =>
+    options.reloadSource && source._id
+      ? ((await CmsContent.findById(source._id).lean()) as Record<string, any> | null)
+      : source;
 
   for (const locale of targetLocales) {
     if (options.guard && !(await options.guard().catch(() => false))) {
@@ -398,20 +409,29 @@ export async function syncCmsTranslations(
       continue;
     }
     try {
+      // The latest saved source (see `reloadSource`). Gone or no longer an
+      // original: stop managing its translations from this run.
+      const current = await reload();
+      if (!current || !isTranslationSource(current) || current.locale !== source.locale) {
+        results.push(failedResult(locale, "interrupted"));
+        continue;
+      }
+      const sourceHash = computeSourceHash(current);
+
       // Prefer the managed sibling (translatedFrom); otherwise same-slug doc.
-      const managed = source._id
+      const managed = current._id
         ? await CmsContent.findOne({
-            type: source.type,
+            type: current.type,
             locale,
-            translatedFrom: source._id,
+            translatedFrom: current._id,
           }).lean()
         : null;
       const sibling =
         managed ??
         (await CmsContent.findOne({
-          type: source.type,
+          type: current.type,
           locale,
-          slug: source.slug,
+          slug: current.slug,
         }).lean());
 
       // A same-slug machine translation managed by ANOTHER live original
@@ -424,7 +444,7 @@ export async function syncCmsTranslations(
         sibling &&
         sibling.autoTranslated === true &&
         sibling.translatedFrom &&
-        String(sibling.translatedFrom) !== String(source._id) &&
+        String(sibling.translatedFrom) !== String(current._id) &&
         (await CmsContent.exists({ _id: sibling.translatedFrom }))
       ) {
         results.push({ locale, status: "skipped_manual" });
@@ -434,7 +454,7 @@ export async function syncCmsTranslations(
       const isManual = Boolean(sibling) && sibling!.autoTranslated !== true;
       const linkedToSource =
         Boolean(sibling?.translatedFrom) &&
-        String(sibling!.translatedFrom) === String(source._id);
+        String(sibling!.translatedFrom) === String(current._id);
 
       // A same-slug MANUAL document that is not explicitly linked to this
       // source (an independent original, another original's manual
@@ -452,11 +472,11 @@ export async function syncCmsTranslations(
         // A linked manual translation keeps its human-written text, but the
         // restricting source controls always apply (countries mirrored; an
         // unpublished source demotes it). A source publish never promotes it.
-        const controls = manualTranslationControlUpdate(source, sibling!);
+        const controls = manualTranslationControlUpdate(current, sibling!);
         await CmsContent.updateOne(
           { _id: sibling!._id, autoTranslated: { $ne: true } },
           {
-            $set: { ...controls.$set, translatedFrom: source._id },
+            $set: { ...controls.$set, translatedFrom: current._id },
             ...(Object.keys(controls.$unset).length ? { $unset: controls.$unset } : {}),
           }
         );
@@ -477,15 +497,15 @@ export async function syncCmsTranslations(
       // their text has to wait for the provider (or the provider is off).
       // Skipped when this pass is about to rewrite the row anyway.
       if (machineSibling && !(needsText && translate && translatorEnabled)) {
-        const copied = buildUpdate(copiedFields(source));
+        const copied = buildUpdate(copiedFields(current));
         await CmsContent.updateOne(
           { _id: machineSibling._id, autoTranslated: true },
           {
             $set: {
               ...copied.$set,
-              type: source.type,
-              slug: source.slug,
-              translatedFrom: source._id,
+              type: current.type,
+              slug: current.slug,
+              translatedFrom: current._id,
               autoTranslated: true,
             },
             ...(Object.keys(copied.$unset).length ? { $unset: copied.$unset } : {}),
@@ -508,18 +528,38 @@ export async function syncCmsTranslations(
         continue;
       }
 
-      const translatedFields = await translateSourceFields(source, locale, options.deadline);
+      // A forced manual row is overwritten only if nobody edits it while the
+      // provider call runs. Read its updatedAt AFTER the control update above
+      // (which bumps it) so that update does not count as an edit.
+      let forcedUpdatedAt: unknown;
+      if (forced) {
+        const fresh = (await CmsContent.findById(sibling!._id).select("updatedAt").lean()) as
+          | Record<string, any>
+          | null;
+        forcedUpdatedAt = fresh?.updatedAt ?? sibling!.updatedAt;
+      }
+
+      const translatedFields = await translateSourceFields(current, locale, options.deadline);
 
       if (options.guard && !(await options.guard().catch(() => false))) {
         results.push(failedResult(locale, "interrupted"));
         continue;
       }
 
-      const copied = buildUpdate(copiedFields(source));
+      // Text comes from the snapshot that was translated (its hash is
+      // recorded, so a newer text edit shows as stale and is re-run); control
+      // fields, type and slug come from the source as it is now.
+      const latest = await reload();
+      if (!latest || !isTranslationSource(latest) || latest.locale !== source.locale) {
+        results.push(failedResult(locale, "interrupted"));
+        continue;
+      }
+
+      const copied = buildUpdate(copiedFields(latest));
       const meta = {
         autoTranslated: true,
         sourceHash,
-        translatedFrom: source._id,
+        translatedFrom: current._id,
       };
 
       if (sibling) {
@@ -531,15 +571,15 @@ export async function syncCmsTranslations(
           ? {
               _id: sibling._id,
               autoTranslated: { $ne: true },
-              ...(sibling.updatedAt ? { updatedAt: sibling.updatedAt } : {}),
+              ...(forcedUpdatedAt ? { updatedAt: forcedUpdatedAt } : {}),
             }
           : { _id: sibling._id, autoTranslated: true };
         const write = await CmsContent.updateOne(filter, {
           $set: {
             ...copied.$set,
             ...translated.$set,
-            type: source.type,
-            slug: source.slug,
+            type: latest.type,
+            slug: latest.slug,
             ...meta,
           },
           ...(Object.keys(copied.$unset).length || Object.keys(translated.$unset).length
@@ -561,9 +601,9 @@ export async function syncCmsTranslations(
         // One flat insert so copied `seo.ogImage`/`noindex` and translated
         // `seo.titleTag`/… land in the same nested seo object.
         await CmsContent.create({
-          ...buildInsert({ ...copiedFields(source), ...translatedFields }),
-          type: source.type,
-          slug: source.slug, // same slug across locales
+          ...buildInsert({ ...copiedFields(latest), ...translatedFields }),
+          type: latest.type,
+          slug: latest.slug, // same slug across locales
           locale,
           ...meta,
         });

@@ -117,18 +117,26 @@ export async function processCmsTranslationQueue(
           { "translationRun.leaseUntil": { $lte: now } },
         ],
       },
-      {
-        $set: {
-          "translationRun.requested": false,
-          "translationRun.runId": runId,
-          "translationRun.leaseUntil": new Date(now.getTime() + TRANSLATION_LEASE_MS),
-          "translationRun.startedAt": now,
+      // Pipeline update: the claim moves the requested forced locales to
+      // `activeForceLocales` in the same atomic write, so a status read never
+      // sees a claimed run without them.
+      [
+        {
+          $set: {
+            "translationRun.requested": false,
+            "translationRun.runId": runId,
+            "translationRun.leaseUntil": new Date(now.getTime() + TRANSLATION_LEASE_MS),
+            "translationRun.startedAt": now,
+            "translationRun.activeForceLocales": { $ifNull: ["$translationRun.forceLocales", []] },
+          },
         },
-        $unset: { "translationRun.forceLocales": 1 },
-      },
+        { $unset: "translationRun.forceLocales" },
+      ],
       { returnDocument: "before", ...NO_TIMESTAMPS }
     ).lean()) as Record<string, any> | null;
     if (!claimed) return;
+
+    const forceLocales: string[] = claimed.translationRun?.forceLocales ?? [];
 
     const holdsLease = async () =>
       Boolean(await CmsContent.exists({ _id: sourceId, "translationRun.runId": runId }));
@@ -138,9 +146,10 @@ export async function processCmsTranslationQueue(
       try {
         results = await syncCmsTranslations(claimed, {
           translate: true,
-          forceLocales: claimed.translationRun?.forceLocales ?? [],
+          forceLocales,
           deadline: invocationDeadline,
           guard: holdsLease,
+          reloadSource: true,
         });
       } catch (err) {
         console.error(`[cmsTranslations] sync crashed for ${String(sourceId)}:`, err);
@@ -156,7 +165,11 @@ export async function processCmsTranslationQueue(
           translationResults: results.map((result) => ({ ...result, at })),
           "translationRun.finishedAt": at,
         },
-        $unset: { "translationRun.runId": 1, "translationRun.leaseUntil": 1 },
+        $unset: {
+          "translationRun.runId": 1,
+          "translationRun.leaseUntil": 1,
+          "translationRun.activeForceLocales": 1,
+        },
       },
       NO_TIMESTAMPS
     );
@@ -196,7 +209,11 @@ export async function reconcileCmsTranslationRun(source: Record<string, any>): P
           })),
           "translationRun.finishedAt": now,
         },
-        $unset: { "translationRun.runId": 1, "translationRun.leaseUntil": 1 },
+        $unset: {
+          "translationRun.runId": 1,
+          "translationRun.leaseUntil": 1,
+          "translationRun.activeForceLocales": 1,
+        },
       },
       NO_TIMESTAMPS
     );
