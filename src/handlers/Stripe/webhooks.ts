@@ -1,3 +1,4 @@
+import { releaseReferralReservation } from '../../utils/referralDiscount';
 /**
  * Stripe Webhook Handlers
  * Processes Stripe webhook events
@@ -13,11 +14,14 @@ import User from '../../models/user';
 import StripeEvent from '../../models/stripeEvent';
 import DiscountCode from '../../models/discountCode';
 import DiscountCodeUsage from '../../models/discountCodeUsage';
+import { recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger';
 import { convertFromStripeAmount } from '../../utils/payment';
 import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
 import { deductPoints } from '../../utils/pointsSystem';
 import { notify } from '../../utils/notifications/notify';
+import { paymentConfirmationAmount } from '../../utils/paymentConfirmationAmount';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
+import { notifyMilestonePaymentDue } from '../../utils/notifications/milestonePaymentDue';
 import { reconcileExtraCostPayment } from '../../services/extraCostPayment';
 import { getProfessionalId } from '../../utils/bookingHelpers';
 import {
@@ -180,7 +184,7 @@ export const handleWebhook = async (req: Request, res: Response) => {
     // acknowledged as an unknown event.
     switch (event.type as string) {
       case 'payment_intent.succeeded':
-        await handlePaymentIntentSucceeded(event.data.object as Stripe.PaymentIntent);
+        await handlePaymentIntentSucceeded(event.data.object as Stripe.PaymentIntent, event.id);
         break;
 
       case 'payment_intent.payment_failed':
@@ -254,9 +258,107 @@ export const handleWebhook = async (req: Request, res: Response) => {
 };
 
 /**
+ * Durable manual-reconciliation item for a succeeded PaymentIntent that is no
+ * longer the booking's current intent (for example the cancel in
+ * createPaymentIntent failed because the old intent was already processing).
+ * The stale success is never applied to the current payment; this only makes
+ * the possible charge operator-queryable. No refund, retry or provider call is
+ * made here.
+ *
+ * Applied-intent check: an intent the booking already recorded as settled is
+ * a redelivery of an applied payment, not a new charge, and needs no item.
+ * The recorded facts are the per-payment ledger entry for the intent, or a
+ * paid milestone that stores this intent id (both success paths persist it).
+ * Older paid milestones without a stored intent id are not guessed: they get
+ * an item, and the operator confirms the charge against the provider.
+ *
+ * One item per PaymentIntent, enforced by the database: the item is its own
+ * StripeEvent document keyed by `reconciliationItemEventId(intent)` and
+ * upserted under the existing unique `eventId` index, so concurrent
+ * deliveries with different Stripe event ids cannot create two items (the
+ * losing upsert is a no-op or a duplicate-key error, both "already marked").
+ * The delivered event's own StripeEvent record keeps its normal dedup, status
+ * and TTL. Items written before this keying (on the delivered event's own
+ * record) still count as already marked and are never rewritten.
+ * Returns true when this call created the item.
+ */
+export const reconciliationItemEventId = (paymentIntentId: string) =>
+  `reconciliation:superseded_payment_intent_succeeded:${paymentIntentId}`;
+
+async function recordSupersededIntentReconciliation(
+  eventId: string,
+  eventType: string,
+  bookingId: mongoose.Types.ObjectId,
+  paymentIntent: Stripe.PaymentIntent,
+  currentIntentId: string,
+): Promise<boolean> {
+  const alreadyApplied = await Booking.exists({
+    _id: bookingId,
+    $or: [
+      { 'paymentDiscountLedger.paymentIntentId': paymentIntent.id },
+      { milestonePayments: { $elemMatch: { paidStripePaymentIntentId: paymentIntent.id, status: 'paid' } } },
+    ],
+  });
+  if (alreadyApplied) return false;
+  const itemEventId = reconciliationItemEventId(paymentIntent.id);
+  // Legacy items (written on the delivered event's record) are no longer
+  // created, so this read cannot race a new legacy write.
+  const legacyItem = await StripeEvent.exists({
+    eventId: { $ne: itemEventId },
+    'reconciliation.required': true,
+    'reconciliation.paymentIntentId': paymentIntent.id,
+  });
+  if (legacyItem) return false;
+  const currency = (paymentIntent.currency || '').toUpperCase() || undefined;
+  const amount = typeof paymentIntent.amount === 'number'
+    ? convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency || 'eur')
+    : undefined;
+  const latestCharge = paymentIntent.latest_charge;
+  const chargeId = typeof latestCharge === 'string' ? latestCharge : latestCharge?.id;
+  const now = new Date();
+  try {
+    const result = await StripeEvent.updateOne(
+      { eventId: itemEventId },
+      {
+        $setOnInsert: {
+          eventId: itemEventId,
+          eventType,
+          status: 'processed',
+          attempts: 1,
+          firstSeenAt: now,
+          lastAttemptAt: now,
+          processedAt: now,
+          reconciliation: {
+            required: true,
+            reason: 'superseded_payment_intent_succeeded',
+            bookingId,
+            paymentIntentId: paymentIntent.id,
+            currentPaymentIntentId: currentIntentId,
+            ...(chargeId ? { chargeId } : {}),
+            ...(amount !== undefined ? { amount } : {}),
+            ...(currency ? { currency } : {}),
+            sourceEventId: eventId,
+            detectedAt: now,
+            resolvedAt: null,
+          },
+        },
+      },
+      // No schema defaults on insert: the item must not get the 90-day
+      // `expiresAt` that ordinary event records carry.
+      { upsert: true, setDefaultsOnInsert: false },
+    );
+    return result.upsertedCount === 1;
+  } catch (error: any) {
+    // A concurrent delivery inserted the same item first.
+    if (error?.code === 11000) return false;
+    throw error;
+  }
+}
+
+/**
  * Handle payment_intent.succeeded event
  */
-async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent) {
+async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent, eventId: string) {
   if (paymentIntent.metadata.type === 'extra_cost') {
     await handleExtraCostPaymentSucceeded(paymentIntent);
     return;
@@ -267,205 +369,258 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent)
   const booking = await Booking.findById(bookingId);
   if (!booking || !booking.payment) return;
 
-  const now = new Date();
-  const msIdx = (booking.payment as any).milestoneIndex;
-  const isMilestone = typeof msIdx === 'number'
-    && Array.isArray(booking.milestonePayments)
-    && booking.milestonePayments[msIdx]
-    && booking.milestonePayments[msIdx].status !== 'paid';
+  try {
+    // A late event for a superseded intent (e.g. milestone 1 delivered after
+    // the milestone 2 checkout replaced booking.payment) must not mark the
+    // current milestone paid or stamp its charge on the current payment.
+    const currentIntentId = booking.payment.stripePaymentIntentId;
+    if (currentIntentId && currentIntentId !== paymentIntent.id) {
+      // Persist the operator marker before acknowledging: if this write fails
+      // the event is marked failed and Stripe retries it.
+      const marked = await recordSupersededIntentReconciliation(
+        eventId,
+        'payment_intent.succeeded',
+        booking._id as mongoose.Types.ObjectId,
+        paymentIntent,
+        currentIntentId,
+      );
+      console.error(
+        `[WEBHOOK] payment_intent.succeeded ${paymentIntent.id} is not booking ${bookingId}'s current intent ${currentIntentId}; not applied`
+          + (marked ? `, reconciliation item ${reconciliationItemEventId(paymentIntent.id)} recorded` : ''),
+      );
+      return;
+    }
 
-  if (booking.payment.status === 'pending' || isMilestone) {
-    const updateFields: Record<string, any> = {};
-    const filter: Record<string, any> = { _id: booking._id };
+    const now = new Date();
+    const msIdx = (booking.payment as any).milestoneIndex;
+    const isMilestone = typeof msIdx === 'number'
+      && Array.isArray(booking.milestonePayments)
+      && booking.milestonePayments[msIdx]
+      && booking.milestonePayments[msIdx].status !== 'paid';
 
-    if (booking.payment.status === 'pending') {
-      updateFields['payment.status'] = 'authorized';
-      updateFields['payment.authorizedAt'] = now;
-      if (booking.status !== 'in_progress' && booking.status !== 'professional_completed' && booking.status !== 'completed') {
-        updateFields.status = 'booked';
+    if (booking.payment.status === 'pending' || isMilestone) {
+      const updateFields: Record<string, any> = {};
+      const filter: Record<string, any> = { _id: booking._id };
+
+      if (booking.payment.status === 'pending') {
+        updateFields['payment.status'] = 'authorized';
+        updateFields['payment.authorizedAt'] = now;
+        if (booking.status !== 'in_progress' && booking.status !== 'professional_completed' && booking.status !== 'completed') {
+          updateFields.status = 'booked';
+        }
+        filter['payment.status'] = 'pending';
+        if (paymentIntent.latest_charge) {
+          updateFields['payment.stripeChargeId'] = paymentIntent.latest_charge as string;
+        }
       }
-      filter['payment.status'] = 'pending';
-      if (paymentIntent.latest_charge) {
-        updateFields['payment.stripeChargeId'] = paymentIntent.latest_charge as string;
+
+      if (isMilestone) {
+        updateFields[`milestonePayments.${msIdx}.status`] = 'paid';
+        updateFields[`milestonePayments.${msIdx}.paidAt`] = now;
+        // The paying intent is the milestone's settlement fact (read by the
+        // superseded-intent reconciliation check).
+        updateFields[`milestonePayments.${msIdx}.stripePaymentIntentId`] = paymentIntent.id;
+        updateFields[`milestonePayments.${msIdx}.paidStripePaymentIntentId`] = paymentIntent.id;
+        filter[`milestonePayments.${msIdx}.status`] = { $ne: 'paid' };
       }
-    }
 
-    if (isMilestone) {
-      updateFields[`milestonePayments.${msIdx}.status`] = 'paid';
-      updateFields[`milestonePayments.${msIdx}.paidAt`] = now;
-      filter[`milestonePayments.${msIdx}.status`] = { $ne: 'paid' };
-    }
+      if (Object.keys(updateFields).length === 0) return;
 
-    if (Object.keys(updateFields).length === 0) return;
+      const statusChangedToBooked = updateFields.status === 'booked';
+      const updateOperation: Record<string, any> = { $set: updateFields };
+      if (statusChangedToBooked) {
+        updateOperation.$push = {
+          statusHistory: {
+            status: 'booked',
+            timestamp: now,
+            // Stripe-driven transition: record the system actor so the timeline
+            // never shows an unattributed status change.
+            updatedBy: SYSTEM_USER_ID,
+            note: 'Payment confirmed — booking confirmed',
+          },
+        };
+      }
 
-    const statusChangedToBooked = updateFields.status === 'booked';
-    const updateOperation: Record<string, any> = { $set: updateFields };
-    if (statusChangedToBooked) {
-      updateOperation.$push = {
-        statusHistory: {
-          status: 'booked',
-          timestamp: now,
-          // Stripe-driven transition: record the system actor so the timeline
-          // never shows an unattributed status change.
-          updatedBy: SYSTEM_USER_ID,
-          note: 'Payment confirmed — booking confirmed',
-        },
-      };
-    }
+      const updated = await Booking.findOneAndUpdate(filter, updateOperation, { new: true });
+      if (!updated) {
+        // Lost the race with confirmPayment (or a duplicate delivery): the booking
+        // is already authorized. Ensure post-payment notifications still go out
+        // exactly once (deduped via deliveryKey).
+        const fresh = await Booking.findById(bookingId).select(
+          'payment.status payment.stripePaymentIntentId payment.amount payment.totalWithVat payment.milestoneIndex',
+        );
+        if (
+          fresh?.payment &&
+          fresh.payment.stripePaymentIntentId === paymentIntent.id &&
+          (fresh.payment.status === 'authorized' || (fresh.payment as any).status === 'completed')
+        ) {
+          // VAT-inclusive amount actually paid, matching booking details.
+          const amountPaid = paymentConfirmationAmount(fresh.payment, paymentIntent);
+          await notifyBookingPaymentConfirmed({
+            bookingId: String(fresh._id),
+            paymentIntentId: paymentIntent.id,
+            amount: typeof amountPaid === 'number' ? amountPaid : undefined,
+            currency: (paymentIntent.currency || 'EUR').toUpperCase(),
+          });
+        }
+        // The other writer may have stopped before the ledger write; this is
+        // idempotent and only matches while booking.payment is this intent.
+        await recordPaymentDiscountSnapshot(booking._id, booking.payment, paymentIntent.id, now);
+        return;
+      }
 
-    const updated = await Booking.findOneAndUpdate(filter, updateOperation, { new: true });
-    if (!updated) {
-      // Lost the race with confirmPayment (or a duplicate delivery): the booking
-      // is already authorized. Ensure post-payment notifications still go out
-      // exactly once (deduped via deliveryKey).
+      await Payment.findOneAndUpdate(
+        { booking: booking._id },
+        {
+          status: 'authorized',
+          authorizedAt: now,
+          ...(paymentIntent.latest_charge ? { stripeChargeId: paymentIntent.latest_charge as string } : {}),
+        }
+      );
+
+      const pointsRedeemed = (booking.payment as any)?.discount?.pointsRedeemed;
+      if (pointsRedeemed > 0 && booking.customer) {
+        try {
+          await deductPoints(
+            booking.customer,
+            pointsRedeemed,
+            'redemption',
+            `Points redeemed for booking #${(booking as any).bookingNumber || bookingId}`,
+            { relatedBooking: booking._id }
+          );
+        } catch (pointsError: any) {
+          console.error(`Failed to deduct ${pointsRedeemed} points for booking ${bookingId}:`, pointsError);
+        }
+      }
+
+      const codeId = (booking.payment as any)?.discount?.codeId;
+      const codeAmount = (booking.payment as any)?.discount?.codeDiscountAmount;
+      const codeLabel = (booking.payment as any)?.discount?.codeLabel;
+      if (codeId && codeAmount > 0 && booking.customer) {
+        const session = await mongoose.startSession();
+        try {
+          let limitReached: 'global' | 'perUser' | 'not_found' | null = null;
+          await session.withTransaction(async () => {
+            limitReached = null;
+            const codeDoc = await DiscountCode.findById(codeId).session(session);
+            if (!codeDoc) {
+              limitReached = 'not_found';
+              return;
+            }
+            const perUserLimit = Number(codeDoc.perUserLimit) > 0 ? Number(codeDoc.perUserLimit) : 1;
+            const userUsage = await DiscountCodeUsage.countDocuments(
+              { code: codeId, user: booking.customer },
+              { session }
+            );
+            if (userUsage >= perUserLimit) {
+              limitReached = 'perUser';
+              return;
+            }
+            const incremented = await DiscountCode.findOneAndUpdate(
+              {
+                _id: codeId,
+                $or: [
+                  { usageLimit: { $exists: false } },
+                  { usageLimit: null },
+                  { $expr: { $lt: ['$usageCount', '$usageLimit'] } },
+                ],
+              },
+              { $inc: { usageCount: 1 } },
+              { new: true, session }
+            );
+            if (!incremented) {
+              limitReached = 'global';
+              return;
+            }
+            await DiscountCodeUsage.create([{
+              code: codeId,
+              codeString: codeLabel || '',
+              user: booking.customer,
+              booking: booking._id,
+              amountDiscounted: codeAmount,
+              redeemedAt: now,
+            }], { session });
+          });
+          if (limitReached === 'global') {
+            console.warn(`Discount code ${codeLabel || codeId} usageLimit already reached; skipping usage record for booking ${bookingId}`);
+          } else if (limitReached === 'perUser') {
+            console.warn(`Discount code ${codeLabel || codeId} perUserLimit already reached for customer ${booking.customer}; skipping usage record for booking ${bookingId}`);
+          } else if (limitReached === 'not_found') {
+            console.warn(`Discount code not found for id ${codeId} (label ${codeLabel || 'unknown'}); skipping usage record for booking ${bookingId}`);
+          }
+        } catch (codeError: any) {
+          if (codeError?.code === 11000) {
+            // Duplicate usage for this booking — already recorded by a prior webhook delivery; transaction rolled back, no-op
+          } else {
+            console.error(`Failed to record discount code usage for booking ${bookingId}:`, codeError);
+          }
+        } finally {
+          await session.endSession();
+        }
+      }
+
+      console.log(`Payment authorized via webhook for booking ${bookingId}`);
+
+      if (booking.payment.status === 'pending') {
+        // First payment for this booking — notify both sides exactly once.
+        // Idempotent with confirmPayment via per-booking deliveryKey (never on
+        // checkout-page forward, only after payment). VAT-inclusive paid amount.
+        const amountPaid = paymentConfirmationAmount(booking.payment, paymentIntent);
+        const currency = (paymentIntent.currency || 'EUR').toUpperCase();
+        await notifyBookingPaymentConfirmed({
+          bookingId: String(booking._id),
+          paymentIntentId: paymentIntent.id,
+          amount: typeof amountPaid === 'number' ? amountPaid : undefined,
+          currency,
+        });
+      }
+
+      // Keep this payment's discount after a later milestone checkout replaces
+      // booking.payment. A failure here fails the event so Stripe retries; the
+      // retry takes the branch below, which records the entry idempotently.
+      await recordPaymentDiscountSnapshot(booking._id, booking.payment, paymentIntent.id, now);
+    } else {
+      // confirmPayment (sync frontend call) may have already flipped
+      // pending->authorized before this webhook ran. Ensure the post-payment
+      // notifications still go out exactly once (deduped via deliveryKey).
       const fresh = await Booking.findById(bookingId).select(
-        'payment.status payment.stripePaymentIntentId payment.amount',
+        'payment.status payment.stripePaymentIntentId payment.amount payment.totalWithVat payment.milestoneIndex status',
       );
       if (
         fresh?.payment &&
         fresh.payment.stripePaymentIntentId === paymentIntent.id &&
         (fresh.payment.status === 'authorized' || (fresh.payment as any).status === 'completed')
       ) {
-        const amountPaid =
-          (fresh.payment as any)?.amount ?? convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency);
+        // VAT-inclusive amount actually paid, matching booking details.
+        const amountPaid = paymentConfirmationAmount(fresh.payment, paymentIntent);
+        const currency = (paymentIntent.currency || 'EUR').toUpperCase();
         await notifyBookingPaymentConfirmed({
           bookingId: String(fresh._id),
           paymentIntentId: paymentIntent.id,
           amount: typeof amountPaid === 'number' ? amountPaid : undefined,
-          currency: (paymentIntent.currency || 'EUR').toUpperCase(),
+          currency,
         });
       }
-      return;
+      // Duplicate delivery, Stripe retry or confirmPayment won the race: record
+      // the discount snapshot if it is still missing (idempotent).
+      await recordPaymentDiscountSnapshot(booking._id, booking.payment, paymentIntent.id, now);
     }
-
-    await Payment.findOneAndUpdate(
-      { booking: booking._id },
-      {
-        status: 'authorized',
-        authorizedAt: now,
-        ...(paymentIntent.latest_charge ? { stripeChargeId: paymentIntent.latest_charge as string } : {}),
+  } finally {
+    // A previous writer or retry may already have settled this milestone.
+    // This attempt survives payment-confirmation/ledger failure; the due
+    // notifier owns its existing per-milestone delivery deduplication.
+    try {
+      const settled = await Booking.findById(bookingId).select('milestonePayments');
+      if (settled?.milestonePayments?.some(milestone => milestone.status === 'paid'
+        && (milestone.paidStripePaymentIntentId === paymentIntent.id
+          || milestone.stripePaymentIntentId === paymentIntent.id))) {
+        await notifyMilestonePaymentDue(String(bookingId));
       }
-    );
-
-    const pointsRedeemed = (booking.payment as any)?.discount?.pointsRedeemed;
-    if (pointsRedeemed > 0 && booking.customer) {
-      try {
-        await deductPoints(
-          booking.customer,
-          pointsRedeemed,
-          'redemption',
-          `Points redeemed for booking #${(booking as any).bookingNumber || bookingId}`,
-          { relatedBooking: booking._id }
-        );
-      } catch (pointsError: any) {
-        console.error(`Failed to deduct ${pointsRedeemed} points for booking ${bookingId}:`, pointsError);
-      }
-    }
-
-    const codeId = (booking.payment as any)?.discount?.codeId;
-    const codeAmount = (booking.payment as any)?.discount?.codeDiscountAmount;
-    const codeLabel = (booking.payment as any)?.discount?.codeLabel;
-    if (codeId && codeAmount > 0 && booking.customer) {
-      const session = await mongoose.startSession();
-      try {
-        let limitReached: 'global' | 'perUser' | 'not_found' | null = null;
-        await session.withTransaction(async () => {
-          limitReached = null;
-          const codeDoc = await DiscountCode.findById(codeId).session(session);
-          if (!codeDoc) {
-            limitReached = 'not_found';
-            return;
-          }
-          const perUserLimit = Number(codeDoc.perUserLimit) > 0 ? Number(codeDoc.perUserLimit) : 1;
-          const userUsage = await DiscountCodeUsage.countDocuments(
-            { code: codeId, user: booking.customer },
-            { session }
-          );
-          if (userUsage >= perUserLimit) {
-            limitReached = 'perUser';
-            return;
-          }
-          const incremented = await DiscountCode.findOneAndUpdate(
-            {
-              _id: codeId,
-              $or: [
-                { usageLimit: { $exists: false } },
-                { usageLimit: null },
-                { $expr: { $lt: ['$usageCount', '$usageLimit'] } },
-              ],
-            },
-            { $inc: { usageCount: 1 } },
-            { new: true, session }
-          );
-          if (!incremented) {
-            limitReached = 'global';
-            return;
-          }
-          await DiscountCodeUsage.create([{
-            code: codeId,
-            codeString: codeLabel || '',
-            user: booking.customer,
-            booking: booking._id,
-            amountDiscounted: codeAmount,
-            redeemedAt: now,
-          }], { session });
-        });
-        if (limitReached === 'global') {
-          console.warn(`Discount code ${codeLabel || codeId} usageLimit already reached; skipping usage record for booking ${bookingId}`);
-        } else if (limitReached === 'perUser') {
-          console.warn(`Discount code ${codeLabel || codeId} perUserLimit already reached for customer ${booking.customer}; skipping usage record for booking ${bookingId}`);
-        } else if (limitReached === 'not_found') {
-          console.warn(`Discount code not found for id ${codeId} (label ${codeLabel || 'unknown'}); skipping usage record for booking ${bookingId}`);
-        }
-      } catch (codeError: any) {
-        if (codeError?.code === 11000) {
-          // Duplicate usage for this booking — already recorded by a prior webhook delivery; transaction rolled back, no-op
-        } else {
-          console.error(`Failed to record discount code usage for booking ${bookingId}:`, codeError);
-        }
-      } finally {
-        await session.endSession();
-      }
-    }
-
-    console.log(`Payment authorized via webhook for booking ${bookingId}`);
-
-    if (booking.payment.status === 'pending') {
-      // First payment for this booking — notify both sides exactly once.
-      // Idempotent with confirmPayment via per-booking deliveryKey (never on
-      // checkout-page forward, only after payment).
-      const amountPaid = (booking.payment as any)?.amount ?? convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency);
-      const currency = (paymentIntent.currency || 'EUR').toUpperCase();
-      await notifyBookingPaymentConfirmed({
-        bookingId: String(booking._id),
-        paymentIntentId: paymentIntent.id,
-        amount: typeof amountPaid === 'number' ? amountPaid : undefined,
-        currency,
-      });
-    }
-  } else {
-    // confirmPayment (sync frontend call) may have already flipped
-    // pending->authorized before this webhook ran. Ensure the post-payment
-    // notifications still go out exactly once (deduped via deliveryKey).
-    const fresh = await Booking.findById(bookingId).select(
-      'payment.status payment.stripePaymentIntentId payment.amount status',
-    );
-    if (
-      fresh?.payment &&
-      fresh.payment.stripePaymentIntentId === paymentIntent.id &&
-      (fresh.payment.status === 'authorized' || (fresh.payment as any).status === 'completed')
-    ) {
-      const amountPaid =
-        (fresh.payment as any)?.amount ?? convertFromStripeAmount(paymentIntent.amount, paymentIntent.currency);
-      const currency = (paymentIntent.currency || 'EUR').toUpperCase();
-      await notifyBookingPaymentConfirmed({
-        bookingId: String(fresh._id),
-        paymentIntentId: paymentIntent.id,
-        amount: typeof amountPaid === 'number' ? amountPaid : undefined,
-        currency,
-      });
+    } catch (error: any) {
+      console.error(`Milestone-due notify failed for booking ${bookingId}:`, error?.message || error);
     }
   }
+
 }
 
 /**
@@ -640,6 +795,18 @@ async function handlePaymentIntentCanceled(paymentIntent: Stripe.PaymentIntent) 
 
   const booking = await Booking.findById(bookingId);
   if (!booking || !booking.payment) return;
+
+  // Superseded-intent events must never release a newer checkout's benefit.
+  if (booking.payment.stripePaymentIntentId !== paymentIntent.id) return;
+  if (['pending', 'failed'].includes(booking.payment.status)) {
+    const updated = await Booking.updateOne({
+      _id: bookingId,
+      'payment.stripePaymentIntentId': paymentIntent.id,
+      'payment.status': { $in: ['pending', 'failed'] },
+    }, { $set: { 'payment.status': 'failed', 'payment.canceledAt': new Date() } });
+    if (updated.modifiedCount) await releaseReferralReservation(bookingId, booking.payment.discount?.referralReservationToken);
+    return;
+  }
 
   if (booking.payment.status === 'authorized') {
     const now = new Date();

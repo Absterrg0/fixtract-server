@@ -1,3 +1,4 @@
+import { InvoiceSettlementBasisSchema, RefundCreditFactSchema, type InvoiceSettlementBasis, type RefundCreditFact } from "./invoiceSettlement";
 import mongoose, { Schema, model, Document, Types } from "mongoose";
 import { getNextSequence } from "../utils/counterSequence";
 import { STRIPE_CONFIG } from "../services/stripe";
@@ -69,10 +70,46 @@ export interface IQuotationMilestone {
 export interface IBookingMilestone extends IQuotationMilestone {
   workStatus?: 'pending' | 'in_progress' | 'completed';
   stripePaymentIntentId?: string;
+  /**
+   * The PaymentIntent that actually settled this milestone. Written only by
+   * the payment-success paths (unlike `stripePaymentIntentId`, which the
+   * checkout also sets), so it is a settlement fact; absent on milestones
+   * paid before it existed.
+   */
+  paidStripePaymentIntentId?: string;
   stripeClientSecret?: string;
   startedAt?: Date;
   completedAt?: Date;
   paidAt?: Date;
+}
+
+/**
+ * Immutable discount snapshot of one captured payment (a milestone or the
+ * whole booking). Written once per PaymentIntent when the payment succeeds,
+ * so a later milestone checkout that replaces `booking.payment` cannot erase
+ * it. Amounts are copied from that payment's own checkout snapshot; zero is a
+ * recorded zero, never a guess.
+ */
+export interface IPaymentDiscountLedgerEntry {
+  netAmount?: number;
+  vatAmount?: number;
+  totalWithVat?: number;
+  platformCommission?: number;
+  professionalPayout?: number;
+  vatRate?: number;
+  reverseCharge?: boolean;
+
+  paymentIntentId: string;
+  milestoneIndex?: number;
+  currency?: string;
+  originalAmount: number;
+  loyaltyAmount: number;
+  repeatBuyerAmount: number;
+  pointsDiscountAmount: number;
+  codeDiscountAmount: number;
+  referralDiscountAmount?: number;
+  totalDiscount: number;
+  recordedAt: Date;
 }
 
 export interface IQuoteMaterial {
@@ -85,11 +122,12 @@ export interface IQuoteMaterial {
 export interface IQuoteCustomerTotals {
   commissionPercent: number;
   professionalNetAmount: number;
-  /** Customer net before VAT and before checkout-only discounts. */
+  /** Customer net after recorded quote-time automatic discounts, before VAT. */
   customerNetAmount: number;
   /** Alias kept for the frontend contract. */
   amountBeforeDiscounts?: number;
   vatAmount?: number;
+  vatBreakdown?: VatBreakdownLine[];
   vatRate?: number;
   totalWithVat?: number;
   /** Alias kept for the frontend contract. */
@@ -125,6 +163,8 @@ export interface IQuoteVersion {
   rejectedBy?: Types.ObjectId;
   /** Customer-facing amounts frozen at submit/edit; absent for legacy versions. */
   customerTotals?: IQuoteCustomerTotals;
+  /** Earliest feasible execution start computed server-side at submit/edit; null when unavailable. */
+  firstPossibleStart?: Date | null;
   /** Service address as submitted with this version; absent for legacy versions. */
   serviceLocation?: {
     country?: string;
@@ -220,6 +260,7 @@ export interface IBookingScheduleSnapshot {
   scheduledStartTime?: string;
   scheduledEndTime?: string;
   assignedTeamMembers?: Types.ObjectId[];
+  resourcePlan?: { resourceId: Types.ObjectId; days: Date[] }[];
 }
 
 export interface IBooking extends Document {
@@ -236,6 +277,7 @@ export interface IBooking extends Document {
    */
   serviceConfigurationId?: string;
 
+  checkoutRevision?: number;
   // Status and lifecycle
   status: BookingStatus;
   statusBeforeDispute?: BookingStatus;
@@ -281,6 +323,8 @@ export interface IBooking extends Document {
   lastReminderSentAt?: Date;
   customerRejectionReason?: string;
   milestonePayments?: IBookingMilestone[];
+  /** Per-payment discount snapshots (see IPaymentDiscountLedgerEntry). Not selected by default. */
+  paymentDiscountLedger?: IPaymentDiscountLedgerEntry[];
   selectedSubprojectIndex?: number;
   selectedExtraOptions?: { extraOptionId: string; bookedPrice: number }[];
   checkoutSnapshot?: {
@@ -389,6 +433,7 @@ export interface IBooking extends Document {
     // Refund
     refundAmount?: number;
     refundReason?: string;
+    refundOperationKey?: string;
     refundSource?: 'professional' | 'platform' | 'mixed';
     refundNotes?: string;
     disputeId?: string;
@@ -465,6 +510,7 @@ export interface IBooking extends Document {
     creditNotePeppolDispatchReason?: string;
     creditNotePeppolDispatchReference?: string;
     creditNoteGenerationClaim?: string;
+    refundInvoiceRetryAt?: Date;
     supplierInvoiceGenerationClaim?: string;
     supplierCreditNoteNumber?: string;
     supplierCreditNoteUrl?: string;
@@ -475,6 +521,8 @@ export interface IBooking extends Document {
     supplierCreditNotePeppolDispatchReason?: string;
     supplierCreditNotePeppolDispatchReference?: string;
     invoiceArtifactHistory?: InvoiceArtifactHistoryEntry[];
+    invoiceSettlementBasis?: InvoiceSettlementBasis;
+    refundCreditLedger?: RefundCreditFact[];
 
     // Auto-discount breakdown
     discount?: {
@@ -486,6 +534,9 @@ export interface IBooking extends Document {
       pointsRedeemed: number;
       pointsDiscountAmount: number;
       codeDiscountAmount?: number;
+      referralDiscountAmount?: number;
+      referralId?: Types.ObjectId;
+      referralReservationToken?: string;
       codeId?: mongoose.Types.ObjectId;
       codeLabel?: string;
       totalDiscount: number;
@@ -506,7 +557,7 @@ export interface IBooking extends Document {
   actualStartDate?: Date;
   actualEndDate?: Date;
   rescheduleRequest?: {
-    status: 'pending' | 'accepted' | 'declined';
+    status: 'pending' | 'accepted' | 'declined' | 'disputed';
     requestedBy: Types.ObjectId;
     requestedAt: Date;
     reason: string;
@@ -526,7 +577,7 @@ export interface IBooking extends Document {
     note?: string;
     previousSchedule?: IBookingScheduleSnapshot;
     proposedSchedule: IBookingScheduleSnapshot;
-    status: 'accepted' | 'declined' | 'auto_cancelled';
+    status: 'accepted' | 'declined' | 'disputed' | 'auto_cancelled';
     respondedAt?: Date;
     respondedBy?: Types.ObjectId;
     responseNote?: string;
@@ -621,6 +672,8 @@ export interface IBooking extends Document {
     description: string;
     raisedAt: Date;
     resolvedAt?: Date;
+    refundPending?: boolean;
+    refundRequestedAmount?: number;
     resolution?: string;
     resolvedBy?: Types.ObjectId; // Admin who resolved
     adminAdjustedAmount?: number;
@@ -658,6 +711,8 @@ export interface IBooking extends Document {
   notes?: string; // Internal notes
   /** Terminal-state calendar release did not complete; retried on the next save. */
   calendarReleasePending?: boolean;
+  /** A started partial-refund cancellation retains only its historical resource plan. */
+  refundPreservesPastPlanning?: boolean;
   professionalCompletedAt?: Date;
   notificationReminders?: {
     unfinishedCheckoutLastSentAt?: Date;
@@ -734,6 +789,7 @@ const QuoteCustomerTotalsSchema = new Schema(
     customerNetAmount: { type: Number, min: 0 },
     amountBeforeDiscounts: { type: Number, min: 0 },
     vatAmount: { type: Number, min: 0 },
+    vatBreakdown: { type: [Schema.Types.Mixed], default: undefined },
     vatRate: { type: Number, min: 0, max: 100 },
     totalWithVat: { type: Number, min: 0 },
     totalAmount: { type: Number, min: 0 },
@@ -797,6 +853,7 @@ const BookingSchema = new Schema({
     type: String,
     enum: ['rfq', 'rfq_accepted', 'draft_quote', 'quoted', 'quote_accepted', 'quote_rejected', 'payment_pending', 'booked', 'rescheduling_requested', 'in_progress', 'professional_completed', 'completed', 'cancelled', 'dispute', 'refunded'],
   },
+  checkoutRevision: { type: Number, default: 0 },
   statusHistory: [{
     status: {
       type: String,
@@ -805,8 +862,7 @@ const BookingSchema = new Schema({
     },
     timestamp: {
       type: Date,
-      default: Date.now,
-      required: true
+      // Recorded by status writers; legacy hydration must stay undated.
     },
     updatedBy: {
       type: Schema.Types.ObjectId,
@@ -979,7 +1035,8 @@ const BookingSchema = new Schema({
       unit: { type: String, enum: ['hours', 'days'] }
     },
     validUntil: { type: Date, required: true },
-    createdAt: { type: Date, default: Date.now },
+    // Writers set this explicitly; hydration must not manufacture a legacy date.
+    createdAt: { type: Date },
     changeNote: { type: String, maxlength: 500 },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
     rejectedAt: { type: Date },
@@ -987,6 +1044,7 @@ const BookingSchema = new Schema({
     rejectedBy: { type: Schema.Types.ObjectId, ref: 'User' },
     customerTotals: { type: QuoteCustomerTotalsSchema },
     serviceLocation: { type: QuoteServiceLocationSchema },
+    firstPossibleStart: { type: Date },
   }],
   currentQuoteVersion: { type: Number },
   acceptedQuoteVersion: { type: Number, min: 1 },
@@ -1016,11 +1074,41 @@ const BookingSchema = new Schema({
     status: { type: String, enum: ['pending', 'invoiced', 'paid', 'overdue'], default: 'pending' },
     workStatus: { type: String, enum: ['pending', 'in_progress', 'completed'], default: 'pending' },
     stripePaymentIntentId: { type: String },
+    paidStripePaymentIntentId: { type: String },
     stripeClientSecret: { type: String },
     startedAt: { type: Date },
     completedAt: { type: Date },
     paidAt: { type: Date }
   }],
+  // Customer-only financial history: excluded from default reads so booking
+  // payloads never carry it; the savings read model selects it explicitly.
+  // No default, so loading a booking without it and saving never rewrites it.
+  paymentDiscountLedger: {
+    type: [{
+      netAmount: { type: Number },
+      vatAmount: { type: Number },
+      totalWithVat: { type: Number },
+      platformCommission: { type: Number },
+      professionalPayout: { type: Number },
+      vatRate: { type: Number },
+      reverseCharge: { type: Boolean },
+
+      paymentIntentId: { type: String, required: true },
+      milestoneIndex: { type: Number, min: 0 },
+      currency: { type: String },
+      originalAmount: { type: Number, default: 0 },
+      loyaltyAmount: { type: Number, default: 0 },
+      repeatBuyerAmount: { type: Number, default: 0 },
+      pointsDiscountAmount: { type: Number, default: 0 },
+      referralDiscountAmount: { type: Number },
+      codeDiscountAmount: { type: Number, default: 0 },
+      totalDiscount: { type: Number, default: 0 },
+      recordedAt: { type: Date, required: true },
+      _id: false,
+    }],
+    select: false,
+    default: undefined,
+  },
   selectedSubprojectIndex: {
     type: Number,
     min: 0,
@@ -1191,6 +1279,7 @@ const BookingSchema = new Schema({
     // Refund metadata
     refundAmount: { type: Number, min: 0 },
     refundReason: { type: String, maxlength: 500 },
+    refundOperationKey: { type: String, maxlength: 200 },
     refundSource: {
       type: String,
       enum: ['professional', 'platform', 'mixed']
@@ -1262,6 +1351,7 @@ const BookingSchema = new Schema({
     creditNotePeppolDispatchReason: { type: String },
     creditNotePeppolDispatchReference: { type: String },
     creditNoteGenerationClaim: { type: String },
+    refundInvoiceRetryAt: { type: Date, select: false },
     supplierInvoiceGenerationClaim: { type: String },
     supplierCreditNoteNumber: { type: String },
     supplierCreditNoteUrl: { type: String },
@@ -1272,6 +1362,8 @@ const BookingSchema = new Schema({
     supplierCreditNotePeppolDispatchReason: { type: String },
     supplierCreditNotePeppolDispatchReference: { type: String },
     invoiceArtifactHistory: { type: [InvoiceArtifactHistorySchema], default: [] },
+    invoiceSettlementBasis: { type: InvoiceSettlementBasisSchema, select: false },
+    refundCreditLedger: { type: [RefundCreditFactSchema], default: undefined, select: false },
 
     // Auto-discount breakdown
     discount: {
@@ -1282,7 +1374,10 @@ const BookingSchema = new Schema({
       repeatBuyerAmount: { type: Number, default: 0 },
       pointsRedeemed: { type: Number, default: 0 },
       pointsDiscountAmount: { type: Number, default: 0 },
+      referralDiscountAmount: { type: Number },
       codeDiscountAmount: { type: Number, default: 0 },
+      referralId: { type: Schema.Types.ObjectId, ref: "Referral" },
+      referralReservationToken: { type: String },
       codeId: { type: mongoose.Schema.Types.ObjectId, ref: 'DiscountCode' },
       codeLabel: { type: String },
       totalDiscount: { type: Number, default: 0 },
@@ -1312,7 +1407,7 @@ const BookingSchema = new Schema({
   rescheduleRequest: {
     status: {
       type: String,
-      enum: ['pending', 'accepted', 'declined'],
+      enum: ['pending', 'accepted', 'declined', 'disputed'],
     },
     requestedBy: {
       type: Schema.Types.ObjectId,
@@ -1330,6 +1425,7 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      resourcePlan: { type: [{ resourceId: { type: Schema.Types.ObjectId, ref: 'User', required: true }, days: [Date] }], default: undefined },
       assignedTeamMembers: [{
         type: Schema.Types.ObjectId,
         ref: 'User',
@@ -1343,6 +1439,7 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      resourcePlan: { type: [{ resourceId: { type: Schema.Types.ObjectId, ref: 'User', required: true }, days: [Date] }], default: undefined },
       assignedTeamMembers: [{
         type: Schema.Types.ObjectId,
         ref: 'User',
@@ -1369,6 +1466,7 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      resourcePlan: { type: [{ resourceId: { type: Schema.Types.ObjectId, ref: 'User', required: true }, days: [Date] }], default: undefined },
       assignedTeamMembers: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     },
     proposedSchedule: {
@@ -1379,9 +1477,10 @@ const BookingSchema = new Schema({
       scheduledBufferUnit: { type: String, enum: ['hours', 'days'] },
       scheduledStartTime: { type: String, match: TIME_24H_REGEX },
       scheduledEndTime: { type: String, match: TIME_24H_REGEX },
+      resourcePlan: { type: [{ resourceId: { type: Schema.Types.ObjectId, ref: 'User', required: true }, days: [Date] }], default: undefined },
       assignedTeamMembers: [{ type: Schema.Types.ObjectId, ref: 'User' }],
     },
-    status: { type: String, enum: ['accepted', 'declined', 'auto_cancelled'], required: true },
+    status: { type: String, enum: ['accepted', 'declined', 'disputed', 'auto_cancelled'], required: true },
     respondedAt: {
       type: Date,
       required: function (this: any) {
@@ -1476,12 +1575,14 @@ const BookingSchema = new Schema({
       type: String,
       maxlength: 1000
     },
-    images: [{
-      type: String
-    }],
+    // No defaults here: a default materializes a phantom review on every
+    // booking (see utils/bookingActivity.ts). Writers set these explicitly.
+    images: {
+      type: [String],
+      default: undefined
+    },
     reviewedAt: {
-      type: Date,
-      default: Date.now
+      type: Date
     },
     reply: {
       comment: {
@@ -1493,8 +1594,7 @@ const BookingSchema = new Schema({
       }
     },
     isHidden: {
-      type: Boolean,
-      default: false
+      type: Boolean
     },
     hiddenBy: {
       type: Schema.Types.ObjectId,
@@ -1522,8 +1622,7 @@ const BookingSchema = new Schema({
       maxlength: 1000
     },
     reviewedAt: {
-      type: Date,
-      default: Date.now
+      type: Date
     }
   },
 
@@ -1542,8 +1641,7 @@ const BookingSchema = new Schema({
       maxlength: 500
     },
     cancelledAt: {
-      type: Date,
-      default: Date.now
+      type: Date
     },
     refundAmount: {
       type: Number,
@@ -1604,10 +1702,11 @@ const BookingSchema = new Schema({
       maxlength: 2000
     },
     raisedAt: {
-      type: Date,
-      default: Date.now
+      type: Date
     },
     resolvedAt: { type: Date },
+    refundPending: { type: Boolean },
+    refundRequestedAmount: { type: Number },
     resolution: { type: String, maxlength: 2000 },
     resolvedBy: {
       type: Schema.Types.ObjectId,
@@ -1619,10 +1718,9 @@ const BookingSchema = new Schema({
     type: {
       type: String,
       enum: ['extra_costs', 'reschedule', 'completion_request', 'warranty_claim', 'warranty_resolve', 'refund_request', 'in_progress'],
-      default: 'extra_costs',
     },
-    attachments: [{ type: String }],
-    resolutionAttachments: [{ type: String }],
+    attachments: { type: [String], default: undefined },
+    resolutionAttachments: { type: [String], default: undefined },
   },
 
   // Post-booking data
@@ -1669,6 +1767,7 @@ const BookingSchema = new Schema({
     type: String
   },
   calendarReleasePending: { type: Boolean, default: undefined },
+  refundPreservesPastPlanning: { type: Boolean, default: undefined },
   notes: {
     type: String,
     maxlength: 2000
@@ -1744,7 +1843,14 @@ BookingSchema.post("save", async function (doc) {
   if (!["cancelled", "refunded", "completed"].includes(String(doc.status))) return;
   try {
     const session = typeof (doc as any).$session === "function" ? (doc as any).$session() : undefined;
-    await releaseCalendarReservations("booking", doc._id, session || undefined);
+    if (doc.status === 'cancelled' && doc.payment?.status === 'partially_refunded'
+      && doc.refundPreservesPastPlanning
+      && doc.resourcePlan?.some((entry) => entry.days?.length > 0)) {
+      const { replaceBookingCalendar } = await import('../utils/support/bookingCalendar');
+      await replaceBookingCalendar(doc as unknown as IBooking, session || undefined);
+    } else {
+      await releaseCalendarReservations("booking", doc._id, session || undefined);
+    }
     if (doc.calendarReleasePending) {
       await Booking.updateOne({ _id: doc._id }, { $unset: { calendarReleasePending: 1 } });
       doc.calendarReleasePending = undefined;

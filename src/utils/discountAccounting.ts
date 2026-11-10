@@ -8,6 +8,7 @@ export type DiscountPayoutInput = {
   repeatBuyerDiscount: AmountDiscountComponent;
   pointsDiscount: PointsDiscountComponent;
   codeDiscount?: AmountDiscountComponent;
+  referralDiscount?: AmountDiscountComponent;
 };
 
 const roundToTwo = (value: number): number => Math.round(value * 100) / 100;
@@ -42,7 +43,7 @@ export function calculateDiscountedPayouts(
   const platformAbsorbed = roundToTwo(
     (discount.loyaltyDiscount.amount || 0) +
       (discount.pointsDiscount.discountAmount || 0) +
-      (discount.codeDiscount?.amount || 0),
+      (discount.codeDiscount?.amount || 0) + (discount.referralDiscount?.amount || 0),
   );
 
   return {

@@ -6,8 +6,40 @@ import jwt from 'jsonwebtoken';
 import { generateUsername, isValidUsernameFormat } from "../../utils/usernameUtils";
 import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
 
-export function parsePostalCity(lastLine: string): { postalCode?: string; city: string } {
-  const match = lastLine.match(/^(\d[\dA-Z]{1,4}(?:[\s-][\dA-Z]{2,5})?)\s+(.+)$/i)
+// Stored profile countries can be names rather than ISO codes.
+const DUTCH_COUNTRY_VALUES = new Set(['NL', 'NETHERLANDS', 'THE NETHERLANDS', 'NEDERLAND', 'PAYS-BAS']);
+
+/**
+ * Split a VIES address line such as "5026SL TILBURG" or "1000 Brussel" into
+ * postal code and city. The Dutch 4-digit + 2-letter rule applies only for
+ * NL (or an unknown country); otherwise the generic patterns are used, and a
+ * line without a recognizable postal code becomes the city.
+ */
+export function parsePostalCity(
+  rawLine: string,
+  country?: string,
+): { postalCode?: string; city: string } {
+  // VIES lines can carry leading/trailing whitespace; the anchored patterns
+  // below would otherwise miss the postal code and keep the whole line as city.
+  const lastLine = typeof rawLine === 'string' ? rawLine.trim() : '';
+  // Dutch postcodes are canonically spaceless (e.g. "5026SL TILBURG") — match
+  // the 4-digit + 2-letter shape before the generic patterns, which only
+  // accept spaced postcodes and would otherwise lose the postal code.
+  // A Belgian line such as "1300 LA HULPE" has the same shape, so only apply
+  // the Dutch rule when the country is NL or unknown.
+  const countryCode = typeof country === 'string' ? country.trim().toUpperCase() : '';
+  const dutch = countryCode === '' || DUTCH_COUNTRY_VALUES.has(countryCode)
+    ? lastLine.match(/^(\d{4}\s?[A-Z]{2})\s+(.+)$/i)
+    : null;
+  if (dutch) {
+    return { postalCode: dutch[1].replace(/\s+/, '').toUpperCase(), city: dutch[2].trim() };
+  }
+  // A digit-led postcode's separated second part is numeric (CZ/SK/SE/GR
+  // "110 00", PL/PT "00-950"/"1000-001"); the only lettered one is the Dutch
+  // shape handled above. Allowing letters here would swallow the first city
+  // word for non-Dutch lines: "1300 LA HULPE" (BE) became "1300 LA"/"HULPE"
+  // and "75001 PARIS CEDEX" became "75001 PARIS"/"CEDEX".
+  const match = lastLine.match(/^(\d[\dA-Z]{1,4}(?:[\s-]\d{2,5})?)\s+(.+)$/i)
     || lastLine.match(/^([A-Z]\d[\dA-Z](?:\s[\dA-Z]{2,4})?)\s+(.+)$/i);
   if (match) {
     return { postalCode: match[1].trim(), city: match[2].trim() };
@@ -44,7 +76,7 @@ export const validateVAT = async (req: Request, res: Response, next: NextFunctio
     if (validationResult.companyAddress) {
       const addressLines = validationResult.companyAddress.split('\n').filter(line => line.trim());
       const lastLine = addressLines[addressLines.length - 1] || '';
-      const parsed = parsePostalCity(lastLine);
+      const parsed = parsePostalCity(lastLine, formattedVAT.substring(0, 2));
       cleanedAddress = {
         fullAddress: validationResult.companyAddress,
         streetAddress: addressLines[0] || '',
@@ -155,7 +187,9 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
 
         const lastLine = addressLines[addressLines.length - 1];
         if (lastLine) {
-          const parsed = parsePostalCity(lastLine);
+          // The VIES address belongs to the VAT registration, so its country
+          // (the VAT prefix) decides the postcode rule, not the stored profile.
+          const parsed = parsePostalCity(lastLine, formattedVAT.substring(0, 2));
           if (parsed.postalCode && !user.businessInfo.postalCode) {
             user.businessInfo.postalCode = parsed.postalCode;
           }
@@ -215,7 +249,7 @@ export const validateAndPopulateVAT = async (req: Request, res: Response, next: 
 
         const lastLine = addressLines[addressLines.length - 1];
         if (lastLine) {
-          const parsed = parsePostalCity(lastLine);
+          const parsed = parsePostalCity(lastLine, formattedVAT.substring(0, 2));
           if (parsed.postalCode && !user.companyAddress.postalCode) {
             user.companyAddress.postalCode = parsed.postalCode;
           }

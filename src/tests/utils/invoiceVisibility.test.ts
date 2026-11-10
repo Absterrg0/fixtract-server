@@ -1,11 +1,13 @@
+vi.mock('../../models/platformSettings', () => ({ default: { getCurrentConfig: async () => ({ commissionPercent: 10 }) } }));
 import mongoose from "mongoose";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   bookingForViewer,
   filterInvoiceFieldsByRole,
   resolveBookingViewerRole,
   sanitizePaymentForViewer,
   stripPeppolDispatchDiagnostics,
+  stripProPayoutSummaryForCustomer,
 } from "../../utils/invoiceVisibility";
 
 const payment = {
@@ -257,7 +259,9 @@ describe("non-admin payment diagnostics", () => {
     };
     const result = bookingForViewer(booking, "customer");
     expect(result.milestonePayments[0].stripeClientSecret).toBeUndefined();
-    expect(result.milestonePayments[0].amount).toBe(50);
+    // The professional base milestone amount is withheld from customers; the professional view keeps it.
+    expect(result.milestonePayments[0]).not.toHaveProperty("amount");
+    expect(bookingForViewer(booking, "professional").milestonePayments[0].amount).toBe(50);
     expect(booking.milestonePayments[0].stripeClientSecret).toBe("pi_milestone_secret");
   });
 
@@ -344,4 +348,45 @@ describe("viewer role with Mongo ObjectIds", () => {
       resolveBookingViewerRole({ _id: otherId, role: "professional" }, booking)
     ).toBe("professional");
   });
+});
+
+describe("pro payout summary stripping", () => {
+  it("strips transfer facts for customers while keeping own totals and refunds", () => {
+    const payment = {
+      status: "completed",
+      currency: "EUR",
+      totalWithVat: 1210,
+      professionalPayout: 1089,
+      transferredAt: new Date("2026-04-01T00:00:00.000Z"),
+      transferStatus: "succeeded",
+      refunds: [{ amount: 100, currency: "EUR" }],
+      invoiceNumber: "FIX-1",
+      supplierInvoiceNumber: "SUP-1",
+    };
+    const stripped = stripProPayoutSummaryForCustomer({ ...payment });
+    expect(stripped.professionalPayout).toBeUndefined();
+    expect(stripped.transferredAt).toBeUndefined();
+    expect(stripped.transferStatus).toBeUndefined();
+    expect(stripped.supplierInvoiceNumber).toBeUndefined();
+    expect(stripped.totalWithVat).toBe(1210);
+    expect(stripped.refunds).toHaveLength(1);
+    expect(stripped.invoiceNumber).toBe("FIX-1");
+  });
+});
+
+it('strips the referral reservation token for both participants without changing admin or stored data', () => {
+  const source = { ...payment, discount: { referralReservationToken: 'pi_internal', referralDiscountAmount: 12 } };
+  for (const role of ['customer', 'professional'] as const) {
+    const result = bookingForViewer({ payment: source }, role);
+    expect(result.payment.discount).toEqual({ referralDiscountAmount: 12 });
+  }
+  expect(bookingForViewer({ payment: source }, 'admin').payment.discount.referralReservationToken).toBe('pi_internal');
+  expect(source.discount.referralReservationToken).toBe('pi_internal');
+});
+
+
+it.each(['customer', 'professional'] as const)('hides refund retry scheduling from %s payloads', role => {
+  const visible = sanitizePaymentForViewer({ status: 'partially_refunded', refundInvoiceRetryAt: new Date() }, role);
+  expect(visible.refundInvoiceRetryAt).toBeUndefined();
+  expect(JSON.stringify(visible)).not.toContain('refundInvoiceRetryAt');
 });

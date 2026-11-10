@@ -1,3 +1,7 @@
+import { quotationForViewer } from '../../utils/quotationVisibility';
+import { canViewBooking } from '../Booking/details';
+import { resolveBookingViewerRole } from '../../utils/invoiceVisibility';
+import { resolveBookingAdminAccess } from '../../utils/bookingDetails/adminAccess';
 /**
  * Quotation Handlers
  * Handles RFQ response, quotation wizard submission, editing, customer response,
@@ -15,12 +19,13 @@ import Project from '../../models/project';
 import { addWorkingDays } from '../../utils/workingDays';
 import { getNextSequence } from '../../utils/counterSequence';
 import { createPaymentIntent } from '../Stripe/payment';
-import { firstVatCountry, getQuotationTierRateOptionsFromConfig, getVatRateOptionsFromConfig, parseFlexibleNumber, parseVatCountryCode, resolveVatDecisionFromConfig } from '../../utils/vatManagement';
+import { firstVatCountry, getQuotationTierRateOptionsFromConfig, parseFlexibleNumber, parseVatCountryCode, resolveVatDecisionFromConfig, describeCustomerVatDetermination, vatRateRejectionMessage } from '../../utils/vatManagement';
 import { notify } from '../../utils/notifications/notify';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
 import { bookingForRequest, sanitizeMilestoneForViewer, sanitizeMilestonesForViewer } from '../../utils/invoiceVisibility';
-import { buildQuoteCustomerTotals, quoteServiceLocationSnapshot } from '../../utils/bookingDetails/quoteTotals';
+import { buildQuoteCustomerTotalsWithDiscounts, quoteServiceLocationSnapshot } from '../../utils/bookingDetails/quoteTotals';
+import { computeQuoteFirstPossibleStartBounded } from '../../utils/bookingDetails/quoteFirstStart';
 import { captureBookingSnapshotIfMissing, loadVatQuestionDefinitions } from '../../utils/bookingDetails/capture';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 import { UserFacingError } from '../../utils/appErrors';
@@ -125,7 +130,7 @@ const getAllowedVatOptionsForBooking = async (booking: any, serviceCountryOverri
   });
 };
 
-const validatePricingLinesAgainstAllowedVat = async (booking: any, lines: Array<{ vatRate: number; vatLabel?: string }>) => {
+export const validatePricingLinesAgainstAllowedVat = async (booking: any, lines: Array<{ vatRate: number; vatLabel?: string }>) => {
   const options = await getAllowedVatOptionsForBooking(booking);
   const allowedRates = new Set(options.map(option => Number(option.rate)));
   const bookingCountry = booking.vatDecision?.country || booking.location?.country;
@@ -140,10 +145,7 @@ const validatePricingLinesAgainstAllowedVat = async (booking: any, lines: Array<
   }
   const invalidLine = lines.find(line => !allowedRates.has(Number(line.vatRate)));
   if (invalidLine) {
-    return {
-      valid: false,
-      message: `VAT rate ${invalidLine.vatRate}% is not available for this booking. Allowed rates: ${options.map(option => `${option.rate}%`).join(', ') || 'none'}. Select Standard or Reduced only.`,
-    };
+    return { valid: false, message: vatRateRejectionMessage(options, invalidLine.vatRate) };
   }
   return { valid: true };
 };
@@ -170,14 +172,14 @@ const canonicalizePricingLineVat = async (
  * from the same allowed option list used by validation, so the invoice layer
  * cannot silently fall back to the old 21% default.
  */
-const syncQuotationVatDecision = async (
+export const syncQuotationVatDecision = async (
   booking: any,
   lines: Array<{ vatRate: number }>,
 ) => {
   const selectedRate = Number(lines[0]?.vatRate);
   const options = await getAllowedVatOptionsForBooking(booking);
   const selected = options.find((option) => Number(option.rate) === selectedRate);
-  if (!selected) {
+  if (!selected || lines.some(line => !options.some(option => Number(option.rate) === Number(line.vatRate)))) {
     throw new Error(`VAT rate ${selectedRate}% is not available for this booking`);
   }
 
@@ -200,17 +202,29 @@ const syncQuotationVatDecision = async (
     professionalAnswers: getProfessionalAnswersFromProject(project),
     propertyNature: booking.vatDecision?.propertyNature,
   });
-  const action = selected.reverseCharge || selected.source === 'standard' ? 'standard_rate' : 'reduced_rate';
+  // The recorded decision is per-line-aware: a single rate is only recorded
+  // as the quotation-wide determination when every line uses it (reverse
+  // charge always does, enforced by validation). Mixed lines keep the base
+  // service-configuration determination so no single line's rate is rendered
+  // as the quotation-wide rate.
+  const uniform = lines.length > 0 && lines.every((line) => Number(line.vatRate) === selectedRate);
+  const action = !uniform
+    ? base.action === 'rfq' ? 'standard_rate' : base.action
+    : selected.reverseCharge || selected.source === 'standard' ? 'standard_rate' : 'reduced_rate';
   booking.vatDecision = {
     ...base,
     action,
     country: selected.country || base.country,
-    appliedRate: selected.rate,
-    reverseCharge: selected.reverseCharge,
-    vatLabel: selected.label,
-    explanation: selected.reverseCharge
-      ? selected.label
-      : `${selected.label} selected by the professional for this quotation.`,
+    appliedRate: uniform ? selected.rate : base.action === 'rfq' ? base.standardRate : base.appliedRate,
+    reverseCharge: uniform ? selected.reverseCharge : base.reverseCharge,
+    vatLabel: uniform ? selected.label : base.vatLabel,
+    explanation: !uniform
+      ? `${base.explanation} Mixed per-line VAT rates applied by the professional.`
+      : selected.reverseCharge
+        ? selected.label
+        : selected.source === 'reduced'
+          ? `${selected.label} selected by the professional for this quotation, overriding the service configuration.`
+          : `${selected.label} selected by the professional for this quotation.`,
   };
 };
 
@@ -283,12 +297,46 @@ export const getQuotationVatRateOptions = async (req: Request, res: Response) =>
     const options = await getAllowedVatOptionsForBooking(booking, serviceCountry || undefined);
     const country = options.find((option) => option.country)?.country || options[0]?.country || fallbackCountry;
 
+    // Parameters that determined the VAT, so the professional can see why a
+    // rate (or reverse charge) applies. Resolved with the same inputs as the
+    // allowed options above, so the two can never disagree.
+    const projectServiceForDetermination = Array.isArray(project?.services) && project.services.length > 0
+      ? project.services[0]
+      : null;
+    const determinationDecision = await resolveVatDecisionFromConfig({
+      serviceConfigurationId: project?.serviceConfigurationId?.toString(),
+      category: projectServiceForDetermination?.category || project?.category,
+      service: projectServiceForDetermination?.service || project?.service,
+      areaOfWork: projectServiceForDetermination?.areaOfWork || project?.areaOfWork,
+      country: serviceCountry || fallbackCountry,
+      bookingCountry: serviceCountry || booking.location?.country || customer?.location?.country,
+      businessCountry: firstVatCountry(customer?.companyAddress?.country, customer?.location?.country),
+      customerType: customer?.customerType || 'individual',
+      vatNumber: customer?.vatNumber,
+      isVatVerified: customer?.isVatVerified,
+      professionalAnswers: getProfessionalAnswersFromProject(project),
+      propertyNature: booking.vatDecision?.propertyNature,
+    });
+    const vatDetermination = describeCustomerVatDetermination({
+      customerType: customer?.customerType || 'individual',
+      propertyNature: determinationDecision.propertyNature,
+      exemptFromBelgianReverseCharge: determinationDecision.exemptFromBelgianReverseCharge,
+      bookingCountry: serviceCountry || booking.location?.country || customer?.location?.country,
+      // Company address only (no generic location fallback): the business
+      // label requires a real company address behind the country.
+      customerBusinessCountry: customer?.companyAddress?.country,
+      hasCompanyAddress: Boolean(parseVatCountryCode(customer?.companyAddress?.country)),
+      vatCountry: determinationDecision.country || country,
+      reverseCharge: determinationDecision.reverseCharge,
+    });
+
     return res.json({
       success: true,
       data: {
         country,
         customerType: customer?.customerType || 'individual',
         options,
+        vatDetermination,
       },
     });
   } catch (error: any) {
@@ -752,7 +800,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
     const now = new Date();
     const versionNumber = 1;
     const commissionPercent = await getSafeCommissionPercent();
-    const customerTotals = buildQuoteCustomerTotals({
+    const customerTotals = await buildQuoteCustomerTotalsWithDiscounts({
       booking,
       totalAmount: normalizedTotalAmount,
       pricingLines: canonicalPricingLines,
@@ -791,6 +839,17 @@ export const submitQuotation = async (req: Request, res: Response) => {
       ...(customerTotals ? { customerTotals } : {}),
       ...(serviceLocation ? { serviceLocation } : {}),
     };
+    // Server-calculated earliest feasible start from the quantity-aware
+    // schedule engine (resource/calendar/lead-time/timezone). Read-only: no
+    // reservation. Null when unavailable/insufficient (incl. professional-only
+    // RFQs without a project), on error, or after a short timeout; never
+    // blocks or stalls the quote write.
+    // Bounded: errors and timeouts both store null (unknown).
+    quoteVersion.firstPossibleStart = await computeQuoteFirstPossibleStartBounded(booking, {
+      executionDuration,
+      preparationDuration,
+      bufferDuration: bufferDuration || undefined,
+    });
 
     booking.quoteVersions = [quoteVersion];
     booking.currentQuoteVersion = 1;
@@ -815,7 +874,10 @@ export const submitQuotation = async (req: Request, res: Response) => {
     const professional = booking.professional as any;
 
     try {
-      const customerAmount = +(normalizedTotalAmount * (1 + commissionPercent / 100)).toFixed(2);
+      // The email follows the recorded quotation price: the same
+      // customer-facing gross (commission + VAT) the quotation page shows.
+      const customerAmount = customerTotals?.totalWithVat
+        ?? +(normalizedTotalAmount * (1 + commissionPercent / 100)).toFixed(2);
       const profDisplayName = getProfessionalDisplayName(professional);
       const isDirect = booking.rfqResponse === undefined || booking.rfqResponse === null;
       const customerId = customer._id?.toString?.() || customer.id;
@@ -839,7 +901,7 @@ export const submitQuotation = async (req: Request, res: Response) => {
       console.error('Failed to notify quotation received:', e);
     }
 
-    await sendQuotationChatMessage(booking, versionNumber, scope, normalizedTotalAmount, currency || 'EUR', validUntil, false);
+    await sendQuotationChatMessage(booking, versionNumber, scope, customerTotals?.totalWithVat ?? normalizedTotalAmount, currency || 'EUR', validUntil, false);
 
     return res.json({
       success: true,
@@ -957,7 +1019,7 @@ export const editQuotation = async (req: Request, res: Response) => {
       booking.quotationNumber = await getNextQuotationNumber();
     }
     const commissionPercent = await getSafeCommissionPercent();
-    const customerTotals = buildQuoteCustomerTotals({
+    const customerTotals = await buildQuoteCustomerTotalsWithDiscounts({
       booking,
       totalAmount: normalizedTotalAmount,
       pricingLines: canonicalPricingLines,
@@ -997,6 +1059,12 @@ export const editQuotation = async (req: Request, res: Response) => {
       ...(customerTotals ? { customerTotals } : {}),
       ...(serviceLocation ? { serviceLocation } : {}),
     };
+    // Bounded: errors and timeouts both store null (unknown).
+    quoteVersion.firstPossibleStart = await computeQuoteFirstPossibleStartBounded(booking, {
+      executionDuration,
+      preparationDuration,
+      bufferDuration: bufferDuration || undefined,
+    });
 
     // Capture the state this edit was based on, so the write below cannot
     // overwrite a concurrent accept/reject/version bump (lost update).
@@ -1081,7 +1149,7 @@ export const editQuotation = async (req: Request, res: Response) => {
       console.error('Failed to notify quotation updated:', e);
     }
 
-    await sendQuotationChatMessage(booking, newVersionNumber, scope, normalizedTotalAmount, currency || 'EUR', validUntil, true);
+    await sendQuotationChatMessage(booking, newVersionNumber, scope, customerTotals?.totalWithVat ?? normalizedTotalAmount, currency || 'EUR', validUntil, true);
 
     return res.json({
       success: true,
@@ -1226,7 +1294,8 @@ export const customerRespondToQuotation = async (req: Request, res: Response) =>
         currency: currentVersion?.currency || 'EUR',
         description: currentVersion?.description,
         validUntil: currentVersion?.validUntil,
-        submittedAt: currentVersion?.createdAt || now,
+        // Required on IQuote: the final `now` keeps the field set when neither source has a date.
+        submittedAt: currentVersion?.createdAt || booking.quote?.submittedAt || now,
         submittedBy: booking.professional!._id,
       },
     };
@@ -1558,18 +1627,22 @@ export const getQuotationVersions = async (req: Request, res: Response) => {
       return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Authentication required' } });
     }
 
-    const booking = await Booking.findById(bookingId).select('quoteVersions currentQuoteVersion quotationNumber customer professional');
+    const booking = await Booking.findById(bookingId).select('quoteVersions currentQuoteVersion quotationNumber customer professional project')
+      .populate('project', 'professionalId')
+      .populate('customer', '_id isAnonymized deletedAt')
+      .populate('professional', '_id isAnonymized deletedAt');
 
     if (!booking) {
       return res.status(404).json({ success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } });
     }
 
-    // Authorization: customer or professional
-    const isCustomer = booking.customer.toString() === userId;
-    const isProfessional = booking.professional?.toString() === userId;
-
-    if (!isCustomer && !isProfessional) {
+    if (!canViewBooking(req.user, booking)) {
       return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Not authorized to view this quotation' } });
+    }
+    const viewerRole = resolveBookingViewerRole(req.user, booking);
+    const adminAccess = viewerRole === 'admin' ? await resolveBookingAdminAccess(req.user) : undefined;
+    if (viewerRole === 'admin' && !adminAccess?.bookings) {
+      return res.status(403).json({ success: false, error: { code: 'ADMIN_PERMISSION_DENIED', message: 'Not authorized to view this quotation' } });
     }
 
     return res.json({
@@ -1577,7 +1650,7 @@ export const getQuotationVersions = async (req: Request, res: Response) => {
       data: {
         quotationNumber: booking.quotationNumber,
         currentVersion: booking.currentQuoteVersion,
-        versions: booking.quoteVersions || [],
+        versions: quotationForViewer(bookingForRequest(booking, req.user).quoteVersions || [], viewerRole, adminAccess?.payments === true),
       }
     });
   } catch (error: any) {
@@ -1719,6 +1792,18 @@ export const updateMilestoneWorkStatus = async (req: Request, res: Response) => 
           notificationError?.message || notificationError,
         );
       }
+    }
+
+    // A milestone start/completion can make the next milestone payable.
+    // Customer-only here: the professional performed this action themselves.
+    try {
+      const { notifyMilestonePaymentDue } = await import('../../utils/notifications/milestonePaymentDue');
+      await notifyMilestonePaymentDue(String(booking._id));
+    } catch (milestoneDueError: any) {
+      console.error(
+        `Failed to notify milestone-due after saving booking ${booking._id}:`,
+        milestoneDueError?.message || milestoneDueError,
+      );
     }
 
     return res.json({

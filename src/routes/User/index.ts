@@ -1,5 +1,5 @@
 import { Router, Request, Response, NextFunction } from "express";
-import PlatformSettings from '../../models/platformSettings';
+import { getCommissionRate } from '../../handlers/Public/customerPrices';
 import { VerifyPhone } from "../../handlers/User/verify/phone";
 import { VerifyPhoneCheck } from "../../handlers/User/verify/phone";
 import emailVerificationRoutes from "./verify/email";
@@ -10,6 +10,7 @@ import { uploadIdProof, updateProfessionalProfile, submitForVerification, update
 import { upload, uploadProfileImage as profileImageUpload } from "../../utils/s3Upload";
 import { toHandlerError } from "../../utils/handlerErrors";
 import { getLoyaltyStatus, addSpending, getLeaderboard, getUserPointsBalance, getUserPointsHistory, getProfessionalLevelStatus, boostProfessionalLevel } from "../../handlers/User/loyaltyManagement";
+import { getSavingsSummary } from "../../handlers/User/savingsSummary";
 import { inviteEmployee, getEmployees, updateEmployeeStatus, acceptInvitation, updateEmployeeEmail, removeEmployee } from "../../handlers/User/employeeManagement";
 import { changePassword, resetEmployeePassword } from "../../handlers/User/passwordManagement";
 import {
@@ -86,6 +87,7 @@ userRouter.route("/phone").put(updatePhone)
 userRouter.route("/customer-profile").put(updateCustomerProfile)
 userRouter.route("/id-info").put(updateIdInfo)
 userRouter.route("/loyalty/status").get(getLoyaltyStatus)
+userRouter.route("/savings/summary").get(getSavingsSummary)
 userRouter.route("/loyalty/add-spending").post(addSpending)
 userRouter.route("/loyalty/leaderboard").get(getLeaderboard)
 
@@ -171,14 +173,6 @@ userRouter.route("/backlinks").get(listBacklinks)
 userRouter.route("/backlinks/:id").get(getBacklinkById)
 
 // Platform commission (read-only for professionals)
-userRouter.route("/commission-rate").get(async (req, res) => {
-  try {
-    const config = await PlatformSettings.getCurrentConfig();
-    return res.status(200).json({ success: true, data: { commissionPercent: config.commissionPercent } });
-  } catch (error) {
-    console.error("Failed to retrieve commission rate:", error);
-    return res.status(500).json({ success: false, msg: "Failed to retrieve commission rate" });
-  }
-});
+userRouter.route("/commission-rate").get(getCommissionRate);
 
 export default userRouter;

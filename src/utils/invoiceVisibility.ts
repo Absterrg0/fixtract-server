@@ -1,3 +1,5 @@
+import { quotationForViewer, publicProfessionalTags } from './quotationVisibility';
+import { withoutPhantomBookingActivity } from './bookingActivity';
 import { maskBookingForAnonymizedParties } from "./accountAnonymity";
 
 export type InvoiceViewerRole = "admin" | "customer" | "professional";
@@ -24,6 +26,7 @@ const INTERNAL_PAYMENT_DIAGNOSTIC_FIELDS = [
   "extraCostTransferFailureReason",
   "extraCostRefundPending",
   "refundNotes",
+  "refundInvoiceRetryAt",
 ] as const;
 
 /**
@@ -49,6 +52,7 @@ const INTERNAL_PAYMENT_METADATA_KEYS = [
  */
 const PARTICIPANT_PROVIDER_FIELDS = [
   "stripePaymentIntentId",
+  "paidStripePaymentIntentId",
   "stripeChargeId",
   "stripeTransferId",
   "stripeDestinationPayment",
@@ -102,6 +106,47 @@ const stripFields = (payment: Record<string, any>, fields: readonly string[]) =>
   for (const field of fields) {
     if (field in payment) payment[field] = undefined;
   }
+};
+
+/**
+ * Pro-specific payout summary fields. These describe the platform→supplier
+ * transfer and are only ever visible to the professional (and entitled
+ * admins). Customer-own totals, statuses, and refund records are NOT part of
+ * this set and must stay intact in participant payloads.
+ */
+const PRO_PAYOUT_SUMMARY_FIELDS = [
+  "professionalPayout",
+  "transferredAt",
+  "transferStatus",
+  "transferAmount",
+  "transferCurrency",
+  "transferAttempt",
+  "transferAttemptedAt",
+  "platformCommission",
+  "extraCostPlatformFee",
+  "extraCostPlatformCommission",
+  "extraCostProfessionalPayout",
+  "extraCostTransferStatus",
+  "extraCostTransferAttemptedAt",
+] as const;
+
+/**
+ * Strip the pro-specific payout summary (transfer date/amount/status,
+ * commission and extra-cost payout fields) and the supplier invoice from a
+ * booking.payment payload before it reaches a customer. Used for the shared
+ * bookings-table list payload. Customer payment payloads serialized by
+ * `sanitizePaymentForViewer(payment, "customer")` (payment history, booking
+ * details, data export) omit the same payout set. Customer-own totals,
+ * statuses and refund details are not in that set and stay intact.
+ */
+export const stripProPayoutSummaryForCustomer = <T extends Record<string, any>>(
+  payment: T
+): T => {
+  if (!payment || typeof payment !== "object") return payment;
+  const clean: Record<string, any> = { ...payment };
+  stripFields(clean, PRO_PAYOUT_SUMMARY_FIELDS);
+  stripFields(clean, SUPPLIER_INVOICE_FIELDS);
+  return clean as T;
 };
 
 /**
@@ -196,10 +241,16 @@ export const sanitizePaymentForViewer = (
 
   const clean: Record<string, any> = stripInternalPaymentDiagnostics(payment);
   stripFields(clean, PARTICIPANT_PROVIDER_FIELDS);
+  if (clean.discount && typeof clean.discount === "object") {
+    clean.discount = { ...clean.discount };
+    delete clean.discount.referralReservationToken;
+  }
   if ("metadata" in clean) clean.metadata = undefined;
 
   if (viewerRole === "customer") {
     stripFields(clean, SUPPLIER_INVOICE_FIELDS);
+    // The pro's payout summary (amount/status/timing) is never customer data.
+    stripFields(clean, PRO_PAYOUT_SUMMARY_FIELDS);
   } else {
     stripFields(clean, CUSTOMER_INVOICE_FIELDS);
     // A client secret can confirm or capture the customer's payment. The
@@ -212,7 +263,7 @@ export const sanitizePaymentForViewer = (
   clean.invoiceArtifactHistory = filterArtifactHistory(clean.invoiceArtifactHistory, side);
   clean.manualArtifactClaims = filterManualArtifactClaims(clean.manualArtifactClaims, side);
 
-  return clean;
+  return quotationForViewer(clean, viewerRole);
 };
 
 /**
@@ -261,10 +312,13 @@ export const bookingForViewer = (booking: any, viewerRole: InvoiceViewerRole) =>
   if (!booking || typeof booking !== "object") return booking;
 
   const source = typeof booking.toObject === "function" ? booking.toObject() : { ...booking };
-  const safeSource = maskBookingForAnonymizedParties(source);
+  const safeSource = quotationForViewer(maskBookingForAnonymizedParties(withoutPhantomBookingActivity(source)), viewerRole);
   if (viewerRole === "admin") return safeSource;
 
   const visible = filterInvoiceFieldsByRole(safeSource, viewerRole);
+  if (visible.professional && typeof visible.professional === 'object' && Array.isArray(visible.professional.adminTags)) {
+    visible.professional = { ...visible.professional, adminTags: publicProfessionalTags(visible.professional.adminTags) };
+  }
 
   // Internal booking notes and admin-only dispute internals are not part of
   // any participant payload. They must be removed here as well as in details,

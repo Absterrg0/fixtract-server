@@ -1,3 +1,4 @@
+import { previewCustomerPrices } from '../../handlers/Public/customerPrices';
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { getGoogleMapsConfig, validateAddress } from "../../handlers/User/googleMaps";
@@ -24,11 +25,16 @@ import {
   listPublicPolicyLinks,
 } from "../../handlers/Public/cms";
 import { getPublicSiteSettings } from "../../handlers/Public/siteSettings";
+import { getPublicAutoConversion } from "../../handlers/Public/autoConversion";
 import { getPublicExchangeRates } from "../../handlers/Public/exchangeRates";
 import {
   listPublicSiteAnnouncements,
   recordSiteAnnouncementEvent,
 } from "../../handlers/Public/siteAnnouncements";
+import {
+  getPublicLoyaltyTiers,
+  getPublicProfessionalLevels,
+} from "../../handlers/Public/levelTiers";
 import { unsubscribeMarketing } from "../../handlers/Public/marketingUnsubscribe";
 import { getMarketingLanguages } from "../../handlers/Public/marketingLanguages";
 import { recordProfessionalView } from "../../handlers/Public/profileView";
@@ -45,17 +51,37 @@ import { optionalProtect } from "../../middlewares/auth";
 // Public routes - accessible without authentication
 const publicRouter = Router();
 
-const schedulingRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 60,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    success: false,
-    msg: 'Too many requests. Please wait a few minutes and try again.',
-    code: 'RATE_LIMITED',
-  },
-});
+const PUBLIC_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+/** Per-IP budget shared by the booking calendar and other low-volume public reads. */
+export const SCHEDULING_RATE_LIMIT = 60;
+/**
+ * Marketing announcements get their own per-IP budgets, so that ordinary browsing
+ * (one listing call plus up to a few counter events per page view) can never
+ * exhaust the booking calendar budget above, and vice versa. Each budget still
+ * caps how far one IP can inflate counters or scrape listings.
+ */
+export const ANNOUNCEMENT_LIST_RATE_LIMIT = 300;
+export const ANNOUNCEMENT_EVENT_RATE_LIMIT = 600;
+/** Per-IP budget for public customer price lookups (see handlers/Public/customerPrices). */
+export const PRICE_PREVIEW_RATE_LIMIT = 600;
+
+const createPublicRateLimiter = (limit: number) =>
+  rateLimit({
+    windowMs: PUBLIC_RATE_LIMIT_WINDOW_MS,
+    limit,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      success: false,
+      msg: 'Too many requests. Please wait a few minutes and try again.',
+      code: 'RATE_LIMITED',
+    },
+  });
+
+const schedulingRateLimiter = createPublicRateLimiter(SCHEDULING_RATE_LIMIT);
+const announcementListRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_LIST_RATE_LIMIT);
+const pricePreviewRateLimiter = createPublicRateLimiter(PRICE_PREVIEW_RATE_LIMIT);
+const announcementEventRateLimiter = createPublicRateLimiter(ANNOUNCEMENT_EVENT_RATE_LIMIT);
 
 // Google Maps configuration (public endpoint)
 publicRouter.route("/google-maps-config").get(getGoogleMapsConfig);
@@ -67,7 +93,11 @@ publicRouter.route("/validate-address").post(validateAddress);
 publicRouter.route("/vat/validate").post(validateVAT);
 
 // Project viewing (public endpoint for customers to view projects)
-publicRouter.route("/projects/:id").get(getPublishedProject);
+publicRouter.route("/projects/:id").get(optionalProtect, getPublishedProject);
+
+// Customer price lookup: entity-keyed (project, package, usage, options). Rate limited by PRICE_PREVIEW_RATE_LIMIT.
+// Each call reads the platform commission setting, which is not cached (see handlers/Public/customerPrices).
+publicRouter.route("/customer-prices").post(pricePreviewRateLimiter, previewCustomerPrices);
 
 // Team availability (public endpoint for booking calendar)
 publicRouter
@@ -120,14 +150,25 @@ publicRouter
 // Public site settings (social links etc)
 publicRouter.route("/site-settings").get(getPublicSiteSettings);
 
+// Auto-conversion roll-out countries + default country (frontend middleware)
+publicRouter.route("/auto-conversion").get(getPublicAutoConversion);
+
 // ECB EUR-based daily exchange rates (cached in memory + Mongo snapshot)
 publicRouter.route("/exchange-rates").get(getPublicExchangeRates);
 
 // Marketing site announcements (top bar / modal / exit-intent)
-publicRouter.route("/site-announcements").get(schedulingRateLimiter, listPublicSiteAnnouncements);
+publicRouter.route("/site-announcements").get(announcementListRateLimiter, listPublicSiteAnnouncements);
 publicRouter
   .route("/site-announcements/:id/event")
-  .post(schedulingRateLimiter, recordSiteAnnouncementEvent);
+  .post(announcementEventRateLimiter, recordSiteAnnouncementEvent);
+
+// Tier/level tag colours (public, display-safe fields only)
+publicRouter
+  .route("/loyalty-tiers")
+  .get(schedulingRateLimiter, getPublicLoyaltyTiers);
+publicRouter
+  .route("/professional-levels")
+  .get(schedulingRateLimiter, getPublicProfessionalLevels);
 
 // CMS public endpoints
 publicRouter.route("/cms/sitemap").get(listCmsSitemapEntries);

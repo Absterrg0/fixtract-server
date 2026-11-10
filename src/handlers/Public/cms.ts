@@ -29,8 +29,29 @@ const LISTING_FIELDS =
 const BOT_UA_RE =
   /bot|crawl|spider|slurp|bingpreview|facebookexternalhit|linkedinbot|twitterbot|whatsapp|telegram|prerender|headlesschrome|lighthouse/i;
 
-function requestCountryCode(req: Request): string | undefined {
-  return parseCmsCountryCode(req.get("x-vercel-ip-country") || req.get("cf-ipcountry"));
+/**
+ * First-party content-country header set by the frontend middleware: the
+ * effective auto-conversion country (visitor geo inside the roll-out, else the
+ * admin default country). The frontend deletes any client-supplied value first.
+ */
+export const CMS_CONTENT_COUNTRY_HEADER = "x-fixera-content-country";
+
+/**
+ * Country used to choose which country-targeted CMS content is shown.
+ * Display filtering only, not authorization: any caller can already pick a
+ * country through these headers, and every country sees global content.
+ * Precedence: x-fixera-content-country, then the platform geo headers
+ * (x-vercel-ip-country, cf-ipcountry). Each must be a valid ISO 3166-1 alpha-2
+ * code; an invalid value falls through to the next header. The first-party
+ * header comes first because the backend's own edge may replace an inbound
+ * x-vercel-ip-country with the calling frontend function's geo.
+ */
+export function requestCountryCode(req: Pick<Request, "get">): string | undefined {
+  return (
+    parseCmsCountryCode(req.get(CMS_CONTENT_COUNTRY_HEADER)) ??
+    parseCmsCountryCode(req.get("x-vercel-ip-country")) ??
+    parseCmsCountryCode(req.get("cf-ipcountry"))
+  );
 }
 
 /**

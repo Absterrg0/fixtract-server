@@ -1,6 +1,7 @@
+import { releaseUnpaidReferralSafely } from '../../utils/releaseUnpaidReferral';
 import { Request, Response } from "express";
 import mongoose from "mongoose";
-import CancellationRequest from "../../models/cancellationRequest";
+import CancellationRequest, { ADMIN_ACTIONABLE_CANCELLATION_STATUSES } from "../../models/cancellationRequest";
 import Booking from "../../models/booking";
 import Payment from "../../models/payment";
 import User from "../../models/user";
@@ -12,9 +13,16 @@ import { auditLog } from "../../utils/auditLogger";
 import { param, params } from "../../utils/requestParams";
 import { notify } from '../../utils/notifications/notify';
 import { maskCancellationRequestForAnonymizedParties } from '../../utils/accountAnonymity';
+import {
+  ensureRefundInvoices,
+  isBookingStarted,
+  leavesBillableRemainder,
+  pruneFutureResourcePlanDays,
+  retainPastBookingCalendar,
+} from "../../utils/refundFinalization";
 
 const VALID_STATUSES = ["pending", "processing", "negotiating", "escalated", "approved", "denied"] as const;
-const ADMIN_ACTIONABLE_STATUSES = ["pending", "escalated"];
+const ADMIN_ACTIONABLE_STATUSES = ADMIN_ACTIONABLE_CANCELLATION_STATUSES;
 
 const parsePagination = (query: any) => {
   const page = Math.max(1, Math.floor(Number(query.page) || 1));
@@ -241,17 +249,32 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
     }
 
     releaseScheduleSlots(freshBooking, adminId);
+    // A partial refund on a started booking keeps past planned days blocked
+    // and unplans only future days; anything else releases the whole calendar.
+    const partialRefundRemainder = freshBooking.payment?.status === 'partially_refunded'
+      && leavesBillableRemainder(freshBooking.payment.totalWithVat, freshBooking.payment.refundAmount);
+    if (partialRefundRemainder && isBookingStarted(freshBooking)) {
+      pruneFutureResourcePlanDays(freshBooking);
+    }
     await freshBooking.save();
+    await releaseUnpaidReferralSafely(freshBooking, 'cancellation approval');
     try {
-      await releaseBookingCalendar(freshBooking._id);
+      if (partialRefundRemainder && isBookingStarted(freshBooking)) {
+        await retainPastBookingCalendar(freshBooking);
+      } else {
+        await releaseBookingCalendar(freshBooking._id);
+      }
     } catch (calendarError) {
-      // The cancellation is already effective; a failed release must not leave
-      // the request stuck in `processing`. The booking post-save hook records
-      // `calendarReleasePending` for the scheduled retry.
+      // The cancellation is already effective; a failed calendar update must
+      // not leave the request stuck in `processing`. The booking post-save hook
+      // records `calendarReleasePending` for the scheduled retry.
       console.error(
-        "Calendar release failed after approving cancellation; retry queued",
+        "Calendar update failed after approving cancellation; retry queued",
         calendarError instanceof Error ? calendarError.name : typeof calendarError,
       );
+    }
+    if (partialRefundRemainder) {
+      void ensureRefundInvoices(String(freshBooking._id));
     }
 
     cancellation.status = "approved";

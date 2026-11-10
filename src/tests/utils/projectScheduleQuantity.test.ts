@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { getProjectDurations, resolveProjectScheduleQuantity, getBookingScheduleOptions } from '../../utils/scheduleEngine';
+import Project from '../../models/project';
 
 describe('unit priced project scheduling quantity', () => {
   const project = (pricing: Record<string, unknown>, executionDuration?: { value: number; unit: 'hours' | 'days' }) => ({
@@ -23,6 +24,21 @@ describe('unit priced project scheduling quantity', () => {
   it('uses customer quantity as hours for per-unit hourly packages even if a duration was saved', () => {
     const durations = getProjectDurations({ subprojects: [{ pricing: { type: 'unit', unit: 'hour', durationBasis: 'per_unit' }, executionDuration: { value: 5, unit: 'days' } }] }, 0, undefined, 2.5);
     expect(durations?.execution).toEqual({ value: 2.5, unit: 'hours' });
+  });
+
+  it('books the customer hours for an hourly package the wizard saved without a professional duration', () => {
+    // The wizard shows "determined by customer" and stores no execution value.
+    const hourly = { subprojects: [{ pricing: { type: 'unit', unit: 'hour', durationBasis: 'per_unit' }, executionDuration: { unit: 'hours' } }] };
+    expect(getProjectDurations(hourly, 0, undefined, 1)?.execution).toEqual({ value: 1, unit: 'hours' });
+    expect(getProjectDurations(hourly, 0, undefined, 6)?.execution).toEqual({ value: 6, unit: 'hours' });
+    const errors = new Project({ subprojects: hourly.subprojects.map((sub) => ({ ...sub, name: 'Hourly', description: 'Hourly help', pricing: { ...sub.pricing, amount: 50 } })) }).validateSync();
+    expect(Object.keys(errors?.errors || {}).filter((path) => path.startsWith('subprojects.0.executionDuration'))).toEqual([]);
+  });
+
+  it('scales a per-unit duration for one unit and for a large quantity', () => {
+    const perM2 = project({ durationBasis: 'per_unit' }, { value: 0.5, unit: 'hours' });
+    expect(getProjectDurations(perM2, 0, undefined, 1)?.execution).toEqual({ value: 0.5, unit: 'hours' });
+    expect(getProjectDurations(perM2, 0, undefined, 40)?.execution).toEqual({ value: 20, unit: 'hours' });
   });
 
   it('defaults an omitted quantity to the package minimum', () => {

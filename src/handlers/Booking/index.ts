@@ -21,10 +21,11 @@ import {
   bookingForRequest,
   bookingForViewer,
   sanitizePaymentForViewer,
+  stripProPayoutSummaryForCustomer,
 } from "../../utils/invoiceVisibility";
 import { IUser } from "../../models/user";
 import { maskAnonymizedUser, maskBookingForAnonymizedParties } from "../../utils/accountAnonymity";
-import { applyB2BInvoiceRule, firstVatCountry, parseVatCountryCode, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
+import { ARTICLE_47_FIELD_NAME, applyB2BInvoiceRule, firstVatCountry, parseVatCountryCode, requiresVatRfqReview, resolveVatDecisionFromConfig } from "../../utils/vatManagement";
 import ServiceConfiguration from "../../models/serviceConfiguration";
 import { sendHandlerError } from '../../utils/handlerErrors';
 import { runWithEmailActor } from '../../utils/emailActorContext';
@@ -49,7 +50,17 @@ import {
 } from '../../utils/bookingDetails/capture';
 import { isQuestionAnswerUploadOwnedByUser, isUploadOwnedByUser } from '../../utils/bookingDetails/attachments';
 import { presignOwnedUrl, presignQuestionAnswerUrl, referenceId } from '../../utils/bookingDetails/attachments';
+import {
+  OVERVIEW_LEDGER_NOT_LOADED,
+  buildBookingListOverview,
+  selectedPriceModel,
+} from "../../utils/bookingDetails/overviewRows";
+import { loadOverviewRefundLedgers } from "../../utils/paymentRefundLedger";
+import { safeErrorSummary } from "../../utils/safeErrorLog";
 import { snapshotQuestionDefinitions } from '../../utils/bookingDetails/snapshot';
+import { RECORDED_DISPUTE_FILTER, withoutPhantomBookingActivity } from '../../utils/bookingActivity';
+import { bookingWithCustomerProjectPrices } from '../../utils/customerPriceView';
+import { getCheckoutCommissionPercent } from '../../utils/checkoutCommission';
 
 /** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
 const applyProceedAtStandardVatIfRequested = (
@@ -329,7 +340,10 @@ const snapshotToQuoteBreakdown = (snapshot: NonNullable<ReturnType<typeof buildC
 ];
 
 const presignBookingFiles = async (bookingDoc: any) => {
-  const booking = bookingDoc?.toObject ? bookingDoc.toObject() : { ...bookingDoc };
+  // Legacy records carry schema-default review/cancellation/dispute stamps.
+  const booking = withoutPhantomBookingActivity(
+    bookingDoc?.toObject ? bookingDoc.toObject() : { ...bookingDoc },
+  );
   const customerId = referenceId(booking?.customer);
   const professionalId = referenceId(booking?.professional);
   const projectId = referenceId(booking?.project)
@@ -730,6 +744,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     }
 
     // Validate professional or project exists
+    // Should-fix 4: the engine-resolved conversion zone for scheduleTimeZone
+    // (assigned in the project branch when a window is computed).
+    let engineScheduleZone: string | null = null;
     if (bookingType === 'professional') {
       const professional = await User.findById(professionalId);
       if (!professional || professional.role !== 'professional') {
@@ -960,7 +977,16 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
         subprojectIndex < project.subprojects.length &&
         (project.subprojects[subprojectIndex] as any)?.pricing?.type === "rfq";
 
+      // Should-fix 4: remember the engine-resolved zone for scheduleTimeZone
+      // (declared on the outer project branch so it survives below).
       if (!isRfqSubproject) {
+        // Client bug list #23b: the wall-clock time is converted to a UTC
+        // instant in the professional's effective zone. Pass the request zone
+        // so the engine does not silently fall back to UTC when the
+        // professional's business info has no usable zone.
+        const requestTimeZone = resolveScheduleTimeZone(
+          req.body?.timeZone || req.body?.scheduleTimeZone,
+        ) || undefined;
         const validation = await validateProjectScheduleSelection({
           projectId,
           subprojectIndex,
@@ -968,6 +994,7 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
           customerBlocks,
           quantity: scheduleQuantity.quantity,
+          requestTimeZone,
         });
 
         if (!validation.valid) {
@@ -986,6 +1013,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           startTime: typeof rawStartTime === "string" ? rawStartTime : undefined,
           customerBlocks,
           quantity: scheduleQuantity.quantity,
+          requestTimeZone: resolveScheduleTimeZone(
+            req.body?.timeZone || req.body?.scheduleTimeZone,
+          ) || undefined,
         });
 
         if (!window) {
@@ -995,6 +1025,8 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           });
         }
 
+        if (window.resourcePlan) bookingData.resourcePlan = window.resourcePlan;
+        engineScheduleZone = typeof window.timeZone === 'string' ? window.timeZone : null;
         bookingData.scheduledStartDate = window.scheduledStartDate;
         if (window.scheduledExecutionEndDate) {
           bookingData.scheduledExecutionEndDate = window.scheduledExecutionEndDate;
@@ -1159,7 +1191,10 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
     // Freeze the booked package/terms/questions before the first save. This is
     // an absolute whitelist copy; later project edits never touch it.
     const vatQuestionsForSnapshot = await loadVatQuestionDefinitions(configIdForVat);
-    const scheduleTimeZone = resolveScheduleTimeZone(
+    // Should-fix 4: persist the engine-resolved conversion zone (the window
+    // already falls back to the request zone) so details/timeline carry the
+    // resolved zone even when the client sends no timeZone.
+    const scheduleTimeZone = engineScheduleZone || resolveScheduleTimeZone(
       req.body?.timeZone || req.body?.scheduleTimeZone,
     );
     if (scheduleTimeZone) {
@@ -1258,7 +1293,9 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       msg:
         populated.status === "quote_accepted"
           ? "Booking created. Proceed to payment."
-          : "Booking request created successfully",
+          : populated.status === "rfq"
+            ? "Quotation request created successfully"
+            : "Booking request created successfully",
       booking: bookingForRequest(populated, req.user)
     });
 
@@ -1308,7 +1345,7 @@ export const uploadRFQAttachment = async (req: Request, res: Response) => {
 export const getMyBookings = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user?._id;
-    const { status, page, limit, service, search, addressFilter, customerNameFilter } = req.query;
+    const { status, page, limit, service, search, q, addressFilter, customerNameFilter } = req.query;
     const parsedPage = Math.max(1, Math.floor(Number(page) || 1));
     const parsedLimit = Math.min(100, Math.max(1, Math.floor(Number(limit) || 20)));
 
@@ -1320,18 +1357,18 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       });
     }
 
-    const query: any = {};
+    const baseQuery: any = {};
     let professionalProjectIds: any[] | null = null;
 
     // Build query based on user role
     if (user.role === 'customer') {
-      query.customer = userId;
+      baseQuery.customer = userId;
     } else if (user.role === 'professional') {
       const projectIds = await Project.find({
         professionalId: userId,
       }).select("_id");
       professionalProjectIds = projectIds.map((project) => project._id);
-      query.$or = [
+      baseQuery.$or = [
         { professional: userId },
         { project: { $in: professionalProjectIds } },
       ];
@@ -1342,28 +1379,43 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       });
     }
 
+    // Track per-facet clauses separately so counts can be disjunctive on
+    // their own facet while respecting every other active filter.
+    let statusClause: Record<string, unknown> | null = null;
+    let serviceClause: Record<string, unknown> | null = null;
+    const otherAnd: Record<string, unknown>[] = [];
+
+    // Canonical booking-mode status sets. `awaiting_payment` is an alias for
+    // the quote_accepted + payment_pending pair used by both dashboards.
+    const expandStatusAlias = (raw: string): string[] =>
+      raw.split(',').map(s => s.trim()).filter(Boolean).flatMap((s) =>
+        s === 'awaiting_payment' ? ['quote_accepted', 'payment_pending'] : [s],
+      );
+
     // Filter by status if provided (supports comma-separated for multiple statuses)
     if (status && typeof status === 'string') {
-      if (status.includes(',')) {
-        query.status = { $in: status.split(',').map(s => s.trim()) };
-      } else {
-        query.status = status;
+      const statuses = expandStatusAlias(status);
+      if (statuses.length === 1) {
+        statusClause = { status: statuses[0] };
+      } else if (statuses.length > 1) {
+        statusClause = { status: { $in: statuses } };
       }
     }
 
-    // Filter by service type — match project.service OR rfqData.serviceType.
-    // Combined via $and so the role-based $or above is preserved.
     if (service && typeof service === 'string') {
       const matchingProjectIds = await Project.find({ service }).select("_id");
       const serviceOr: any[] = [{ 'rfqData.serviceType': service }];
       if (matchingProjectIds.length > 0) {
         serviceOr.push({ project: { $in: matchingProjectIds.map(p => p._id) } });
       }
-      query.$and = (query.$and || []).concat([{ $or: serviceOr }]);
+      serviceClause = { $or: serviceOr };
     }
 
-    if (search && typeof search === 'string') {
-      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // `q` is a preserved alias of `search`.
+    const searchRaw = typeof search === 'string' && search ? search
+      : typeof q === 'string' && q ? q : '';
+    if (searchRaw) {
+      const escaped = searchRaw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const regex = new RegExp(escaped, 'i');
       const matchingCustomerIds = await User.find({ name: regex }).select("_id");
       const searchOr: any[] = [
@@ -1374,7 +1426,7 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       if (matchingCustomerIds.length > 0) {
         searchOr.push({ customer: { $in: matchingCustomerIds.map(c => c._id) } });
       }
-      query.$and = (query.$and || []).concat([{ $or: searchOr }]);
+      otherAnd.push({ $or: searchOr });
     }
 
     if (addressFilter && typeof addressFilter === 'string' && user.role === 'customer') {
@@ -1382,13 +1434,13 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       if (trimmedAddress.length >= 2) {
         const escaped = trimmedAddress.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const regex = new RegExp(escaped, 'i');
-        query.$and = (query.$and || []).concat([{
+        otherAnd.push({
           $or: [
             { 'location.address': regex },
             { 'location.city': regex },
             { 'location.country': regex },
           ],
-        }]);
+        });
       }
     }
 
@@ -1399,14 +1451,31 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
         const regex = new RegExp(escaped, 'i');
         const matchingCustomerIds = await User.find({ role: 'customer', name: regex }).select('_id');
         if (matchingCustomerIds.length > 0) {
-          query.$and = (query.$and || []).concat([{
+          otherAnd.push({
             customer: { $in: matchingCustomerIds.map(c => c._id) },
-          }]);
+          });
         } else {
-          query.$and = (query.$and || []).concat([{ customer: { $in: [] } }]);
+          otherAnd.push({ customer: { $in: [] } });
         }
       }
     }
+
+    const withClauses = (extra: Record<string, unknown>[]): Record<string, unknown> => {
+      const composed = { ...baseQuery };
+      const and = [...otherAnd, ...extra];
+      if (and.length > 0) composed.$and = and;
+      return composed;
+    };
+    // Full filter set drives the page. Counts are computed BEFORE paging on
+    // the same filtered set: total respects every filter; each facet count
+    // is disjunctive on its own facet but respects all other filters
+    // (role, search, location, counterpart, and the sibling facet).
+    const query = withClauses([
+      ...(statusClause ? [statusClause] : []),
+      ...(serviceClause ? [serviceClause] : []),
+    ]);
+    const statusCountMatch = withClauses([...(serviceClause ? [serviceClause] : [])]);
+    const serviceCountMatch = withClauses([...(statusClause ? [statusClause] : [])]);
 
     const skip = (parsedPage - 1) * parsedLimit;
 
@@ -1419,16 +1488,50 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       ? Project.distinct('service', { _id: { $in: roleProjectIds } })
       : Promise.resolve([] as string[]);
 
-    const [bookings, total, distinctServices] = await Promise.all([
+    const [bookings, total, distinctServices, statusCountRows, serviceCountRows] = await Promise.all([
       Booking.find(query)
         .populate('customer', 'name email phone customerType isAnonymized deletedAt')
-        .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
-        .populate('project', 'title description pricing category service timeMode subprojects executionDuration professionalId')
-        .sort({ createdAt: -1 })
+        .populate('professional', 'name email username businessInfo professionalLevel adminTags isAnonymized deletedAt')
+        .populate('project', 'title description priceModel pricing category service timeMode subprojects executionDuration professionalId')
+        .sort({ createdAt: -1, _id: -1 })
         .skip(skip)
         .limit(parsedLimit),
       Booking.countDocuments(query),
       distinctServicesPromise,
+      Booking.aggregate([
+        { $match: statusCountMatch },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]),
+      Booking.aggregate([
+        { $match: serviceCountMatch },
+        {
+          $lookup: {
+            from: 'projects',
+            localField: 'project',
+            foreignField: '_id',
+            as: '_countProject',
+          },
+        },
+        { $unwind: { path: '$_countProject', preserveNullAndEmptyArrays: true } },
+        {
+          $project: {
+            serviceValues: {
+              $setUnion: [
+                [{ $ifNull: ['$rfqData.serviceType', null] }],
+                [{ $ifNull: ['$_countProject.service', null] }],
+              ],
+            },
+          },
+        },
+        { $unwind: '$serviceValues' },
+        { $match: { serviceValues: { $ne: null } } },
+        {
+          $group: {
+            _id: '$serviceValues',
+            count: { $sum: 1 },
+          },
+        },
+      ]),
     ]);
 
     const viewerRole = user.role === 'professional' ? 'professional' : 'customer';
@@ -1438,30 +1541,73 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       .filter((value): value is string => Boolean(value)))];
     const projectOwnerRows = projectOwnerIds.length > 0
       ? await User.find({ _id: { $in: projectOwnerIds } })
-          .select('_id isAnonymized deletedAt')
+          .select('_id name username businessInfo professionalLevel adminTags isAnonymized deletedAt')
           .lean()
       : [];
+    const projectOwners = new Map(projectOwnerRows.map((owner: any) => [String(owner._id), owner]));
     const anonymizedProjectOwners = new Set(
       projectOwnerRows
         .filter((owner: any) => owner.isAnonymized || owner.deletedAt)
         .map((owner: any) => String(owner._id)),
     );
+    // Refund facts live on the stored Payment ledger, not on booking.payment.
+    // One batched read for this page's already-authorized bookings only. If
+    // it fails the rows still load, with ledger-dependent money unknown.
+    let refundLedgers: Awaited<ReturnType<typeof loadOverviewRefundLedgers>> | null = null;
+    try {
+      refundLedgers = await loadOverviewRefundLedgers(bookings.map((booking) => booking._id as any));
+    } catch (ledgerError) {
+      console.error('Get bookings: refund ledger read failed; overview money left unknown:', safeErrorSummary(ledgerError));
+    }
     const visibleBookings = bookings.map((booking) => {
-      const visible = bookingForViewer(booking, viewerRole);
-      const projectOwnerId = referenceId((booking.project as any)?.professionalId);
-      if (projectOwnerId && anonymizedProjectOwners.has(projectOwnerId)) {
-        return maskBookingForAnonymizedParties(visible, {
-          professional: true,
-          professionalId: projectOwnerId,
-        });
+      const ownerId = referenceId((booking.project as any)?.professionalId);
+      const source = !booking.professional && ownerId && projectOwners.has(ownerId)
+        ? { ...booking.toObject(), professional: projectOwners.get(ownerId) }
+        : booking;
+      const visible: any = withoutPhantomBookingActivity(bookingForViewer(source, viewerRole));
+      if (visible && typeof visible === "object") visible.priceModel = selectedPriceModel(visible);
+      // The shared bookings table exposes pro-only payout date/amount
+      // columns. Strip the pro payout summary server-side for customers;
+      // UI hiding alone is not a fix. Customer-own totals and refund
+      // records stay intact.
+      if (viewerRole === 'customer' && visible && typeof visible === 'object' && visible.payment) {
+        visible.payment = stripProPayoutSummaryForCustomer(visible.payment);
       }
-      return visible;
+      // Computed, viewer-safe overview money (paid price, settled completion
+      // addition) from the sanitized payload plus the ledger facts.
+      const overview = visible && typeof visible === 'object'
+        ? buildBookingListOverview(
+            visible,
+            viewerRole,
+            refundLedgers?.get(String(booking._id)) ?? OVERVIEW_LEDGER_NOT_LOADED,
+          )
+        : null;
+      const projectOwnerId = referenceId((booking.project as any)?.professionalId);
+      const result = projectOwnerId && anonymizedProjectOwners.has(projectOwnerId)
+        ? maskBookingForAnonymizedParties(visible, {
+            professional: true,
+            professionalId: projectOwnerId,
+          })
+        : visible;
+      if (overview && result && typeof result === 'object') (result as any).overview = overview;
+      return result;
     });
+
+    const statusCounts: Record<string, number> = {};
+    for (const row of statusCountRows || []) {
+      if (row && typeof row._id === 'string' && row._id) statusCounts[row._id] = Number(row.count) || 0;
+    }
+    const serviceCounts: Record<string, number> = {};
+    for (const row of serviceCountRows || []) {
+      if (row && typeof row._id === 'string' && row._id) serviceCounts[row._id] = Number(row.count) || 0;
+    }
 
     return res.status(200).json({
       success: true,
       bookings: visibleBookings,
       distinctServices: distinctServices.filter(Boolean).sort(),
+      statusCounts,
+      serviceCounts,
       pagination: {
         total,
         page: parsedPage,
@@ -1514,10 +1660,10 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
       .populate('customer', isAdmin
         ? 'name username email phone customerType location vatNumber totalSpent businessName timeZone isAnonymized deletedAt'
         : 'name username email phone customerType location businessName timeZone isAnonymized deletedAt')
-      .populate('professional', professionalFields)
+      .populate('professional', `${professionalFields} professionalLevel adminTags`)
       .populate(
         'project',
-        `title description pricing category service team timeMode rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects minResources minOverlapPercentage executionDuration${isAdmin ? ' resources' : ''}`
+        `title description pricing category service team timeMode priceModel rfqQuestions postBookingQuestions professionalId extraOptions termsConditions subprojects minResources minOverlapPercentage executionDuration${isAdmin ? ' resources' : ''}`
       )
       .populate('assignedTeamMembers', 'name email');
 
@@ -1568,7 +1714,7 @@ export const getBookingById = async (req: Request, res: Response, next: NextFunc
             : booking,
           adminAccess!,
         )
-      : bookingForViewer(booking, viewerRole);
+      : bookingForViewer(await bookingWithCustomerProjectPrices(booking, viewerRole, getCheckoutCommissionPercent), viewerRole);
     const maskedBooking = maskBookingForAnonymizedParties(filteredBooking, maskingFlags);
     // Masking must remove target-owned file keys before any presigner sees
     // them. The old order signed first and could return a working URL.
@@ -2181,24 +2327,28 @@ export const getMyDisputes = async (req: Request, res: Response, next: NextFunct
     }
 
     const objectUserId = new mongoose.Types.ObjectId(userId);
-    const bookings = await Booking.find({
+    const page = Math.max(parseInt(String(req.query.page), 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit), 10) || 20, 1), 100);
+    const filter = {
       status: { $in: ['dispute', 'completed', 'cancelled', 'refunded'] },
-      'dispute.raisedAt': { $exists: true },
+      ...RECORDED_DISPUTE_FILTER,
       $or: [{ customer: objectUserId }, { professional: objectUserId }],
-    })
+    };
+    const [bookings, total] = await Promise.all([Booking.find(filter)
       .select('bookingNumber status dispute customer professional project payment scheduledStartDate')
       .populate('customer', 'name isAnonymized deletedAt')
       .populate('professional', 'name isAnonymized deletedAt')
       .populate('project', 'title')
-      .sort({ 'dispute.raisedAt': -1 })
-      .limit(100)
-      .lean();
+      .sort({ 'dispute.raisedAt': -1, _id: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean(), Booking.countDocuments(filter)]);
 
     const visibleBookings = bookings.map((booking: any) =>
       bookingForRequest(booking, req.user)
     );
 
-    return res.json({ success: true, data: { items: visibleBookings } });
+    return res.json({ success: true, data: { items: visibleBookings, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } } });
   } catch (error: any) {
     console.error('Get my disputes error:', error);
     next(error);
@@ -2209,7 +2359,7 @@ export const getMyDisputes = async (req: Request, res: Response, next: NextFunct
 export const getMyPayments = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user?._id ? req.user._id.toString() : undefined;
-    const { status, page = '1', limit = '20' } = req.query;
+    const { status, page = '1', limit = '20', q, search, bookingId, service } = req.query;
 
     if (!userId) {
       return res.status(401).json({ success: false, msg: "Unauthorized" });
@@ -2229,6 +2379,58 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
       query.status = status;
     }
 
+    // Literal search: booking number substring (escaped, never raw regex),
+    // exact booking identity, or counterparty (professional) name.
+    const searchRaw = typeof q === 'string' && q ? q
+      : typeof search === 'string' && search ? search : '';
+    const trimmedSearch = searchRaw.trim().slice(0, 80);
+    if (trimmedSearch) {
+      const escaped = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      const searchOr: Record<string, any>[] = [{ bookingNumber: regex }];
+      if (/^[a-f\d]{24}$/i.test(trimmedSearch)) {
+        searchOr.push({ booking: new mongoose.Types.ObjectId(trimmedSearch) });
+      }
+      // `Payment.bookingNumber` is optional; match the referenced booking too.
+      const bookingsByNumber = await Booking.find({ customer: userId, bookingNumber: regex })
+        .select('_id')
+        .lean();
+      if (bookingsByNumber.length > 0) {
+        searchOr.push({ booking: { $in: bookingsByNumber.map((b: any) => b._id) } });
+      }
+      const matchingProfessionals = await User.find({ role: 'professional', name: regex }).select('_id');
+      if (matchingProfessionals.length > 0) {
+        searchOr.push({ professional: { $in: matchingProfessionals.map(p => p._id) } });
+      }
+      query.$and = (query.$and || []).concat([{ $or: searchOr }]);
+    }
+
+    if (bookingId && typeof bookingId === 'string' && /^[a-f\d]{24}$/i.test(bookingId)) {
+      query.booking = new mongoose.Types.ObjectId(bookingId);
+    }
+
+    // Service filter resolves through the customer's own bookings, so the
+    // payment collection itself is never scanned by service name.
+    if (service && typeof service === 'string' && service !== 'all') {
+      const serviceProjectIds = await Project.find({ service }).select('_id');
+      const serviceBookingFilter: Record<string, any> = {
+        customer: userId,
+        $or: [{ 'rfqData.serviceType': service }],
+      };
+      if (serviceProjectIds.length > 0) {
+        (serviceBookingFilter.$or as any[]).push({ project: { $in: serviceProjectIds.map(p => p._id) } });
+      }
+      const serviceBookingIds = await Booking.find(serviceBookingFilter).select('_id').lean();
+      const serviceIdSet = new Set(serviceBookingIds.map((b: any) => String(b._id)));
+      if (query.booking) {
+        // An explicit booking was also requested: keep it only when it
+        // belongs to the requested service set.
+        query.booking = serviceIdSet.has(String(query.booking)) ? query.booking : { $in: [] };
+      } else {
+        query.booking = { $in: Array.from(serviceIdSet) };
+      }
+    }
+
     const pageNumber = Math.max(parseInt(page as string, 10) || 1, 1);
     const limitNumber = Math.min(Math.max(parseInt(limit as string, 10) || 20, 5), 100);
     const skip = (pageNumber - 1) * limitNumber;
@@ -2237,7 +2439,7 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
       Payment.find(query)
         .populate('booking', 'status bookingType bookingNumber')
         .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
-        .sort({ createdAt: -1 })
+        .sort({ createdAt: -1, _id: -1 })
         .skip(skip)
         .limit(limitNumber)
         .lean(),
@@ -2338,6 +2540,22 @@ export const previewVatDecision = async (req: Request, res: Response) => {
     });
     if (coverageError) return res.status(400).json({ success: false, msg: coverageError });
 
+    // A stored reserved answer survives a classification change; the current
+    // classification decides whether it may still feed a VAT rule.
+    const previewConfigId = serviceConfigurationId || project?.serviceConfigurationId;
+    let previewArticle47Classification: unknown;
+    if (previewConfigId && mongoose.Types.ObjectId.isValid(String(previewConfigId))) {
+      const previewConfig = await ServiceConfiguration.findById(previewConfigId)
+        .select("vatManagement.article47Classification")
+        .lean();
+      previewArticle47Classification = (previewConfig as any)?.vatManagement?.article47Classification;
+    }
+    const previewProfessionalAnswers = Object.fromEntries(
+      Object.entries(professionalAnswersFromProject(project)).filter(([fieldName]) =>
+        !(String(previewArticle47Classification || "").toLowerCase() !== "project_dependent"
+          && fieldName === ARTICLE_47_FIELD_NAME))
+    );
+
     const decision = await resolveVatDecisionFromConfig({
       serviceConfigurationId: serviceConfigurationId || project?.serviceConfigurationId,
       category: projectService?.category || project?.category,
@@ -2347,7 +2565,7 @@ export const previewVatDecision = async (req: Request, res: Response) => {
       bookingCountry: previewCountry,
       businessCountry: firstVatCountry(customer.companyAddress?.country, customer.location?.country),
       answers: normalizedVatAnswers,
-      professionalAnswers: professionalAnswersFromProject(project),
+      professionalAnswers: previewProfessionalAnswers,
       customerType: customer.customerType || "individual",
       vatNumber: customer.vatNumber,
       isVatVerified: customer.isVatVerified,

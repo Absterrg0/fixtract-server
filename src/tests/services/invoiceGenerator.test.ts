@@ -362,3 +362,86 @@ describe("invoice PDF artifacts", () => {
     });
   });
 });
+
+describe('referral customer invoice and UBL accounting', () => {
+  const issuedAt = new Date('2026-11-05T12:00:00Z');
+  const round = (value: number) => Math.round(value * 100) / 100;
+  const bookingFor = (original: number, referral: number, loyalty = 0, code = 0): any => {
+    const net = round(original - referral - loyalty - code);
+    return {
+      _id: 'referral-invoice', bookingNumber: 'BK-REFERRAL',
+      customer: { name: 'Customer', email: 'customer@example.test', location: { country: 'BE' } },
+      professional: { name: 'Supplier', businessInfo: { country: 'BE' } },
+      quote: { amount: original, description: 'Service' },
+      payment: {
+        currency: 'EUR', status: 'pending', amount: net, netAmount: net,
+        vatRate: 21, vatAmount: round(net * 0.21), totalWithVat: round(net * 1.21),
+        professionalPayout: original,
+        discount: { referralDiscountAmount: referral, loyaltyAmount: loyalty, codeDiscountAmount: code, totalDiscount: referral + loyalty + code },
+      },
+      __supplierVatDecision: { reverseCharge: false, appliedRate: 21 },
+    };
+  };
+  beforeEach(() => {
+    mocks.platformSettings.mockResolvedValue({ companyAddress: { name: 'Fixtract', country: 'BE' } });
+    mocks.invoiceSequence.mockResolvedValue({ value: 1 });
+  });
+
+  it.each([
+    ['referral alone', 100, 10, 0, 0],
+    ['referral with loyalty and code', 100, 10, 5, 7],
+    ['first prorated milestone', 40, 4, 2, 2.8],
+    ['second prorated milestone', 60, 6, 3, 4.2],
+  ])('%s: full service minus discounts equals the paid amount on invoice and credit note', async (_label, original, referral, loyalty, code) => {
+    const { buildUblInvoiceXml, buildUblCreditNoteXml } = await import('../../services/invoiceArtifacts');
+    const booking = bookingFor(Number(original), Number(referral), Number(loyalty), Number(code));
+    for (const creditNote of [false, true]) {
+      const { pdfBuffer } = await generateBookingInvoice(booking, { kind: 'customer', creditNote });
+      const text = concatenatePdfHexText(extractPdfStreamText(pdfBuffer));
+      expect(text).toContain('Referral discount');
+      expect(text).toContain(Number(original).toFixed(2));
+      expect(text).toContain(Number(referral).toFixed(2));
+      expect(text).toContain(booking.payment.totalWithVat.toFixed(2));
+      const xml = (creditNote ? buildUblCreditNoteXml : buildUblInvoiceXml)(booking, 'FIX-REFERRAL', issuedAt, { selfBilling: false, platform: { country: 'BE' } });
+      expect(xml).toContain('Referral discount');
+      const sign = creditNote ? -1 : 1;
+      expect(xml).toContain(`<cbc:TaxInclusiveAmount currencyID="EUR">${(booking.payment.totalWithVat * sign).toFixed(2)}</cbc:TaxInclusiveAmount>`);
+      // Sum the actual rendered UBL lines, excluding the monetary-total summary.
+      const lineXml = xml.match(/<cac:(?:InvoiceLine|CreditNoteLine)>[\s\S]*?<\/cac:(?:InvoiceLine|CreditNoteLine)>/g)!;
+      const amounts = lineXml.map(line => Number(line.match(/<cbc:LineExtensionAmount[^>]*>([^<]+)/)![1]));
+      expect(amounts[0]).toBe(Number(original) * sign);
+      expect(round(amounts.reduce((sum, value) => sum + value, 0))).toBe(booking.payment.netAmount * sign);
+      expect(round((Number(original) - Number(referral) - Number(loyalty) - Number(code)) * 1.21)).toBe(booking.payment.totalWithVat);
+    }
+  });
+
+  it('does not put platform-absorbed referral savings on supplier invoice or UBL', async () => {
+    const { buildUblInvoiceXml } = await import('../../services/invoiceArtifacts');
+    const booking = bookingFor(100, 10, 5, 7);
+    const without = structuredClone(booking);
+    without.payment.discount.referralDiscountAmount = 0;
+    for (const creditNote of [false, true]) {
+      const supplier = await generateBookingInvoice(booking, { kind: 'self_bill', creditNote });
+      const control = await generateBookingInvoice(without, { kind: 'self_bill', creditNote });
+      const text = concatenatePdfHexText(extractPdfStreamText(supplier.pdfBuffer));
+      expect(text).not.toContain('Referral discount');
+      expect(text).toBe(concatenatePdfHexText(extractPdfStreamText(control.pdfBuffer)));
+      const options = { platform: { country: 'BE' }, creditNote, selfBilling: true };
+      expect(buildUblInvoiceXml(booking, 'SUP-1', issuedAt, options)).toBe(buildUblInvoiceXml(without, 'SUP-1', issuedAt, options));
+    }
+  });
+
+  it('keeps the legacy invoice and UBL exactly unchanged when referral attribution is absent versus zero', async () => {
+    const { buildUblInvoiceXml, buildUblCreditNoteXml } = await import('../../services/invoiceArtifacts');
+    const modern = bookingFor(100, 0, 5, 7);
+    const legacy = structuredClone(modern);
+    delete legacy.payment.discount.referralDiscountAmount;
+    for (const creditNote of [false, true]) {
+      const oldPdf = await generateBookingInvoice(legacy, { kind: 'customer', creditNote });
+      const newPdf = await generateBookingInvoice(modern, { kind: 'customer', creditNote });
+      expect(extractPdfStreamText(newPdf.pdfBuffer)).toBe(extractPdfStreamText(oldPdf.pdfBuffer));
+      const build = creditNote ? buildUblCreditNoteXml : buildUblInvoiceXml;
+      expect(build(modern, 'FIX-1', issuedAt, { selfBilling: false, platform: { country: 'BE' } })).toBe(build(legacy, 'FIX-1', issuedAt, { selfBilling: false, platform: { country: 'BE' } }));
+    }
+  });
+});

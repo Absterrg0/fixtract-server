@@ -5,6 +5,10 @@
 
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
+import { stripe } from '../../services/stripe';
+import { getReferralReservationToken, releaseReferralReservation } from '../../utils/referralDiscount';
+import { releaseUnpaidReferralSafely } from '../../utils/releaseUnpaidReferral';
+import { quoteAmountIncludesSelectedExtras } from '../../utils/payment';
 import Booking, { BookingStatus } from '../../models/booking';
 import Project from '../../models/project';
 import PlatformSettings from '../../models/platformSettings';
@@ -21,6 +25,7 @@ import {
   getBookingScheduleOptions,
   validateProjectScheduleSelection,
 } from '../../utils/scheduleEngine';
+import { applyReschedulePlanReset } from '../../utils/applyReschedulePlanReset';
 import {
   addWarrantyDuration,
   getBookingWarrantyDuration,
@@ -202,9 +207,11 @@ const snapshotCurrentSchedule = (booking: any) => ({
   scheduledStartTime: booking.scheduledStartTime,
   scheduledEndTime: booking.scheduledEndTime,
   assignedTeamMembers: Array.isArray(booking.assignedTeamMembers) ? booking.assignedTeamMembers : undefined,
+  resourcePlan: booking.resourcePlan,
 });
 
 const applyScheduleFields = (booking: any, schedule: Record<string, any>) => {
+  if (Array.isArray(schedule.resourcePlan)) booking.resourcePlan = schedule.resourcePlan;
   booking.scheduledStartDate = schedule.scheduledStartDate;
   booking.scheduledExecutionEndDate = schedule.scheduledExecutionEndDate;
   booking.scheduledBufferStartDate = schedule.scheduledBufferStartDate;
@@ -217,18 +224,21 @@ const applyScheduleFields = (booking: any, schedule: Record<string, any>) => {
   }
 };
 
+
 export const buildScheduleUpdatePayload = async ({
   booking,
   scheduledStartDate,
   scheduledStartTime,
   hasExplicitExtraOptions = false,
   selectedExtraOptions,
+  requestTimeZone,
 }: {
   booking: any;
   scheduledStartDate: string;
   scheduledStartTime?: string;
   hasExplicitExtraOptions?: boolean;
   selectedExtraOptions?: unknown;
+  requestTimeZone?: unknown;
 }): Promise<
   | { success: true; data: Record<string, any> }
   | { success: false; status: number; error: { code: string; message: string } }
@@ -281,6 +291,9 @@ export const buildScheduleUpdatePayload = async ({
       scheduleData.scheduledBufferUnit = undefined;
       scheduleData.scheduledStartTime = typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined;
       scheduleData.scheduledEndTime = undefined;
+      // Should-fix 4: record the resolved zone even for date-only RFQ
+      // schedules so details/timeline carry it.
+      scheduleData.scheduleTimeZone = resolveScheduleTimeZone(requestTimeZone) || undefined;
       if (Array.isArray(booking.assignedTeamMembers) && booking.assignedTeamMembers.length > 0) {
         scheduleData.assignedTeamMembers = booking.assignedTeamMembers;
       }
@@ -296,6 +309,7 @@ export const buildScheduleUpdatePayload = async ({
         startTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
         customerBlocks: booking.customerBlocks,
         excludeBookingId,
+        requestTimeZone,
       });
 
       if (!validation.valid) {
@@ -317,6 +331,7 @@ export const buildScheduleUpdatePayload = async ({
         customerBlocks: booking.customerBlocks,
         ...scheduleOptions,
         excludeBookingId,
+        requestTimeZone,
       });
 
       if (!window) {
@@ -327,6 +342,7 @@ export const buildScheduleUpdatePayload = async ({
         };
       }
 
+      scheduleData.resourcePlan = window.resourcePlan;
       scheduleData.scheduledStartDate = window.scheduledStartDate;
       scheduleData.scheduledExecutionEndDate = window.scheduledExecutionEndDate;
       scheduleData.scheduledBufferStartDate = window.scheduledBufferStartDate;
@@ -334,6 +350,9 @@ export const buildScheduleUpdatePayload = async ({
       scheduleData.scheduledBufferUnit = window.scheduledBufferUnit;
       scheduleData.scheduledStartTime = window.scheduledStartTime;
       scheduleData.scheduledEndTime = window.scheduledEndTime;
+      // Should-fix 4: persist the engine-resolved conversion zone so the
+      // details/timeline carry it even when the client sends no timeZone.
+      scheduleData.scheduleTimeZone = window.timeZone || undefined;
       if (window.assignedTeamMembers?.length) {
         scheduleData.assignedTeamMembers = window.assignedTeamMembers;
       } else if (Array.isArray(booking.assignedTeamMembers) && booking.assignedTeamMembers.length > 0) {
@@ -368,6 +387,7 @@ export const buildScheduleUpdatePayload = async ({
       scheduledStartTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
       scheduledEndTime: booking.scheduledEndTime,
       assignedTeamMembers: Array.isArray(booking.assignedTeamMembers) ? booking.assignedTeamMembers : undefined,
+      scheduleTimeZone: resolveScheduleTimeZone(requestTimeZone) || undefined,
     },
   };
 };
@@ -951,6 +971,8 @@ export const updateBookingStatusWithPayment = async (req: Request, res: Response
       await booking.save(session ? { session } : undefined);
     });
 
+    if (requestedStatus === 'cancelled') await releaseUnpaidReferralSafely(booking, 'booking cancellation');
+
     if (['cancelled', 'refunded', 'completed'].includes(requestedStatus)) {
       try {
         await releaseBookingCalendar(booking._id);
@@ -1197,16 +1219,40 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Only the customer can set the schedule' } });
     }
 
-    if (!['quote_accepted'].includes(booking.status)) {
-      return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'Schedule can only be set for accepted quotes' } });
+    if (!['quote_accepted', 'payment_pending'].includes(booking.status)) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'Only unpaid accepted bookings can be edited' } });
+    }
+
+    if ((booking.payment?.status && !['pending', 'failed'].includes(booking.payment.status)) ||
+        booking.milestonePayments?.some((milestone) => milestone.status === 'paid')) {
+      return res.status(409).json({ success: false, error: { code: 'PAYMENT_ALREADY_PROCESSED', message: 'Paid bookings must use the reschedule flow' } });
+    }
+    const expectedWrite = {
+      status: booking.status,
+      updatedAt: booking.updatedAt,
+      'payment.stripePaymentIntentId': booking.payment?.stripePaymentIntentId ?? null,
+    };
+    // Accepted quotations and legacy all-in quotes cannot safely be repriced
+    // from today's catalog. Their schedule is editable; options stay agreed.
+    const optionsLocked = Boolean(booking.quoteVersions?.length || quoteAmountIncludesSelectedExtras(booking));
+    if (hasExplicitExtraOptions && optionsLocked) {
+      const project = booking.project as any;
+      const requested = normalizeSelectedExtraOptions(selectedExtraOptions, project);
+      const currentIds = (booking.selectedExtraOptions || []).map((option: any) => String(option.extraOptionId)).sort();
+      if (JSON.stringify(requested.map(option => String(option.extraOptionId)).sort()) !== JSON.stringify(currentIds)) {
+        return res.status(409).json({ success: false, error: { code: 'QUOTE_OPTIONS_LOCKED', message: 'Changing options on an agreed quotation requires a revised quotation' } });
+      }
     }
 
     const scheduleUpdate = await buildScheduleUpdatePayload({
       booking,
       scheduledStartDate,
       scheduledStartTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
-      hasExplicitExtraOptions,
+      hasExplicitExtraOptions: hasExplicitExtraOptions && !optionsLocked,
       selectedExtraOptions,
+      // Client bug list #23b: convert the wall-clock time in the
+      // professional's effective zone, not silently in UTC.
+      requestTimeZone: (req.body as any)?.timeZone || (req.body as any)?.scheduleTimeZone,
     });
 
     if (!scheduleUpdate.success) {
@@ -1217,7 +1263,7 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
     if (typeof scheduleUpdate.data.selectedSubprojectIndex === 'number') {
       booking.selectedSubprojectIndex = scheduleUpdate.data.selectedSubprojectIndex;
     }
-    if (hasExplicitExtraOptions) {
+    if (hasExplicitExtraOptions && !optionsLocked) {
       booking.selectedExtraOptions = scheduleUpdate.data.selectedExtraOptions;
     }
 
@@ -1226,7 +1272,9 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       booking.rfqData.additionalNotes = additionalNotes;
     }
 
-    const scheduleTimeZone = resolveScheduleTimeZone(
+    // Should-fix 4: persist the engine-resolved conversion zone (the window
+    // already falls back to the request zone), not only a client-sent zone.
+    const scheduleTimeZone = scheduleUpdate.data.scheduleTimeZone || resolveScheduleTimeZone(
       (req.body as any)?.timeZone || (req.body as any)?.scheduleTimeZone,
     );
     if (scheduleTimeZone) {
@@ -1273,11 +1321,37 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       });
     }
 
+    const oldIntentId = booking.payment?.stripePaymentIntentId;
+    const oldReservationToken = oldIntentId
+      ? booking.payment?.discount?.referralReservationToken
+      : await getReferralReservationToken(String(booking._id));
+    if (oldIntentId) {
+      // Never edit while a charge is processing, authorized, or succeeded.
+      // A successful cancellation is authority to invalidate the checkout.
+      const intent = await stripe.paymentIntents.retrieve(oldIntentId);
+      if (intent.status !== 'canceled') {
+        if (!['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(intent.status)) {
+          return res.status(409).json({ success: false, error: { code: 'PAYMENT_IN_PROGRESS', message: 'Payment is processing or already paid. Refresh the booking before editing.' } });
+        }
+        const cancelled = await stripe.paymentIntents.cancel(oldIntentId);
+        if (cancelled.status !== 'canceled') throw new Error('Payment cancellation was not confirmed');
+      }
+    }
+    // The next checkout recalculates totals, VAT and discounts. A revision
+    // prevents Stripe's idempotency cache returning the cancelled intent even
+    // when the edited schedule has the same price.
+    booking.payment = undefined;
+    booking.status = 'quote_accepted';
+    booking.checkoutRevision = (booking.checkoutRevision || 0) + 1;
+    booking.$where = expectedWrite;
+
     const updatedBooking = await withAnonymizationWriteFence([userId], async (session) => {
       await replaceBookingCalendar(candidate as any, session);
       await booking.save(session ? { session } : undefined);
       return booking;
     });
+
+    await releaseReferralReservation(String(booking._id), oldReservationToken);
 
     try {
       const professional = booking.professional as any;
@@ -1306,6 +1380,9 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       data: { message: 'Schedule set successfully', booking: bookingForRequest(updatedBooking, (req as any).user) }
     });
   } catch (error: any) {
+    if (error?.name === 'DocumentNotFoundError') {
+      return res.status(409).json({ success: false, error: { code: 'BOOKING_CHANGED', message: 'The booking or payment changed. Refresh before editing.' } });
+    }
     if (error?.status === 409 || error?.code === 'SCHEDULE_CONFLICT') {
       return res.status(409).json({
         success: false,
@@ -1380,6 +1457,9 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
       booking,
       scheduledStartDate,
       scheduledStartTime: typeof scheduledStartTime === 'string' ? scheduledStartTime : undefined,
+      // Client bug list #23c: same effective-zone conversion as creation, so
+      // a reschedule to 12:00 lands on the same instant the calendar shows.
+      requestTimeZone: (req.body as any)?.timeZone || (req.body as any)?.scheduleTimeZone,
     });
 
     if (!proposedSchedule.success) {
@@ -1399,7 +1479,8 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
         String(booking._id),
         proposedTeamMembers as any,
         proposedStart,
-        proposedEnd
+        proposedEnd,
+        proposedSchedule.data.resourcePlan,
       );
       if (conflicts.length > 0) {
         return res.status(409).json({
@@ -1431,6 +1512,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
         scheduledStartTime: proposedSchedule.data.scheduledStartTime,
         scheduledEndTime: proposedSchedule.data.scheduledEndTime,
         assignedTeamMembers: proposedSchedule.data.assignedTeamMembers,
+        resourcePlan: proposedSchedule.data.resourcePlan,
       },
     } as any;
     booking.statusHistory = booking.statusHistory || [];
@@ -1466,6 +1548,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
             oldDate,
             newDate,
             reason: normalizedReason,
+            ...(normalizedDescription ? { description: normalizedDescription } : {}),
           },
         });
       } else if (isCustomer && professionalId) {
@@ -1481,6 +1564,7 @@ export const requestBookingReschedule = async (req: Request, res: Response) => {
             oldDate,
             newDate,
             reason: normalizedReason,
+            ...(normalizedDescription ? { description: normalizedDescription } : {}),
           },
         });
       }
@@ -1527,6 +1611,19 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       return res.status(403).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Only the customer can respond to a rescheduling request' } });
     }
 
+    // Client bug list #9c (+ review nit): once the request is disputed,
+    // accept/decline stay rejected with the explicit 409 — checked first so
+    // post-dispute responses never report the generic 400.
+    const openRescheduleDispute = Boolean(
+      booking.dispute && !booking.dispute.resolvedAt && booking.dispute.type === 'reschedule',
+    );
+    if (openRescheduleDispute && normalizedAction !== 'dispute') {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'RESCHEDULE_DISPUTED', message: 'This rescheduling request was disputed and can no longer be accepted or declined' },
+      });
+    }
+
     if (booking.status !== 'rescheduling_requested' || booking.rescheduleRequest?.status !== 'pending') {
       return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'There is no pending rescheduling request for this booking' } });
     }
@@ -1549,7 +1646,8 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
           String(booking._id),
           proposedTeamMembers as any,
           proposedStart as Date,
-          proposedEnd as Date
+          proposedEnd as Date,
+          booking.rescheduleRequest.proposedSchedule?.resourcePlan,
         );
         if (conflicts.length > 0) {
           return res.status(409).json({
@@ -1567,7 +1665,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
             _id: booking._id,
             professional: (booking.professional as any)?._id || booking.professional,
             assignedTeamMembers: proposedTeamMembers as any[],
-            resourcePlan: booking.resourcePlan || [],
+            resourcePlan: booking.rescheduleRequest.proposedSchedule?.resourcePlan || [],
             scheduledStartDate: proposedStart as Date,
             scheduledExecutionEndDate: booking.rescheduleRequest.proposedSchedule?.scheduledExecutionEndDate,
             scheduledBufferEndDate: booking.rescheduleRequest.proposedSchedule?.scheduledBufferEndDate,
@@ -1586,15 +1684,6 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       }
 
       const proposedSchedule = booking.rescheduleRequest.proposedSchedule || {};
-      const calendarCandidate = {
-        _id: booking._id,
-        professional: (booking.professional as any)?._id || booking.professional,
-        assignedTeamMembers: proposedTeamMembers,
-        resourcePlan: booking.resourcePlan || [],
-        scheduledStartDate: proposedSchedule.scheduledStartDate,
-        scheduledExecutionEndDate: proposedSchedule.scheduledExecutionEndDate,
-        scheduledBufferEndDate: proposedSchedule.scheduledBufferEndDate,
-      };
       // Prepare the document before the transaction. The driver may replay the
       // callback after a transient conflict; only the save may re-run, so the
       // additive status-history entry is created exactly once.
@@ -1602,7 +1691,20 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       booking.rescheduleRequest!.respondedBy = (req as any).user._id;
       if (responseNote !== undefined) booking.rescheduleRequest!.responseNote = responseNote;
       booking.rescheduleRequest!.status = 'accepted';
+      const previousResourcePlan = booking.resourcePlan;
       applyScheduleFields(booking, proposedSchedule || {});
+      // Client bug list #9b: the new start date overrules earlier manual
+      // planning (day-mode only; hour-mode planning stays untouched).
+      await applyReschedulePlanReset(booking, (req as any).user._id, proposedSchedule.resourcePlan, previousResourcePlan);
+      const calendarCandidate = {
+        _id: booking._id,
+        professional: (booking.professional as any)?._id || booking.professional,
+        assignedTeamMembers: proposedTeamMembers,
+        resourcePlan: booking.resourcePlan || [],
+        scheduledStartDate: proposedSchedule.scheduledStartDate,
+        scheduledExecutionEndDate: booking.scheduledExecutionEndDate,
+        scheduledBufferEndDate: booking.scheduledBufferEndDate,
+      };
       booking.status = 'booked';
       booking.statusHistory = booking.statusHistory || [];
       booking.statusHistory.push(
@@ -1667,7 +1769,9 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       );
       releaseScheduleSlots(booking, (req as any).user._id);
     } else if (normalizedAction === 'dispute') {
-      booking.rescheduleRequest!.status = 'declined';
+      // Review follow-up: the live subdoc must agree with the history entry
+      // and response DTO on the terminal 'disputed' state (never 'declined').
+      booking.rescheduleRequest!.status = 'disputed';
       const disputeReason = typeof reason === 'string' && reason.trim()
         ? reason.trim()
         : 'Reschedule dispute';
@@ -1700,7 +1804,7 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
       note: booking.rescheduleRequest!.note,
       previousSchedule: booking.rescheduleRequest!.previousSchedule,
       proposedSchedule: booking.rescheduleRequest!.proposedSchedule,
-      status: normalizedAction === 'accept' ? 'accepted' : 'declined',
+      status: normalizedAction === 'accept' ? 'accepted' : normalizedAction === 'dispute' ? 'disputed' : 'declined',
       respondedAt: booking.rescheduleRequest!.respondedAt,
       respondedBy: booking.rescheduleRequest!.respondedBy,
       responseNote: booking.rescheduleRequest!.responseNote,
@@ -1710,6 +1814,8 @@ export const respondToBookingReschedule = async (req: Request, res: Response) =>
     await withAnonymizationWriteFence([userId], async (session) => {
       await booking.save(session ? { session } : undefined);
     });
+
+    if (booking.status === 'cancelled') await releaseUnpaidReferralSafely(booking, 'reschedule decline');
 
     if (normalizedAction !== 'accept' && ['cancelled', 'refunded'].includes(booking.status)) {
       try {
@@ -1878,6 +1984,7 @@ export const extendBookingExecution = async (req: Request, res: Response) => {
           ] as any[],
           booking.scheduledStartDate,
           intervalEnd,
+          candidate.resourcePlan,
         )
       : [];
     const conflicts = [...calendarConflicts, ...bookingConflicts];

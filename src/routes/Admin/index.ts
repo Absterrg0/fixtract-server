@@ -68,6 +68,7 @@ import {
   getPlatformSettings,
   updatePlatformSettings,
   updateSupportChatSetting,
+  updateAutoConversionSetting,
 } from "../../handlers/Admin/platformSettings";
 import {
   getAdminReviews,
@@ -83,6 +84,7 @@ import {
   uploadDisputeResolutionAttachment,
 } from "../../handlers/Admin/disputeManagement";
 import { deleteUser } from "../../handlers/Admin/userDeletion";
+import { getAdminNavigationBadges } from "../../handlers/Admin/navigationBadges";
 import {
   getFavoritesOverview,
   listAllFavorites,
@@ -241,6 +243,9 @@ adminRouter.use(enforceAdminRoutePermission);
 
 // Staff RBAC management (super only via staff.manage — except /access for any admin)
 adminRouter.route('/access').get(getMyAdminAccess);
+// Navigation badges: any admin may ask; the handler returns only the queue
+// counts this admin's effective access can read (per-queue checks).
+adminRouter.route('/navigation/badges').get(getAdminNavigationBadges);
 adminRouter.route('/staff/permissions').get(getAdminRoleAccess).put(updateAdminRoleAccess);
 adminRouter.route('/staff').get(listStaff).post(inviteStaff);
 adminRouter.route('/staff/:staffId/resend-invite').post(resendStaffInvite);
@@ -335,6 +340,7 @@ adminRouter.route('/favorites/:id').delete(deleteFavorite);
 // Platform settings routes
 adminRouter.route('/platform-settings').get(getPlatformSettings).put(updatePlatformSettings);
 adminRouter.route('/platform-settings/support-chat').patch(updateSupportChatSetting);
+adminRouter.route('/platform-settings/auto-conversion').patch(updateAutoConversionSetting);
 adminRouter.route('/platform-settings/odoo-companies').get(getOdooCompanies);
 
 // Site settings (social media links etc)

@@ -4,6 +4,9 @@ import User from "../../models/user";
 import { popularServiceMatch } from "../../utils/popularServiceMatch";
 import { aggregateProjectRatings } from "./aggregateRatings";
 import { eligibleProjectOwnerStages } from "./eligibleOwner";
+import { signProjectMediaUrl } from "../../utils/projectMedia";
+import { getCheckoutCommissionPercent } from "../../utils/checkoutCommission";
+import { startingPriceForView, viewerSeesBasePricing } from "../../utils/customerPriceView";
 
 /**
  * Get popular published projects for the homepage / service carousels.
@@ -188,7 +191,16 @@ export const getPopularProjects = async (req: Request, res: Response) => {
     const projectIds = projects.map((p: any) => p._id);
     const ratingMap = await aggregateProjectRatings(projectIds);
 
-    const results = projects.map((project: any) => {
+    const signedAt = new Date();
+    const coverImages = await Promise.all(
+      projects.map((project: any) => {
+        const image = project.media?.images?.[0];
+        return image ? signProjectMediaUrl(image, project.professionalId, signedAt) : null;
+      })
+    );
+
+    const commissionForView = await getCheckoutCommissionPercent();
+    const results = projects.map((project: any, index: number) => {
       const profId = project.professionalId?.toString();
       const professional = profId ? professionalMap.get(profId) : null;
       const ratings = ratingMap.get(project._id.toString()) || {
@@ -196,37 +208,19 @@ export const getPopularProjects = async (req: Request, res: Response) => {
         totalReviews: 0,
       };
 
-      // Get the lowest starting price from subprojects
-      let startingPrice: number | null = null;
-      let priceType: string = "rfq";
-      if (project.subprojects?.length) {
-        for (const sp of project.subprojects) {
-          if (sp.pricing?.type === "fixed" && sp.pricing.amount != null) {
-            if (startingPrice === null || sp.pricing.amount < startingPrice) {
-              startingPrice = sp.pricing.amount;
-              priceType = "fixed";
-            }
-          } else if (
-            sp.pricing?.type === "unit" &&
-            sp.pricing.amount != null
-          ) {
-            if (
-              startingPrice === null ||
-              sp.pricing.amount < startingPrice
-            ) {
-              startingPrice = sp.pricing.amount;
-              priceType = "unit";
-            }
-          }
-        }
-      }
+      // Lowest package price for the card. Customers and anonymous visitors get the customer price, never the base.
+      const { startingPrice, priceType } = startingPriceForView(
+        project.subprojects,
+        viewerSeesBasePricing(req.user, project.professionalId, res.locals?.canReadPayments === true),
+        commissionForView,
+      );
 
       return {
         _id: project._id,
         title: project.title,
         category: project.category,
         service: project.service,
-        image: project.media?.images?.[0] || null,
+        image: (coverImages[index] as string | null) || null,
         location: project.distance?.address || null,
         startingPrice,
         priceType,

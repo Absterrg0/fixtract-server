@@ -15,6 +15,7 @@ import {
   buildTransferIdempotencyKey,
   generateIdempotencyKey,
   convertToStripeAmount,
+  convertFromStripeAmount,
   calculateProfessionalPayout,
   calculatePlatformCommission,
   calculateStripeFee,
@@ -26,7 +27,10 @@ import {
   computeGrossBookingAmount,
   quoteAmountIncludesSelectedExtras,
 } from '../../utils/payment';
+import { getCheckoutCommissionPercent } from '../../utils/checkoutCommission';
+import { buildMilestoneChargePlan } from '../../utils/milestoneCharges';
 import { canRetryTransfer, getTransferStatus, requireProfessionalPayout } from '../../utils/paymentSafety';
+import { bindReferralReservation, releaseReferralReservation, withReferralDiscount } from '../../utils/referralDiscount';
 import { calculateVAT } from '../../utils/vat';
 import { calculateVatFromPricingLines } from '../../utils/vatLineCalculation';
 import { parseVatCountryCode, requiresVatRfqReview } from '../../utils/vatManagement';
@@ -36,10 +40,12 @@ import {
   recordBasePaymentRefund,
 } from '../../utils/paymentRefundLedger';
 import { summarizeBaseRefunds } from '../../utils/paymentRefunds';
+import { isBookingStarted, preparePartialRefundCancellation } from '../../utils/refundFinalization';
 import { calculateAutoDiscount, validateDiscountCode } from '../../utils/discountEngine';
 // deductPoints moved to webhook handler (handlePaymentIntentSucceeded)
 import { calculateDiscountedPayouts } from '../../utils/discountEngine';
-import { commissionedQuoteAmount } from '../../utils/customerPricing';
+import { recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger';
+import { commissionedPricingLines, commissionedQuoteAmount } from '../../utils/customerPricing';
 import { auditLog } from '../../utils/auditLogger';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
 
@@ -48,6 +54,18 @@ const extractParticipantIds = (booking: any, professionalOverride?: any) => {
   const professionalSource = professionalOverride || booking.professional;
   const professionalId = (professionalSource as any)?._id || professionalSource || undefined;
   return { customerId, professionalId };
+};
+
+/**
+ * VAT-inclusive amount actually paid by the customer, matching what booking
+ * details and the invoice show. `payment.amount` is the pre-VAT net and must
+ * never be presented as the paid amount.
+ */
+const grossPaidAmount = (payment: any): number | undefined => {
+  const gross = Number(payment?.totalWithVat);
+  if (Number.isFinite(gross)) return gross;
+  const net = Number(payment?.amount);
+  return Number.isFinite(net) ? net : undefined;
 };
 
 const ALLOWED_PAYMENT_OVERRIDE_KEYS = new Set([
@@ -205,7 +223,7 @@ const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {
   };
 };
 
-const getQuotePricingVatCalculation = (booking: any, amount: number) => {
+export const getQuotePricingVatCalculation = (booking: any, amount: number, commissionPercent: number) => {
   const quoteVersions = Array.isArray(booking.quoteVersions) ? booking.quoteVersions : [];
   const currentVersion = quoteVersions.find((version: any) => version.version === booking.currentQuoteVersion)
     || quoteVersions[quoteVersions.length - 1];
@@ -225,9 +243,37 @@ const getQuotePricingVatCalculation = (booking: any, amount: number) => {
   if (!hasCompleteVatMetadata) {
     return null;
   }
-  const originalLineNet = pricingLines.reduce((sum: number, line: any) => sum + Number(line.price), 0);
-  const discountedNet = originalLineNet > 0 && amount > 0 && amount <= originalLineNet ? amount : undefined;
-  return calculateVatFromPricingLines(pricingLines, discountedNet);
+  // VAT is calculated on the price AFTER commission is included, mirroring
+  // the recorded quote customer totals: commission each line first, then
+  // allocate VAT across the customer-facing lines.
+  const proTotal = pricingLines.reduce((sum: number, line: any) => sum + Number(line.price), 0);
+  const customerNet = commissionedQuoteAmount(proTotal, (booking as any).checkoutSnapshot, commissionPercent);
+  const commissionedLines = commissionedPricingLines(
+    pricingLines.map((line: any) => ({
+      description: String(line.description || ''),
+      price: Number(line.price),
+      vatRate: Number(line.vatRate),
+      vatCountry: line.vatCountry,
+      vatLabel: line.vatLabel,
+    })),
+    customerNet,
+    commissionPercent,
+  );
+  if (!quoteAmountIncludesSelectedExtras(booking)) {
+    const options = (booking.selectedExtraOptions || []).filter((option: any) => Number(option.bookedPrice) > 0);
+    const optionRate = Number(booking.vatDecision?.appliedRate ?? booking.payment?.vatRate ?? pricingLines[0].vatRate);
+    if (!Number.isFinite(optionRate) || optionRate < 0 || optionRate > 100) return null;
+    const optionsTotal = options.reduce((sum: number, option: any) => sum + Number(option.bookedPrice), 0);
+    commissionedLines.push(...commissionedPricingLines(options.map((option: any) => ({
+      description: String(option.name || option.extraOptionId || 'Option'),
+      price: Number(option.bookedPrice), vatRate: optionRate,
+      vatCountry: booking.vatDecision?.country,
+    })), commissionedQuoteAmount(optionsTotal, undefined, commissionPercent), commissionPercent));
+  }
+  const commissionedNet = commissionedLines.reduce((sum, line) => sum + Number(line.price), 0);
+  if (amount > commissionedNet + 0.005) return null;
+  const discountedNet = commissionedNet > 0 && amount > 0 ? amount : undefined;
+  return calculateVatFromPricingLines(commissionedLines, discountedNet);
 };
 
 const clamp = (value: number, min: number, max: number): number => Math.min(Math.max(value, min), max);
@@ -297,6 +343,8 @@ export const createPaymentIntent = async (
   requestedMilestoneIndex?: number,
   discountCode?: string
 ): Promise<CreatePaymentIntentResult> => {
+  let createdIntentId: string | undefined;
+  let reservationToken: string | undefined;
   try {
     const booking = await Booking.findById(bookingId)
       .populate('customer')
@@ -306,6 +354,8 @@ export const createPaymentIntent = async (
     if (!booking) {
       return { success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } };
     }
+
+    const expectedWrite = { updatedAt: booking.updatedAt, status: booking.status, 'payment.stripePaymentIntentId': booking.payment?.stripePaymentIntentId ?? null };
 
     // Verify customer
     if (booking.customer._id.toString() !== userId) {
@@ -371,8 +421,7 @@ export const createPaymentIntent = async (
     // Fetch commission rate from DB early so milestone amounts include it
     let commissionPercent: number;
     try {
-      const platformConfig = await PlatformSettings.getCurrentConfig();
-      commissionPercent = platformConfig.commissionPercent;
+      commissionPercent = await getCheckoutCommissionPercent();
     } catch (configError) {
       console.warn('Failed to fetch platform config from DB, falling back to env var:', configError);
       const parsed = Number.parseFloat(process.env.STRIPE_PLATFORM_COMMISSION_PERCENT || '0');
@@ -386,9 +435,9 @@ export const createPaymentIntent = async (
       customer.location?.country
     );
 
-    let chargeAmount = commissionedQuoteAmount(booking.quote.amount, (booking as any).checkoutSnapshot, commissionPercent);
+    // The customer charge for the booking, the same amount the booking read shows as customerTotal (computeGrossBookingAmount).
+    let chargeAmount = computeGrossBookingAmount(booking as any, commissionPercent);
     let milestoneIndex: number | null = null;
-    let milestoneOrder: number | null = null;
     if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
       const sorted = normalizeBookingMilestones(booking.milestonePayments as any[]);
       const nextPayable = sorted.find((milestone) => isMilestoneCurrentlyPayable(milestone, sorted));
@@ -407,7 +456,6 @@ export const createPaymentIntent = async (
         }
         chargeAmount = +(nextPayable.amount * (1 + commissionPercent / 100)).toFixed(2);
         milestoneIndex = nextPayable._originalIndex;
-        milestoneOrder = nextPayable.order ?? 0;
       } else {
         return {
           success: false,
@@ -418,19 +466,12 @@ export const createPaymentIntent = async (
         };
       }
     }
-    const extrasAlreadyInQuote = quoteAmountIncludesSelectedExtras(booking);
-    const commissionedExtraOptionsTotal = +(selectedExtraOptionsTotal * (1 + commissionPercent / 100)).toFixed(2);
-    let milestoneExtraOptionsCharge = 0;
-    if (selectedExtraOptionsTotal > 0 && !extrasAlreadyInQuote) {
-      if (Array.isArray(booking.milestonePayments) && booking.milestonePayments.length > 0) {
-        const minOrder = Math.min(...booking.milestonePayments.map((m: any) => m.order ?? 0));
-        if (milestoneOrder === minOrder) {
-          milestoneExtraOptionsCharge = commissionedExtraOptionsTotal;
-          chargeAmount += milestoneExtraOptionsCharge;
-        }
-      } else {
-        chargeAmount += commissionedExtraOptionsTotal;
-      }
+    // Client bug list #19b: options are charged in full with the first
+    // milestone via the shared charge plan — never split across milestones.
+    if (milestoneIndex !== null) {
+      const planEntry = buildMilestoneChargePlan(booking, commissionPercent)
+        .find((entry) => entry.index === milestoneIndex) || null;
+      if (planEntry) chargeAmount = planEntry.expectedCustomerGross;
     }
 
     if (booking.payment?.stripePaymentIntentId && booking.payment?.stripeClientSecret) {
@@ -468,7 +509,8 @@ export const createPaymentIntent = async (
       }
       if (booking.payment.status === 'pending') {
         try {
-          await stripe.paymentIntents.cancel(booking.payment.stripePaymentIntentId);
+          const cancelled = await stripe.paymentIntents.cancel(booking.payment.stripePaymentIntentId);
+          if (cancelled.status === 'canceled') await releaseReferralReservation(String(booking._id), booking.payment.discount?.referralReservationToken);
           console.log(`🗑️  Cancelled superseded PaymentIntent ${booking.payment.stripePaymentIntentId} for booking ${booking._id}`);
         } catch (cancelErr: any) {
           if (cancelErr?.code !== 'payment_intent_unexpected_state' && cancelErr?.code !== 'resource_missing') {
@@ -496,7 +538,7 @@ export const createPaymentIntent = async (
     }
 
 
-    const fullDiscountBreakdown = await calculateAutoDiscount(
+    const automaticDiscount = await calculateAutoDiscount(
       customer._id.toString(),
       professional._id.toString(),
       booking.project ? (booking.project as any)._id?.toString() || booking.project.toString() : null,
@@ -506,6 +548,8 @@ export const createPaymentIntent = async (
       codeInfo
     );
 
+    const fullDiscountBreakdown = await withReferralDiscount(automaticDiscount, customer._id.toString(), String(booking._id), true);
+    reservationToken = fullDiscountBreakdown.referralDiscount?.reservationToken;
     let discountBreakdown = fullDiscountBreakdown;
     if (fullBookingAmount > 0 && chargeAmount < fullBookingAmount) {
       const ratio = chargeAmount / fullBookingAmount;
@@ -515,7 +559,8 @@ export const createPaymentIntent = async (
       const proratedCode = fullDiscountBreakdown.codeDiscount
         ? Math.round(fullDiscountBreakdown.codeDiscount.amount * ratio * 100) / 100
         : 0;
-      const proratedTotal = proratedLoyalty + proratedRepeat + proratedPoints + proratedCode;
+      const proratedReferral = Math.round((fullDiscountBreakdown.referralDiscount?.amount || 0) * ratio * 100) / 100;
+      const proratedTotal = proratedLoyalty + proratedRepeat + proratedPoints + proratedCode + proratedReferral;
       discountBreakdown = {
         ...fullDiscountBreakdown,
         loyaltyDiscount: { ...fullDiscountBreakdown.loyaltyDiscount, amount: proratedLoyalty },
@@ -524,6 +569,7 @@ export const createPaymentIntent = async (
         codeDiscount: fullDiscountBreakdown.codeDiscount
           ? { ...fullDiscountBreakdown.codeDiscount, amount: proratedCode }
           : undefined,
+        referralDiscount: fullDiscountBreakdown.referralDiscount ? { ...fullDiscountBreakdown.referralDiscount, amount: proratedReferral } : undefined,
         totalDiscount: proratedTotal,
         originalAmount: chargeAmount,
         finalAmount: chargeAmount - proratedTotal,
@@ -542,7 +588,7 @@ export const createPaymentIntent = async (
     // quotation line metadata.
     const quotePricingVatCalculation = configuredVatDecision?.reverseCharge
       ? null
-      : getQuotePricingVatCalculation(booking, discountedQuoteAmount);
+      : getQuotePricingVatCalculation(booking, discountedQuoteAmount, commissionPercent);
     const vatCountry = parseVatCountryCode(
       configuredVatDecision?.country || booking.location?.country || customer.location?.country,
     );
@@ -631,9 +677,21 @@ export const createPaymentIntent = async (
         pointsToRedeem,
         discountCode,
         quoteVersion: booking.currentQuoteVersion,
+        checkoutRevision: booking.checkoutRevision,
+        previousIntentId: booking.payment?.stripePaymentIntentId,
       })
     });
 
+    createdIntentId = paymentIntent.id;
+    if (reservationToken) {
+      const bound = await bindReferralReservation(bookingId, reservationToken, paymentIntent.id);
+      if (!bound) {
+        // Another attempt owns the reservation. This idempotent intent may be
+        // shared with it, so neither cancel it nor expose its client secret.
+        return { success: false, error: { code: 'BOOKING_CHANGED', message: 'The checkout changed. Refresh before paying.' } };
+      }
+      reservationToken = paymentIntent.id;
+    }
     // Update booking with payment info
     booking.payment = {
       amount: netAmount,
@@ -653,7 +711,7 @@ export const createPaymentIntent = async (
       reverseCharge: vatCalculation.reverseCharge,
       vatBreakdown: (vatCalculation as any).vatBreakdown,
       ...(milestoneIndex !== null && { milestoneIndex }),
-      ...(discountBreakdown.totalDiscount > 0 && {
+      ...({
         discount: {
           loyaltyTier: discountBreakdown.loyaltyDiscount.tier,
           loyaltyPercentage: discountBreakdown.loyaltyDiscount.percentage,
@@ -662,6 +720,9 @@ export const createPaymentIntent = async (
           repeatBuyerAmount: discountBreakdown.repeatBuyerDiscount.amount,
           pointsRedeemed: discountBreakdown.pointsDiscount.pointsUsed,
           pointsDiscountAmount: discountBreakdown.pointsDiscount.discountAmount,
+          referralDiscountAmount: discountBreakdown.referralDiscount?.amount || 0,
+          referralReservationToken: reservationToken,
+          referralId: discountBreakdown.referralDiscount?.referralId ? new mongoose.Types.ObjectId(discountBreakdown.referralDiscount.referralId) : undefined,
           codeDiscountAmount: discountBreakdown.codeDiscount?.amount || 0,
           codeId: discountBreakdown.codeDiscount?.codeId
             ? new mongoose.Types.ObjectId(discountBreakdown.codeDiscount.codeId)
@@ -675,6 +736,7 @@ export const createPaymentIntent = async (
     if (!hasUnpaidMilestones || ['quote_accepted', 'payment_pending'].includes(booking.status)) {
       booking.status = 'payment_pending';
     }
+    booking.$where = expectedWrite;
     await booking.save();
 
     // Points deduction is handled in the payment success webhook (handlePaymentIntentSucceeded)
@@ -721,6 +783,26 @@ export const createPaymentIntent = async (
     };
 
   } catch (error: any) {
+    if (error?.name === 'DocumentNotFoundError' && createdIntentId) {
+      try {
+        // Stripe can return the same idempotent intent to two concurrent
+        // callers. A losing save must never cancel the winner's active intent.
+        const latest = await Booking.findById(bookingId).select('payment.stripePaymentIntentId payment.discount.referralReservationToken status').lean();
+        if (latest?.payment?.stripePaymentIntentId !== createdIntentId) {
+          const cancelled = await stripe.paymentIntents.cancel(createdIntentId);
+          // A winning checkout for this same booking keeps its reservation.
+          if (cancelled.status === 'canceled' && (!latest?.payment?.stripePaymentIntentId || latest.status === 'cancelled')) {
+            await releaseReferralReservation(bookingId, reservationToken);
+          } else if (cancelled.status === 'canceled' && reservationToken && latest?.payment?.stripePaymentIntentId) {
+            // Restore the winning checkout's fence only if we still own the
+            // cancelled attempt. A later retry's token must survive this too.
+            await bindReferralReservation(bookingId, reservationToken,
+              latest.payment.discount?.referralReservationToken || latest.payment.stripePaymentIntentId);
+          }
+        }
+      } catch { /* A racing success is handled by the durable superseded-intent reconciliation path. */ }
+      return { success: false, error: { code: 'BOOKING_CHANGED', message: 'The booking changed. Refresh before paying.' } };
+    }
     console.error('Error creating payment intent:', error);
     return {
       success: false,
@@ -729,6 +811,19 @@ export const createPaymentIntent = async (
         message: "We couldn't start the payment. Please try again."
       }
     };
+  }
+};
+
+/**
+ * Record the succeeded payment's discount snapshot from the confirm endpoint.
+ * The webhook is the durable writer (it fails and retries); here a ledger
+ * error must not turn a successful payment into a failed confirmation.
+ */
+const recordDiscountSnapshotSafely = async (booking: any, paymentIntentId: string) => {
+  try {
+    await recordPaymentDiscountSnapshot(booking._id, booking.payment, paymentIntentId);
+  } catch (ledgerError: any) {
+    console.error(`[PAYMENT CONFIRM] Discount ledger write failed for booking ${booking._id}:`, ledgerError?.message || ledgerError);
   }
 };
 
@@ -787,12 +882,14 @@ export const confirmPayment = async (req: Request, res: Response) => {
         await notifyBookingPaymentConfirmed({
           bookingId: String(booking._id),
           paymentIntentId: typeof paymentIntentId === 'string' ? paymentIntentId : undefined,
-          amount: typeof (booking.payment as any)?.amount === 'number' ? (booking.payment as any).amount : undefined,
+          // VAT-inclusive amount actually paid, matching booking details.
+          amount: grossPaidAmount(booking.payment),
           currency: (booking.payment as any)?.currency || 'EUR',
         });
       } catch (notifyError: any) {
         console.error(`[PAYMENT CONFIRM] Post-payment notify failed for booking ${booking._id}:`, notifyError?.message || notifyError);
       }
+      await recordDiscountSnapshotSafely(booking, paymentIntentId);
       return res.json({
         success: true,
         data: {
@@ -837,6 +934,9 @@ export const confirmPayment = async (req: Request, res: Response) => {
       if (typeof msIdx === 'number' && Array.isArray(booking.milestonePayments) && booking.milestonePayments[msIdx]) {
         updateFields[`milestonePayments.${msIdx}.status`] = 'paid';
         updateFields[`milestonePayments.${msIdx}.paidAt`] = now;
+        // Same settlement fact as the webhook path: the intent that paid.
+        updateFields[`milestonePayments.${msIdx}.stripePaymentIntentId`] = paymentIntent.id;
+        updateFields[`milestonePayments.${msIdx}.paidStripePaymentIntentId`] = paymentIntent.id;
       }
 
       const milestoneFilter: Record<string, any> = { _id: booking._id };
@@ -884,6 +984,7 @@ export const confirmPayment = async (req: Request, res: Response) => {
       );
 
       console.log(`✅ Payment authorized for booking ${booking._id}`);
+      await recordDiscountSnapshotSafely(booking, paymentIntent.id);
 
       // Notify both sides exactly once after payment (idempotent with webhook
       // via per-booking deliveryKey — never on checkout-page forward).
@@ -891,9 +992,20 @@ export const confirmPayment = async (req: Request, res: Response) => {
         await notifyBookingPaymentConfirmed({
           bookingId: String(booking._id),
           paymentIntentId: paymentIntent.id,
-          amount: typeof (booking.payment as any)?.amount === 'number' ? (booking.payment as any).amount : undefined,
+          // VAT-inclusive amount actually paid, matching booking details.
+          amount: grossPaidAmount(booking.payment),
           currency: (paymentIntent.currency || (booking.payment as any)?.currency || 'EUR').toUpperCase(),
         });
+        // A settled milestone can make the next one payable; the per-milestone
+        // delivery key dedupes this with the webhook and the reminder sweep.
+        if (typeof msIdx === 'number') {
+          try {
+            const { notifyMilestonePaymentDue } = await import('../../utils/notifications/milestonePaymentDue');
+            await notifyMilestonePaymentDue(String(booking._id));
+          } catch (milestoneDueError: any) {
+            console.error(`[PAYMENT CONFIRM] Milestone-due notify failed for booking ${booking._id}:`, milestoneDueError?.message || milestoneDueError);
+          }
+        }
       } catch (notifyError: any) {
         console.error(`[PAYMENT CONFIRM] Post-payment notify failed for booking ${booking._id}:`, notifyError?.message || notifyError);
       }
@@ -1236,7 +1348,7 @@ export interface RefundResult {
 
 export const executeRefund = async (
   bookingId: string,
-  opts: { amount?: number; reason?: string; actorId?: string | mongoose.Types.ObjectId | null }
+  opts: { amount?: number; reason?: string; actorId?: string | mongoose.Types.ObjectId | null; operationKey?: string }
 ): Promise<RefundResult> => {
   const { amount, reason } = opts;
   const refundActorId = opts.actorId && mongoose.Types.ObjectId.isValid(String(opts.actorId))
@@ -1265,6 +1377,8 @@ export const executeRefund = async (
     throw new RefundError('NO_PAYMENT', 'No payment to refund');
   }
 
+  const wasStarted = isBookingStarted(booking);
+
   // Legacy bookings predate totalWithVat; fall back to the captured amount so
   // they keep a refundable capacity instead of throwing REFUND_EXCEEDS_TOTAL.
   const totalWithVat = booking.payment?.totalWithVat ?? booking.payment?.amount ?? 0;
@@ -1279,11 +1393,50 @@ export const executeRefund = async (
     booking,
     booking.payment.stripePaymentIntentId,
   );
+  // A dispute is one refund obligation across retries. Reconcile its recorded
+  // fact before calculating capacity (which changes after a partial refund).
+  const disputeStartedAt = opts.operationKey?.match(/^dispute-[a-f0-9]{24}-(\d+)$/)?.[1];
+  const legacyDisputeRefund = (refund: any) => disputeStartedAt && !refund.operationKey
+    && typeof refund.reason === 'string' && refund.reason.startsWith('Dispute resolution (')
+    && new Date(refund.refundedAt).getTime() >= Math.floor(Number(disputeStartedAt) / 1000) * 1000;
+  const recorded = opts.operationKey && basePaymentRows.flatMap(row => row.refunds || [])
+    .find(refund => (refund.operationKey === opts.operationKey || legacyDisputeRefund(refund))
+      && !['failed', 'canceled'].includes(refund.status));
+  if (recorded) return { refundId: recorded.refundId, amount: recorded.amount,
+    status: recorded.status, refundSource: recorded.source || 'platform' };
+  if (opts.operationKey && legacyDisputeRefund({ reason: booking.payment.refundReason,
+    refundedAt: booking.payment.refundedAt }) && Number(booking.payment.refundAmount) > 0
+    && booking.payment.refundOperationKey !== opts.operationKey) {
+    throw new RefundError('REFUND_RECONCILIATION_REQUIRED', 'The prior dispute refund lacks a matching ledger fact; reconcile it before issuing another refund', 409);
+  }
+  let priorProviderRefund: Stripe.Refund | undefined;
+  if (opts.operationKey) {
+    let after: string | undefined;
+    do {
+      const page = await stripe.refunds.list({ payment_intent: booking.payment.stripePaymentIntentId,
+        limit: 100, ...(after ? { starting_after: after } : {}) }).catch(() => {
+        throw new RefundError('REFUND_RECONCILIATION_REQUIRED', 'Refund history is unavailable; retry reconciliation before issuing the refund', 503);
+      });
+      priorProviderRefund = page.data.find(refund => refund.metadata?.operationKey === opts.operationKey);
+      if (priorProviderRefund || !page.has_more) break;
+      const next = page.data[page.data.length - 1]?.id;
+      if (!next || next === after) throw new RefundError('REFUND_RECONCILIATION_REQUIRED', 'Refund reconciliation could not complete', 503);
+      after = next;
+    } while (true);
+    if (priorProviderRefund && ['failed', 'canceled'].includes(String(priorProviderRefund.status))) {
+      throw new RefundError('REFUND_RECONCILIATION_REQUIRED', 'The recorded dispute refund needs reconciliation before another refund can be issued', 409);
+    }
+  }
   const baseRefunds = summarizeBaseRefunds(basePaymentRows);
   const existingBookingRefunds = baseRefunds.refunds.filter(
     (refund: any) => refund?.kind !== 'extra_cost',
   );
-  const aggregateRefundTotal = Number(booking.payment?.refundAmount);
+  // A prior attempt may have saved the booking but failed to write the ledger.
+  // Remove only that identified operation from the baseline before replaying it.
+  const alreadySaved = priorProviderRefund && booking.payment.refundOperationKey === opts.operationKey
+    ? convertFromStripeAmount(priorProviderRefund.amount, booking.payment.currency || 'EUR') : 0;
+  const aggregateRefundTotal = Number(booking.payment?.refundAmount || 0) - alreadySaved;
+  if (priorProviderRefund) normalizedAmount = convertFromStripeAmount(priorProviderRefund.amount, booking.payment.currency || 'EUR');
   const aggregateBookingRefund = Number.isFinite(aggregateRefundTotal) && aggregateRefundTotal > 0
     ? roundMoneyLocal(aggregateRefundTotal)
     : 0;
@@ -1310,9 +1463,9 @@ export const executeRefund = async (
     );
   }
   const refundAmount = normalizedAmount ?? remainingRefundable;
-  const refundIntentVersion = normalizedAmount
+  const refundIntentVersion = opts.operationKey || (normalizedAmount
     ? `partial-${booking.payment.stripePaymentIntentId}-${previousRefundTotal}-${normalizedAmount}`
-    : `full-${booking.payment.stripePaymentIntentId}-${previousRefundTotal}`;
+    : `full-${booking.payment.stripePaymentIntentId}-${previousRefundTotal}`);
   // The only stored authoritative split is the payment-level net/VAT. When
   // earlier partial refunds each recorded their split, the remaining split is
   // arithmetic over those recorded facts. Never proportionally invent a split
@@ -1354,13 +1507,14 @@ export const executeRefund = async (
   })();
 
   if (booking.payment.status === 'authorized') {
-    const refund = await stripe.refunds.create(
+    const refund = priorProviderRefund || await stripe.refunds.create(
       {
         payment_intent: booking.payment.stripePaymentIntentId,
         amount: convertToStripeAmount(refundAmount, booking.payment.currency || 'EUR'),
         metadata: {
           bookingId: booking._id.toString(),
           refundKind: 'booking',
+          ...(opts.operationKey ? { operationKey: opts.operationKey } : {}),
         },
       },
       {
@@ -1385,42 +1539,53 @@ export const executeRefund = async (
     booking.payment.refundSource = 'platform';
     if (!isPartial) {
       booking.status = 'cancelled';
+    } else {
+      preparePartialRefundCancellation(booking, wasStarted);
     }
-    await booking.save();
-
-    await recordBasePaymentRefund({
-      booking,
-      set: {
-        status: booking.payment.status,
-        refundedAt: booking.payment.refundedAt,
-      },
-      refund: {
-        amount: refundAmount,
-        reason,
-        refundId: refund.id,
-        refundedAt: refundCreatedAt,
-        source: 'platform',
-        notes: 'Refund issued before transfer to professional',
-        kind: 'booking',
-        status: refund.status || undefined,
-        ...(refundActorId ? { refundedBy: refundActorId } : {}),
-        ...refundVatSplit,
-      },
-    });
+    if (opts.operationKey) booking.payment.refundOperationKey = opts.operationKey;
+    try {
+      await booking.save();
+      await recordBasePaymentRefund({
+        booking,
+        set: {
+          status: booking.payment.status,
+          refundedAt: booking.payment.refundedAt,
+        },
+        refund: {
+          amount: refundAmount,
+          reason,
+          refundId: refund.id,
+          refundedAt: refundCreatedAt,
+          source: 'platform',
+          notes: 'Refund issued before transfer to professional',
+          kind: 'booking',
+          ...(opts.operationKey ? { operationKey: opts.operationKey } : {}),
+          status: refund.status || undefined,
+          ...(refundActorId ? { refundedBy: refundActorId } : {}),
+          ...refundVatSplit,
+        },
+      });
+    } catch (error) {
+      if (!opts.operationKey) throw error;
+      // Stripe accepted the refund; callers must keep the dispute closed and
+      // retry reconciliation with this operation, never treat this as a denial.
+      throw new RefundError('REFUND_RECONCILIATION_REQUIRED', 'Refund accepted; recording is pending. Retry to reconcile the same refund.', 503);
+    }
 
     console.log(`✅ Payment refunded for booking ${booking._id}: ${refund.id}`);
 
     return { refundId: refund.id, amount: refundAmount, status: refund.status || undefined, refundSource: 'platform' };
   }
 
-  if (['completed', 'partially_refunded', 'captured'].includes(String(booking.payment.status))) {
-    const refund = await stripe.refunds.create(
+  if (priorProviderRefund || ['completed', 'partially_refunded', 'captured'].includes(String(booking.payment.status))) {
+    const refund = priorProviderRefund || await stripe.refunds.create(
       {
         payment_intent: booking.payment.stripePaymentIntentId,
         amount: convertToStripeAmount(refundAmount, booking.payment.currency || 'EUR'),
         metadata: {
           bookingId: booking._id.toString(),
           refundKind: 'booking',
+          ...(opts.operationKey ? { operationKey: opts.operationKey } : {}),
         },
       },
       {
@@ -1432,7 +1597,7 @@ export const executeRefund = async (
       }
     );
 
-    if (booking.payment.stripeTransferId) {
+    if (booking.payment.stripeTransferId && !priorProviderRefund) {
       try {
         const reversalCurrency =
           booking.payment.transferCurrency || booking.payment.currency || 'EUR';
@@ -1460,7 +1625,7 @@ export const executeRefund = async (
         booking.payment.refundSource = 'platform';
         booking.payment.refundNotes = 'Platform-funded refund (transfer reversal failed)';
       }
-    } else {
+    } else if (!priorProviderRefund) {
       booking.payment.refundSource = 'platform';
     }
 
@@ -1475,28 +1640,38 @@ export const executeRefund = async (
     booking.payment.refundReason = reason;
     if (booking.payment.status === 'refunded') {
       booking.status = 'refunded';
+    } else {
+      preparePartialRefundCancellation(booking, wasStarted);
     }
-    await booking.save();
-
-    await recordBasePaymentRefund({
-      booking,
-      set: {
-        status: booking.payment.status,
-        refundedAt: booking.payment.refundedAt,
-      },
-      refund: {
-        amount: refundAmount,
-        reason,
-        refundId: refund.id,
-        refundedAt: refundCreatedAt,
-        source: booking.payment.refundSource || 'platform',
-        notes: booking.payment.refundNotes,
-        kind: 'booking',
-        status: refund.status || undefined,
-        ...(refundActorId ? { refundedBy: refundActorId } : {}),
-        ...refundVatSplit,
-      },
-    });
+    if (opts.operationKey) booking.payment.refundOperationKey = opts.operationKey;
+    try {
+      await booking.save();
+      await recordBasePaymentRefund({
+        booking,
+        set: {
+          status: booking.payment.status,
+          refundedAt: booking.payment.refundedAt,
+        },
+        refund: {
+          amount: refundAmount,
+          reason,
+          refundId: refund.id,
+          refundedAt: refundCreatedAt,
+          source: booking.payment.refundSource || 'platform',
+          notes: booking.payment.refundNotes,
+          kind: 'booking',
+          ...(opts.operationKey ? { operationKey: opts.operationKey } : {}),
+          status: refund.status || undefined,
+          ...(refundActorId ? { refundedBy: refundActorId } : {}),
+          ...refundVatSplit,
+        },
+      });
+    } catch (error) {
+      if (!opts.operationKey) throw error;
+      // Stripe accepted the refund; callers must keep the dispute closed and
+      // retry reconciliation with this operation, never treat this as a denial.
+      throw new RefundError('REFUND_RECONCILIATION_REQUIRED', 'Refund accepted; recording is pending. Retry to reconcile the same refund.', 503);
+    }
 
     console.log(`✅ Refund processed for booking ${booking._id}: ${refund.id}`);
 
@@ -1700,6 +1875,18 @@ export const refundPayment = async (req: Request, res: Response) => {
     }
 
     const result = await executeRefund(bookingId, { amount, reason, actorId: userId });
+
+    // A partial refund on a live booking closes it with a billable remainder:
+    // generate the FIX/SUP invoices from the remaining amount when missing.
+    try {
+      const refreshed = await Booking.findById(bookingId).select('payment.status payment.totalWithVat');
+      if (refreshed?.payment?.status === 'partially_refunded') {
+        const { ensureRefundInvoices } = await import('../../utils/refundFinalization');
+        void ensureRefundInvoices(bookingId);
+      }
+    } catch (invoiceTriggerError: any) {
+      console.error(`Refund invoice trigger failed for booking ${bookingId}:`, invoiceTriggerError?.message || invoiceTriggerError);
+    }
 
     if (user?.role === 'admin') {
       await auditLog({

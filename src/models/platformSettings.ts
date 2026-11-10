@@ -24,6 +24,12 @@ export interface IPlatformSettings extends Omit<Document, '_id'> {
     /** Book Stripe payments against the Odoo invoices (journal "Stripe (Fixtract)"). */
     odooRecordPayments?: boolean;
   };
+  /** Auto-conversion roll-out; `configuredAt` is set once an admin saves it. */
+  autoConversion?: {
+    enabledCountries: string[];
+    defaultCountry: string;
+    configuredAt?: Date;
+  };
   lastModifiedBy: mongoose.Types.ObjectId;
   lastModified: Date;
   version: number;
@@ -66,6 +72,11 @@ const platformSettingsSchema = new Schema<IPlatformSettings>({
     peppolParticipantId: { type: String, trim: true },
     odooCompanyId: { type: Number, min: 1 },
     odooRecordPayments: { type: Boolean, default: false },
+  },
+  autoConversion: {
+    enabledCountries: { type: [{ type: String, uppercase: true, trim: true, match: /^[A-Z]{2}$/ }], default: undefined },
+    defaultCountry: { type: String, uppercase: true, trim: true, match: /^[A-Z]{2}$/ },
+    configuredAt: { type: Date },
   },
   lastModifiedBy: {
     type: mongoose.Schema.Types.ObjectId,

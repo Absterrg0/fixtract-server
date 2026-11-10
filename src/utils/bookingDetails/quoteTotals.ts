@@ -1,6 +1,9 @@
+import { calculateAutoDiscount, type DiscountBreakdown } from '../discountEngine';
+import { withReferralDiscount } from '../referralDiscount';
+import User from '../../models/user';
 import type { IQuoteCustomerTotals, IQuoteVersion } from '../../models/booking';
 import { calculateVatFromPricingLines } from '../vatLineCalculation';
-import { commissionedQuoteAmount } from '../customerPricing';
+import { commissionedPricingLines, commissionedQuoteAmount } from '../customerPricing';
 
 const roundMoney = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
 
@@ -26,33 +29,42 @@ export const buildQuoteCustomerTotals = (params: {
   commissionPercent: number;
   currency: string;
   recordedAt?: Date;
+  discountBreakdown?: DiscountBreakdown;
 }): IQuoteCustomerTotals | null => {
   const professionalNetAmount = finite(params.totalAmount);
   if (professionalNetAmount == null || professionalNetAmount < 0) return null;
 
-  const customerNetAmount = roundMoney(
+  const amountBeforeDiscounts = roundMoney(
     commissionedQuoteAmount(professionalNetAmount, params.booking?.checkoutSnapshot, params.commissionPercent),
   );
 
-  const pricingLines = Array.isArray(params.pricingLines)
+  const customerNetAmount = params.discountBreakdown?.finalAmount ?? amountBeforeDiscounts;
+  // VAT is calculated on the price AFTER commission is included: every
+  // pricing line is commissioned first, then VAT is allocated across the
+  // customer-facing lines by the same helper checkout uses.
+  const sourceLines = Array.isArray(params.pricingLines)
     ? params.pricingLines.filter((line) => finite(line?.price) != null && finite(line?.vatRate) != null)
     : [];
+  const commissionedLines =
+    sourceLines.length > 0
+      ? commissionedPricingLines(
+          sourceLines.map((line) => ({
+            description: line.description,
+            price: Number(line.price),
+            vatRate: Number(line.vatRate),
+            vatCountry: line.vatCountry,
+            vatLabel: line.vatLabel,
+          })),
+          amountBeforeDiscounts,
+          params.commissionPercent,
+        )
+      : [];
   const originalLineNet = roundMoney(
-    pricingLines.reduce((sum, line) => sum + Number(line.price), 0),
+    commissionedLines.reduce((sum, line) => sum + Number(line.price), 0),
   );
-  // `createPaymentIntent` only discounts line VAT when the customer amount is
-  // not larger than the recorded line net; otherwise VAT is calculated on the
-  // recorded lines and commission is added on top of net. Mirror that exact
-  // existing calculation rather than inventing a commission-inclusive VAT base.
-  const vatCalculation = pricingLines.length > 0
+  const vatCalculation = commissionedLines.length > 0
     ? calculateVatFromPricingLines(
-        pricingLines.map((line) => ({
-          description: line.description,
-          price: Number(line.price),
-          vatRate: Number(line.vatRate),
-          vatCountry: line.vatCountry,
-          vatLabel: line.vatLabel,
-        })),
+        commissionedLines,
         customerNetAmount <= originalLineNet ? customerNetAmount : undefined,
       )
     : null;
@@ -61,7 +73,15 @@ export const buildQuoteCustomerTotals = (params: {
     commissionPercent: Math.max(0, finite(params.commissionPercent) ?? 0),
     professionalNetAmount,
     customerNetAmount,
-    amountBeforeDiscounts: customerNetAmount,
+    amountBeforeDiscounts,
+    ...(params.discountBreakdown ? { discount: {
+      source: 'quote_time_automatic',
+      loyaltyAmount: params.discountBreakdown.loyaltyDiscount.amount,
+      repeatBuyerAmount: params.discountBreakdown.repeatBuyerDiscount.amount,
+      referralDiscountAmount: params.discountBreakdown.referralDiscount?.amount || 0,
+      totalDiscount: params.discountBreakdown.totalDiscount,
+      originalAmount: amountBeforeDiscounts,
+    } } : {}),
     currency: params.currency || 'EUR',
     recordedAt: params.recordedAt || new Date(),
   };
@@ -70,9 +90,33 @@ export const buildQuoteCustomerTotals = (params: {
     totals.vatRate = vatCalculation.vatRate;
     totals.totalWithVat = roundMoney(customerNetAmount + vatCalculation.vatAmount);
     totals.totalAmount = totals.totalWithVat;
+    totals.vatBreakdown = vatCalculation.vatBreakdown;
+    if (totals.discount) {
+      const beforeDiscount = calculateVatFromPricingLines(commissionedLines);
+      if (beforeDiscount) totals.discount.totalDiscountWithVat = roundMoney(beforeDiscount.total - totals.totalWithVat);
+    }
   }
   return totals;
 };
+
+/** Freeze automatic customer discounts at quote time. Checkout still
+ * recalculates eligibility; points and user-entered codes are checkout-only.
+ * No referral reservation, redemption or reward is written by this reader.
+ */
+export async function buildQuoteCustomerTotalsWithDiscounts(params: Parameters<typeof buildQuoteCustomerTotals>[0]) {
+  const base = buildQuoteCustomerTotals(params);
+  if (!base) return null;
+  const booking = params.booking;
+  const customerId = booking.customer?._id?.toString?.() || String(booking.customer);
+  const professionalId = booking.professional?._id?.toString?.() || String(booking.professional);
+  const projectId = booking.project?._id?.toString?.() || (booking.project ? String(booking.project) : null);
+  // Read private loyalty input separately; never populate spend history into
+  // the booking returned to a professional.
+  const customer = await User.findById(customerId).select('totalSpent').lean();
+  const automatic = await calculateAutoDiscount(customerId, professionalId, projectId, base.customerNetAmount, customer?.totalSpent || 0);
+  const discountBreakdown = await withReferralDiscount(automatic, customerId, String(booking._id));
+  return buildQuoteCustomerTotals({ ...params, discountBreakdown });
+}
 
 export const quoteServiceLocationSnapshot = (booking: any): IQuoteVersion['serviceLocation'] | undefined => {
   const location = booking?.location;
