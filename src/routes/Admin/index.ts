@@ -111,6 +111,7 @@ import {
   syncCmsLandingSlots,
   listCmsServiceOptions,
   translateCmsContent,
+  getCmsTranslationStatus,
 } from "../../handlers/Admin/cmsManagement";
 import {
   listDiscountCodes,
@@ -399,6 +400,7 @@ adminRouter.route('/cms/upload-image').post(cmsImageMulter.single('image'), uplo
 adminRouter.route('/cms/preview/:type/:slug').get(getCmsPreviewBySlug);
 adminRouter.route('/cms/:id').get(getCmsContentById).put(updateCmsContent).delete(deleteCmsContent);
 adminRouter.route('/cms/:id/translate').post(translateCmsContent);
+adminRouter.route('/cms/:id/translations').get(getCmsTranslationStatus);
 
 // Email logs
 adminRouter.route('/email-logs').get(listEmailLogs);

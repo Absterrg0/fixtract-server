@@ -39,30 +39,52 @@ import {
 } from "../../utils/cms/locales";
 import {
   deleteAutoTranslatedSiblings,
+  failedResult,
   isTranslationSource,
   mergeTranslationResults,
   moveAutoTranslatedSiblings,
   syncCmsTranslations,
+  targetLocalesFor,
   TranslationResult,
 } from "../../utils/cms/syncTranslations";
+import { requestCmsTranslationRun } from "../../utils/cms/translationQueue";
+import { loadCmsTranslationStatus, tryLoadCmsTranslationStatus } from "../../utils/cms/translationStatus";
 
 const isValidObjectId = (id: string): boolean => mongoose.Types.ObjectId.isValid(id);
 
 /**
- * Runs the Azure translation sync for a saved source doc inside the request
- * (Vercel serverless freezes post-response work, so never fire-and-forget).
- * A translation failure must never fail or roll back the admin's save.
+ * Request-time translation step for a saved source doc. Never calls the
+ * provider: it mirrors control/non-text fields onto existing translations
+ * right away (`translate: false`) and, when any locale needs new text, queues
+ * a background run (see utils/cms/translationQueue) that translates after the
+ * response. A translation failure never fails or rolls back the admin's save.
  */
 async function runTranslationSync(
   doc: Record<string, any>,
-  options: { force?: boolean } = {}
+  options: { forceLocales?: string[] } = {}
 ): Promise<TranslationResult[]> {
+  let results: TranslationResult[];
   try {
-    return await syncCmsTranslations(doc, options);
+    results = await syncCmsTranslations(doc, {
+      translate: false,
+      forceLocales: options.forceLocales,
+    });
   } catch (err) {
     console.error("CMS translation sync crashed (save kept, continuing):", err);
-    return [{ locale: "*", status: "failed", error: "Translation sync crashed" }];
+    return [failedResult("*", "internal", "Translation sync crashed")];
   }
+
+  if (results.some((result) => result.status === "pending")) {
+    try {
+      await requestCmsTranslationRun(doc._id, { forceLocales: options.forceLocales });
+    } catch (err) {
+      console.error("Queueing the CMS translation run failed (save kept):", err);
+      return results.map((result) =>
+        result.status === "pending" ? failedResult(result.locale, "internal") : result
+      );
+    }
+  }
+  return results;
 }
 
 const sanitizeStringArray = (input: unknown, max = 20): string[] => {
@@ -197,10 +219,20 @@ export async function loadCmsLocaleVariants(
   }
 }
 
-/** Adds `localeVariants` to an admin response doc when the lookup succeeded. */
-async function withLocaleVariants(doc: Record<string, any>): Promise<Record<string, any>> {
-  const localeVariants = await loadCmsLocaleVariants(doc);
-  return localeVariants ? { ...doc, localeVariants } : doc;
+/**
+ * Adds `localeVariants` and `translationStatus` to an admin response doc.
+ * Both are best-effort: a failed lookup omits the field, never the response.
+ */
+async function withTranslationInfo(doc: Record<string, any>): Promise<Record<string, any>> {
+  const [localeVariants, translationStatus] = await Promise.all([
+    loadCmsLocaleVariants(doc),
+    tryLoadCmsTranslationStatus(doc._id),
+  ]);
+  return {
+    ...doc,
+    ...(localeVariants ? { localeVariants } : {}),
+    ...(translationStatus ? { translationStatus } : {}),
+  };
 }
 
 export const listFaqCategories = async (_req: Request, res: Response) => {
@@ -425,7 +457,7 @@ export const getCmsContentById = async (req: Request, res: Response) => {
     }
 
     const presigned = await presignCmsDoc(doc);
-    return res.status(200).json({ success: true, data: await withLocaleVariants(presigned) });
+    return res.status(200).json({ success: true, data: await withTranslationInfo(presigned) });
   } catch (error) {
     console.error("Get CMS content error:", error);
     return res.status(500).json({ success: false, msg: "Failed to fetch content" });
@@ -526,14 +558,16 @@ export const createCmsContent = async (req: Request, res: Response) => {
       activeCountries: sanitizeCmsActiveCountries(body.activeCountries),
     });
 
-    // Await the sync synchronously within the request — serverless freezes
-    // post-response work, so fire-and-forget would silently lose it.
+    // Mirrors nothing yet (a new doc has no translations) and queues the
+    // background run that creates the machine translations after the response.
     const translations = await runTranslationSync(doc);
 
     const fallback = doc.toObject() as Record<string, any>;
     const populated = await loadCmsDocForResponse(doc._id, fallback);
     const presigned = await presignCmsDoc(populated);
-    return res.status(201).json({ success: true, translations, data: presigned });
+    return res
+      .status(201)
+      .json({ success: true, translations, data: await withTranslationInfo(presigned) });
   } catch (error: any) {
     if (error?.code === 11000) {
       return res.status(409).json({ success: false, msg: "Slug already exists for this type and locale" });
@@ -688,10 +722,10 @@ export const updateCmsContent = async (req: Request, res: Response) => {
 
     await doc.save();
 
-    // Await synchronously (serverless freezes post-response work). A failure
-    // here is reported in the response; the admin's save is never rolled back.
-    // Only originals are sources; a manual translation (translatedFrom set) is
-    // a no-op here, whatever the edit changed.
+    // Control fields are mirrored inside the request; new text is queued for
+    // the background run. A failure here is reported in the response; the
+    // admin's save is never rolled back. Only originals are sources; a manual
+    // translation (translatedFrom set) is a no-op here, whatever the edit changed.
     let translations: TranslationResult[] = [];
     if (isTranslationSource(doc)) {
       try {
@@ -702,7 +736,7 @@ export const updateCmsContent = async (req: Request, res: Response) => {
         translations = mergeTranslationResults(moveResults, syncResults);
       } catch (err) {
         console.error("CMS translation sync/move crashed after save (save kept):", err);
-        translations = [{ locale: "*", status: "failed", error: "Translation sync crashed" }];
+        translations = [failedResult("*", "internal", "Translation sync crashed")];
       }
     }
 
@@ -723,7 +757,7 @@ export const updateCmsContent = async (req: Request, res: Response) => {
     const presigned = await presignCmsDoc(populated);
     return res
       .status(200)
-      .json({ success: true, translations, data: await withLocaleVariants(presigned) });
+      .json({ success: true, translations, data: await withTranslationInfo(presigned) });
   } catch (error: any) {
     if (error?.code === 11000) {
       return res.status(409).json({ success: false, msg: "Slug already exists for this type and locale" });
@@ -774,17 +808,21 @@ export const deleteCmsContent = async (req: Request, res: Response) => {
 };
 
 /**
- * POST /api/admin/cms/:id/translate — re-run the translation sync for a doc.
- * body { force?: boolean }:
- * - default: sync the doc as usual (manual translations preserved).
- * - force: also overwrite this source's LINKED manual translations
- *   (translatedFrom = source). A same-slug manual document that is not
- *   linked to the source is never overwritten (skipped_manual).
+ * POST /api/admin/cms/:id/translate — retry / re-sync / force.
+ * body { force?: boolean, locales?: CmsLocale[] }:
+ * - default: re-run the sync (creates missing, refreshes stale, retries
+ *   failed; manual translations preserved). Up-to-date locales cost nothing.
+ * - force: also replace this source's LINKED manual translations
+ *   (translatedFrom = source) with machine text, limited to `locales` when
+ *   given. A same-slug document not linked to the source is never overwritten.
  *
  * Only originals are translation sources. When the id points at a translation
  * (translatedFrom set), the sync is re-run from its origin instead, so force
  * never overwrites the human source locale with machine text. If the origin no
  * longer exists, the doc is promoted to a manual original first.
+ *
+ * The provider work runs in the background; `translations` are the immediate
+ * results (`pending` while queued) and `data` is the current status.
  */
 export const translateCmsContent = async (req: Request, res: Response) => {
   try {
@@ -793,7 +831,25 @@ export const translateCmsContent = async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, msg: "Invalid content ID" });
     }
 
-    const force = req.body?.force === true;
+    const body = req.body || {};
+    if (body.force !== undefined && typeof body.force !== "boolean") {
+      return res.status(400).json({ success: false, msg: "force must be a boolean" });
+    }
+    const force = body.force === true;
+
+    let requestedLocales: string[] | undefined;
+    if (body.locales !== undefined && body.locales !== null) {
+      if (
+        !Array.isArray(body.locales) ||
+        !body.locales.every((locale: unknown) => typeof locale === "string" && isCmsLocale(locale))
+      ) {
+        return res.status(400).json({
+          success: false,
+          msg: `locales must be a list of supported locales (${CMS_LOCALES.join(", ")})`,
+        });
+      }
+      requestedLocales = Array.from(new Set(body.locales as string[]));
+    }
 
     await connecToDatabase();
     const doc = await CmsContent.findById(id);
@@ -816,11 +872,42 @@ export const translateCmsContent = async (req: Request, res: Response) => {
       }
     }
 
-    const translations = await runTranslationSync(sourceDoc, { force });
-    return res.status(200).json({ success: true, translations });
+    const targets = targetLocalesFor(String(sourceDoc.locale));
+    const forceLocales = force
+      ? targets.filter((locale) => !requestedLocales || requestedLocales.includes(locale))
+      : [];
+
+    const translations = await runTranslationSync(sourceDoc, { forceLocales });
+    const status = await loadCmsTranslationStatus(sourceDoc._id);
+    return res.status(200).json({ success: true, translations, data: status ?? undefined });
   } catch (error) {
     console.error("Translate CMS content error:", error);
     return res.status(500).json({ success: false, msg: "Translation sync failed" });
+  }
+};
+
+/**
+ * GET /api/admin/cms/:id/translations — translation status of the family the
+ * doc belongs to (`:id` may be the source or any translation). Polled by the
+ * admin UI while a background run is pending; each read also re-schedules a
+ * run whose worker died.
+ */
+export const getCmsTranslationStatus = async (req: Request, res: Response) => {
+  try {
+    const { id } = params(req.params);
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ success: false, msg: "Invalid content ID" });
+    }
+
+    await connecToDatabase();
+    const status = await loadCmsTranslationStatus(id);
+    if (!status) {
+      return res.status(404).json({ success: false, msg: "Content not found" });
+    }
+    return res.status(200).json({ success: true, data: status });
+  } catch (error) {
+    console.error("Get CMS translation status error:", error);
+    return res.status(500).json({ success: false, msg: "Failed to load translation status" });
   }
 };
 
