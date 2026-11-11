@@ -133,13 +133,20 @@ export function translatorRegion(): string | undefined {
  * Azure language codes. For our supported locales the Azure code is the same
  * two-letter code, validated against the single source of truth.
  */
-function normalizeLanguage(value: string, field: "from" | "to"): string {
-  if (!isCmsLocale(value)) {
+function normalizeLanguage(
+  value: string,
+  field: "from" | "to",
+  languages?: readonly string[]
+): string {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  const supported = languages ?? CMS_LOCALES;
+  const ok = languages ? languages.includes(normalized) : isCmsLocale(value);
+  if (!ok) {
     throw new TranslatorError(
-      `Unsupported translation language "${value}" for ${field} (supported: ${CMS_LOCALES.join(", ")})`
+      `Unsupported translation language "${value}" for ${field} (supported: ${supported.join(", ")})`
     );
   }
-  return value.trim().toLowerCase();
+  return normalized;
 }
 
 /**
@@ -415,10 +422,20 @@ async function requestWithRetry(
  */
 export async function translateTexts(
   texts: string[],
-  opts: { from: string; to: string; html: boolean; deadline?: number }
+  opts: {
+    from: string;
+    to: string;
+    html: boolean;
+    deadline?: number;
+    /**
+     * Allowed language codes (Azure codes). Defaults to the CMS locales;
+     * marketing callers pass their own catalog (e.g. adds "de").
+     */
+    languages?: readonly string[];
+  }
 ): Promise<string[]> {
-  const from = normalizeLanguage(opts.from, "from");
-  const to = normalizeLanguage(opts.to, "to");
+  const from = normalizeLanguage(opts.from, "from", opts.languages);
+  const to = normalizeLanguage(opts.to, "to", opts.languages);
 
   if (!isTranslatorConfigured()) throw new TranslatorNotConfiguredError();
 
