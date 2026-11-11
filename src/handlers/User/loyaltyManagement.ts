@@ -11,6 +11,7 @@ import { getPointsBalance, getPointHistory } from "../../utils/pointsSystem";
 import { calculateProfessionalLevel } from "../../utils/professionalLevelSystem";
 import { applyPointsBoost } from '../../utils/professionalLevelSystem';
 import LoyaltyConfig from "../../models/loyaltyConfig";
+import ProfessionalLevelConfig from "../../models/professionalLevelConfig";
 import mongoose from 'mongoose';
 import { sendHandlerError } from '../../utils/handlerErrors';
 
@@ -143,7 +144,7 @@ export const getProfessionalLevelStatus = async (req: Request, res: Response, ne
       return res.status(401).json({ success: false, msg: "Authentication required" });
     }
 
-    const user = await User.findById(userId).select('role');
+    const user = await User.findById(userId).select('role professionalLevel');
     if (!user) {
       return res.status(404).json({ success: false, msg: "User not found" });
     }
@@ -154,12 +155,25 @@ export const getProfessionalLevelStatus = async (req: Request, res: Response, ne
 
     const levelInfo = await calculateProfessionalLevel(userId);
     const pointsBalance = await getPointsBalance(userId);
+    // FT3 #12: how many points buy one booking credit at the current level
+    // (the same ratio applyPointsBoost uses), so the benefits page can offer it.
+    let pointsBoostRatio = 100;
+    try {
+      const config = await ProfessionalLevelConfig.getCurrentConfig();
+      // Same lookup as applyPointsBoost: the stored level, else 'New'.
+      const currentName = (user as any).professionalLevel || 'New';
+      const current = config.levels.find((l: any) => l.isActive && l.name === currentName);
+      pointsBoostRatio = current?.pointsBoostRatio || 100;
+    } catch (configError) {
+      console.warn('Professional level: boost ratio lookup failed:', configError);
+    }
 
     return res.status(200).json({
       success: true,
       data: {
         level: levelInfo,
-        points: pointsBalance
+        points: pointsBalance,
+        pointsBoostRatio,
       }
     });
   } catch (error: any) {
@@ -176,9 +190,11 @@ export const boostProfessionalLevel = async (req: Request, res: Response, next: 
       return res.status(401).json({ success: false, msg: "Authentication required" });
     }
 
-    const { pointsToSpend } = req.body;
-    if (!pointsToSpend || pointsToSpend <= 0) {
-      return res.status(400).json({ success: false, msg: "Points amount must be positive" });
+    const pointsToSpend = Number(req.body?.pointsToSpend);
+    // Whole, positive points only: a non-numeric value must never reach the
+    // ledger as NaN.
+    if (!Number.isInteger(pointsToSpend) || pointsToSpend <= 0) {
+      return res.status(400).json({ success: false, msg: "Points amount must be a positive whole number" });
     }
 
     const user = await User.findById(userId).select('role');
