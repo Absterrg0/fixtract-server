@@ -4,6 +4,7 @@
  */
 
 import { Request, Response } from 'express';
+import { waitUntil } from '@vercel/functions';
 import mongoose from 'mongoose';
 import Stripe from 'stripe';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
@@ -1882,7 +1883,9 @@ export const refundPayment = async (req: Request, res: Response) => {
       const refreshed = await Booking.findById(bookingId).select('payment.status payment.totalWithVat');
       if (refreshed?.payment?.status === 'partially_refunded') {
         const { ensureRefundInvoices } = await import('../../utils/refundFinalization');
-        void ensureRefundInvoices(bookingId);
+        // Registered with waitUntil so a serverless runtime finishes it after
+        // the response, as the completion invoices do.
+        waitUntil(ensureRefundInvoices(bookingId));
       }
     } catch (invoiceTriggerError: any) {
       console.error(`Refund invoice trigger failed for booking ${bookingId}:`, invoiceTriggerError?.message || invoiceTriggerError);

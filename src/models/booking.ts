@@ -645,6 +645,12 @@ export interface IBooking extends Document {
     cancelledBy: Types.ObjectId; // User who cancelled
     reason: string;
     adminResolutionNote?: string;
+    /**
+     * Invoice-facing refund description when no admin note exists: the
+     * negotiated note or the requester's description (negotiated and dispute
+     * refunds). Rendered under the refund block of the remainder invoice.
+     */
+    refundNote?: string;
     cancelledAt: Date;
     refundAmount?: number;
   };
@@ -1639,6 +1645,10 @@ const BookingSchema = new Schema({
     adminResolutionNote: {
       type: String,
       maxlength: 500
+    },
+    refundNote: {
+      type: String,
+      maxlength: 1000
     },
     cancelledAt: {
       type: Date

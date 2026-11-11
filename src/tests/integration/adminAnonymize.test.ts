@@ -3746,6 +3746,8 @@ describeDb('admin account anonymization', () => {
     const storedApprovalBooking = await Booking.findById(approvalBooking._id).lean();
     expect(storedApprovalBooking?.cancellation?.reason).toBe('[deleted]');
     expect(storedApprovalBooking?.cancellation?.adminResolutionNote).toBe('Admin decision recorded separately');
+    // The invoice-facing refund note copied the requester's text; it is redacted too.
+    expect(storedApprovalBooking?.cancellation?.refundNote).toBe('[deleted]');
     expect(JSON.stringify(storedApprovalBooking)).not.toContain('+32 488 11 11 11');
   });
 
