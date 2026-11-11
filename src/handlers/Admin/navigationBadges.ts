@@ -10,6 +10,12 @@ import CancellationRequest, {
   ADMIN_ACTIONABLE_CANCELLATION_STATUSES,
 } from "../../models/cancellationRequest";
 import { buildDisputeFilter } from "./disputeManagement";
+import {
+  clauseForDashboard,
+  loadDashboardBaselines,
+  withBaselineClause,
+  type DashboardBaselineMap,
+} from "../../utils/adminDashboardBaselines";
 import { getEffectiveAccessForUser } from "../../utils/adminRbac/roleAccess";
 import { hasAccessLevel } from "../../utils/adminRbac/rolePermissions";
 import { denyUnlessPermission } from "../../utils/adminRbac/assertPermission";
@@ -84,7 +90,18 @@ export const PENDING_LEGACY_MEETING_REQUEST_FILTER = Object.freeze({ status: "pe
 type BadgeQueue = {
   /** Same authorization as the queue's list endpoint. */
   authorized: (ctx: { admin: IUser; levels: AdminPermissionLevels }) => boolean;
-  count: () => Promise<number>;
+  count: (baselines: DashboardBaselineMap) => Promise<number>;
+};
+
+/**
+ * Counting-since clause for a dashboard's current baseline. Badges count only
+ * open work, and the baseline rule keeps open work visible, so this clause does
+ * not change the number. It is applied anyway so the badge follows the same rule
+ * as its queue.
+ */
+const badgeBaselineClause = (key: "disputes" | "cancellations", baselines: DashboardBaselineMap) => {
+  const resetAt = baselines.get(key);
+  return resetAt ? clauseForDashboard(key, resetAt) : {};
 };
 
 const readable = (area: AdminAccessArea) => ({ levels }: { levels: AdminPermissionLevels }) =>
@@ -93,24 +110,28 @@ const readable = (area: AdminAccessArea) => ({ levels }: { levels: AdminPermissi
 export const NAVIGATION_BADGE_QUEUES: Record<AdminNavigationBadgeKey, BadgeQueue> = {
   professionalApprovals: {
     authorized: readable("professionals_approve"),
-    count: () => User.countDocuments(PENDING_PROFESSIONAL_APPROVAL_FILTER),
+    count: async () => User.countDocuments(PENDING_PROFESSIONAL_APPROVAL_FILTER),
   },
   projectApprovals: {
     // GET /projects/admin/pending is outside the admin router and is guarded by
     // denyUnlessPermission(projects.approve); use that exact check.
     authorized: ({ admin }) => denyUnlessPermission(admin, "projects.approve") === null,
-    count: () => Project.countDocuments(PENDING_PROJECT_APPROVAL_FILTER),
+    count: async () => Project.countDocuments(PENDING_PROJECT_APPROVAL_FILTER),
   },
   cancellationRequests: {
     authorized: readable("cancellations"),
-    count: () => CancellationRequest.countDocuments(ACTIONABLE_CANCELLATION_FILTER),
+    count: async (baselines) => CancellationRequest.countDocuments(
+      withBaselineClause(ACTIONABLE_CANCELLATION_FILTER, badgeBaselineClause("cancellations", baselines)),
+    ),
   },
   disputes: {
     // Canonical open booking disputes: the dispute list's Open view and the
     // "Open booking disputes" card. Warranty claims and escalated refunds are
     // separate queues and are never part of this count.
     authorized: readable("disputes"),
-    count: () => Booking.countDocuments(buildDisputeFilter("open")),
+    count: async (baselines) => Booking.countDocuments(
+      withBaselineClause(buildDisputeFilter("open"), badgeBaselineClause("disputes", baselines)) as any,
+    ),
   },
   supportTickets: {
     authorized: readable("support"),
@@ -124,7 +145,7 @@ export const NAVIGATION_BADGE_QUEUES: Record<AdminNavigationBadgeKey, BadgeQueue
   },
   chatReports: {
     authorized: readable("chat_reports"),
-    count: () => ChatReport.countDocuments(PENDING_CHAT_REPORT_FILTER),
+    count: async () => ChatReport.countDocuments(PENDING_CHAT_REPORT_FILTER),
   },
   reviewModeration: {
     authorized: readable("reviews"),
@@ -145,7 +166,13 @@ export async function computeAdminNavigationBadges(admin: IUser): Promise<AdminN
   const keys = ADMIN_NAVIGATION_BADGE_KEYS.filter((key) =>
     NAVIGATION_BADGE_QUEUES[key].authorized({ admin, levels }),
   );
-  const results = await Promise.allSettled(keys.map((key) => NAVIGATION_BADGE_QUEUES[key].count()));
+  // A failed baseline read must not take down every badge: fall back to no
+  // baselines (count all), which keeps per-queue failure isolation intact.
+  const baselines = await loadDashboardBaselines().catch((error: unknown) => {
+    console.error("[Admin] navigation badge baselines failed:", (error as Error)?.message);
+    return new Map() as Awaited<ReturnType<typeof loadDashboardBaselines>>;
+  });
+  const results = await Promise.allSettled(keys.map((key) => NAVIGATION_BADGE_QUEUES[key].count(baselines)));
   const counts: AdminNavigationBadgeCounts = {};
   keys.forEach((key, index) => {
     const result = results[index];

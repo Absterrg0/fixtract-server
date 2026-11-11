@@ -86,6 +86,12 @@ import {
 import { deleteUser } from "../../handlers/Admin/userDeletion";
 import { getAdminNavigationBadges } from "../../handlers/Admin/navigationBadges";
 import {
+  getDashboardBaselines,
+  resetAllDashboardBaselines,
+  resetDashboardBaseline,
+  undoDashboardBaseline,
+} from "../../handlers/Admin/dashboardBaselines";
+import {
   getFavoritesOverview,
   listAllFavorites,
   deleteFavorite,
@@ -221,6 +227,21 @@ import {
 
 const adminRouter = Router();
 
+// Dashboard "reset" writes (super only, enforced by the /platform-settings rule
+// and again in the handlers). Same shape as the other admin mutation limiters.
+const dashboardResetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => String(req.admin?._id || ipKeyGenerator(req.ip ?? 'unknown')),
+  message: {
+    success: false,
+    msg: 'Too many dashboard reset requests. Please wait a few minutes and try again.',
+    code: 'RATE_LIMITED',
+  },
+});
+
 const marketingTestSendLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 20,
@@ -341,6 +362,12 @@ adminRouter.route('/platform-settings').get(getPlatformSettings).put(updatePlatf
 adminRouter.route('/platform-settings/support-chat').patch(updateSupportChatSetting);
 adminRouter.route('/platform-settings/auto-conversion').patch(updateAutoConversionSetting);
 adminRouter.route('/platform-settings/odoo-companies').get(getOdooCompanies);
+
+// Super-admin "Reset dashboards": counting-since baselines for booking-flow dashboards
+adminRouter.route('/platform-settings/dashboard-baselines').get(getDashboardBaselines);
+adminRouter.route('/platform-settings/dashboard-baselines/reset-all').post(dashboardResetLimiter, resetAllDashboardBaselines);
+adminRouter.route('/platform-settings/dashboard-baselines/:key/reset').post(dashboardResetLimiter, resetDashboardBaseline);
+adminRouter.route('/platform-settings/dashboard-baselines/:key/undo').post(dashboardResetLimiter, undoDashboardBaseline);
 
 // Site settings (social media links etc)
 adminRouter.route('/site-settings').get(getAdminSiteSettings).put(updateAdminSiteSettings);

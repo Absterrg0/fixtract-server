@@ -14,6 +14,11 @@ import { param, params } from "../../utils/requestParams";
 import { notify } from '../../utils/notifications/notify';
 import { maskCancellationRequestForAnonymizedParties } from '../../utils/accountAnonymity';
 import {
+  resolveDashboardBaseline,
+  toBaselineInfo,
+  withBaselineClause,
+} from "../../utils/adminDashboardBaselines";
+import {
   ensureRefundInvoices,
   isBookingStarted,
   leavesBillableRemainder,
@@ -35,10 +40,13 @@ export const listCancellationRequests = async (req: Request, res: Response) => {
     const { status } = req.query;
     const { page, limit, skip } = parsePagination(req.query);
 
-    const filter: any = {};
+    const statusFilter: any = {};
     if (typeof status === "string" && (VALID_STATUSES as readonly string[]).includes(status)) {
-      filter.status = status;
+      statusFilter.status = status;
     }
+    // Counting-since baseline: open or pending requests always stay listed.
+    const baseline = await resolveDashboardBaseline(req, "cancellations");
+    const filter: any = withBaselineClause(statusFilter, baseline.clause);
 
     const [items, total] = await Promise.all([
       CancellationRequest.find(filter)
@@ -66,6 +74,7 @@ export const listCancellationRequests = async (req: Request, res: Response) => {
         total,
         page,
         limit,
+        baseline: toBaselineInfo(baseline),
       },
     });
   } catch (error: any) {
