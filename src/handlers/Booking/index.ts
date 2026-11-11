@@ -56,6 +56,7 @@ import {
   selectedPriceModel,
 } from "../../utils/bookingDetails/overviewRows";
 import { loadOverviewRefundLedgers } from "../../utils/paymentRefundLedger";
+import { countPaymentsByService, countPaymentsByStatus } from "../../utils/paymentFacetCounts";
 import { safeErrorSummary } from "../../utils/safeErrorLog";
 import { snapshotQuestionDefinitions } from '../../utils/bookingDetails/snapshot';
 import { RECORDED_DISPUTE_FILTER, withoutPhantomBookingActivity } from '../../utils/bookingActivity';
@@ -2374,10 +2375,14 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
       return res.status(403).json({ success: false, msg: "Only customers can view payment history" });
     }
 
-    const query: Record<string, any> = { customer: userId };
-    if (status && typeof status === 'string' && status !== 'all') {
-      query.status = status;
-    }
+    // Built as separate clauses so each facet count (FT2 #10a) can drop its
+    // own facet while honouring every other active filter. Aggregations do
+    // not cast, so ids are ObjectIds here.
+    const customerObjectId = new mongoose.Types.ObjectId(userId);
+    const baseQuery: Record<string, any> = { customer: customerObjectId };
+    const otherAnd: Record<string, any>[] = [];
+    const statusClause: Record<string, any> | null =
+      status && typeof status === 'string' && status !== 'all' ? { status } : null;
 
     // Literal search: booking number substring (escaped, never raw regex),
     // exact booking identity, or counterparty (professional) name.
@@ -2402,15 +2407,16 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
       if (matchingProfessionals.length > 0) {
         searchOr.push({ professional: { $in: matchingProfessionals.map(p => p._id) } });
       }
-      query.$and = (query.$and || []).concat([{ $or: searchOr }]);
+      otherAnd.push({ $or: searchOr });
     }
 
     if (bookingId && typeof bookingId === 'string' && /^[a-f\d]{24}$/i.test(bookingId)) {
-      query.booking = new mongoose.Types.ObjectId(bookingId);
+      otherAnd.push({ booking: new mongoose.Types.ObjectId(bookingId) });
     }
 
     // Service filter resolves through the customer's own bookings, so the
     // payment collection itself is never scanned by service name.
+    let serviceClause: Record<string, any> | null = null;
     if (service && typeof service === 'string' && service !== 'all') {
       const serviceProjectIds = await Project.find({ service }).select('_id');
       const serviceBookingFilter: Record<string, any> = {
@@ -2421,21 +2427,20 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
         (serviceBookingFilter.$or as any[]).push({ project: { $in: serviceProjectIds.map(p => p._id) } });
       }
       const serviceBookingIds = await Booking.find(serviceBookingFilter).select('_id').lean();
-      const serviceIdSet = new Set(serviceBookingIds.map((b: any) => String(b._id)));
-      if (query.booking) {
-        // An explicit booking was also requested: keep it only when it
-        // belongs to the requested service set.
-        query.booking = serviceIdSet.has(String(query.booking)) ? query.booking : { $in: [] };
-      } else {
-        query.booking = { $in: Array.from(serviceIdSet) };
-      }
+      serviceClause = { booking: { $in: serviceBookingIds.map((b: any) => b._id) } };
     }
+
+    const withClauses = (extra: Array<Record<string, any> | null>): Record<string, any> => {
+      const and = [...otherAnd, ...extra.filter((clause): clause is Record<string, any> => Boolean(clause))];
+      return and.length > 0 ? { ...baseQuery, $and: and } : { ...baseQuery };
+    };
+    const query = withClauses([statusClause, serviceClause]);
 
     const pageNumber = Math.max(parseInt(page as string, 10) || 1, 1);
     const limitNumber = Math.min(Math.max(parseInt(limit as string, 10) || 20, 5), 100);
     const skip = (pageNumber - 1) * limitNumber;
 
-    const [payments, totalCount, summaryStats] = await Promise.all([
+    const [payments, totalCount, summaryStats, facetCounts] = await Promise.all([
       Payment.find(query)
         .populate('booking', 'status bookingType bookingNumber')
         .populate('professional', 'name email username businessInfo isAnonymized deletedAt')
@@ -2445,7 +2450,7 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
         .lean(),
       Payment.countDocuments(query),
       Payment.aggregate([
-        { $match: { customer: new mongoose.Types.ObjectId(userId) } },
+        { $match: { customer: customerObjectId } },
         {
           $group: {
             _id: '$status',
@@ -2453,8 +2458,17 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
             total: { $sum: '$totalWithVat' }
           }
         }
-      ])
+      ]),
+      // FT2 #10a facet counts: best-effort, never block the list.
+      Promise.all([
+        countPaymentsByStatus(withClauses([serviceClause])),
+        countPaymentsByService(withClauses([statusClause])),
+      ]).catch((facetError) => {
+        console.error('Get my payments: facet counts failed; counts left unknown:', facetError?.message || facetError);
+        return [null, null] as const;
+      }),
     ]);
+    const [statusCounts, serviceCounts] = facetCounts;
 
     const summary = {
       totalPaid: 0,
@@ -2478,6 +2492,8 @@ export const getMyPayments = async (req: Request, res: Response, next: NextFunct
       data: {
         payments: visiblePayments,
         summary,
+        statusCounts,
+        serviceCounts,
         pagination: {
           page: pageNumber,
           limit: limitNumber,
