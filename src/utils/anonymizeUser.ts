@@ -3,6 +3,7 @@ import User from "../models/user";
 import AccountDataGuard from "../models/accountDataGuard";
 import AuditLog from "../models/auditLog";
 import Booking from "../models/booking";
+import BookingEvent from "../models/bookingEvent";
 import ChatMessage from "../models/chatMessage";
 import ChatReport from "../models/chatReport";
 import Conversation from "../models/conversation";
@@ -1615,6 +1616,28 @@ const redactCancellationRequests = async (
   return changed;
 };
 
+/**
+ * Booking event archive (models/bookingEvent): free text and evidence the
+ * target wrote are redacted; the transition facts (status, time) are kept.
+ */
+const redactBookingEvents = async (userId: Types.ObjectId, session: ClientSession) => {
+  const userIdText = idString(userId);
+  const result = await BookingEvent.updateMany(
+    {
+      $or: [
+        { actor: userId },
+        { "context.dispute.raisedBy": userIdText },
+        { "context.cancellation.cancelledBy": userIdText },
+        { "context.reschedule.requestedBy": userIdText },
+        { "context.completion.confirmedBy": userIdText },
+      ],
+    },
+    { $unset: { note: 1, context: 1 }, $set: { attachments: [] } },
+    { session },
+  );
+  return result.modifiedCount;
+};
+
 const redactWarrantyClaims = async (
   data: CollectedData,
   userId: Types.ObjectId,
@@ -2381,6 +2404,7 @@ const applyDatabaseRedaction = async (
   await redactConversations(data, userId, session);
   const chatCount = await redactChat(userId, session);
   await redactCancellationRequests(data, userId, session);
+  await redactBookingEvents(userId, session);
   await redactWarrantyClaims(data, userId, session);
   const projectCount = await redactProjects(data, userId, session);
   const bookingCount = await redactBookings(data, userId, session);

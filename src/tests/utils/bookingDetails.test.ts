@@ -942,17 +942,22 @@ describe('refund facts', () => {
       justification: 'Cancelled before start',
     });
     const partial = details.payments.refunds.find((refund) => refund.amount === 20)!;
+    // Phase 2: not recorded by the refund writer, so derived pro rata from the
+    // refunded payment's recorded 21% VAT and labelled as derived.
     expect(partial).toMatchObject({
       amount: 20,
-      netAmount: null,
-      vatAmount: null,
+      netAmount: 16.53,
+      vatAmount: 3.47,
+      vatRate: 21,
       vatSplitRecorded: false,
+      vatSplitDerived: true,
       justification: 'Goodwill',
       kind: 'booking',
     });
     expect(partial.internalNotes).toBeUndefined();
     expect(details.meta.dataQuality.refundVatRecorded).toBe(false);
-    expect(details.payments.notices.map((notice) => notice.code)).toContain('REFUND_VAT_SPLIT_NOT_RECORDED');
+    expect(details.payments.notices.map((notice) => notice.code)).toContain('REFUND_VAT_SPLIT_DERIVED');
+    expect(details.payments.notices.map((notice) => notice.code)).not.toContain('REFUND_VAT_SPLIT_NOT_RECORDED');
   });
 
   it('keeps an aggregate-only booking refund explicit when a real Payment row exists', async () => {
@@ -982,9 +987,10 @@ describe('refund facts', () => {
       status: 'aggregate_only',
       justification: null,
       justificationRecorded: false,
-      vatAmount: null,
-      netAmount: null,
+      vatAmount: 5.21,
+      netAmount: 24.79,
       vatSplitRecorded: false,
+      vatSplitDerived: true,
     });
     expect(details.payments.refunds[0].internalNotes).toBeUndefined();
     expect(details.payments.byCurrency).toEqual([
@@ -992,7 +998,7 @@ describe('refund facts', () => {
     ]);
     expect(details.meta.dataQuality.refundVatRecorded).toBe(false);
     expect(details.payments.notices.map((notice) => notice.code))
-      .toContain('REFUND_VAT_SPLIT_NOT_RECORDED');
+      .toContain('REFUND_VAT_SPLIT_DERIVED');
 
     const admin = await buildDetails('admin', {
       booking: {
