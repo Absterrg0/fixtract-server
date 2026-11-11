@@ -9,7 +9,10 @@ import {
   resolveProjectScheduleQuantity,
   getProjectDurations,
   validateProjectScheduleSelection,
+  applyWorkingDayExecutionMode,
+  isQuantityDerivedExecution,
 } from "../../utils/scheduleEngine";
+import { resolveAvailability } from "../../utils/availabilityHelpers";
 import { presignS3Url, uploadToS3, generateFileName } from "../../utils/s3Upload";
 import { resolveSubprojectIndex } from "../../utils/bookingHelpers";
 import { sendCancellationRequestAdminEmail } from "../../utils/emailService";
@@ -1096,7 +1099,19 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
       }
 
       if (selectedSubprojectForCheckout && checkoutSnapshot) {
-        const durations = getProjectDurations(project, subprojectIndex, undefined, checkoutSnapshot.quantity);
+        let durations = getProjectDurations(project, subprojectIndex, undefined, checkoutSnapshot.quantity);
+        // FT1 6B: freeze the execution the engine schedules. A quantity-derived
+        // execution in hours longer than the professional's longest working
+        // day is planned in day mode, so the snapshot (read by planning and
+        // reschedules) must carry the same day-mode duration.
+        if (durations?.execution.unit === 'hours' && isQuantityDerivedExecution(project, subprojectIndex)) {
+          const availabilityOwner = await User.findById(project.professionalId).select('companyAvailability').lean();
+          durations = applyWorkingDayExecutionMode(
+            durations,
+            resolveAvailability((availabilityOwner as any)?.companyAvailability),
+            true,
+          );
+        }
         if (!durations && selectedSubprojectForCheckout.pricing?.type === 'unit') {
           return res.status(400).json({ success: false, msg: 'The selected unit package has no valid execution duration' });
         }
