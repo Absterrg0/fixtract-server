@@ -3,7 +3,9 @@ import User from "../../models/user";
 import {
   calculateLoyaltyStatus,
   updateUserLoyalty,
-  getUserLoyaltyBenefits
+  getUserLoyaltyBenefits,
+  nextTierAfterLevel,
+  reconcileLoyaltyLevelUpgrade,
 } from "../../utils/loyaltySystem";
 import { getPointsBalance, getPointHistory } from "../../utils/pointsSystem";
 import { calculateProfessionalLevel } from "../../utils/professionalLevelSystem";
@@ -30,31 +32,48 @@ export const getLoyaltyStatus = async (req: Request, res: Response, next: NextFu
     }
 
     const loyaltyStatus = await calculateLoyaltyStatus(user.totalSpent || 0);
-    const effectiveLevel = user.manualCustomerLevelOverride || user.loyaltyLevel || loyaltyStatus.level;
+    const hasManualOverride = !!user.manualCustomerLevelOverride;
+    // FT3 #14a: a stored level below what the spend already qualifies for
+    // (e.g. Platinum added after the last booking) is upgraded now, so the
+    // level shown, the discount applied and the progression agree.
+    let storedLevel: string | undefined = user.loyaltyLevel;
+    if (!hasManualOverride) {
+      try {
+        storedLevel = await reconcileLoyaltyLevelUpgrade(user, loyaltyStatus.level);
+      } catch (reconcileError) {
+        console.warn('Loyalty: level reconcile failed:', reconcileError);
+      }
+    }
+    const effectiveLevel = user.manualCustomerLevelOverride || storedLevel || loyaltyStatus.level;
     const benefits = await getUserLoyaltyBenefits((user._id as mongoose.Types.ObjectId).toString());
     const pointsBalance = await getPointsBalance(userId);
 
-    const hasManualOverride = !!user.manualCustomerLevelOverride;
-
     let effectiveTierInfo = loyaltyStatus.tierInfo;
-    if (effectiveLevel && effectiveLevel !== loyaltyStatus.tierInfo?.name) {
-      try {
-        const config = await LoyaltyConfig.getCurrentConfig();
+    // Progress is relative to the level actually held.
+    let progression: ReturnType<typeof nextTierAfterLevel> = null;
+    try {
+      const config = await LoyaltyConfig.getCurrentConfig();
+      if (effectiveLevel && effectiveLevel !== loyaltyStatus.tierInfo?.name) {
         const match = config.tiers.find(t => t.isActive !== false && t.name === effectiveLevel);
         if (match) effectiveTierInfo = match;
-      } catch (lookupError) {
-        console.warn('Loyalty: tier lookup for override failed:', lookupError);
       }
+      progression = nextTierAfterLevel(config.tiers, effectiveLevel, user.totalSpent || 0);
+    } catch (lookupError) {
+      console.warn('Loyalty: tier lookup failed:', lookupError);
     }
+    const nextLevel = progression ? progression.nextTier?.name ?? null : loyaltyStatus.nextTier?.name ?? null;
 
     return res.status(200).json({
       success: true,
       data: {
         loyaltyStatus: {
           level: effectiveLevel,
-          nextLevel: hasManualOverride ? null : loyaltyStatus.nextTier?.name,
-          amountToNextTier: hasManualOverride ? null : loyaltyStatus.amountToNextTier,
-          progress: hasManualOverride ? null : loyaltyStatus.progress
+          // 'manual': an admin set this level, so there is no spend-based
+          // progression to show (distinct from reaching the top tier).
+          levelSource: hasManualOverride ? 'manual' : 'spend',
+          nextLevel: hasManualOverride ? null : nextLevel,
+          amountToNextTier: hasManualOverride ? null : (progression ? progression.amountNeeded ?? null : loyaltyStatus.amountToNextTier),
+          progress: hasManualOverride ? null : (progression ? progression.progress ?? null : loyaltyStatus.progress)
         },
         points: pointsBalance,
         userStats: {
