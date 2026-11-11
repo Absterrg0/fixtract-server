@@ -2021,6 +2021,12 @@ const buildBookingUpdate = (
       String(booking.cancellation.reason || ""),
     );
   }
+  // refundNote copies free text written by either party (the requester's
+  // reason, the professional's negotiated note or the dispute description),
+  // so it is redacted when any participant of the booking is anonymized.
+  if (typeof booking.cancellation?.refundNote === "string" && booking.cancellation.refundNote !== ANONYMIZED_TEXT) {
+    set["cancellation.refundNote"] = ANONYMIZED_TEXT;
+  }
 
   if (booking.rescheduleRequest) {
     if (idString(booking.rescheduleRequest.requestedBy) === userIdText) {

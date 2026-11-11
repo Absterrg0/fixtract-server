@@ -1,5 +1,6 @@
 import { releaseUnpaidReferralSafely } from '../../utils/releaseUnpaidReferral';
 import { Request, Response } from 'express';
+import { waitUntil } from '@vercel/functions';
 import Booking, { BookingStatus } from '../../models/booking';
 import User from '../../models/user';
 import WarrantyClaim from '../../models/warrantyClaim';
@@ -47,6 +48,11 @@ import {
 } from '../../utils/accountAnonymity';
 import { param, params } from '../../utils/requestParams';
 import { notify } from '../../utils/notifications/notify';
+import {
+  resolveDashboardBaseline,
+  toBaselineInfo,
+  withBaselineClause,
+} from '../../utils/adminDashboardBaselines';
 
 const presignAttachments = async (urls?: unknown): Promise<string[]> => {
   if (!Array.isArray(urls) || urls.length === 0) return [];
@@ -330,7 +336,12 @@ export const getDisputes = async (req: Request, res: Response) => {
     const pageNum = Math.max(1, parseInt(page as string) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
 
-    const filter = buildDisputeFilter(typeof status === 'string' ? status : undefined);
+    // Counting-since baseline: the list and its pagination total share one filter.
+    const baseline = await resolveDashboardBaseline(req, 'disputes');
+    const filter = withBaselineClause(
+      buildDisputeFilter(typeof status === 'string' ? status : undefined),
+      baseline.clause,
+    ) as any;
 
     const [disputes, total] = await Promise.all([
       Booking.find(filter)
@@ -374,7 +385,8 @@ export const getDisputes = async (req: Request, res: Response) => {
           limit: limitNum,
           total,
           pages: Math.ceil(total / limitNum),
-        }
+        },
+        baseline: toBaselineInfo(baseline),
       }
     });
   } catch (error: any) {
@@ -735,6 +747,9 @@ export const resolveDispute = async (req: Request, res: Response) => {
           ? Number(adjustedAmount)
           : undefined;
       const refundReason = `Dispute resolution (${disputeType}): ${booking.dispute?.refundPending ? booking.dispute.resolution : resolution}`;
+      const disputeRefundNote = [booking.dispute?.description, booking.dispute?.reason]
+        .find((note): note is string => typeof note === 'string' && note.trim().length > 0)
+        ?.trim().slice(0, 1000);
       let refundResult;
       try {
         refundResult = await executeRefund(resolvedBooking._id.toString(), {
@@ -815,6 +830,9 @@ export const resolveDispute = async (req: Request, res: Response) => {
               'cancellation.cancelledAt': new Date(),
               'cancellation.reason': refundReason,
               'cancellation.refundAmount': refundResult.amount,
+              // The admin resolution is already in the refund reason; the
+              // invoice refund block adds the requester's description.
+              ...(disputeRefundNote ? { 'cancellation.refundNote': disputeRefundNote } : {}),
             },
           }
         );
@@ -832,7 +850,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
               ).catch((pruneWriteError) => console.error('Failed to prune future planned days after dispute refund:', pruneWriteError));
               await retainPastBookingCalendar(resolvedBooking);
             }
-            void ensureRefundInvoices(String(resolvedBooking._id));
+            waitUntil(ensureRefundInvoices(String(resolvedBooking._id)));
           } else {
             await releaseBookingCalendar(booking._id);
           }
@@ -845,7 +863,7 @@ export const resolveDispute = async (req: Request, res: Response) => {
         } });
       } catch (recordingError) {
         console.error('Dispute refund accepted; post-refund booking reconciliation is pending:', recordingError);
-        void ensureRefundInvoices(String(resolvedBooking._id));
+        waitUntil(ensureRefundInvoices(String(resolvedBooking._id)));
       }
     }
   } catch (error: any) {
@@ -906,9 +924,27 @@ export const resolveDispute = async (req: Request, res: Response) => {
     console.error('Audit log failed after dispute resolve:', auditError);
   }
 
-  setImmediate(async () => {
-    try {
-      if (targetStatus === COMPLETED_BOOKING_STATUS) {
+  // Post-resolution work runs after the response. Like the normal completion
+  // path, it is registered with waitUntil: on Vercel, unregistered work is cut
+  // off once the response is out, which left completions without invoices.
+  // The setImmediate keeps it after the response, as before.
+  waitUntil(new Promise<void>((resolveBackground) => setImmediate(() => {
+    runPostResolutionWork().catch((backgroundError) => {
+      console.error('Post-resolve background work failed:', backgroundError);
+    }).finally(resolveBackground);
+  })));
+
+  return res.json({
+    success: true,
+    data: {
+      message: `Dispute resolved: ${action}`,
+      booking: resolvedBooking,
+    }
+  });
+
+  async function runPostResolutionWork(): Promise<void> {
+    if (targetStatus === COMPLETED_BOOKING_STATUS) {
+      try {
         const transferResult = await captureAndTransferPayment(resolvedBooking._id.toString());
         if (!transferResult.success) {
           const paymentStatus = resolvedBooking.payment?.status ? String(resolvedBooking.payment.status) : '';
@@ -918,19 +954,21 @@ export const resolveDispute = async (req: Request, res: Response) => {
         } else if (isExtraCostsDispute) {
           await transferResolvedExtraCostIfNeeded(resolvedBooking, finalExtraCostAmount);
         }
-        // An admin-forced completion must leave the same FIX/SUP artifacts as
-        // a customer-confirmed one. Idempotent: existing invoices are kept.
-        try {
-          await ensureBookingInvoiceArtifacts(resolvedBooking._id.toString());
-        } catch (invoiceError) {
-          console.error(
-            'Failed to generate booking invoice artifacts after dispute resolution:',
-            invoiceError instanceof Error ? invoiceError.message : invoiceError,
-          );
-        }
+      } catch (e) {
+        console.error('Post-resolve Stripe step failed:', e);
       }
-    } catch (e) {
-      console.error('Post-resolve Stripe step failed:', e);
+      // An admin-forced completion must leave the same FIX/SUP artifacts as
+      // a customer-confirmed one, also when the capture/transfer above threw:
+      // the invoices are built from the resolved booking, not the transfer.
+      // Idempotent: existing invoices are kept.
+      try {
+        await ensureBookingInvoiceArtifacts(resolvedBooking._id.toString());
+      } catch (invoiceError) {
+        console.error(
+          'Failed to generate booking invoice artifacts after dispute resolution:',
+          invoiceError instanceof Error ? invoiceError.message : invoiceError,
+        );
+      }
     }
 
     const proId = await getProfessionalId(resolvedBooking).catch(() => null);
@@ -1047,32 +1085,26 @@ export const resolveDispute = async (req: Request, res: Response) => {
     } catch (e) {
       console.error('Failed to archive related support conversations:', e);
     }
-  });
-
-  return res.json({
-    success: true,
-    data: {
-      message: `Dispute resolved: ${action}`,
-      booking: resolvedBooking,
-    }
-  });
+  }
 };
 
-export const getDisputeAnalytics = async (_req: Request, res: Response) => {
+export const getDisputeAnalytics = async (req: Request, res: Response) => {
   try {
     // totalOpen / totalResolved / totalDisputes count booking disputes only,
-    // with exactly the filters of the Open / Resolved / All list views.
+    // with exactly the filters of the Open / Resolved / All list views, plus the
+    // same counting-since baseline (open work is never excluded by it).
     // Warranty claims and refund requests are reported separately and are
     // never added into these totals.
+    const baseline = await resolveDashboardBaseline(req, 'disputes');
     const [
       totalOpen,
       totalResolved,
       totalDisputes,
       separateQueues,
     ] = await Promise.all([
-      Booking.countDocuments(buildDisputeFilter('open')),
-      Booking.countDocuments(buildDisputeFilter('resolved')),
-      Booking.countDocuments(buildDisputeFilter()),
+      Booking.countDocuments(withBaselineClause(buildDisputeFilter('open'), baseline.clause) as any),
+      Booking.countDocuments(withBaselineClause(buildDisputeFilter('resolved'), baseline.clause) as any),
+      Booking.countDocuments(withBaselineClause(buildDisputeFilter(), baseline.clause) as any),
       countSeparateDisputeQueues(),
     ]);
 
@@ -1083,6 +1115,7 @@ export const getDisputeAnalytics = async (_req: Request, res: Response) => {
         totalResolved,
         totalDisputes,
         separateQueues,
+        baseline: toBaselineInfo(baseline),
       }
     });
   } catch (error: any) {

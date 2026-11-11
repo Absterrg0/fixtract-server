@@ -18,6 +18,8 @@ import {
   getResourcePolicy,
   getUnbookableStartDates,
   getWorkingRangeUtc,
+  isQuantityDerivedExecution,
+  resolveScheduleDurations,
   hasMinimumFreeWorkingSchedule,
   isDayBlockedByCoveredMinutes,
   normalizeRangeEndInclusive,
@@ -1392,14 +1394,14 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
     const scheduleQuantity = resolveProjectScheduleQuantity(projectData, subprojectIndex, req.query.quantity);
     if (!scheduleQuantity.valid) return res.status(400).json({ success: false, error: scheduleQuantity.error });
 
-    // If subprojectIndex is provided, use that specific subproject's execution duration
-    if (typeof subprojectIndex === 'number' &&
-        projectData.subprojects &&
-        Array.isArray(projectData.subprojects) &&
-        projectData.subprojects[subprojectIndex]?.executionDuration?.value &&
-        projectData.subprojects[subprojectIndex]?.executionDuration?.unit === 'days') {
-      const durationMultiplier = projectData.subprojects[subprojectIndex].pricing?.type === 'unit' && projectData.subprojects[subprojectIndex].pricing?.durationBasis === 'per_unit' ? scheduleQuantity.quantity : 1;
-      executionDays = Math.max(1, Math.ceil(projectData.subprojects[subprojectIndex].executionDuration.value * durationMultiplier));
+    // If subprojectIndex is provided, use the execution the engine schedules
+    // for that package and quantity (per-unit scaling, and FT1 6B: customer
+    // hours longer than a working day are planned in day mode).
+    const selectedScheduleDurations = typeof subprojectIndex === 'number' && Array.isArray(projectData.subprojects)
+      ? resolveScheduleDurations(projectData, subprojectIndex, undefined, scheduleQuantity.quantity, availability)
+      : null;
+    if (selectedScheduleDurations?.execution.unit === 'days') {
+      executionDays = Math.max(1, Math.ceil(selectedScheduleDurations.execution.value));
     } else if (projectData.executionDuration?.value && projectData.executionDuration?.unit === 'days') {
       // Use project-level execution duration
       executionDays = Math.max(1, Math.ceil(projectData.executionDuration.value));
@@ -1709,8 +1711,9 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
     const projectForQuantity = await Project.findById(id).select("subprojects");
     const scheduleQuantity = resolveProjectScheduleQuantity(projectForQuantity, subprojectIndex, req.query.quantity);
     if (!scheduleQuantity.valid) return res.status(400).json({ success: false, error: scheduleQuantity.error });
-    const selectedPricing = projectForQuantity?.subprojects?.[subprojectIndex as number]?.pricing;
-    const safeDurationOverride = selectedPricing?.type === 'unit' && selectedPricing.durationBasis === 'per_unit'
+    // Quantity-derived executions (per-unit, or customer hours: FT1 6A) are
+    // never overridden by the caller.
+    const safeDurationOverride = isQuantityDerivedExecution(projectForQuantity, subprojectIndex)
       ? { ...durationOverride, execution: undefined }
       : durationOverride;
     const proposals = await buildProjectScheduleProposals(id as string, subprojectIndex, safeDurationOverride, excludeBookingId, scheduleQuantity.quantity, typeof req.query.timeZone === 'string' ? req.query.timeZone : undefined);
@@ -1882,8 +1885,7 @@ export const getProjectScheduleWindow = async (req: Request, res: Response) => {
     const durationOverrideW = executionParsedW.value || preparationParsedW.value || bufferParsedW.value
       ? { execution: executionParsedW.value, preparation: preparationParsedW.value, buffer: bufferParsedW.value }
       : undefined;
-    const selectedPricingW = project.subprojects?.[subprojectIndex as number]?.pricing;
-    const safeDurationOverrideW = selectedPricingW?.type === 'unit' && selectedPricingW.durationBasis === 'per_unit'
+    const safeDurationOverrideW = isQuantityDerivedExecution(project, subprojectIndex)
       ? { ...durationOverrideW, execution: undefined }
       : durationOverrideW;
 
@@ -2444,6 +2446,9 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
       // Match either the primary category field or within services[] selections
       filter.$or = [{ category }, { "services.category": category }];
     }
+    // FT2 #10a: the service dropdown counts honour every filter except the
+    // service selection itself, so snapshot the filter before it is applied.
+    const serviceCountFilter: any = { ...filter, ...(filter.$and ? { $and: [...filter.$and] } : {}) };
     if (service && service !== "all") {
       // Match either the primary service field or within services[] selections
       const serviceConditions = [{ service }, { "services.service": service }];
@@ -2456,14 +2461,14 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
     }
     if (search) {
       const regex = new RegExp(search.trim().slice(0, 80).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-      filter.$and = (filter.$and || []).concat([
-        {
-          $or: [{ title: regex }, { description: regex }, { keywords: regex }],
-        },
-      ]);
+      const searchClause = {
+        $or: [{ title: regex }, { description: regex }, { keywords: regex }],
+      };
+      filter.$and = (filter.$and || []).concat([searchClause]);
+      serviceCountFilter.$and = (serviceCountFilter.$and || []).concat([searchClause]);
     }
 
-    const [items, total, distinctServices, counts] = await Promise.all([
+    const [items, total, distinctServices, counts, serviceCounts] = await Promise.all([
       Project.find(filter)
         .sort({ updatedAt: -1 })
         .skip((page - 1) * limit)
@@ -2515,6 +2520,31 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
           archived: byStatus["archived"] || 0,
         };
       })(),
+      // Per-service counts. A project counts once for every service it
+      // matches under the service filter (primary field or services[]).
+      (async () => {
+        const rows = await (Project as any).aggregate([
+          { $match: { ...serviceCountFilter, professionalId: new mongoose.Types.ObjectId(professionalId) } },
+          {
+            $project: {
+              serviceValues: {
+                $setUnion: [
+                  [{ $ifNull: ["$service", null] }],
+                  { $ifNull: ["$services.service", []] },
+                ],
+              },
+            },
+          },
+          { $unwind: "$serviceValues" },
+          { $match: { serviceValues: { $nin: [null, ""] } } },
+          { $group: { _id: "$serviceValues", count: { $sum: 1 } } },
+        ]);
+        const byService: Record<string, number> = {};
+        for (const row of rows || []) {
+          if (row && typeof row._id === "string" && row._id) byService[row._id] = Number(row.count) || 0;
+        }
+        return byService;
+      })().catch(() => null),
     ]);
 
     // Assigned team member names, resolved in one batched lookup. Only
@@ -2550,6 +2580,7 @@ export const getProjectsMaster = async (req: Request, res: Response) => {
         pages: Math.ceil(total / limit),
       },
       counts,
+      serviceCounts,
       distinctServices: distinctServices.filter(Boolean).sort(),
     });
   } catch (error) {

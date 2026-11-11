@@ -35,7 +35,7 @@ const getCachedLevelConfig = async (): Promise<IProfessionalLevelConfig> => {
     });
   return cachedLevelConfigPromise;
 };
-import { buildProjectScheduleProposalsWithData, resolveEffectiveScheduleTimeZone } from "../../utils/scheduleEngine";
+import { buildProjectScheduleProposalsWithData, isQuantityDerivedExecution, resolveEffectiveScheduleTimeZone } from "../../utils/scheduleEngine";
 
 export { getPopularServices } from "./getPopularServices";
 export { getPopularProjects } from "./getPopularProjects";
@@ -875,7 +875,7 @@ async function searchProjects(
           const proposalsFor = async (subprojectIndex?: number) => {
             const subproject = typeof subprojectIndex === "number" ? packages[subprojectIndex] : null;
             const minQuantity = Math.max(1, Number(subproject?.pricing?.minOrderQuantity) || 1);
-            const quantity = subproject?.pricing?.type === "unit" && subproject?.pricing?.durationBasis === "per_unit" ? minQuantity : 1;
+            const quantity = isQuantityDerivedExecution(project, subprojectIndex) ? minQuantity : 1;
             return buildProjectScheduleProposalsWithData(project, boundedProfessional, subprojectIndex, undefined, undefined, quantity);
           };
           const mainIndex = !project.executionDuration?.value && packages.length > 0 ? 0 : undefined;
@@ -1073,7 +1073,7 @@ async function searchProjects(
     const getSearchQuantity = (project: any, subprojectIndex?: number) => {
       const subproject = typeof subprojectIndex === "number" ? project.subprojects?.[subprojectIndex] : null;
       const minQuantity = Math.max(1, Number(subproject?.pricing?.minOrderQuantity) || 1);
-      return subproject?.pricing?.type === "unit" && subproject?.pricing?.durationBasis === "per_unit" ? minQuantity : 1;
+      return isQuantityDerivedExecution(project, subprojectIndex) ? minQuantity : 1;
     };
 
     // Customer prices for every viewer except the owning professional and payments-authorized admins.

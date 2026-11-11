@@ -1,5 +1,6 @@
 import { releaseUnpaidReferralSafely } from '../../utils/releaseUnpaidReferral';
 import { Request, Response } from "express";
+import { waitUntil } from "@vercel/functions";
 import mongoose from "mongoose";
 import CancellationRequest, { ADMIN_ACTIONABLE_CANCELLATION_STATUSES } from "../../models/cancellationRequest";
 import Booking from "../../models/booking";
@@ -13,6 +14,11 @@ import { auditLog } from "../../utils/auditLogger";
 import { param, params } from "../../utils/requestParams";
 import { notify } from '../../utils/notifications/notify';
 import { maskCancellationRequestForAnonymizedParties } from '../../utils/accountAnonymity';
+import {
+  resolveDashboardBaseline,
+  toBaselineInfo,
+  withBaselineClause,
+} from "../../utils/adminDashboardBaselines";
 import {
   ensureRefundInvoices,
   isBookingStarted,
@@ -35,10 +41,13 @@ export const listCancellationRequests = async (req: Request, res: Response) => {
     const { status } = req.query;
     const { page, limit, skip } = parsePagination(req.query);
 
-    const filter: any = {};
+    const statusFilter: any = {};
     if (typeof status === "string" && (VALID_STATUSES as readonly string[]).includes(status)) {
-      filter.status = status;
+      statusFilter.status = status;
     }
+    // Counting-since baseline: open or pending requests always stay listed.
+    const baseline = await resolveDashboardBaseline(req, "cancellations");
+    const filter: any = withBaselineClause(statusFilter, baseline.clause);
 
     const [items, total] = await Promise.all([
       CancellationRequest.find(filter)
@@ -66,6 +75,7 @@ export const listCancellationRequests = async (req: Request, res: Response) => {
         total,
         page,
         limit,
+        baseline: toBaselineInfo(baseline),
       },
     });
   } catch (error: any) {
@@ -226,6 +236,8 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
       cancelledAt: new Date(),
       refundAmount: refundAmount || undefined,
       ...(adminResolutionNote ? { adminResolutionNote } : {}),
+      // Invoice fallback when the admin note is absent or already the reason.
+      ...(resolvedReason?.trim() ? { refundNote: resolvedReason.trim().slice(0, 1000) } : {}),
     } as any;
 
     const adminStatusNote = (adminResolutionNote
@@ -274,7 +286,9 @@ export const approveCancellationRequest = async (req: Request, res: Response) =>
       );
     }
     if (partialRefundRemainder) {
-      void ensureRefundInvoices(String(freshBooking._id));
+      // Registered with waitUntil so a serverless runtime finishes it after
+      // the response, as the completion invoices do.
+      waitUntil(ensureRefundInvoices(String(freshBooking._id)));
     }
 
     cancellation.status = "approved";
