@@ -823,6 +823,7 @@ const buildPayments = async (params: {
       netAmount: fact.netAmount,
       vatRate: fact.vatRate,
       vatSplitRecorded: fact.vatSplitRecorded,
+      vatSplitDerived: fact.vatSplitDerived === true,
       kind: fact.kind,
       ...(canSeeAdminInternals
         ? { internalNotes: fact.internalNotes, providerRefundId: fact.providerRefundId }
@@ -831,8 +832,11 @@ const buildPayments = async (params: {
       noticeCodes: fact.noticeCodes,
     };
   });
-  if (refunds.some((refund) => !refund.vatSplitRecorded)) {
+  if (refunds.some((refund) => !refund.vatSplitRecorded && !refund.vatSplitDerived)) {
     notices.push(notice('REFUND_VAT_SPLIT_NOT_RECORDED', 'info', 'refund'));
+  }
+  if (refunds.some((refund) => refund.vatSplitDerived)) {
+    notices.push(notice('REFUND_VAT_SPLIT_DERIVED', 'info', 'refund'));
   }
 
   const byCurrencyMap = new Map<string, { charged: number; refunded: number; complete: boolean }>();
@@ -1837,7 +1841,9 @@ export const buildBookingDetails = async (params: {
         : null,
     extraCosts: num(booking.extraCostTotal) != null
       ? {
-          total: num(booking.extraCostTotal),
+          // The professional base is never a customer-facing figure.
+          total: viewerRole === 'customer' ? null : num(booking.extraCostTotal),
+          customerTotal: viewerRole === 'professional' ? null : extraCosts.totalCustomerAmount,
           currency: paymentCurrency,
           currencySource: booking.payment?.currency ? 'payment' : quoteCurrency ? 'quote' : 'not_recorded',
           status: booking.extraCostStatus || null,
