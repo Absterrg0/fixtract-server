@@ -127,6 +127,9 @@ import {
   updateSiteAnnouncement,
   setSiteAnnouncementActive,
   deleteSiteAnnouncement,
+  getSiteAnnouncementTranslations,
+  runSiteAnnouncementTranslations,
+  saveSiteAnnouncementTranslation,
 } from "../../handlers/Admin/siteAnnouncements";
 import {
   listMarketingCampaigns,
@@ -141,6 +144,7 @@ import {
   listMarketingSubscribers,
   listMarketingTemplates,
   sendMarketingCampaignTestEmail,
+  autoTranslateMarketingCampaign,
 } from "../../handlers/Admin/marketingCampaigns";
 import { uploadProfileImage as cmsImageMulter, upload as adminFileUpload } from "../../utils/s3Upload";
 import { listMarketingServiceOptions } from "../../handlers/Admin/marketingServiceOptions";
@@ -222,6 +226,19 @@ import {
 } from "../../utils/adminRbac/middleware";
 
 const adminRouter = Router();
+
+const marketingAutoTranslateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => String(req.admin?._id || ipKeyGenerator(req.ip ?? 'unknown')),
+  message: {
+    success: false,
+    msg: 'Too many auto-translate requests. Please wait a few minutes and try again.',
+    code: 'RATE_LIMITED',
+  },
+});
 
 const marketingTestSendLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -368,6 +385,9 @@ adminRouter.route('/discount-codes/:id').get(getDiscountCode).patch(updateDiscou
 // Site announcement / marketing promo surfaces
 adminRouter.route('/site-announcements').get(listSiteAnnouncements).post(createSiteAnnouncement);
 adminRouter.route('/site-announcements/:id/active').patch(setSiteAnnouncementActive);
+adminRouter.route('/site-announcements/:id/translations').get(getSiteAnnouncementTranslations);
+adminRouter.route('/site-announcements/:id/translations/run').post(runSiteAnnouncementTranslations);
+adminRouter.route('/site-announcements/:id/translations/:locale').put(saveSiteAnnouncementTranslation);
 adminRouter.route('/site-announcements/:id').get(getSiteAnnouncement).patch(updateSiteAnnouncement).delete(deleteSiteAnnouncement);
 
 // Marketing email campaigns (Brevo)
@@ -375,6 +395,7 @@ adminRouter.route('/marketing-campaigns').get(listMarketingCampaigns).post(creat
 adminRouter.route('/marketing-campaigns/preview-audience').post(previewMarketingAudience);
 adminRouter.route('/marketing-campaigns/test-send').post(marketingTestSendLimiter, sendMarketingCampaignTestEmail);
 adminRouter.route('/marketing-campaigns/templates').get(listMarketingTemplates);
+adminRouter.route('/marketing-campaigns/auto-translate').post(marketingAutoTranslateLimiter, autoTranslateMarketingCampaign);
 adminRouter.route('/marketing-campaigns/service-options').get(listMarketingServiceOptions);
 adminRouter.route('/marketing-campaigns/:id/send').post(sendMarketingCampaignNow);
 adminRouter.route('/marketing-campaigns/:id/stats').post(refreshMarketingCampaignStats);
