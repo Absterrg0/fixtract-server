@@ -206,7 +206,8 @@ export const boostProfessionalLevel = async (req: Request, res: Response, next: 
 
     return res.status(200).json({
       success: true,
-      msg: result.levelChanged
+      // Only an upward change is an upgrade (a recalculation can also lower it).
+      msg: result.leveledUp
         ? `Level upgraded to ${result.newLevel}!`
         : `${result.boostedBookings} booking credits added toward level progress`,
       data: result

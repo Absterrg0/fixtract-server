@@ -28,10 +28,18 @@ describe('professional points boost validation', () => {
 
   it('accepts a whole positive amount, also sent as a numeric string', async () => {
     findById.mockReturnValue({ select: async () => ({ role: 'professional' }) });
-    applyPointsBoost.mockResolvedValue({ boostedBookings: 2, newLevel: 'Expert', levelChanged: false });
+    applyPointsBoost.mockResolvedValue({ boostedBookings: 2, newLevel: 'Expert', levelChanged: false, leveledUp: false });
     const r = res();
     await boostProfessionalLevel({ user: { _id: 'pro' }, body: { pointsToSpend: '200' } } as any, r, vi.fn());
     expect(r.statusCode).toBe(200);
     expect(applyPointsBoost).toHaveBeenCalledWith('pro', 200);
+  });
+
+  it('never calls a downward recalculation an upgrade', async () => {
+    findById.mockReturnValue({ select: async () => ({ role: 'professional' }) });
+    applyPointsBoost.mockResolvedValue({ boostedBookings: 1, newLevel: 'New', levelChanged: true, leveledUp: false });
+    const r = res();
+    await boostProfessionalLevel({ user: { _id: 'pro' }, body: { pointsToSpend: 100 } } as any, r, vi.fn());
+    expect(r.body.msg).not.toMatch(/upgraded/i);
   });
 });
