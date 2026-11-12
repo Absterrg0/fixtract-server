@@ -179,6 +179,10 @@ import {
   adminUpdateSupportItem,
   adminUpdateSupportMeeting,
 } from "../../handlers/Admin/supportItems";
+import {
+  getSupportMeetingLinkSettings,
+  updateSupportMeetingLinkSettings,
+} from "../../handlers/Admin/supportMeetingLinkSettings";
 import { listEmailLogs } from "../../handlers/Admin/emailLogs";
 import {
   listCancellationRequests,
@@ -398,6 +402,11 @@ adminRouter.route('/support/items/:kind/:id/notes').get(adminListSupportNotes).p
 adminRouter.route('/support/items/:kind/:id/replies').post(adminReplySupportItem);
 adminRouter.route('/support/items/:kind/:id/meeting').patch(adminUpdateSupportMeeting);
 adminRouter.route('/support/availability').get(adminGetSupportAvailability);
+// The signed-in admin's default meeting link (GET needs support read, PUT write).
+adminRouter
+  .route('/support/meeting-link-settings')
+  .get(getSupportMeetingLinkSettings)
+  .put(updateSupportMeetingLinkSettings);
 
 // Legacy professional support management (kept for old clients)
 adminRouter.route('/support/tickets').get(adminListTickets);
