@@ -230,6 +230,27 @@ it('shows each service address part once when the street address already contain
   expect(joinAddress({ address: 'Meir 1', city: 'Antwerpen', postalCode: '2000', country: 'BE' })).toBe('Meir 1, Antwerpen, 2000, BE');
   expect(joinAddress({})).toBeNull();
 });
+it('does not label a combined legacy price model as one model, and prefers the booked subproject pricing type', () => {
+  for (const [text, token] of [
+    ['Fixed Price', 'fixed'], ['Price per hour', 'hour'], ['m2', 'm2'], ['Price per square metre', 'm2'],
+    ['Total price or m² of material', null], ['Total price or m² of material or per hour', null], ['Something bespoke', null],
+  ] as const) expect(normalizePriceModel(text), text).toBe(token);
+  // Ambiguous project text: the subproject type decides, else the raw text is shown as before.
+  expect(selectedPriceModel({ bookingSnapshot: { project: { priceModel: 'Total price or m² of material' }, selectedSubproject: { pricing: { type: 'unit' } } } })).toBe('unit');
+  expect(selectedPriceModel({ bookingSnapshot: { project: { priceModel: 'Total price or m² of material' } } })).toBe('Total price or m² of material');
+  expect(buildSharedBookingsRow({ priceModel: 'Total price or m² of material' }, 'customer').priceModel).toBe('Total price or m² of material');
+  // The subproject type wins over the project text; a unit-based project text only refines "unit".
+  expect(selectedPriceModel({ bookingSnapshot: { project: { priceModel: 'Fixed Price' }, selectedSubproject: { pricing: { type: 'unit' } } } })).toBe('unit');
+  expect(selectedPriceModel({ bookingSnapshot: { project: { priceModel: 'Price per m²' }, selectedSubproject: { pricing: { type: 'unit' } } } })).toBe('m2');
+  expect(selectedPriceModel({ bookingSnapshot: { project: { priceModel: 'Price per hour' }, selectedSubproject: { pricing: { type: 'fixed' } } } })).toBe('fixed');
+});
+it('keeps a city or postal code that only appears inside the street name', () => {
+  expect(joinAddress({ address: 'Rue de Namur 12', city: 'Namur', postalCode: '5000', country: 'BE' })).toBe('Rue de Namur 12, Namur, 5000, BE');
+  expect(joinAddress({ address: 'Kerkstraat 1000', city: 'Brussel', postalCode: '1000', country: 'BE' })).toBe('Kerkstraat 1000, Brussel, 1000, BE');
+  // Repeats of a later segment are still dropped, whitespace and case ignored.
+  expect(joinAddress({ address: 'Rue de Namur 12, 5000  NAMUR', city: 'Namur', postalCode: '5000', country: 'BE' })).toBe('Rue de Namur 12, 5000  NAMUR, BE');
+  expect(joinAddress({ address: 'Meir 1, Antwerpen', city: ' antwerpen ', postalCode: '2000', country: 'Belgium' })).toBe('Meir 1, Antwerpen, 2000, Belgium');
+});
 it('uses the recorded customer VAT-inclusive total for the pinned quote', () => {
   expect(pinnedVersionMoney({ currentQuoteVersion: 2, quoteVersions: [{ version: 2, totalAmount: 300, customerTotals: { totalWithVat: 363 }, currency: 'EUR' }] }).amount).toBe(363);
 });

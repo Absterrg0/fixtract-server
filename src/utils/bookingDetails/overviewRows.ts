@@ -111,10 +111,25 @@ const countryNameVariants = (value: string): string[] => {
 };
 
 /**
+ * Whole-segment forms of an address segment: the segment itself and, for a
+ * combined "postcode city" / "city postcode" segment, each leading and trailing
+ * run of its words ("2000 Antwerpen" also stands for "2000" and "Antwerpen").
+ */
+const segmentForms = (segment: string): string[] => {
+  const words = addressWords(segment).split(" ").filter(Boolean);
+  const forms = [words.join(" ")];
+  for (let k = 1; k < words.length; k += 1) forms.push(words.slice(0, k).join(" "), words.slice(k).join(" "));
+  return forms;
+};
+
+/**
  * One-line service address. A Google-formatted street address ("Meir 1, 2000
  * Antwerpen, Belgium") already names the city, postcode and country, and some
  * bookings stored the profile address with those parts appended again; each
- * part is shown once, in its first position.
+ * part is shown once, in its first position. A part is dropped only when it
+ * matches a whole segment already added after the street (case, accents and
+ * spacing ignored; "BE" matches "Belgium"), never because the street name
+ * contains the same word ("Rue de Namur 12" in Namur).
  */
 export const joinAddress = (location: any): string | null => {
   if (!location || typeof location !== "object") return null;
@@ -125,11 +140,13 @@ export const joinAddress = (location: any): string | null => {
     location.country,
   ];
   const kept: string[] = [];
+  const seen = new Set<string>();
   for (const segment of segments) {
     if (typeof segment !== "string" || !segment.trim()) continue;
-    const haystack = ` ${addressWords(kept.join(" "))} `;
     const variants = [segment, ...countryNameVariants(segment)].map(addressWords).filter(Boolean);
-    if (variants.length === 0 || variants.some((variant) => haystack.includes(` ${variant} `))) continue;
+    if (variants.length === 0 || variants.some((variant) => seen.has(variant))) continue;
+    // The first kept segment is the street; only later segments name the city, postcode or country.
+    if (kept.length > 0) for (const form of segmentForms(segment)) seen.add(form);
     kept.push(segment.trim());
   }
   return kept.length > 0 ? kept.join(", ") : null;
@@ -386,23 +403,34 @@ export type PriceModelToken = (typeof PRICE_MODEL_TOKENS)[number];
  * configuration's pricing option name ("Fixed Price", "Price per m²"), which is
  * free text; subproject pricing stores the enum (fixed/unit/rfq), and older
  * records may hold the option type (fixed_price/price_per_unit). Null when the
- * text names no known model.
+ * text names no known model, or names more than one (the legacy combined
+ * option "Total price or m² of material"), so the caller shows it as recorded.
+ * Mirrored by the frontend's priceModelKey (fixera lib/priceModel.ts).
  */
+const PRICE_MODEL_PATTERNS: ReadonlyArray<readonly [PriceModelToken, RegExp]> = [
+  ["rfq", /\b(rfq|quote|quotation|request)\b|offerte|devis/],
+  ["fixed", /\b(fixed|total|flat|fixe)\b|vaste|forfait/],
+  ["hour", /\b(hour|hours|hourly|uur)\b|heure/],
+  ["day", /\b(day|days|daily|dag)\b|jour/],
+  ["m2", /m²|\bm2\b|square met/],
+  ["room", /\b(room|rooms|kamer)\b|pièce/],
+  ["meter", /\b(metre|meter|linear|lineair)\b|mètre/],
+];
+
 export const normalizePriceModel = (value: unknown): PriceModelToken | null => {
   if (typeof value !== "string") return null;
   const text = value.trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
   if (!text) return null;
   if ((PRICE_MODEL_TOKENS as readonly string[]).includes(text)) return text as PriceModelToken;
-  if (/\b(rfq|quote|quotation|request)\b|offerte|devis/.test(text)) return "rfq";
-  if (/\b(fixed|total|flat|fixe)\b|vaste|forfait/.test(text)) return "fixed";
-  if (/\b(hour|hours|hourly|uur)\b|heure/.test(text)) return "hour";
-  if (/\b(day|days|daily|dag)\b|jour/.test(text)) return "day";
-  if (/m²|\bm2\b|square met/.test(text)) return "m2";
-  if (/\b(room|rooms|kamer)\b|pièce/.test(text)) return "room";
-  if (/\b(metre|meter|linear|lineair)\b|mètre/.test(text)) return "meter";
-  if (/\b(unit|per)\b|eenheid|unité/.test(text)) return "unit";
-  return null;
+  let matches = PRICE_MODEL_PATTERNS.filter(([, pattern]) => pattern.test(text)).map(([token]) => token);
+  // "Square metre" names the area model, not the linear one.
+  if (matches.includes("m2")) matches = matches.filter((token) => token !== "meter");
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) return null;
+  return /\b(unit|per)\b|eenheid|unité/.test(text) ? "unit" : null;
 };
+
+const UNIT_BASED_TOKENS: ReadonlySet<PriceModelToken> = new Set(["unit", "hour", "day", "meter", "m2", "room"]);
 
 export const selectedPriceModel = (booking: any): string | null => {
   const snapshot = booking?.bookingSnapshot;
@@ -415,10 +443,17 @@ export const selectedPriceModel = (booking: any): string | null => {
     booking?.project?.pricingModel,
   ];
   // First recognisable model in priority order, as a token the frontend translates.
+  let token: PriceModelToken | null = null;
   for (const candidate of candidates) {
-    const token = normalizePriceModel(candidate);
-    if (token) return token;
+    token = normalizePriceModel(candidate);
+    if (token) break;
   }
+  // The booked subproject's pricing type (fixed/unit/rfq) wins over the
+  // project-level text; a unit-based project text only refines "unit" to its
+  // specific unit (m², hour, ...).
+  const subprojectType = normalizePriceModel(snapshot?.selectedSubproject?.pricing?.type);
+  if (subprojectType && !(subprojectType === "unit" && token && UNIT_BASED_TOKENS.has(token))) return subprojectType;
+  if (token) return token;
   // Unrecognised free text is still shown as recorded.
   for (const candidate of candidates) {
     if (typeof candidate === "string" && candidate) return candidate;
