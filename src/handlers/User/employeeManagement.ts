@@ -364,7 +364,7 @@ export const updateEmployeeStatus = async (req: Request, res: Response, next: Ne
 
         res.status(200).json({
             success: true,
-            msg: `Employee ${isActive ? 'activated' : 'deactivated'} successfully`,
+            msg: isActive ? 'Employee activated successfully' : 'Employee deactivated successfully',
             data: {
                 employee: {
                     _id: employee._id,
