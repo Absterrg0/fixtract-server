@@ -94,11 +94,45 @@ const asMoney = (amount: unknown, currency: unknown): OverviewMoney => {
   };
 };
 
-const joinAddress = (location: any): string | null => {
+const addressWords = (text: string): string =>
+  text.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+
+/** "BE" also reads as Belgium / België / Belgique when the address already names the country. */
+const countryNameVariants = (value: string): string[] => {
+  if (!/^[A-Za-z]{2}$/.test(value.trim())) return [];
+  return ["en", "nl", "fr", "de"].flatMap((locale) => {
+    try {
+      const name = new Intl.DisplayNames([locale], { type: "region" }).of(value.trim().toUpperCase());
+      return name ? [name] : [];
+    } catch {
+      return [];
+    }
+  });
+};
+
+/**
+ * One-line service address. A Google-formatted street address ("Meir 1, 2000
+ * Antwerpen, Belgium") already names the city, postcode and country, and some
+ * bookings stored the profile address with those parts appended again; each
+ * part is shown once, in its first position.
+ */
+export const joinAddress = (location: any): string | null => {
   if (!location || typeof location !== "object") return null;
-  const parts = [location.address, location.city, location.postalCode, location.country]
-    .filter((part) => typeof part === "string" && part.trim());
-  return parts.length > 0 ? parts.join(", ") : null;
+  const segments = [
+    ...(typeof location.address === "string" ? location.address.split(",") : []),
+    location.city,
+    location.postalCode,
+    location.country,
+  ];
+  const kept: string[] = [];
+  for (const segment of segments) {
+    if (typeof segment !== "string" || !segment.trim()) continue;
+    const haystack = ` ${addressWords(kept.join(" "))} `;
+    const variants = [segment, ...countryNameVariants(segment)].map(addressWords).filter(Boolean);
+    if (variants.length === 0 || variants.some((variant) => haystack.includes(` ${variant} `))) continue;
+    kept.push(segment.trim());
+  }
+  return kept.length > 0 ? kept.join(", ") : null;
 };
 
 /**
@@ -307,7 +341,7 @@ export function buildSharedBookingsRow(
     actualStart: asDate(booking?.actualStartDate),
     actualEnd: asDate(booking?.actualEndDate),
     priceModel: typeof booking?.priceModel === "string"
-      ? booking.priceModel
+      ? normalizePriceModel(booking.priceModel) ?? booking.priceModel
       : typeof selectedPriceModel(booking) === "string" ? selectedPriceModel(booking) : null,
     paidPrice: asMoney(paidSource, currency),
     completionAddition: completedAddition != null
@@ -343,6 +377,33 @@ export function buildBookingListOverview(
   return { paidPrice: row.paidPrice, completionAddition: row.completionAddition };
 }
 
+/** Price-model tokens the frontend translates (booking details and dashboard tables). */
+export const PRICE_MODEL_TOKENS = ["fixed", "unit", "rfq", "hour", "day", "meter", "m2", "room"] as const;
+export type PriceModelToken = (typeof PRICE_MODEL_TOKENS)[number];
+
+/**
+ * Maps a recorded price model to a token. Projects store the service
+ * configuration's pricing option name ("Fixed Price", "Price per m²"), which is
+ * free text; subproject pricing stores the enum (fixed/unit/rfq), and older
+ * records may hold the option type (fixed_price/price_per_unit). Null when the
+ * text names no known model.
+ */
+export const normalizePriceModel = (value: unknown): PriceModelToken | null => {
+  if (typeof value !== "string") return null;
+  const text = value.trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  if (!text) return null;
+  if ((PRICE_MODEL_TOKENS as readonly string[]).includes(text)) return text as PriceModelToken;
+  if (/\b(rfq|quote|quotation|request)\b|offerte|devis/.test(text)) return "rfq";
+  if (/\b(fixed|total|flat|fixe)\b|vaste|forfait/.test(text)) return "fixed";
+  if (/\b(hour|hours|hourly|uur)\b|heure/.test(text)) return "hour";
+  if (/\b(day|days|daily|dag)\b|jour/.test(text)) return "day";
+  if (/m²|\bm2\b|square met/.test(text)) return "m2";
+  if (/\b(room|rooms|kamer)\b|pièce/.test(text)) return "room";
+  if (/\b(metre|meter|linear|lineair)\b|mètre/.test(text)) return "meter";
+  if (/\b(unit|per)\b|eenheid|unité/.test(text)) return "unit";
+  return null;
+};
+
 export const selectedPriceModel = (booking: any): string | null => {
   const snapshot = booking?.bookingSnapshot;
   const candidates = [
@@ -353,6 +414,12 @@ export const selectedPriceModel = (booking: any): string | null => {
     booking?.project?.priceModel,
     booking?.project?.pricingModel,
   ];
+  // First recognisable model in priority order, as a token the frontend translates.
+  for (const candidate of candidates) {
+    const token = normalizePriceModel(candidate);
+    if (token) return token;
+  }
+  // Unrecognised free text is still shown as recorded.
   for (const candidate of candidates) {
     if (typeof candidate === "string" && candidate) return candidate;
   }
