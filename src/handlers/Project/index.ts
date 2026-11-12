@@ -722,9 +722,23 @@ export const getProject = async (req: Request, res: Response) => {
 };
 
 // Public endpoint - Get published project by ID (for customers to view/book)
+/**
+ * Public project routes take a Mongo id in the path. Anything that is not a 24-hex
+ * ObjectId can never name a project, so it is answered like an unknown id (404 with
+ * the catalogued message) instead of reaching Mongo and failing the cast with a 500.
+ */
+const isProjectIdParam = (id: unknown): id is string =>
+  typeof id === "string" && /^[a-f0-9]{24}$/i.test(id);
+
 export const getPublishedProject = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    if (!isProjectIdParam(id)) {
+      return res.status(404).json({
+        success: false,
+        error: "Project not found or not published"
+      });
+    }
 
     const project = await Project.findOne({
       _id: id,
@@ -799,6 +813,9 @@ export const getPublishedProject = async (req: Request, res: Response) => {
 export const getProjectTeamAvailability = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    if (!isProjectIdParam(id)) {
+      return res.status(404).json({ success: false, error: "Project not found" });
+    }
     const startDate = req.query.startDate as string | undefined;
     const endDate = req.query.endDate as string | undefined;
     const subprojectIndexRaw = req.query.subprojectIndex as string | undefined;
@@ -1618,6 +1635,9 @@ export const getProjectTeamAvailability = async (req: Request, res: Response) =>
 export const getProjectWorkingHours = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    if (!isProjectIdParam(id)) {
+      return res.status(404).json({ success: false, error: "Project not found" });
+    }
 
     const project = await Project.findOne({
       _id: id,
@@ -1655,6 +1675,9 @@ export const getProjectScheduleProposals = async (req: Request, res: Response) =
   try {
     console.log('[SCHEDULE PROPOSALS API] Request for project:', req.params.id);
     const { id } = req.params;
+    if (!isProjectIdParam(id)) {
+      return res.status(404).json({ success: false, error: "Project not found" });
+    }
     const subprojectIndexRaw = req.query.subprojectIndex as string | undefined;
     const excludeBookingId = req.query.excludeBookingId as string | undefined;
 
@@ -1749,7 +1772,7 @@ export const getProjectAvailableSlots = async (req: Request, res: Response) => {
     const date = req.query.date as string | undefined;
     const subprojectIndexRaw = req.query.subprojectIndex as string | undefined;
 
-    if (!id || typeof id !== "string" || !mongoose.Types.ObjectId.isValid(id)) {
+    if (!isProjectIdParam(id)) {
       return res.status(404).json({ success: false, error: "Project not found" });
     }
 
@@ -1824,6 +1847,9 @@ export const getProjectScheduleWindow = async (req: Request, res: Response) => {
       startDate,
       startTime,
     } = req.query;
+    if (!isProjectIdParam(id)) {
+      return res.status(404).json({ success: false, error: "Project not found" });
+    }
 
     if (!startDate || typeof startDate !== "string") {
       console.log('[SCHEDULE WINDOW API] Missing startDate');

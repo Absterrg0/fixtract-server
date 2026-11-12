@@ -63,7 +63,7 @@ vi.mock("../../models/project", () => {
   };
   return {
     default: {
-      find: vi.fn(() => ({ sort() { return this; }, lean: async () => mocks.projects })),
+      find: vi.fn(() => ({ sort() { return this; }, select() { return this; }, lean: async () => mocks.projects })),
       aggregate: vi.fn(async (pipeline: any[]) => runPipeline(pipeline)),
     },
   };

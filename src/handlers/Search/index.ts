@@ -52,6 +52,7 @@ import {
   type ProjectSearchDimensions,
 } from "../../utils/search/projectFilters";
 import { isRelevanceSort, sortProjectsByRelevance } from "../../utils/search/projectRelevance";
+import { CANDIDATE_PROJECTION, toSearchProjectCard, withCardImages } from "../../utils/search/projectCard";
 import PlatformSettings from "../../models/platformSettings";
 import LoyaltyConfig from "../../models/loyaltyConfig";
 import { getCurrentTier } from "../../utils/loyaltySystem";
@@ -625,7 +626,7 @@ async function searchProjects(
     // Execute query with pagination and populate professional info
     console.log('[SEARCH] Project filter:', JSON.stringify(filter, null, 2));
 
-    const baseQuery = Project.find(filter).sort({ createdAt: -1, _id: 1 });
+    const baseQuery = Project.find(filter).select(CANDIDATE_PROJECTION).sort({ createdAt: -1, _id: 1 });
 
     let projects: any[] = [];
     let total = 0;
@@ -734,6 +735,7 @@ async function searchProjects(
       geoPipeline.push({
         $project: {
           locationExactMatch: 0,
+          ...CANDIDATE_PROJECTION,
         },
       });
 
@@ -755,6 +757,7 @@ async function searchProjects(
               ] },
               { "distance.address": new RegExp(escapeRegExp(streetPart), "i") },
             ] } },
+            { $project: CANDIDATE_PROJECTION },
             ...eligibleProjectOwnerStages(),
           ]) : [];
           const seen = new Set(projects.map((project: any) => String(project._id)));
@@ -794,6 +797,7 @@ async function searchProjects(
     } else if (hasLocationFilter) {
       projects = await Project.aggregate([
         { $match: filter },
+        { $project: CANDIDATE_PROJECTION },
         ...eligibleProjectOwnerStages(),
         { $sort: { createdAt: -1, _id: 1 } },
       ]);
@@ -808,6 +812,7 @@ async function searchProjects(
     } else if (needsFullSet) {
       projects = await Project.aggregate([
         { $match: filter },
+        { $project: CANDIDATE_PROJECTION },
         ...eligibleProjectOwnerStages(),
         { $sort: { createdAt: -1, _id: 1 } },
       ]);
@@ -1061,7 +1066,7 @@ async function searchProjects(
       }
     }
     const totalCount = baseResults.length;
-    const finalResults = baseResults.slice(skip, skip + limit);
+    const finalResults = await withCardImages(baseResults.slice(skip, skip + limit));
 
     // Aggregate ratings per project (not per professional)
     if (!projectRatingMap) {
@@ -1099,7 +1104,7 @@ async function searchProjects(
                 professionalId: project.professionalId,
               });
             }
-            return project;
+            return toSearchProjectCard(project);
           }
 
           const projectIdStr = project._id?.toString?.() || project._id;
@@ -1109,7 +1114,6 @@ async function searchProjects(
             _id: professional._id,
             name: professional.name,
             username: professional.username,
-            email: professional.email,
             businessInfo: professional.businessInfo,
             hourlyRate: professional.hourlyRate,
             currency: professional.currency,
@@ -1181,7 +1185,7 @@ async function searchProjects(
             })
           );
 
-          return {
+          return toSearchProjectCard({
             ...project,
             professionalId: professionalSummary,
             projectAvgRating: projectRatings.avgRating,
@@ -1200,10 +1204,10 @@ async function searchProjects(
                 end: proposals.shortestThroughputProposal.executionEnd || proposals.shortestThroughputProposal.end,
               }
               : null,
-          };
+          });
         } catch (error) {
           console.error("Failed to build schedule proposals:", error);
-          return project;
+          return toSearchProjectCard(project);
         }
       })
     );
