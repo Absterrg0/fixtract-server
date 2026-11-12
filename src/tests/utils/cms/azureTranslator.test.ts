@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_CHARS_PER_REQUEST,
   MAX_RETRIES,
+  MIN_REQUEST_TIMEOUT_MS,
   TranslatorError,
   TranslatorNotConfiguredError,
   isTranslatorConfigured,
@@ -84,6 +85,7 @@ beforeEach(() => {
 afterEach(() => {
   translatorTiming.now = realTiming.now;
   translatorTiming.sleep = realTiming.sleep;
+  translatorTiming.timeoutSignal = realTiming.timeoutSignal;
   vi.unstubAllGlobals();
   clearTranslatorEnv();
   for (const key of ENV_KEYS) {
@@ -347,6 +349,108 @@ describe('Azure translator client', () => {
     fetchMock.mockResolvedValue({ ok: false, status: 403, text: async () => 'Forbidden' });
     const plain = await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false }).catch((e) => e);
     expect(plain.code).toBe('auth');
+  });
+
+  describe('per-attempt timeout under a deadline', () => {
+    let attemptTimeouts: number[] = [];
+    let current: { controller: AbortController; ms: number } | undefined;
+
+    // Record each attempt's timeout and hand out a signal the test controls.
+    const useFakeTimeouts = () => {
+      attemptTimeouts = [];
+      translatorTiming.timeoutSignal = (ms: number) => {
+        attemptTimeouts.push(ms);
+        current = { controller: new AbortController(), ms };
+        return current.controller.signal;
+      };
+    };
+    // A request that never answers: its timeout elapses on the fake clock.
+    const hang = (signal: AbortSignal) => new Promise<never>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason));
+      const attempt = current!;
+      clock += attempt.ms;
+      attempt.controller.abort(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }));
+    });
+    const hangUntilAborted = () => fetchMock.mockImplementation((_url: string, init: any) => hang(init.signal));
+
+    it('caps the attempt at the budget left, and keeps the full timeout otherwise', async () => {
+      useFakeTimeouts();
+      mockTranslation();
+
+      await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false });
+      await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false, deadline: clock + 60_000 });
+      await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false, deadline: clock + 3_000 });
+
+      expect(attemptTimeouts).toEqual([25_000, 25_000, 3_000]);
+    });
+
+    it('reports an attempt cut off by the deadline as budget_exceeded, ending at the deadline', async () => {
+      useFakeTimeouts();
+      hangUntilAborted();
+      const deadline = clock + 3_000;
+
+      const err = await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false, deadline }).catch((e) => e);
+
+      expect(err.code).toBe('budget_exceeded');
+      expect(err.message).not.toContain('test-key');
+      expect(attemptTimeouts).toEqual([3_000]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(sleeps).toEqual([]);
+      expect(clock).toBe(deadline);
+    });
+
+    it('keeps a full-length attempt timeout a retryable timeout', async () => {
+      useFakeTimeouts();
+      hangUntilAborted();
+
+      const err = await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false, deadline: clock + 600_000 })
+        .catch((e) => e);
+
+      expect(err.code).toBe('timeout');
+      expect(fetchMock).toHaveBeenCalledTimes(MAX_RETRIES + 1);
+    });
+
+    it('caps a retry at the budget left after the backoff', async () => {
+      useFakeTimeouts();
+      hangUntilAborted();
+      fetchMock.mockResolvedValueOnce(errorResponse(503, 'unavailable'));
+      const deadline = clock + 10_000;
+
+      const err = await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false, deadline }).catch((e) => e);
+
+      expect(err.code).toBe('budget_exceeded');
+      expect(sleeps).toEqual([2_000]);
+      expect(attemptTimeouts).toEqual([10_000, 8_000]);
+      expect(clock).toBe(deadline);
+    });
+
+    it('treats an abort while reading the body as the same timeout', async () => {
+      useFakeTimeouts();
+      fetchMock.mockImplementation(async (_url: string, init: any) => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: () => hang(init.signal),
+      }));
+
+      const err = await translateTexts(['Hello'], { from: 'en', to: 'nl', html: false, deadline: clock + 2_000 })
+        .catch((e) => e);
+
+      expect(err.code).toBe('budget_exceeded');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends no request when less than the minimum attempt time is left', async () => {
+      useFakeTimeouts();
+      mockTranslation();
+
+      const err = await translateTexts(['Hello'], {
+        from: 'en', to: 'nl', html: false, deadline: clock + MIN_REQUEST_TIMEOUT_MS - 1,
+      }).catch((e) => e);
+
+      expect(err.code).toBe('budget_exceeded');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
   });
 
   it('does not wait past the deadline: a retry that would overrun fails fast', async () => {

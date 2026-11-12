@@ -27,6 +27,11 @@ import { CMS_LOCALES, isCmsLocale } from "./locales";
 
 const DEFAULT_ENDPOINT = "https://api.cognitive.microsofttranslator.com";
 const REQUEST_TIMEOUT_MS = 25_000;
+/**
+ * Least time worth giving one request. With less budget left before the
+ * caller's deadline, no request is sent (`budget_exceeded`).
+ */
+export const MIN_REQUEST_TIMEOUT_MS = 1_000;
 
 /** Azure's hard limit is 50k chars/request; keep a 5k safety margin. */
 export const MAX_CHARS_PER_REQUEST = 45_000;
@@ -82,6 +87,8 @@ const MAX_RETRY_AFTER_MS = 30_000;
 export const translatorTiming = {
   sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
   now: () => Date.now(),
+  /** Abort signal for one request; tests substitute a controllable one. */
+  timeoutSignal: (ms: number): AbortSignal => AbortSignal.timeout(ms),
 };
 
 function classifyHttpStatus(status: number, azureCode: unknown): TranslatorErrorCode {
@@ -274,12 +281,34 @@ interface AzureErrorBody {
   error?: { code?: number | string; message?: string };
 }
 
+/** How long one attempt may take, and whether the caller's deadline set that limit. */
+interface AttemptTimeout {
+  ms: number;
+  cappedByDeadline: boolean;
+}
+
+/**
+ * An attempt that ran out of time. When the caller's deadline capped the
+ * attempt, the budget is spent (`budget_exceeded`, not retried); a plain
+ * request timeout stays a retryable `timeout`.
+ */
+function attemptTimedOut(timeout: AttemptTimeout): TranslatorError {
+  return timeout.cappedByDeadline
+    ? new TranslatorError(
+        "Azure Translator request failed: timeout (translation time budget exceeded)",
+        undefined,
+        "budget_exceeded"
+      )
+    : new TranslatorError("Azure Translator request failed: timeout", undefined, "timeout");
+}
+
 /** One Azure request for one target language. Returns texts in input order. */
 async function requestTranslations(
   texts: string[],
   from: string,
   to: string,
-  html: boolean
+  html: boolean,
+  timeout: AttemptTimeout = { ms: REQUEST_TIMEOUT_MS, cappedByDeadline: false }
 ): Promise<string[]> {
   const key = (process.env.AZURE_TRANSLATOR_KEY || "").trim();
   if (!key) throw new TranslatorNotConfiguredError();
@@ -310,21 +339,30 @@ async function requestTranslations(
   const region = translatorRegion();
   if (region) headers["Ocp-Apim-Subscription-Region"] = region;
 
+  const signal = translatorTiming.timeoutSignal(timeout.ms);
   let response: Response;
   try {
     response = await fetch(`${translatorEndpoint()}/translate?${query.toString()}`, {
       method: "POST",
       headers,
       body: JSON.stringify(texts.map((text) => ({ Text: text }))),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal,
     });
   } catch (err: any) {
     // Timeout / abort / DNS — never include the key in the message.
-    const reason = err?.name === "TimeoutError" ? "timeout" : err?.message ?? "network error";
-    throw new TranslatorError(`Azure Translator request failed: ${reason}`, undefined, "timeout");
+    if (signal.aborted || err?.name === "TimeoutError" || err?.name === "AbortError") {
+      throw attemptTimedOut(timeout);
+    }
+    throw new TranslatorError(
+      `Azure Translator request failed: ${err?.message ?? "network error"}`,
+      undefined,
+      "timeout"
+    );
   }
 
   const rawBody = await response.text().catch(() => "");
+  // The same signal also bounds reading the body.
+  if (signal.aborted) throw attemptTimedOut(timeout);
   let parsed: unknown;
   if (rawBody) {
     try {
@@ -372,7 +410,9 @@ async function requestTranslations(
 /**
  * {@link requestTranslations} with bounded retries for 429 / 408 / 5xx /
  * network errors. Honours Retry-After (capped) and the caller's deadline: a
- * wait that would end past the deadline fails fast with `budget_exceeded`.
+ * wait that would end past the deadline fails fast with `budget_exceeded`, and
+ * every attempt's timeout is capped at the budget left, so an attempt started
+ * just before the deadline cannot overrun it.
  */
 async function requestWithRetry(
   texts: string[],
@@ -382,15 +422,20 @@ async function requestWithRetry(
   deadline?: number
 ): Promise<string[]> {
   for (let attempt = 0; ; attempt += 1) {
-    if (deadline !== undefined && translatorTiming.now() >= deadline) {
-      throw new TranslatorError(
-        "Translation time budget exceeded before the request could be sent",
-        undefined,
-        "budget_exceeded"
-      );
+    let timeout: AttemptTimeout = { ms: REQUEST_TIMEOUT_MS, cappedByDeadline: false };
+    if (deadline !== undefined) {
+      const remaining = deadline - translatorTiming.now();
+      if (remaining < MIN_REQUEST_TIMEOUT_MS) {
+        throw new TranslatorError(
+          "Translation time budget exceeded before the request could be sent",
+          undefined,
+          "budget_exceeded"
+        );
+      }
+      if (remaining < REQUEST_TIMEOUT_MS) timeout = { ms: remaining, cappedByDeadline: true };
     }
     try {
-      return await requestTranslations(texts, from, to, html);
+      return await requestTranslations(texts, from, to, html, timeout);
     } catch (err) {
       if (!isRetryable(err) || attempt >= MAX_RETRIES) throw err;
       const wait =
