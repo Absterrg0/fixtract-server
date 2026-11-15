@@ -6,15 +6,19 @@
  * that carries project media signs eligible URLs; every save strips S3
  * signatures again so only the stable object URL is persisted.
  *
- * Signatures use a day-aligned signing date, so the same object yields the
- * same URL for a whole UTC day (browser/CDN caching keeps working) and the
- * URL always stays valid for at least one more day after it is served.
+ * Signatures use a signing date aligned to fixed six-day windows, so the
+ * same object yields the same URL for six days and the URL always stays valid
+ * for at least one more day after it is served (seven-day expiry, the SigV4
+ * maximum). A stable URL matters for cost: the frontend shows these images
+ * through next/image, and every new signature is a new /_next/image cache key
+ * that Vercel downloads from S3 and optimizes again.
  */
 
 import { getPresignedUrl, isAllowedS3Url, parseS3KeyFromUrl } from "./s3Upload";
 
-export const PROJECT_MEDIA_SIGNING_WINDOW_MS = 24 * 60 * 60 * 1000;
-export const PROJECT_MEDIA_URL_TTL_SECONDS = 2 * 24 * 60 * 60;
+export const PROJECT_MEDIA_SIGNING_WINDOW_MS = 6 * 24 * 60 * 60 * 1000;
+/** 7 days: the longest expiry SigV4 allows. Keep it one day above the window. */
+export const PROJECT_MEDIA_URL_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 const LEGACY_MEDIA_ROOTS = new Set(["project-images", "project-videos"]);
 const PROJECT_MEDIA_KINDS = new Set(["image", "video"]);

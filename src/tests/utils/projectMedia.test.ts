@@ -16,23 +16,30 @@ const VIDEO = `${BUCKET}/projects/6650aa/video/${OWNER}/1730000000001-aabbccddee
 const DAY = new Date("2026-11-03T08:15:00.000Z");
 const LATER_SAME_DAY = new Date("2026-11-03T23:59:00.000Z");
 const NEXT_DAY = new Date("2026-11-04T00:01:00.000Z");
+const LAST_MINUTE_OF_WINDOW = new Date("2026-11-08T23:59:00.000Z");
+const NEXT_WINDOW = new Date("2026-11-09T00:01:00.000Z");
 
 describe("project media read contract", () => {
-  it("signs the owner's private project image with a two-day day-aligned SigV4 URL", async () => {
+  it("signs the owner's private project image with a seven-day SigV4 URL aligned to six-day windows", async () => {
     const signed = String(await signProjectMediaUrl(IMAGE, OWNER, DAY));
     expect(signed.startsWith(`${IMAGE}?`)).toBe(true);
     const params = new URL(signed).searchParams;
     expect(params.get("X-Amz-Algorithm")).toBe("AWS4-HMAC-SHA256");
     expect(params.get("X-Amz-Signature")).toMatch(/^[0-9a-f]{64}$/);
-    expect(params.get("X-Amz-Expires")).toBe("172800");
+    expect(params.get("X-Amz-Expires")).toBe("604800");
     expect(params.get("X-Amz-Date")).toBe("20261103T000000Z");
-    expect(projectMediaSignatureExpiresAt(DAY).toISOString()).toBe("2026-11-05T00:00:00.000Z");
+    expect(projectMediaSignatureExpiresAt(DAY).toISOString()).toBe("2026-11-10T00:00:00.000Z");
+    // Served at the last minute of its window, a URL still has one more day.
+    expect(projectMediaSignatureExpiresAt(LAST_MINUTE_OF_WINDOW).getTime() - LAST_MINUTE_OF_WINDOW.getTime())
+      .toBeGreaterThan(24 * 60 * 60 * 1000);
   });
 
-  it("returns the same URL for the whole UTC day and a new one the next day", async () => {
+  it("returns the same URL for the whole six-day window and a new one after it", async () => {
     const first = await signProjectMediaUrl(IMAGE, OWNER, DAY);
     expect(await signProjectMediaUrl(IMAGE, OWNER, LATER_SAME_DAY)).toBe(first);
-    expect(await signProjectMediaUrl(IMAGE, OWNER, NEXT_DAY)).not.toBe(first);
+    expect(await signProjectMediaUrl(IMAGE, OWNER, NEXT_DAY)).toBe(first);
+    expect(await signProjectMediaUrl(IMAGE, OWNER, LAST_MINUTE_OF_WINDOW)).toBe(first);
+    expect(await signProjectMediaUrl(IMAGE, OWNER, NEXT_WINDOW)).not.toBe(first);
   });
 
   it("re-signs an already signed URL instead of nesting signatures", async () => {
