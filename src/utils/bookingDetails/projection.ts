@@ -109,6 +109,35 @@ const dateOnly = (value: unknown): string | null => {
   return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
 };
 
+const UTC_MIDNIGHT_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Calendar day (YYYY-MM-DD) a stored schedule value names, in the booking's
+ * zone. Day-mode starts are stored as the professional's local midnight
+ * (2026-11-22T23:00Z = 23/11 in Brussels); cutting the UTC ISO string showed
+ * them one day early on the booking page (C11-1x). Date-only strings and UTC
+ * midnights (dates stored without a time) keep their own date; with no known
+ * zone the UTC day is kept (previous behaviour).
+ */
+const calendarDateIn = (value: unknown, timeZone: string | null | undefined): string | null => {
+  if (!value) return null;
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return value.trim();
+  const date = value instanceof Date ? value : new Date(value as any);
+  const time = date.getTime();
+  if (Number.isNaN(time)) return null;
+  if (!timeZone || time % UTC_MIDNIGHT_MS === 0) return date.toISOString().slice(0, 10);
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date);
+  } catch {
+    return date.toISOString().slice(0, 10);
+  }
+};
+
 const num = (value: unknown): number | null => {
   const parsed = Number(value);
   return value !== null && value !== '' && Number.isFinite(parsed) ? parsed : null;
@@ -156,13 +185,14 @@ const rejectionReasonFromNote = (note: string): string | null => {
   return value ? value : null;
 };
 
-const mapScheduleSnapshot = (schedule: any): ScheduleSnapshotDto | null => {
+const mapScheduleSnapshot = (schedule: any, timeZone?: string | null): ScheduleSnapshotDto | null => {
   if (!schedule) return null;
+  const zone = isValidIanaTimeZone(schedule.timeZone) ? schedule.timeZone : timeZone;
   return {
-    scheduledStartDate: dateOnly(schedule.scheduledStartDate),
-    scheduledExecutionEndDate: dateOnly(schedule.scheduledExecutionEndDate),
-    scheduledBufferStartDate: dateOnly(schedule.scheduledBufferStartDate),
-    scheduledBufferEndDate: dateOnly(schedule.scheduledBufferEndDate),
+    scheduledStartDate: calendarDateIn(schedule.scheduledStartDate, zone),
+    scheduledExecutionEndDate: calendarDateIn(schedule.scheduledExecutionEndDate, zone),
+    scheduledBufferStartDate: calendarDateIn(schedule.scheduledBufferStartDate, zone),
+    scheduledBufferEndDate: calendarDateIn(schedule.scheduledBufferEndDate, zone),
     scheduledBufferUnit: schedule.scheduledBufferUnit || null,
     scheduledStartTime: str(schedule.scheduledStartTime),
     scheduledEndTime: str(schedule.scheduledEndTime),
@@ -1036,6 +1066,18 @@ export const buildBookingDetails = async (params: {
   const projectId = referenceId(booking.project) || str((booking.bookingSnapshot as any)?.project?.id);
   const captured = booking.bookingSnapshot || null;
   const capturedAt = iso(captured?.capturedAt);
+  // Zone the booking's calendar dates are read in (C11-1x): the recorded
+  // schedule zone, else the professional's zone (quotes before checkout).
+  const calendarTimeZone = [
+    booking.scheduleTimeZone,
+    captured?.schedule?.timeZone,
+    captured?.parties?.professional?.timezone,
+    professional?.businessInfo?.timezone,
+    professional?.timeZone,
+  ].find((zone) => isValidIanaTimeZone(zone)) || null;
+  // Shadows the module helper on purpose: every calendar date of this
+  // booking is projected as its local day, not its UTC day.
+  const dateOnly = (value: unknown): string | null => calendarDateIn(value, calendarTimeZone);
   const quoteCurrency = booking.quote?.currency || booking.quoteVersions?.slice(-1)?.[0]?.currency || null;
   const paymentCurrency = booking.payment?.currency || quoteCurrency || null;
 
@@ -1767,8 +1809,8 @@ export const buildBookingDetails = async (params: {
       respondedAt: iso(entry.respondedAt),
       respondedBy,
       responseNote: str(entry.responseNote),
-      previousSchedule: mapScheduleSnapshot(entry.previousSchedule),
-      proposedSchedule: mapScheduleSnapshot(entry.proposedSchedule),
+      previousSchedule: mapScheduleSnapshot(entry.previousSchedule, calendarTimeZone),
+      proposedSchedule: mapScheduleSnapshot(entry.proposedSchedule, calendarTimeZone),
       timeZone,
       timeZoneRecorded: Boolean(timeZone),
     });
@@ -2278,4 +2320,4 @@ export const buildBookingDetails = async (params: {
   return quotationForViewer(details, viewerRole, params.adminAccess?.payments === true);
 };
 
-export { mapCheckoutSnapshot, mapScheduleSnapshot, iso, dateOnly, num, str };
+export { mapCheckoutSnapshot, mapScheduleSnapshot, iso, dateOnly, calendarDateIn, num, str };

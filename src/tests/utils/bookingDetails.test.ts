@@ -2120,6 +2120,39 @@ describe('reschedule details', () => {
   });
 });
 
+describe('day-mode calendar dates (C11-1x)', () => {
+  it('projects schedule dates and the first possible start as the Brussels day, not the UTC day', async () => {
+    const base = booking({
+      scheduleTimeZone: 'Europe/Brussels',
+      // Local midnights in Brussels: 23/11 and 24/11, first start 30/11.
+      scheduledStartDate: new Date('2026-11-22T23:00:00.000Z'),
+      scheduledExecutionEndDate: new Date('2026-11-23T23:00:00.000Z'),
+    });
+    base.quoteVersions = base.quoteVersions.map((version: any) => ({
+      ...version,
+      firstPossibleStart: new Date('2026-11-29T23:00:00.000Z'),
+    }));
+    for (const role of ['customer', 'professional', 'admin'] as const) {
+      const details = await buildDetails(role, { booking: base });
+      expect(details.booking.schedule.scheduledStartDate).toBe('2026-11-23');
+      expect(details.booking.schedule.scheduledExecutionEndDate).toBe('2026-11-24');
+      expect(details.wizard.scheduleSelection.startDate).toBe('2026-11-23');
+      expect(details.quotation?.versions[0]?.firstPossibleStart).toBe('2026-11-30');
+    }
+  });
+
+  it('uses the professional zone before a schedule zone is recorded and keeps UTC-midnight dates', async () => {
+    const base = booking({
+      scheduleTimeZone: undefined,
+      scheduledStartDate: new Date('2026-12-03T23:00:00.000Z'),
+      rfqData: { serviceType: 'Kitchen', preferredStartDate: new Date('2026-12-04T00:00:00.000Z') },
+    });
+    const details = await buildDetails('customer', { booking: base });
+    expect(details.booking.schedule.scheduledStartDate).toBe('2026-12-04');
+    expect(details.booking.schedule.preferredStartDate).toBe('2026-12-04');
+  });
+});
+
 describe('legacy compatibility', () => {
   it('marks a booking without a snapshot as current-project reference with notices', async () => {
     const legacy = booking({
