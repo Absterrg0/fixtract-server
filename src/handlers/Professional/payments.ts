@@ -197,7 +197,7 @@ export const getPaymentStats = async (req: Request, res: Response) => {
  */
 /** Status options of the professional payout list (FT2 #10a/#10b). */
 export const TRANSACTION_STATUS_FILTERS = [
-  'pending', 'authorized', 'completed', 'transfer_pending', 'transfer_failed', 'refunded', 'failed',
+  'pending', 'authorized', 'completed', 'transfer_pending', 'transfer_failed', 'refunded', 'partially_refunded', 'failed',
 ] as const;
 
 /**

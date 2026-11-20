@@ -3,6 +3,31 @@ import Payment from '../models/payment';
 import Project from '../models/project';
 
 /**
+ * The service a booking belongs to, as an aggregation expression (FT2 #10a).
+ * A project booking's service is the one captured at booking time
+ * (bookingSnapshot), else the live project's; `rfqData.serviceType` holds the
+ * project *title* for project bookings, so it names the service only for a
+ * direct request without a project.
+ *
+ * @param bookingPath   path prefix of the booking fields ("" for a Booking
+ *                      pipeline, "_facetBooking." for a joined booking)
+ * @param projectServicePath  path of the joined project's service
+ */
+export const bookingServiceExpression = (bookingPath: string, projectServicePath: string) => ({
+  $cond: [
+    { $ifNull: [`$${bookingPath}project`, false] },
+    { $ifNull: [`$${bookingPath}bookingSnapshot.project.service`, `$${projectServicePath}`] },
+    `$${bookingPath}rfqData.serviceType`,
+  ],
+});
+
+/** Booking clause: the direct-request service type of a booking without a project. */
+export const directRequestServiceClause = (service: string, bookingPath = '') => ({
+  [`${bookingPath}rfqData.serviceType`]: service,
+  [`${bookingPath}project`]: null,
+});
+
+/**
  * Dashboard facet counts for the payment lists (FT2 #10a): how many payments
  * each status / service option would return, given every other active filter.
  *
@@ -19,19 +44,9 @@ export const countPaymentsByService = async (
     { $unwind: '$_facetBooking' },
     { $lookup: { from: 'projects', localField: '_facetBooking.project', foreignField: '_id', as: '_facetProject' } },
     { $unwind: { path: '$_facetProject', preserveNullAndEmptyArrays: true } },
-    {
-      $project: {
-        serviceValues: {
-          $setUnion: [
-            [{ $ifNull: ['$_facetBooking.rfqData.serviceType', null] }],
-            [{ $ifNull: ['$_facetProject.service', null] }],
-          ],
-        },
-      },
-    },
-    { $unwind: '$serviceValues' },
-    { $match: { serviceValues: { $nin: [null, ''] } } },
-    { $group: { _id: '$serviceValues', count: { $sum: 1 } } },
+    { $project: { serviceValue: bookingServiceExpression('_facetBooking.', '_facetProject.service') } },
+    { $match: { serviceValue: { $nin: [null, ''] } } },
+    { $group: { _id: '$serviceValue', count: { $sum: 1 } } },
   ]);
   return toCountRecord(rows);
 };
@@ -68,7 +83,7 @@ export const professionalServiceBookingIds = async (
   const bookings = await Booking.find({
     $and: [
       { $or: [{ professional: professionalId }, { project: { $in: ownedProjectIds } }] },
-      { $or: [{ 'rfqData.serviceType': service }, { project: { $in: serviceProjectIds } }] },
+      { $or: [directRequestServiceClause(service), { project: { $in: serviceProjectIds } }] },
     ],
   })
     .select('_id')
@@ -80,7 +95,8 @@ export const professionalServiceBookingIds = async (
 export const professionalPaymentServices = async (professionalId: unknown): Promise<string[]> => {
   const [projectServices, rfqServices] = await Promise.all([
     Project.find({ professionalId }).distinct('service'),
-    Booking.find({ professional: professionalId }).distinct('rfqData.serviceType'),
+    // Direct requests only: a project booking's rfqData.serviceType is the project title.
+    Booking.find({ professional: professionalId, project: null }).distinct('rfqData.serviceType'),
   ]);
   return [...new Set([...projectServices, ...rfqServices].filter((value): value is string => typeof value === 'string' && value.length > 0))].sort();
 };

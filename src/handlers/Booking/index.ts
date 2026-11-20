@@ -59,7 +59,7 @@ import {
   selectedPriceModel,
 } from "../../utils/bookingDetails/overviewRows";
 import { loadOverviewRefundLedgers } from "../../utils/paymentRefundLedger";
-import { countPaymentsByService, countPaymentsByStatus } from "../../utils/paymentFacetCounts";
+import { bookingServiceExpression, countPaymentsByService, countPaymentsByStatus } from "../../utils/paymentFacetCounts";
 import { safeErrorSummary } from "../../utils/safeErrorLog";
 import { snapshotQuestionDefinitions } from '../../utils/bookingDetails/snapshot';
 import { RECORDED_DISPUTE_FILTER, withoutPhantomBookingActivity } from '../../utils/bookingActivity';
@@ -2358,6 +2358,12 @@ export const getMyDisputes = async (req: Request, res: Response, next: NextFunct
     const statusFilter = rawStatus === 'open' || rawStatus === 'resolved' ? rawStatus : null;
     const rawService = typeof req.query.service === 'string' ? req.query.service.trim().slice(0, 120) : '';
     const serviceFilter = rawService && rawService !== 'all' ? rawService : null;
+    // Literal booking-number search (escaped, never a raw regex); applies to
+    // the list and to both facets.
+    const searchText = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 80) : '';
+    if (searchText) {
+      (filter as Record<string, unknown>).bookingNumber = new RegExp(searchText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    }
     const statusStage = statusFilter ? [{ $match: { _disputeState: statusFilter } }] : [];
     const serviceStage = serviceFilter ? [{ $match: { _disputeService: serviceFilter } }] : [];
 
@@ -2374,15 +2380,11 @@ export const getMyDisputes = async (req: Request, res: Response, next: NextFunct
           as: '_disputeProject',
         },
       },
+      { $set: { _disputeProjectService: { $arrayElemAt: ['$_disputeProject.service', 0] } } },
       {
         $set: {
           // The service captured at booking time wins over the live project.
-          _disputeService: {
-            $ifNull: [
-              '$rfqData.serviceType',
-              { $ifNull: ['$bookingSnapshot.project.service', { $arrayElemAt: ['$_disputeProject.service', 0] }] },
-            ],
-          },
+          _disputeService: bookingServiceExpression('', '_disputeProjectService'),
           _disputeState: { $cond: [{ $ifNull: ['$dispute.resolvedAt', false] }, 'resolved', 'open'] },
         },
       },

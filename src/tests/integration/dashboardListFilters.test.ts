@@ -111,9 +111,11 @@ describeDb('dashboard list filters (real Mongo)', () => {
         {
           _id: ids.bSnapshot, bookingNumber: 'BK-2026-000101', customer: CUSTOMER, professional: PRO,
           project: ids.projMutated, bookingSnapshot: { project: { service: 'Plumbing' } },
+          // The booking wizard stores the project *title* as rfqData.serviceType.
+          rfqData: { serviceType: 'Mutated' },
         },
         // Legacy booking without a snapshot: only the live project service is known.
-        { _id: ids.bLegacy, bookingNumber: 'BK-2026-000102', customer: CUSTOMER, professional: PRO, project: ids.projLegacy },
+        { _id: ids.bLegacy, bookingNumber: 'BK-2026-000102', customer: CUSTOMER, professional: PRO, project: ids.projLegacy, rfqData: { serviceType: 'Legacy' } },
         {
           _id: ids.bCleaning, bookingNumber: 'BK-2026-000103', customer: CUSTOMER, professional: PRO,
           project: ids.projCleaning, bookingSnapshot: { project: { service: 'Cleaning' } },
@@ -457,9 +459,11 @@ describeDb('dashboard list filters (real Mongo)', () => {
         { _id: projOther, professionalId: OTHER_PRO, service: 'Plumbing', title: 'Other' },
       ]);
       await Booking.collection.insertMany([
-        { _id: bPlumbing1, bookingNumber: 'BK-F-1', customer: CUSTOMER, project: projPlumbing },
-        { _id: bPlumbing2, bookingNumber: 'BK-F-2', customer: CUSTOMER, project: projPlumbing },
-        { _id: bPainting, bookingNumber: 'BK-F-3', customer: CUSTOMER, project: projPainting },
+        // Project bookings carry the project *title* in rfqData.serviceType
+        // (booking wizard); it must never count or list as a service.
+        { _id: bPlumbing1, bookingNumber: 'BK-F-1', customer: CUSTOMER, project: projPlumbing, rfqData: { serviceType: 'Fix my leaking tap' } },
+        { _id: bPlumbing2, bookingNumber: 'BK-F-2', customer: CUSTOMER, project: projPlumbing, rfqData: { serviceType: 'Fix my leaking tap' } },
+        { _id: bPainting, bookingNumber: 'BK-F-3', customer: CUSTOMER, professional: PRO, project: projPainting, rfqData: { serviceType: 'Paint one room' } },
         { _id: bRfqTiling, bookingNumber: 'BK-F-4', customer: CUSTOMER, professional: PRO, rfqData: { serviceType: 'Tiling' } },
         { _id: bOther, bookingNumber: 'BK-F-5', customer: CUSTOMER, professional: OTHER_PRO, project: projOther },
       ]);
@@ -500,7 +504,7 @@ describeDb('dashboard list filters (real Mongo)', () => {
       expect(all.services).toEqual(['Painting', 'Plumbing', 'Tiling']);
       expect(all.serviceCounts).toEqual({ Plumbing: 2, Painting: 1, Tiling: 1 });
       expect(all.statusCounts).toMatchObject({
-        completed: 1, transfer_pending: 1, authorized: 1, refunded: 1, transfer_failed: 0, pending: 0, failed: 0,
+        completed: 1, transfer_pending: 1, authorized: 1, refunded: 1, partially_refunded: 0, transfer_failed: 0, pending: 0, failed: 0,
       });
       for (const [status, count] of Object.entries(all.statusCounts as Record<string, number>)) {
         expect((await proList({ status })).pagination.total).toBe(count);

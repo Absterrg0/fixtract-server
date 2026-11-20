@@ -1,3 +1,4 @@
+import { bookingServiceExpression, directRequestServiceClause } from "../../utils/paymentFacetCounts";
 import { Request, Response } from "express";
 import mongoose, { Types } from "mongoose";
 import Booking from "../../models/booking";
@@ -1012,7 +1013,8 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
     // is used only for legacy bookings without a snapshot.
     const serviceMatch = (value: string): Record<string, any> => ({
       $or: [
-        { "_claimBooking.rfqData.serviceType": value },
+        // rfqData.serviceType is the project title on project bookings.
+        directRequestServiceClause(value, "_claimBooking."),
         { "_claimBooking.bookingSnapshot.project.service": value },
         {
           "_claimBooking.bookingSnapshot.project.service": null,
@@ -1032,12 +1034,7 @@ export const listMyWarrantyClaims = async (req: Request, res: Response) => {
         ...(searchStage ? [{ $match: searchStage }] : []),
         {
           $set: {
-            _claimService: {
-              $ifNull: [
-                "$_claimBooking.rfqData.serviceType",
-                { $ifNull: ["$_claimBooking.bookingSnapshot.project.service", "$_claimProject.service"] },
-              ],
-            },
+            _claimService: bookingServiceExpression("_claimBooking.", "_claimProject.service"),
           },
         },
         {

@@ -24,10 +24,10 @@ describeDb('getMyDisputes facets (disposable MongoDB)', () => {
     const dispute = (extra: Record<string, unknown> = {}) => ({ raisedBy: customer, reason: 'r', description: 'd', raisedAt, ...extra });
     await Booking.collection.insertMany([
       // Legacy booking: service from the live project.
-      { _id: new Types.ObjectId(), customer, professional, project: plumbingProject, status: 'dispute', dispute: dispute() },
+      { _id: new Types.ObjectId(), customer, professional, project: plumbingProject, status: 'dispute', rfqData: { serviceType: 'Pipes' }, dispute: dispute() },
       // Snapshot service wins over the project.
       { _id: new Types.ObjectId(), customer, professional, project: plumbingProject, status: 'completed', bookingSnapshot: { project: { service: 'Painting' } }, dispute: dispute({ resolvedAt: new Date() }) },
-      { _id: new Types.ObjectId(), customer, professional, status: 'refunded', rfqData: { serviceType: 'Painting' }, dispute: dispute({ resolvedAt: new Date() }) },
+      { _id: new Types.ObjectId(), bookingNumber: 'BK-2026-000777', customer, professional, status: 'refunded', rfqData: { serviceType: 'Painting' }, dispute: dispute({ resolvedAt: new Date() }) },
       // Someone else's dispute and a phantom dispute are never listed.
       { _id: new Types.ObjectId(), customer: new Types.ObjectId(), professional, status: 'dispute', rfqData: { serviceType: 'Painting' }, dispute: dispute() },
       { _id: new Types.ObjectId(), customer, professional, status: 'completed', dispute: { raisedAt } },
@@ -56,6 +56,12 @@ describeDb('getMyDisputes facets (disposable MongoDB)', () => {
     expect(resolvedPainting.items).toHaveLength(2);
     expect(resolvedPainting.statusCounts).toEqual({ open: 0, resolved: 2 });
     expect(resolvedPainting.serviceCounts).toEqual({ Painting: 2 });
+
+    // Booking-number search is literal and narrows the list and both facets.
+    const search = await call({ q: '000777' });
+    expect(search.items.map((item: any) => item.bookingNumber)).toEqual(['BK-2026-000777']);
+    expect(search.statusCounts).toEqual({ open: 0, resolved: 1 });
+    expect((await call({ q: '.*' })).pagination.total).toBe(0);
 
     const open = await call({ status: 'open' });
     expect(open.items).toHaveLength(1);
