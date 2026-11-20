@@ -70,6 +70,21 @@ describe("payment safety invariants", () => {
     expect(getTransferStatus({ stripeTransferId: "tr_123", metadata: { transferFailed: true } })).toBe("failed");
   });
 
+  it("allows the platform-funded discount on top of the customer net (0 % commission, item 12)", () => {
+    // Q1 milestone 2: payout 5,000, Silver loyalty 15.63 funded by the platform, net 4,984.37.
+    expect(requireProfessionalPayout({
+      professionalPayout: 5000, netAmount: 4984.37, totalWithVat: 6031.09, discount: { loyaltyAmount: 15.63 },
+    })).toBe(5000);
+    // The repeat-buyer discount is the professional's own: it never raises the ceiling.
+    expect(() => requireProfessionalPayout({
+      professionalPayout: 950, netAmount: 855, discount: { repeatBuyerAmount: 95 } as any,
+    })).toThrow(/exceeds the reconciled customer net/);
+    // A payout beyond net + subsidy stays blocked.
+    expect(() => requireProfessionalPayout({
+      professionalPayout: 5001, netAmount: 4984.37, discount: { loyaltyAmount: 15.63 },
+    })).toThrow(/exceeds the reconciled customer net/);
+  });
+
   it("blocks payouts above the reconciled customer amount", () => {
     expect(() => requireProfessionalPayout({ professionalPayout: 101, netAmount: 100 })).toThrow(
       /exceeds the reconciled customer net amount/,
