@@ -59,7 +59,7 @@ import {
   selectedPriceModel,
 } from "../../utils/bookingDetails/overviewRows";
 import { loadOverviewRefundLedgers, loadSettledMilestoneTotals } from "../../utils/paymentRefundLedger";
-import { countPaymentsByService, countPaymentsByStatus } from "../../utils/paymentFacetCounts";
+import { bookingServiceExpression, countPaymentsByService, countPaymentsByStatus } from "../../utils/paymentFacetCounts";
 import { safeErrorSummary } from "../../utils/safeErrorLog";
 import { snapshotQuestionDefinitions } from '../../utils/bookingDetails/snapshot';
 import { RECORDED_DISPUTE_FILTER, withoutPhantomBookingActivity } from '../../utils/bookingActivity';
@@ -2357,21 +2357,91 @@ export const getMyDisputes = async (req: Request, res: Response, next: NextFunct
       ...RECORDED_DISPUTE_FILTER,
       $or: [{ customer: objectUserId }, { professional: objectUserId }],
     };
-    const [bookings, total] = await Promise.all([Booking.find(filter)
-      .select('bookingNumber status dispute customer professional project payment scheduledStartDate')
-      .populate('customer', 'name isAnonymized deletedAt')
-      .populate('professional', 'name isAnonymized deletedAt')
-      .populate('project', 'title')
-      .sort({ 'dispute.raisedAt': -1, _id: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean(), Booking.countDocuments(filter)]);
+
+    // FT2 #10a: status (open/resolved) and service filters with counts, like
+    // the other dashboards. Each facet ignores its own selection and honours
+    // the other one.
+    const rawStatus = typeof req.query.status === 'string' ? req.query.status : 'all';
+    const statusFilter = rawStatus === 'open' || rawStatus === 'resolved' ? rawStatus : null;
+    const rawService = typeof req.query.service === 'string' ? req.query.service.trim().slice(0, 120) : '';
+    const serviceFilter = rawService && rawService !== 'all' ? rawService : null;
+    // Literal booking-number search (escaped, never a raw regex); applies to
+    // the list and to both facets.
+    const searchText = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 80) : '';
+    if (searchText) {
+      (filter as Record<string, unknown>).bookingNumber = new RegExp(searchText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    }
+    const statusStage = statusFilter ? [{ $match: { _disputeState: statusFilter } }] : [];
+    const serviceStage = serviceFilter ? [{ $match: { _disputeService: serviceFilter } }] : [];
+
+    const [result] = await Booking.aggregate([
+      { $match: filter },
+      {
+        $lookup: {
+          from: Project.collection.collectionName,
+          let: { projectId: '$project' },
+          pipeline: [
+            { $match: { $expr: { $eq: ['$_id', '$$projectId'] } } },
+            { $project: { service: 1 } },
+          ],
+          as: '_disputeProject',
+        },
+      },
+      { $set: { _disputeProjectService: { $arrayElemAt: ['$_disputeProject.service', 0] } } },
+      {
+        $set: {
+          // The service captured at booking time wins over the live project.
+          _disputeService: bookingServiceExpression('', '_disputeProjectService'),
+          _disputeState: { $cond: [{ $ifNull: ['$dispute.resolvedAt', false] }, 'resolved', 'open'] },
+        },
+      },
+      {
+        $facet: {
+          page: [
+            ...statusStage,
+            ...serviceStage,
+            { $sort: { 'dispute.raisedAt': -1, _id: -1 } },
+            { $skip: (page - 1) * limit },
+            { $limit: limit },
+            { $project: { _id: 1 } },
+          ],
+          total: [...statusStage, ...serviceStage, { $count: 'count' }],
+          status: [...serviceStage, { $group: { _id: '$_disputeState', count: { $sum: 1 } } }],
+          service: [
+            ...statusStage,
+            { $match: { _disputeService: { $nin: [null, ''] } } },
+            { $group: { _id: '$_disputeService', count: { $sum: 1 } } },
+          ],
+        },
+      },
+    ]);
+    const toCounts = (rows: any[] | undefined) => {
+      const counts: Record<string, number> = {};
+      for (const row of rows || []) {
+        if (row && typeof row._id === 'string' && row._id) counts[row._id] = Number(row.count) || 0;
+      }
+      return counts;
+    };
+    const pageIds: any[] = (result?.page || []).map((row: any) => row._id);
+    const total: number = result?.total?.[0]?.count || 0;
+    const pageDocs: any[] = pageIds.length > 0
+      ? await Booking.find({ _id: { $in: pageIds } })
+        .select('bookingNumber status dispute customer professional project payment scheduledStartDate')
+        .populate('customer', 'name isAnonymized deletedAt')
+        .populate('professional', 'name isAnonymized deletedAt')
+        .populate('project', 'title')
+        .lean()
+      : [];
+    const byId = new Map(pageDocs.map((doc: any) => [String(doc._id), doc]));
+    const bookings = pageIds.map((id) => byId.get(String(id))).filter(Boolean);
+    const statusCounts = { open: 0, resolved: 0, ...toCounts(result?.status) };
+    const serviceCounts = toCounts(result?.service);
 
     const visibleBookings = bookings.map((booking: any) =>
       bookingForRequest(booking, req.user)
     );
 
-    return res.json({ success: true, data: { items: visibleBookings, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } } });
+    return res.json({ success: true, data: { items: visibleBookings, statusCounts, serviceCounts, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } } });
   } catch (error: any) {
     console.error('Get my disputes error:', error);
     next(error);

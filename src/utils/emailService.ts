@@ -62,6 +62,29 @@ const getEmailFooter = () => `
   </div>
 `;
 
+/**
+ * Send through Brevo and record the attempt in Admin > Email logs. The
+ * dedicated senders below (verification code, welcome, approval, ...) called
+ * Brevo directly, so they never appeared in the email log (only `sendEmail`
+ * logged). Failures are logged and rethrown so each caller keeps its own
+ * error handling.
+ */
+const sendTransacEmailLogged = async (
+  emailAPI: TransactionalEmailsApi,
+  sendSmtpEmail: SendSmtpEmail,
+  template: string,
+): Promise<void> => {
+  const to = sendSmtpEmail.to?.map((recipient) => recipient.email).join(', ') || '';
+  const subject = sendSmtpEmail.subject || '';
+  try {
+    await emailAPI.sendTransacEmail(sendSmtpEmail);
+  } catch (error: any) {
+    await logEmail({ to, subject, template, status: 'failed', errorMessage: error?.message || String(error) });
+    throw error;
+  }
+  await logEmail({ to, subject, template, status: 'sent' });
+};
+
 // Send OTP email using Brevo
 export const sendOTPEmail = async (email: string, otp: string, userName: string): Promise<boolean> => {
   try {
@@ -114,7 +137,7 @@ export const sendOTPEmail = async (email: string, otp: string, userName: string)
       email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
     };
 
-    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'otp');
     return true;
   } catch (error: any) {
     return false;
@@ -179,7 +202,7 @@ export const sendWelcomeEmail = async (email: string, userName: string): Promise
       email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
     };
 
-   await emailAPI.sendTransacEmail(sendSmtpEmail);
+   await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'welcome');
 
     return true;
   } catch (error: any) {
@@ -238,7 +261,7 @@ export const sendProfessionalWelcomeEmail = async (email: string, professionalNa
       email: process.env.FROM_EMAIL || "anafariya@gmail.com"
     };
 
-    await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'professional_welcome');
     return true;
   } catch (error: any) {
     console.error('Failed to send professional welcome email:', error);
@@ -295,7 +318,7 @@ export const sendIdExpiredEmail = async (email: string, userName: string): Promi
       email: process.env.FROM_EMAIL || "anafariya@gmail.com"
     };
 
-    await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'id_expired');
     return true;
   } catch (error: any) {
     return false;
@@ -364,7 +387,7 @@ export const sendProfessionalApprovalEmail = async (email: string, professionalN
       email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
     };
 
-    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'professional_approval');
 
     return true;
   } catch (error: any) {
@@ -441,7 +464,7 @@ export const sendProfessionalRejectionEmail = async (email: string, professional
       email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
     };
 
-    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'professional_rejection');
 
     return true;
   } catch (error: any) {
@@ -494,7 +517,7 @@ export const sendProfessionalIdChangeRejectionEmail = async (
       email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
     };
 
-    await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'professional_id_change_rejection');
 
     return true;
   } catch (error: any) {
@@ -545,7 +568,7 @@ export const sendProfessionalIdChangeApprovalEmail = async (
       email: process.env.FROM_EMAIL || "anafariya@gmail.com"
     };
 
-    await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'professional_id_change_approval');
 
     return true;
   } catch (error: any) {
@@ -630,7 +653,7 @@ export const sendProfessionalSuspensionEmail = async (email: string, name: strin
       email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
     };
 
-    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'professional_suspension');
 
     return true;
   } catch (error: any) {
@@ -701,7 +724,7 @@ export const sendProfessionalReactivationEmail = async (email: string, name: str
       email: process.env.FROM_EMAIL || "anafariya@gmail.com" 
     };
 
-    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'professional_reactivation');
 
     return true;
   } catch (error: any) {
@@ -785,7 +808,7 @@ export const sendTeamMemberInvitationEmail = async (
       },
     };
 
-    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'team_member_invitation');
     return true;
   } catch (error: any) {
     return false;
@@ -963,7 +986,7 @@ export const sendProjectApprovalEmail = async (
       email: process.env.FROM_EMAIL || "anafariya@gmail.com"
     };
 
-    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'project_approval');
     return true;
   } catch (error: any) {
     console.error('Failed to send project approval email:', error);
@@ -1038,7 +1061,7 @@ export const sendProjectRejectionEmail = async (
       email: process.env.FROM_EMAIL || "anafariya@gmail.com"
     };
 
-    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'project_rejection');
     return true;
   } catch (error: any) {
     console.error('Failed to send project rejection email:', error);
@@ -1118,7 +1141,7 @@ export const sendProjectDeletedEmail = async (
       email: process.env.FROM_EMAIL || "anafariya@gmail.com"
     };
 
-    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'project_deleted');
     return true;
   } catch (error: any) {
     console.error('Failed to send project deletion email:', error);
@@ -1201,7 +1224,7 @@ export const sendProjectDeactivatedEmail = async (
       email: process.env.FROM_EMAIL || "anafariya@gmail.com"
     };
 
-    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'project_deactivated');
     return true;
   } catch (error: any) {
     console.error('Failed to send project deactivation email:', error);
@@ -1279,7 +1302,7 @@ export const sendProjectReactivatedEmail = async (
       email: process.env.FROM_EMAIL || "anafariya@gmail.com"
     };
 
-    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'project_reactivated');
     return true;
   } catch (error: any) {
     console.error('Failed to send project reactivation email:', error);
@@ -1368,7 +1391,7 @@ export const sendBookingNotificationEmail = async (
       email: process.env.FROM_EMAIL || "anafariya@gmail.com"
     };
 
-    const response = await emailAPI.sendTransacEmail(sendSmtpEmail);
+    await sendTransacEmailLogged(emailAPI, sendSmtpEmail, 'booking_notification');
     return true;
   } catch (error: any) {
     console.error('Failed to send booking notification email:', error);

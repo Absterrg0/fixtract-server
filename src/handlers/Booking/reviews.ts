@@ -15,6 +15,7 @@ import { maskBookingForAnonymizedParties } from '../../utils/accountAnonymity';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 import { UserFacingError } from '../../utils/appErrors';
 import { isPubliclyViewableProfessional, publicProjectOwnerFilter } from '../../utils/publicVisibility';
+import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
 
 const MAX_COMMENT_LENGTH = 1000;
 
@@ -169,6 +170,18 @@ export const submitCustomerReview = async (req: Request, res: Response, next: Ne
         });
       }
       throw error;
+    }
+
+    // FT3 #11: the rating is a level criterion, and the review arrives after
+    // completion (when the level was last evaluated). Re-evaluate now so a
+    // qualifying review levels the professional up (notification + email +
+    // pop-up come from updateProfessionalLevel's 'professional.leveling_up').
+    if (professionalId) {
+      try {
+        await updateProfessionalLevel(professionalId);
+      } catch (levelErr) {
+        console.error("Failed to update professional level after review:", levelErr);
+      }
     }
 
     // Send review notification as system message in chat

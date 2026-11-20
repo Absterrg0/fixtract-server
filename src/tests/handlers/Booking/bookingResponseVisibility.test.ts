@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   intentCancel: vi.fn(),
   bookingFindOneAndUpdate: vi.fn(),
   bookingFind: vi.fn(),
+  bookingAggregate: vi.fn(),
   bookingDistinct: vi.fn(),
   paymentFind: vi.fn(),
   paymentFindOneAndUpdate: vi.fn(),
@@ -28,6 +29,7 @@ vi.mock('../../../models/booking', () => ({
     countDocuments: mocks.bookingCountDocuments,
     findOneAndUpdate: mocks.bookingFindOneAndUpdate,
     find: mocks.bookingFind,
+    aggregate: mocks.bookingAggregate,
     distinct: mocks.bookingDistinct,
     create: vi.fn(),
     updateOne: vi.fn(),
@@ -278,6 +280,7 @@ describe('non-admin booking response serialization', () => {
       milestonePayments: rawMilestones(),
       dispute: { raisedBy: CUSTOMER_ID, reason: 'Work incomplete', raisedAt: new Date('2026-02-01') },
     };
+    mocks.bookingAggregate.mockResolvedValue([{ page: [{ _id: 'booking-1' }], total: [{ count: 1 }], status: [], service: [] }]);
     mocks.bookingFind.mockReturnValue(query([booking]));
 
     const res = response();
@@ -452,15 +455,42 @@ describe('non-admin booking response serialization', () => {
   });
 
   it('paginates disputes with the same participant predicate and a stable tie breaker', async () => {
-    const chain = query([]);
-    mocks.bookingFind.mockReturnValue(chain);
-    mocks.bookingCountDocuments.mockResolvedValue(105);
+    mocks.bookingAggregate.mockResolvedValue([{ page: [], total: [{ count: 105 }], status: [], service: [] }]);
     const res = response();
     await getMyDisputes({ user: user('customer', CUSTOMER_ID), query: { page: '6', limit: '20' } } as any, res as any, vi.fn());
     expect(res.body.data.pagination).toEqual({ page: 6, limit: 20, total: 105, totalPages: 6 });
-    expect(chain.skip).toHaveBeenCalledWith(100);
-    expect(chain.sort).toHaveBeenCalledWith({ 'dispute.raisedAt': -1, _id: -1 });
-    expect(mocks.bookingCountDocuments.mock.calls[0][0]).toEqual(mocks.bookingFind.mock.calls[0][0]);
+    const pipeline = mocks.bookingAggregate.mock.calls[0][0];
+    expect(JSON.stringify(pipeline[0].$match.$or)).toContain(CUSTOMER_ID);
+    const facet = pipeline[pipeline.length - 1].$facet;
+    expect(facet.page).toEqual(expect.arrayContaining([{ $sort: { 'dispute.raisedAt': -1, _id: -1 } }, { $skip: 100 }, { $limit: 20 }]));
+  });
+
+  it('FT2 #10a: filters disputes by status and service and returns the facet counts', async () => {
+    const booking = { _id: 'booking-2', bookingNumber: 'BK-2', status: 'completed', dispute: { raisedBy: CUSTOMER_ID, reason: 'r', raisedAt: new Date('2026-02-01'), resolvedAt: new Date('2026-02-03') } };
+    mocks.bookingAggregate.mockResolvedValue([{
+      page: [{ _id: 'booking-2' }],
+      total: [{ count: 1 }],
+      status: [{ _id: 'resolved', count: 1 }],
+      service: [{ _id: 'Plumbing', count: 1 }, { _id: 'Painting', count: 2 }],
+    }]);
+    mocks.bookingFind.mockReturnValue(query([booking]));
+    const res = response();
+    await getMyDisputes({ user: user('customer', CUSTOMER_ID), query: { status: 'resolved', service: 'Plumbing' } } as any, res as any, vi.fn());
+    expect(res.body.data.statusCounts).toEqual({ open: 0, resolved: 1 });
+    expect(res.body.data.serviceCounts).toEqual({ Plumbing: 1, Painting: 2 });
+    expect(res.body.data.items.map((item: any) => item._id)).toEqual(['booking-2']);
+    const pipeline = mocks.bookingAggregate.mock.calls[0][0];
+    const facet = pipeline[pipeline.length - 1].$facet;
+    // The list honours both selections; each facet drops only its own one.
+    expect(facet.page.slice(0, 2)).toEqual([{ $match: { _disputeState: 'resolved' } }, { $match: { _disputeService: 'Plumbing' } }]);
+    expect(facet.status[0]).toEqual({ $match: { _disputeService: 'Plumbing' } });
+    expect(facet.service[0]).toEqual({ $match: { _disputeState: 'resolved' } });
+    // Unknown status values do not filter.
+    mocks.bookingAggregate.mockClear();
+    mocks.bookingAggregate.mockResolvedValue([{ page: [], total: [], status: [], service: [] }]);
+    await getMyDisputes({ user: user('customer', CUSTOMER_ID), query: { status: 'bogus' } } as any, response() as any, vi.fn());
+    const unfiltered = mocks.bookingAggregate.mock.calls[0][0];
+    expect(unfiltered[unfiltered.length - 1].$facet.page[0]).toEqual({ $sort: { 'dispute.raisedAt': -1, _id: -1 } });
   });
 
   it('sanitizes the reschedule-request response for the professional', async () => {

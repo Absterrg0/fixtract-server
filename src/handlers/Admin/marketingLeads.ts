@@ -110,9 +110,14 @@ function serializeImport(doc: any, options: { includeErrors?: boolean } = {}) {
   const duplicateRows = numberOr(value.duplicateRows, 0);
   const failedRows =
     value.failedRows !== undefined ? numberOr(value.failedRows, 0) : numberOr(value.rejectedRows, 0);
-  const status = rawStatus === 'committed'
+  const committedStatus = rawStatus === 'committed'
     ? (failedRows > 0 ? (importedRows > 0 ? 'partial' : 'failed') : 'completed')
     : rawStatus === 'validated' ? 'failed' : rawStatus || 'failed';
+  // History rows stored as 'failed' before the duplicate-only rule (CA5) read
+  // as "no new leads" when the file itself was processed.
+  const status = committedStatus === 'failed' && !value.fileError && importedRows === 0 && duplicateRows > 0
+    ? 'duplicate_only'
+    : committedStatus;
   const totalRows =
     value.totalRows !== undefined
       ? numberOr(value.totalRows, importedRows + duplicateRows + failedRows)
@@ -292,7 +297,9 @@ function importStatus(input: {
   failedRows: number;
 }): 'completed' | 'partial' | 'duplicate_only' | 'failed' {
   if (input.importedRows > 0) return input.failedRows > 0 ? 'partial' : 'completed';
-  if (input.duplicateRows > 0 && input.failedRows === 0) return 'duplicate_only';
+  // CA5: a re-import made of known leads (plus any invalid rows) imported
+  // nothing new; that is not a failed import.
+  if (input.duplicateRows > 0) return 'duplicate_only';
   return 'failed';
 }
 
