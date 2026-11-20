@@ -509,13 +509,31 @@ const buildPayments = async (params: {
   const paymentRows = resolvedPaymentRows.map((row) => row.payment);
 
   const records: PaymentRecordDto[] = [];
+  const hasInvoiceDocuments = (source: any) => Boolean(source && (
+    source.invoiceNumber || source.invoiceUrl || source.supplierInvoiceNumber
+    || source.supplierInvoiceUrl || source.creditNoteNumber || source.creditNoteUrl
+  ));
+  // Invoice artifacts are booking documents: they are written to
+  // booking.payment (and to the non-milestone Payment row only). A milestone
+  // booking's Payment rows never carry them, so the record of the checkout
+  // booking.payment describes shows the booking's documents (FT3-19d).
+  const bookingInvoicePayment = fallbackPayment && hasInvoiceDocuments(fallbackPayment)
+    ? (viewerRole === 'admin'
+      ? filterPaymentForAdminArea(fallbackPayment, canSeeAdminInternals)
+      : sanitizePaymentForViewer(fallbackPayment, viewerRole))
+    : null;
+  const bookingInvoiceIntent = str(fallbackPayment?.stripePaymentIntentId);
+  const anyRowHasInvoice = paymentRows.some((payment) => hasInvoiceDocuments(payment));
   for (const payment of paymentRows) {
     const currency = str(payment.currency) || str(quoteCurrency) || 'EUR';
     const visiblePayment = viewerRole === 'admin'
       ? filterPaymentForAdminArea(payment, canSeeAdminInternals)
       : sanitizePaymentForViewer(payment, viewerRole);
     const invoice = await (async (): Promise<RoleInvoiceDto | null> => {
-      const source = visiblePayment;
+      const source = !anyRowHasInvoice && bookingInvoicePayment
+        && (!bookingInvoiceIntent || str(payment.stripePaymentIntentId) === bookingInvoiceIntent)
+        ? bookingInvoicePayment
+        : visiblePayment;
       if (!source || !(
         source.invoiceNumber || source.invoiceUrl || source.supplierInvoiceNumber
         || source.supplierInvoiceUrl || source.creditNoteNumber || source.creditNoteUrl

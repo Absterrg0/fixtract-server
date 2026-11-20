@@ -725,6 +725,31 @@ describe('details privacy', () => {
     expect(details.payments.records[0]).not.toHaveProperty('professionalPayout');
   });
 
+  it('FT3-19d: shows the booking invoices on a milestone booking whose Payment rows carry none', async () => {
+    const invoiceFields = {
+      invoiceNumber: 'FIX-2026-000009',
+      invoiceUrl: 'https://fixera-uploads.s3.us-east-1.amazonaws.com/invoices/FIX-2026-000009.pdf',
+      supplierInvoiceNumber: 'SUP-2026-000006',
+      supplierInvoiceUrl: 'https://fixera-uploads.s3.us-east-1.amazonaws.com/invoices/SUP-2026-000006.pdf',
+    };
+    const milestoneRow = payment({
+      stripePaymentIntentId: 'pi_milestone_2', milestoneIndex: 1,
+      invoiceNumber: undefined, invoiceUrl: undefined, supplierInvoiceNumber: undefined, supplierInvoiceUrl: undefined,
+    });
+    const overrides = {
+      booking: { payment: { ...payment({ stripePaymentIntentId: 'pi_milestone_2', milestoneIndex: 1 }), ...invoiceFields } },
+      payments: [milestoneRow],
+    };
+    const customer = await buildDetails('customer', overrides);
+    expect(customer.payments.records.map((record: any) => record.invoice?.invoiceNumber)).toContain('FIX-2026-000009');
+    const professional = await buildDetails('professional', overrides);
+    expect(professional.payments.records.map((record: any) => record.invoice?.supplierInvoiceNumber)).toContain('SUP-2026-000006');
+    expect(JSON.stringify(professional.payments.records)).not.toContain('FIX-2026-000009');
+    const admin = await buildDetails('admin', overrides);
+    const adminInvoice = admin.payments.records.find((record: any) => record.invoice)?.invoice as any;
+    expect(adminInvoice).toMatchObject({ invoiceNumber: 'FIX-2026-000009', supplierInvoiceNumber: 'SUP-2026-000006' });
+  });
+
   it('gives each party only its own invoice side', async () => {
     const customerDetails = await buildDetails('customer');
     expect(customerDetails.payments.records[0].invoice?.invoiceNumber).toBe('FIX-1');
