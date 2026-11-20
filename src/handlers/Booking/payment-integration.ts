@@ -1239,9 +1239,12 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       updatedAt: booking.updatedAt,
       'payment.stripePaymentIntentId': booking.payment?.stripePaymentIntentId ?? null,
     };
-    // Accepted quotations and legacy all-in quotes cannot safely be repriced
-    // from today's catalog. Their schedule is editable; options stay agreed.
-    const optionsLocked = Boolean(booking.quoteVersions?.length || quoteAmountIncludesSelectedExtras(booking));
+    // Legacy all-in quotes cannot safely be repriced from today's catalog:
+    // their schedule is editable, their options stay agreed. An accepted
+    // quotation may still get the project's options until the first milestone
+    // is paid (checked above); they are charged in full with that first
+    // milestone (FT3-19b, see buildMilestoneChargePlan).
+    const optionsLocked = quoteAmountIncludesSelectedExtras(booking);
     if (hasExplicitExtraOptions && optionsLocked) {
       const project = booking.project as any;
       const requested = normalizeSelectedExtraOptions(selectedExtraOptions, project);

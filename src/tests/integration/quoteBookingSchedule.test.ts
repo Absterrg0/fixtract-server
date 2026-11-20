@@ -7,7 +7,8 @@ vi.mock('../../utils/notifications/notify', () => ({ notify: vi.fn() }));
 
 import Booking from '../../models/booking';
 import CalendarReservation from '../../models/calendarReservation';
-import { buildScheduleUpdatePayload } from '../../handlers/Booking/payment-integration';
+import { buildScheduleUpdatePayload, setBookingSchedule } from '../../handlers/Booking/payment-integration';
+import { buildMilestoneChargePlan } from '../../utils/milestoneCharges';
 import { getBookingScheduleOptions, getQuoteScheduleDurationOverride } from '../../utils/scheduleEngine';
 import { reserveBookingCalendar } from '../../utils/support/bookingCalendar';
 
@@ -19,6 +20,7 @@ describeDb('quote bookings are scheduled with the accepted quotation durations',
   const customer = new Types.ObjectId();
   const project = new Types.ObjectId();
   const bookingId = new Types.ObjectId();
+  const optionId = new Types.ObjectId();
 
   beforeAll(async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
@@ -32,12 +34,23 @@ describeDb('quote bookings are scheduled with the accepted quotation durations',
     await mongoose.connection.collection('projects').insertOne({
       _id: project, professionalId: professional, title: 'Kitchen RFQ', status: 'published', resources: [String(professional)], timeMode: 'days',
       subprojects: [{ name: 'Kitchen', pricing: { type: 'rfq' }, executionDuration: { range: { min: 1, max: 10 }, unit: 'days' } }],
+      extraOptions: [{ _id: optionId, name: 'Integrated Lighting', price: 450 }],
     });
     await mongoose.connection.collection('bookings').insertOne({
       _id: bookingId, bookingNumber: 'QS-1', customer, professional, project, bookingType: 'project', status: 'quote_accepted', selectedSubprojectIndex: 0,
       rfqData: { serviceType: 'Kitchen', description: 'Quote' }, assignedTeamMembers: [professional],
       currentQuoteVersion: 1, acceptedQuoteVersion: 1,
-      quoteVersions: [{ version: 1, totalAmount: 8000, currency: 'EUR', preparationDuration: { value: 2, unit: 'days' }, executionDuration: { value: 3, unit: 'days' } }],
+      location: { type: 'Point', coordinates: [4.37, 50.85], country: 'BE' },
+      vatDecision: { action: 'standard_rate', country: 'BE', standardRate: 21, appliedRate: 21 },
+      quoteVersions: [{ version: 1, quotationNumber: 'QT-2027-000001-v1', scope: 'Kitchen renovation works', description: 'Kitchen renovation with new cabinets',
+        warrantyDuration: { value: 12, unit: 'months' }, validUntil: new Date('2027-02-01T00:00:00Z'), createdAt: new Date('2027-01-01T00:00:00Z'),
+        totalAmount: 8000, currency: 'EUR', preparationDuration: { value: 2, unit: 'days' }, executionDuration: { value: 3, unit: 'days' } }],
+      quote: { amount: 8000, currency: 'EUR' },
+      milestonePayments: [
+        { title: 'Deposit', amount: 3000, order: 0, status: 'pending', dueCondition: 'on_start' },
+        { title: 'Cabinets installed', amount: 5000, order: 1, status: 'pending', dueCondition: 'on_milestone_completion' },
+      ],
+      statusHistory: [],
     });
     await CalendarReservation.createCollection();
     await CalendarReservation.createIndexes();
@@ -66,5 +79,26 @@ describeDb('quote bookings are scheduled with the accepted quotation durations',
     const candidate = { _id: bookingId, professional, assignedTeamMembers: [professional], ...data };
     await reserveBookingCalendar(candidate as any);
     expect(await CalendarReservation.countDocuments({ sourceType: 'booking', sourceId: bookingId })).toBeGreaterThan(0);
+  });
+
+  // FT3-19b: options on a quote booking are charged in full with the first milestone.
+  it('lets the customer add project options to an accepted quotation before the first milestone is paid', async () => {
+    const res: any = { statusCode: 200, body: undefined, status(code: number) { this.statusCode = code; return this; }, json(body: unknown) { this.body = body; return this; } };
+    await setBookingSchedule({ user: { _id: customer }, params: { bookingId: String(bookingId) },
+      body: { scheduledStartDate: '2027-01-18', selectedExtraOptions: [0] } } as any, res);
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(200);
+    const stored: any = await Booking.findById(bookingId).lean();
+    expect(stored.selectedExtraOptions).toEqual([expect.objectContaining({ extraOptionId: String(optionId), bookedPrice: 450 })]);
+    const plan = buildMilestoneChargePlan(stored, 0);
+    expect(plan.map((entry) => entry.expectedCustomerGross)).toEqual([3450, 5000]);
+    expect(plan[0].includesSelectedOptions).toBe(true);
+  });
+
+  it('keeps the options locked once a milestone is paid', async () => {
+    await Booking.updateOne({ _id: bookingId }, { $set: { 'milestonePayments.0.status': 'paid' } });
+    const res: any = { statusCode: 200, body: undefined, status(code: number) { this.statusCode = code; return this; }, json(body: unknown) { this.body = body; return this; } };
+    await setBookingSchedule({ user: { _id: customer }, params: { bookingId: String(bookingId) },
+      body: { scheduledStartDate: '2027-01-18', selectedExtraOptions: [] } } as any, res);
+    expect(res.statusCode).toBe(409);
   });
 });
