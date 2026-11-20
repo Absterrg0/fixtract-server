@@ -11,7 +11,7 @@ vi.mock('../../../utils/bookingDetails/quoteTotals', async importOriginal => ({
   ...await importOriginal<any>(),
   buildQuoteCustomerTotalsWithDiscounts: async () => ({ commissionPercent: 17, professionalNetAmount: 100, customerNetAmount: 117, totalWithVat: 141.57, currency: 'EUR', recordedAt: new Date(), discount: { nested: { commission_percentage: 17 } } }),
 }));
-vi.mock('../../../utils/bookingDetails/quoteFirstStart', () => ({ computeQuoteFirstPossibleStartBounded: async () => null }));
+vi.mock('../../../utils/bookingDetails/quoteFirstStart', () => ({ computeQuoteFirstPossibleStartBounded: async () => null, completeQuoteFirstPossibleStart: async () => null }));
 vi.mock('../../../utils/notifications/notify', () => ({ notify: vi.fn() }));
 vi.mock('../../../handlers/Stripe/payment', () => ({ createPaymentIntent: vi.fn() }));
 vi.mock('../../../utils/support/accountGuard', () => ({ withAnonymizationWriteFence: async (_ids: any, write: any) => write(undefined) }));

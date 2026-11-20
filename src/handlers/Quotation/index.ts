@@ -25,7 +25,8 @@ import { getProfessionalDisplayName } from '../../utils/displayName';
 import { params } from '../../utils/requestParams';
 import { bookingForRequest, sanitizeMilestoneForViewer, sanitizeMilestonesForViewer } from '../../utils/invoiceVisibility';
 import { buildQuoteCustomerTotalsWithDiscounts, quoteServiceLocationSnapshot } from '../../utils/bookingDetails/quoteTotals';
-import { computeQuoteFirstPossibleStartBounded } from '../../utils/bookingDetails/quoteFirstStart';
+import { completeQuoteFirstPossibleStart, computeQuoteFirstPossibleStartBounded } from '../../utils/bookingDetails/quoteFirstStart';
+import { waitUntil } from '@vercel/functions';
 import { captureBookingSnapshotIfMissing, loadVatQuestionDefinitions } from '../../utils/bookingDetails/capture';
 import { withAnonymizationWriteFence } from '../../utils/support/accountGuard';
 import { UserFacingError } from '../../utils/appErrors';
@@ -899,6 +900,13 @@ export const submitQuotation = async (req: Request, res: Response) => {
     await withAnonymizationWriteFence([userId], async (session) => {
       await booking.save(session ? { session } : undefined);
     });
+    // FT2-14: the bounded save-time computation often times out; finish it
+    // after the response with a larger budget so the quotes table gets it.
+    if (quoteVersion.firstPossibleStart == null) {
+      waitUntil(completeQuoteFirstPossibleStart(String(booking._id), versionNumber, {
+        executionDuration, preparationDuration, bufferDuration: bufferDuration || undefined,
+      }));
+    }
 
     const customer = booking.customer as any;
     const professional = booking.professional as any;
@@ -1161,6 +1169,12 @@ export const editQuotation = async (req: Request, res: Response) => {
           message: 'This quotation changed while you were editing it. Reload and try again.',
         },
       });
+    }
+    // FT2-14: finish a timed-out first-possible-start after the response.
+    if (quoteVersion.firstPossibleStart == null) {
+      waitUntil(completeQuoteFirstPossibleStart(String(booking._id), newVersionNumber, {
+        executionDuration, preparationDuration, bufferDuration: bufferDuration || undefined,
+      }));
     }
 
     const customer = booking.customer as any;

@@ -216,3 +216,41 @@ export async function computeQuoteFirstPossibleStartBounded(
     if (timer !== undefined) clearTimeout(timer);
   }
 }
+
+/**
+ * Budget for completing a first-possible-start that the quote save could not
+ * compute within QUOTE_FIRST_START_TIMEOUT_MS. The schedule engine takes
+ * ~3.5 s on staging, so the bounded save-time value was effectively always
+ * null and the quotes table showed no first start (FT2-14).
+ */
+export const QUOTE_FIRST_START_BACKGROUND_TIMEOUT_MS = 8000;
+
+/**
+ * After the quote is saved: compute the first possible start for one version
+ * with the larger background budget and store it, only while that version
+ * still has none. Errors and timeouts leave the stored value unknown (null).
+ */
+export async function completeQuoteFirstPossibleStart(
+  bookingId: string,
+  version: number,
+  durations: QuoteFirstStartDurations,
+  timeoutMs: number = QUOTE_FIRST_START_BACKGROUND_TIMEOUT_MS,
+): Promise<Date | null> {
+  try {
+    const { default: Booking } = await import("../../models/booking");
+    const booking = await Booking.findById(bookingId)
+      .select("project selectedSubprojectIndex scheduleSnapshot checkoutSnapshot")
+      .lean();
+    if (!booking) return null;
+    const start = await computeQuoteFirstPossibleStartBounded(booking, durations, timeoutMs);
+    if (!start) return null;
+    await Booking.updateOne(
+      { _id: bookingId, quoteVersions: { $elemMatch: { version, firstPossibleStart: null } } },
+      { $set: { "quoteVersions.$.firstPossibleStart": start } },
+    );
+    return start;
+  } catch (error) {
+    console.warn("completeQuoteFirstPossibleStart failed, leaving unknown:", (error as Error)?.message || error);
+    return null;
+  }
+}

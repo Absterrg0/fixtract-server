@@ -289,3 +289,35 @@ describe("quote version persistence and dashboard projection", () => {
     expect(rfq.pinnedVersion).toBeNull();
   });
 });
+
+describe("FT2-14 — completing the first possible start after the quote save", () => {
+  it("stores the start computed with the larger budget, only while the version has none", async () => {
+    const { completeQuoteFirstPossibleStart, QUOTE_FIRST_START_BACKGROUND_TIMEOUT_MS } = await import("../../utils/bookingDetails/quoteFirstStart");
+    expect(QUOTE_FIRST_START_BACKGROUND_TIMEOUT_MS).toBeGreaterThan(QUOTE_FIRST_START_TIMEOUT_MS);
+    mocks.project = { _id: projectId, professionalId };
+    mocks.professional = { _id: professionalId, companyAvailability: {} };
+    mocks.proposals = { earliestProposal: { start: "2026-12-01T08:00:00.000Z" }, _debug: { usedFallback: false } };
+    mocks.proposalsError = null;
+    mocks.proposalsGate = null;
+    const findSpy = vi.spyOn(Booking, "findById").mockReturnValue({
+      select: () => ({ lean: async () => ({ _id: bookingId, project: projectId, selectedSubprojectIndex: 0 }) }),
+    } as any);
+    const updateSpy = vi.spyOn(Booking, "updateOne").mockResolvedValue({ acknowledged: true } as any);
+    try {
+      const start = await completeQuoteFirstPossibleStart(bookingId, 1, { executionDuration: { value: 3, unit: "days" } });
+      expect(start?.toISOString()).toBe("2026-12-01T08:00:00.000Z");
+      expect(updateSpy).toHaveBeenCalledWith(
+        { _id: bookingId, quoteVersions: { $elemMatch: { version: 1, firstPossibleStart: null } } },
+        { $set: { "quoteVersions.$.firstPossibleStart": start } },
+      );
+      // Nothing bookable: nothing is written.
+      updateSpy.mockClear();
+      mocks.proposals = { _debug: { usedFallback: true }, earliestBookableDate: "2027-06-01T00:00:00.000Z" };
+      expect(await completeQuoteFirstPossibleStart(bookingId, 1, { executionDuration: { value: 3, unit: "days" } })).toBeNull();
+      expect(updateSpy).not.toHaveBeenCalled();
+    } finally {
+      findSpy.mockRestore();
+      updateSpy.mockRestore();
+    }
+  });
+});
