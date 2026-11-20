@@ -1271,13 +1271,22 @@ export async function generateBookingInvoice(
                 ...line,
                 amount: line.amount * customerScale,
               }));
-          const serviceLines = scaledQuoteLines.length > 0
+          // Show the pre-discount service price and let the discount lines
+          // carry the reduction, so the printed total is the sum of all lines.
+          const displayTarget = roundInvoiceMoney(customerServiceNet + sign * customerServiceDiscountTotal);
+          // Without source lines the service line is the remainder of the
+          // full (pre-discount) price after the options. Taking it from the
+          // discounted net and grossing every line up afterwards would shift
+          // part of the discount onto the options (FT3-25a: 783.33 + 166.67
+          // instead of 800 + 150).
+          const fallbackServiceLine = scaledQuoteLines.length === 0;
+          const serviceLines = !fallbackServiceLine
             ? scaledQuoteLines
             : [{
                 description: serviceLabel,
                 amount: Math.max(
                   0,
-                  Math.abs(customerServiceNet) - scaledOptionLines.reduce((sum, line) => sum + Math.abs(line.amount), 0),
+                  Math.abs(displayTarget) - scaledOptionLines.reduce((sum, line) => sum + Math.abs(line.amount), 0),
                 ) * (sign < 0 ? -1 : 1),
                 vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
                 quantity: hasUnits ? unitQuantity : undefined,
@@ -1286,7 +1295,8 @@ export async function generateBookingInvoice(
               }];
           const serviceLinesWithOptions = [...serviceLines, ...scaledOptionLines];
           const serviceLineTotal = serviceLinesWithOptions.reduce((sum, line) => sum + Number(line.amount || 0), 0);
-          const adjustment = Math.round((customerServiceNet - serviceLineTotal) * 100) / 100;
+          const adjustmentTarget = fallbackServiceLine ? displayTarget : customerServiceNet;
+          const adjustment = Math.round((adjustmentTarget - serviceLineTotal) * 100) / 100;
           if (Math.abs(adjustment) >= 0.01) {
             serviceLinesWithOptions.push({
               description: adjustment > 0 ? "Platform commission" : "Payment discount adjustment",
@@ -1294,9 +1304,6 @@ export async function generateBookingInvoice(
               vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
             });
           }
-          // Show the pre-discount service price and let the discount lines above
-          // carry the reduction, so the printed total is the sum of all lines.
-          const displayTarget = roundInvoiceMoney(customerServiceNet + sign * customerServiceDiscountTotal);
           return [...scaleLineItemsToTotal(serviceLinesWithOptions, displayTarget), ...extraCostLines];
         })(),
     discounts,

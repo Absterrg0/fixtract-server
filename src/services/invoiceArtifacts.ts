@@ -650,6 +650,9 @@ const getRawPricingLinesForUbl = (
           vatAmount: 0,
       }];
 
+  // True once the service lines already carry the full pre-discount price.
+  let baseLinesAtFullPrice = false;
+
   const appendScaledOptions = (): void => {
     const selectedOptions: UblLine[] = (booking.selectedExtraOptions || []).map((option: any, index: number) => {
       const projectOption = booking.project?.extraOptions?.find((entry: any, entryIndex: number) =>
@@ -712,6 +715,12 @@ const getRawPricingLinesForUbl = (
     });
     const customerNet = moneyNumber(basis.serviceNet);
     const scale = supplierNet > 0 ? customerNet / supplierNet : 1;
+    // The service line is the remainder of the full (pre-discount) price
+    // after the options; the discounts follow as their own allowances.
+    // Taking it from the discounted net and grossing all lines up afterwards
+    // moved part of the discount onto the options (FT3-25a).
+    const fullCustomerNet = Math.round((customerNet + customerServiceDiscountTotal(basis.discount)) * 100) / 100;
+    baseLinesAtFullPrice = true;
     const scaledOptions = selectedOptions.map((line: UblLine) => ({
       ...line,
       amount: Math.round(line.amount * scale * 100) / 100,
@@ -720,14 +729,14 @@ const getRawPricingLinesForUbl = (
     const optionTotal = scaledOptions.reduce((sum: number, line: UblLine) => sum + line.amount, 0);
     baseLines = [{
       description: booking.quote?.description || booking.rfqData?.description || "Service",
-      amount: Math.max(0, Math.round((customerNet - optionTotal) * 100) / 100),
-      price: Math.max(0, Math.round((customerNet - optionTotal) * 100) / 100),
+      amount: Math.max(0, Math.round((fullCustomerNet - optionTotal) * 100) / 100),
+      price: Math.max(0, Math.round((fullCustomerNet - optionTotal) * 100) / 100),
       vatRate,
       vatAmount: 0,
     }, ...scaledOptions];
     if (rawOptionTotal <= 0) {
-      baseLines[0].amount = customerNet;
-      baseLines[0].price = customerNet;
+      baseLines[0].amount = fullCustomerNet;
+      baseLines[0].price = fullCustomerNet;
     }
   }
 
@@ -833,7 +842,9 @@ const getRawPricingLinesForUbl = (
     baseLines = scaleLineItemsToTotal(baseLines, basis.serviceNet).map(line => ({ ...line, price: line.amount }));
   }
   const baseNet = baseLines.reduce((sum, line) => sum + line.amount, 0);
-  const targetBaseNet = (basis.milestoneActive || basis.serviceNet > 0)
+  const targetBaseNet = baseLinesAtFullPrice
+    ? Math.round((moneyNumber(basis.serviceNet) + customerServiceDiscountTotal(basis.discount)) * 100) / 100
+    : (basis.milestoneActive || basis.serviceNet > 0)
     ? moneyNumber(basis.serviceNet)
     : baseNet;
   if (Math.abs(targetBaseNet - baseNet) >= 0.01) {
@@ -845,7 +856,7 @@ const getRawPricingLinesForUbl = (
       vatAmount: 0,
     });
   }
-  const serviceAndDiscountLines = withCustomerDiscountLines(booking, baseLines, vatRate, reverseCharge, basis.discount)
+  const serviceAndDiscountLines = withCustomerDiscountLines(booking, baseLines, vatRate, reverseCharge, basis.discount, baseLinesAtFullPrice)
     ?? [...baseLines, ...getExtraCostLinesForUbl(booking, vatRate, reverseCharge, true)];
   // normalizeInvoiceBasis already deducts the refund. Keep its facts in the
   // header note; another negative line would deduct it a second time.
@@ -871,6 +882,15 @@ const getRawPricingLinesForUbl = (
   return { lines: reconciledLines, totals };
 };
 
+/** Service discounts shown as their own customer invoice lines (same set as below). */
+const customerServiceDiscountTotal = (discount: any): number => Math.round([
+  discount?.loyaltyAmount,
+  discount?.repeatBuyerAmount,
+  discount?.referralDiscountAmount,
+  discount?.pointsDiscountAmount,
+  discount?.codeDiscountAmount,
+].reduce((sum: number, amount: unknown) => sum + Math.max(0, moneyNumber(amount)), 0) * 100) / 100;
+
 /**
  * Customer lines at their full price with the discounts on their own lines,
  * as on the Fixtract PDF. Folding a discount into the lines would make every
@@ -885,6 +905,7 @@ const withCustomerDiscountLines = (
   vatRate: number,
   reverseCharge: boolean,
   discountOverride?: any,
+  baseLinesAtFullPrice = false,
 ): UblLine[] | undefined => {
   const discount = discountOverride !== undefined ? discountOverride || {} : booking.payment?.discount || {};
   const serviceDiscounts = [
@@ -933,7 +954,7 @@ const withCustomerDiscountLines = (
   const discountLines: UblLine[] = [];
   distinctRates.forEach((rate, rateIndex) => {
     const group = baseLines.filter((line) => lineRateOf(line) === rate);
-    const grossUp = serviceDiscountByRate[rateIndex];
+    const grossUp = baseLinesAtFullPrice ? 0 : serviceDiscountByRate[rateIndex];
     const rateDiscount = totalDiscountByRate[rateIndex];
     const groupBase = baseByRate[rateIndex];
     fullBaseLines.push(
