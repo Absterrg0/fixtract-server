@@ -1105,6 +1105,23 @@ export const buildBookingDetails = async (params: {
   // Shadows the module helper on purpose: every calendar date of this
   // booking is projected as its local day, not its UTC day.
   const dateOnly = (value: unknown): string | null => calendarDateIn(value, calendarTimeZone);
+  // Snapshots captured before C11-1x stored each schedule date as the UTC
+  // day of the instant (23/11 Brussels recorded as 2026-11-22). Such a legacy
+  // value that is exactly the UTC day of the booking's own instant is shown
+  // as that instant's local day; snapshots marked calendarDays 'local' are
+  // already local.
+  const snapshotScheduleDay = (field: string): string | null => {
+    const recorded = captured?.schedule?.[field];
+    const zone = isValidIanaTimeZone(captured?.schedule?.timeZone) ? captured.schedule.timeZone : null;
+    if (captured?.schedule?.calendarDays !== 'local' && zone && typeof recorded === 'string'
+      && /^\d{4}-\d{2}-\d{2}$/.test(recorded) && booking[field]) {
+      const live = booking[field] instanceof Date ? booking[field] : new Date(booking[field]);
+      if (Number.isFinite(live.getTime()) && live.toISOString().slice(0, 10) === recorded) {
+        return calendarDateIn(live, zone);
+      }
+    }
+    return dateOnly(recorded);
+  };
   const quoteCurrency = booking.quote?.currency || booking.quoteVersions?.slice(-1)?.[0]?.currency || null;
   const paymentCurrency = booking.payment?.currency || quoteCurrency || null;
 
@@ -2206,12 +2223,12 @@ export const buildBookingDetails = async (params: {
     schedule: {
       preferredStartDate: dateOnly(captured?.schedule?.preferredStartDate),
       preferredStartTime: str(captured?.schedule?.preferredStartTime),
-      scheduledStartDate: dateOnly(captured?.schedule?.scheduledStartDate),
+      scheduledStartDate: snapshotScheduleDay('scheduledStartDate'),
       scheduledStartTime: str(captured?.schedule?.scheduledStartTime),
       scheduledEndTime: str(captured?.schedule?.scheduledEndTime),
-      scheduledExecutionEndDate: dateOnly(captured?.schedule?.scheduledExecutionEndDate),
-      scheduledBufferStartDate: dateOnly(captured?.schedule?.scheduledBufferStartDate),
-      scheduledBufferEndDate: dateOnly(captured?.schedule?.scheduledBufferEndDate),
+      scheduledExecutionEndDate: snapshotScheduleDay('scheduledExecutionEndDate'),
+      scheduledBufferStartDate: snapshotScheduleDay('scheduledBufferStartDate'),
+      scheduledBufferEndDate: snapshotScheduleDay('scheduledBufferEndDate'),
       timeZone: isValidIanaTimeZone(captured?.schedule?.timeZone) ? captured.schedule.timeZone : null,
       timeZoneRecorded: isValidIanaTimeZone(captured?.schedule?.timeZone),
     },

@@ -28,6 +28,24 @@ const isoDay = (value: unknown): string | undefined => {
   return date.toISOString().slice(0, 10);
 };
 
+/**
+ * Calendar day of a schedule instant in the booking's zone (C11-1x): a
+ * day-mode start is stored as the professional's local midnight
+ * (2026-11-22T23:00Z = 23/11 in Brussels), whose UTC day is one day early.
+ * UTC midnights (dates without a time) keep their own date.
+ */
+const localIsoDay = (value: unknown, timeZone: string | undefined): string | undefined => {
+  const utcDay = isoDay(value);
+  if (!utcDay || !timeZone) return utcDay;
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (date.getTime() % (24 * 60 * 60 * 1000) === 0) return utcDay;
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+  } catch {
+    return utcDay;
+  }
+};
+
 export const isValidIanaTimeZone = (value: unknown): value is string => {
   if (typeof value !== 'string' || !value.trim()) return false;
   try {
@@ -351,6 +369,9 @@ export const buildBookingSnapshot = (params: {
       ? snapshotSelectedSubproject(subprojects[selectedIndex])
       : undefined;
 
+  const scheduleZone = params.scheduleTimeZone && isValidIanaTimeZone(params.scheduleTimeZone)
+    ? params.scheduleTimeZone
+    : undefined;
   const schedule = {
     ...(isoDay(booking.rfqData?.preferredStartDate)
       ? { preferredStartDate: isoDay(booking.rfqData?.preferredStartDate) }
@@ -359,7 +380,7 @@ export const buildBookingSnapshot = (params: {
       ? { preferredStartTime: String(booking.rfqData.preferredStartTime) }
       : {}),
     ...(booking.scheduledStartDate
-      ? { scheduledStartDate: isoDay(booking.scheduledStartDate) }
+      ? { scheduledStartDate: localIsoDay(booking.scheduledStartDate, scheduleZone) }
       : {}),
     ...(stringOrUndefined(booking.scheduledStartTime)
       ? { scheduledStartTime: String(booking.scheduledStartTime) }
@@ -368,16 +389,18 @@ export const buildBookingSnapshot = (params: {
       ? { scheduledEndTime: String(booking.scheduledEndTime) }
       : {}),
     ...(booking.scheduledExecutionEndDate
-      ? { scheduledExecutionEndDate: isoDay(booking.scheduledExecutionEndDate) }
+      ? { scheduledExecutionEndDate: localIsoDay(booking.scheduledExecutionEndDate, scheduleZone) }
       : {}),
     ...(booking.scheduledBufferStartDate
-      ? { scheduledBufferStartDate: isoDay(booking.scheduledBufferStartDate) }
+      ? { scheduledBufferStartDate: localIsoDay(booking.scheduledBufferStartDate, scheduleZone) }
       : {}),
     ...(booking.scheduledBufferEndDate
-      ? { scheduledBufferEndDate: isoDay(booking.scheduledBufferEndDate) }
+      ? { scheduledBufferEndDate: localIsoDay(booking.scheduledBufferEndDate, scheduleZone) }
       : {}),
-    ...(params.scheduleTimeZone && isValidIanaTimeZone(params.scheduleTimeZone)
-      ? { timeZone: params.scheduleTimeZone }
+    ...(scheduleZone
+      // calendarDays: the dates above are local days in timeZone. Snapshots
+      // without it stored the UTC day (see the details projection).
+      ? { timeZone: scheduleZone, calendarDays: 'local' }
       : {}),
   };
 

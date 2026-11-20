@@ -2191,6 +2191,35 @@ describe('day-mode calendar dates (C11-1x)', () => {
     }
   });
 
+  it('records the local day in new checkout snapshots and repairs legacy UTC-day snapshots', async () => {
+    const live = {
+      scheduleTimeZone: 'Europe/Brussels',
+      scheduledStartDate: new Date('2026-11-22T23:00:00.000Z'),
+      scheduledExecutionEndDate: new Date('2026-11-24T16:00:00.000Z'),
+    };
+    const snapshot = buildBookingSnapshot({
+      booking: booking(live),
+      project: project(),
+      customer: customer(),
+      professional: professional(),
+      source: 'booking_creation',
+      capturedAt: quoteTime,
+      scheduleTimeZone: 'Europe/Brussels',
+    } as any);
+    expect(snapshot!.schedule).toMatchObject({ scheduledStartDate: '2026-11-23', scheduledExecutionEndDate: '2026-11-24', calendarDays: 'local' });
+    const fresh = await buildDetails('customer', { booking: { ...live, bookingSnapshot: snapshot } });
+    expect(fresh.bookingSnapshot.schedule.scheduledStartDate).toBe('2026-11-23');
+
+    // BK-2026-000054 as stored before the fix: the UTC day of the same instant.
+    const legacy = { ...snapshot, schedule: { scheduledStartDate: '2026-11-22', scheduledExecutionEndDate: '2026-11-24', timeZone: 'Europe/Brussels' } };
+    const repaired = await buildDetails('customer', { booking: { ...live, bookingSnapshot: legacy } });
+    expect(repaired.bookingSnapshot.schedule.scheduledStartDate).toBe('2026-11-23');
+    expect(repaired.bookingSnapshot.schedule.scheduledExecutionEndDate).toBe('2026-11-24');
+    // A legacy value that is not the UTC day of the booking's instant (e.g. rescheduled since) is kept.
+    const moved = await buildDetails('customer', { booking: { ...live, scheduledStartDate: new Date('2026-11-29T23:00:00.000Z'), bookingSnapshot: legacy } });
+    expect(moved.bookingSnapshot.schedule.scheduledStartDate).toBe('2026-11-22');
+  });
+
   it('uses the professional zone before a schedule zone is recorded and keeps UTC-midnight dates', async () => {
     const base = booking({
       scheduleTimeZone: undefined,
