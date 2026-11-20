@@ -32,6 +32,7 @@ import {
   hasOutstandingResolvedExtraCost,
 } from '../../../handlers/Booking/completion';
 import { getInvoicePayment } from '../../../utils/invoiceSettlement';
+import { extraCostChargeDue } from '../../../utils/extraCostCustomerCharge';
 
 // BK-2026-000028 on staging: €700 checkout (−2 % loyalty) paid, extra costs
 // disputed and adjusted by an admin to €150, booking completed.
@@ -139,5 +140,42 @@ describe('FT3-13a — extra cost adjusted by an admin dispute resolution is stil
     const uncaptured = resolvedBooking();
     uncaptured.payment = { ...uncaptured.payment, capturedAt: undefined, stripeChargeId: undefined };
     expect(getInvoicePayment(uncaptured, 'customer', 1011.56).paidAmount).toBe(0);
+  });
+
+  it('F1-3: the amount shown before paying is the amount the intent charges (loyalty capped at the commission)', async () => {
+    // BK-2026-000056: Silver 2 %, admin-adjusted extra €60 at 0 % commission.
+    // The page estimated 60 − 2 % + VAT = 71.15; the charge and the invoice
+    // are 60 + VAT = 72.60.
+    const booking = resolvedBooking({ extraCostTotal: 60, extraCosts: [{ type: 'other', name: 'Extra', amount: 60 }] });
+    const due = await extraCostChargeDue(booking, booking.customer);
+    expect(due).toEqual({ netAmount: 60, loyaltyDiscount: 0, vatAmount: 12.6, totalAmount: 72.6 });
+    findReturning(booking);
+    const { body } = await callHandler();
+    expect(body.data.customerChargeAmount).toBe(due!.totalAmount);
+    // Once the matching charge exists the page uses it; nothing is due when paid.
+    expect(await extraCostChargeDue(booking, booking.customer)).toBeNull();
+    const paid = resolvedBooking({ extraCostTotal: 60 });
+    paid.payment.extraCostPaymentSucceeded = true;
+    expect(await extraCostChargeDue(paid, paid.customer)).toBeNull();
+    expect(await extraCostChargeDue(resolvedBooking({ dispute: undefined }), {})).toBeNull();
+  });
+
+  it('F1-3: a Stripe refusal returns a clear error instead of a generic 500', async () => {
+    findReturning(resolvedBooking());
+    mocks.createIntent.mockRejectedValueOnce(Object.assign(new Error('Your destination account needs to have at least one of the following capabilities enabled: transfers'), {
+      type: 'StripeInvalidRequestError',
+      code: 'insufficient_capabilities_for_transfer',
+    }));
+    const { status, body } = await callHandler();
+    expect(status).toBe(409);
+    expect(body.error.code).toBe('PROFESSIONAL_PAYMENTS_UNAVAILABLE');
+    expect(body.error.message).toMatch(/payment account cannot receive this payment/);
+    expect(body.error.message).not.toMatch(/destination account|acct_/);
+
+    findReturning(resolvedBooking());
+    mocks.createIntent.mockRejectedValueOnce(Object.assign(new Error('boom'), { type: 'StripeAPIError' }));
+    const other = await callHandler();
+    expect(other.status).toBe(502);
+    expect(other.body.error.code).toBe('PAYMENT_PROVIDER_ERROR');
   });
 });

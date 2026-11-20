@@ -3,7 +3,6 @@ import mongoose from 'mongoose';
 import { waitUntil } from '@vercel/functions';
 import Booking, { BookingStatus, ExtraCostType } from '../../models/booking';
 import User from '../../models/user';
-import PlatformSettings from '../../models/platformSettings';
 import {
   uploadToS3,
   generateFileName,
@@ -23,8 +22,7 @@ import {
 } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
-import LoyaltyConfig from '../../models/loyaltyConfig';
-import { getCurrentTier, updateUserLoyalty } from '../../utils/loyaltySystem';
+import { updateUserLoyalty } from '../../utils/loyaltySystem';
 import Payment from '../../models/payment';
 import {
   awardBookingCompletionPoints,
@@ -45,8 +43,10 @@ import {
 } from '../../utils/completionRefund';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
-import { calculateExtraCostBreakdown } from '../../utils/extraCostAccounting';
-import { commissionedExtraCostTotal } from '../../utils/customerPricing';
+import {
+  computeExtraCostCustomerCharge,
+  getPlatformCommissionPercent,
+} from '../../utils/extraCostCustomerCharge';
 import { getTransferStatus } from '../../utils/paymentSafety';
 import { reconcileExtraCostPayment } from '../../services/extraCostPayment';
 import { isUserFacingError, UserFacingError } from '../../utils/appErrors';
@@ -59,80 +59,7 @@ const ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || proce
 const PROFESSIONAL_COMPLETION_PENDING_STATUS: BookingStatus = 'professional_completed';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
 
-const getPlatformCommissionPercent = async () => {
-  try {
-    const platformConfig = await PlatformSettings.getCurrentConfig();
-    return platformConfig.commissionPercent;
-  } catch (configError) {
-    console.warn('Failed to fetch platform commission for extra-cost payment, falling back to env var:', configError);
-    const parsed = Number.parseFloat(process.env.STRIPE_PLATFORM_COMMISSION_PERCENT || '0');
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-};
-
 const roundToTwo = (value: number) => Math.round(value * 100) / 100;
-
-const computeCustomerLoyaltyDiscount = async (customer: any, commissionInclusiveAmount: number) => {
-  if (commissionInclusiveAmount <= 0) return { tier: 'Bronze', percentage: 0, amount: 0 };
-  try {
-    const config = await LoyaltyConfig.getCurrentConfig();
-    if (!config.globalSettings?.isEnabled) return { tier: 'Bronze', percentage: 0, amount: 0 };
-    const minBookingAmount = config.globalSettings.minBookingAmount || 0;
-    if (commissionInclusiveAmount < minBookingAmount) return { tier: 'Bronze', percentage: 0, amount: 0 };
-    const activeTiers = (config.tiers || []).filter((t: any) => t.isActive);
-    if (activeTiers.length === 0) return { tier: 'Bronze', percentage: 0, amount: 0 };
-    const preferredName = customer?.manualCustomerLevelOverride || customer?.loyaltyLevel;
-    const preferred = preferredName ? activeTiers.find((t: any) => t.name === preferredName) : undefined;
-    const tier = preferred || getCurrentTier(activeTiers, customer?.totalSpent || 0);
-    const percentage = tier.discountPercentage || 0;
-    if (percentage <= 0) return { tier: tier.name, percentage: 0, amount: 0 };
-    let amount = roundToTwo(commissionInclusiveAmount * (percentage / 100));
-    if (typeof tier.maxDiscountAmount === 'number' && Number.isFinite(tier.maxDiscountAmount) && amount > tier.maxDiscountAmount) {
-      amount = tier.maxDiscountAmount;
-    }
-    return { tier: tier.name, percentage, amount };
-  } catch (error) {
-    console.error('Loyalty discount calc failed for extra-cost intent:', error);
-    return { tier: 'Bronze', percentage: 0, amount: 0 };
-  }
-};
-
-const computeExtraCostCustomerCharge = async (
-  customer: any,
-  extraCostTotal: number,
-  vatRate = 0,
-  reverseCharge = false,
-  extraCosts?: any[],
-) => {
-  const commissionPercent = await getPlatformCommissionPercent();
-  const subtotalInclCommission = commissionedExtraCostTotal(extraCosts, extraCostTotal, commissionPercent);
-  const loyalty = await computeCustomerLoyaltyDiscount(customer, subtotalInclCommission);
-  const breakdown = calculateExtraCostBreakdown({
-    extraCostNetAmount: extraCostTotal,
-    commissionPercent,
-    customerDiscount: loyalty.amount,
-    customerSubtotal: subtotalInclCommission,
-  });
-  const appliedLoyalty = {
-    ...loyalty,
-    requestedAmount: loyalty.amount,
-    amount: breakdown.customerDiscount,
-  };
-  const customerNetChargeAmount = breakdown.customerChargeAmount;
-  const vatAmount = reverseCharge ? 0 : roundToTwo(customerNetChargeAmount * Math.max(0, vatRate) / 100);
-  const customerChargeAmount = roundToTwo(customerNetChargeAmount + vatAmount);
-  return {
-    commissionPercent,
-    subtotalInclCommission,
-    loyalty: appliedLoyalty,
-    cappedLoyalty: breakdown.customerDiscount,
-    customerNetChargeAmount,
-    vatAmount,
-    customerChargeAmount,
-    platformCommissionAmount: breakdown.platformCommissionAmount,
-    platformFeeAmount: roundToTwo(breakdown.platformCommissionAmount + vatAmount),
-  };
-};
 
 export const professionalCompleteBooking = async (req: Request, res: Response) => {
   let attachmentUrls: string[] = [];
@@ -661,6 +588,33 @@ export const prepareExtraCostPaymentIntent = async (booking: any) => {
   };
 };
 
+/**
+ * A Stripe refusal while starting the extra-cost payment is reported to the
+ * customer with a clear message instead of a generic 500 (F1-3). Stripe's own
+ * text can name the connected account, so it is not passed through.
+ */
+export const extraCostProviderError = (error: any): { status: number; error: { code: string; message: string } } | null => {
+  const type = typeof error?.type === 'string' ? error.type : '';
+  if (!type.startsWith('Stripe')) return null;
+  const code = typeof error?.code === 'string' ? error.code : '';
+  if (type === 'StripeCardError') {
+    return { status: 402, error: { code: 'PAYMENT_DECLINED', message: 'Your card was declined. Please use another payment method.' } };
+  }
+  if (code === 'insufficient_capabilities_for_transfer' || code === 'account_invalid') {
+    return {
+      status: 409,
+      error: {
+        code: 'PROFESSIONAL_PAYMENTS_UNAVAILABLE',
+        message: "The professional's payment account cannot receive this payment yet, so the extra costs cannot be paid right now. Please try again later or contact support.",
+      },
+    };
+  }
+  return {
+    status: 502,
+    error: { code: 'PAYMENT_PROVIDER_ERROR', message: 'The payment provider could not start this payment. Please try again later or contact support.' },
+  };
+};
+
 export const createExtraCostPaymentIntent = async (req: Request, res: Response) => {
   try {
     const { bookingId } = req.params;
@@ -711,6 +665,11 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
   } catch (error: any) {
     if (error instanceof ExtraCostPaymentError) {
       return res.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+    }
+    const providerError = extraCostProviderError(error);
+    if (providerError) {
+      console.error('Stripe refused the extra cost payment intent:', error?.code || error?.type, error?.message);
+      return res.status(providerError.status).json({ success: false, error: providerError.error });
     }
     console.error('Error creating extra cost payment intent:', error);
     return res.status(500).json({

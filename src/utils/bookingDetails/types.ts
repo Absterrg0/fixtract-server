@@ -658,6 +658,8 @@ export type ExtraCostsDetailsDto = {
   totalProfessionalAmount: number | null;
   /** Customer-side total of the extra costs (commission-inclusive, before discounts). Null for professionals. */
   totalCustomerAmount: number | null;
+  /** Customer view only: what the extra-cost payment will charge while no matching charge exists (F1-3). */
+  customerChargeDue?: { netAmount: number; loyaltyDiscount: number; vatAmount: number; totalAmount: number } | null;
   currency: string | null;
   currencySource: 'payment' | 'quote' | 'not_recorded';
   items: Array<{

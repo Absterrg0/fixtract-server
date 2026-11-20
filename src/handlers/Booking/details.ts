@@ -10,6 +10,7 @@ import { resolveBookingViewerRole } from '../../utils/invoiceVisibility';
 import { referenceId } from '../../utils/bookingDetails/attachments';
 import { collectActorIds, loadActorMap } from '../../utils/bookingDetails/actors';
 import { buildBookingDetails } from '../../utils/bookingDetails/projection';
+import { extraCostChargeDue } from '../../utils/extraCostCustomerCharge';
 import type { BookingDetailsDto, DetailsViewerRole } from '../../utils/bookingDetails/types';
 import {
   isAdminUser,
@@ -100,7 +101,7 @@ export const buildDetailsForBookingDocument = async (params: {
     __bookingEvents: bookingEvents,
   };
 
-  return buildBookingDetails({
+  const details = await buildBookingDetails({
     booking: bookingForProjection,
     payments,
     cancellations,
@@ -110,6 +111,21 @@ export const buildDetailsForBookingDocument = async (params: {
     viewerRole,
     adminAccess,
   });
+  if (viewerRole === 'customer' && details.extraCosts) {
+    // F1-3: the pay card shows the amount the extra-cost charge will take
+    // (loyalty capped at the commission), the same as the invoice's amount due.
+    try {
+      const customerId = referenceId(plain.customer);
+      const loyaltyProfile = customerId && Number(plain.extraCostTotal || 0) > 0
+        ? await User.findById(customerId).select('loyaltyLevel manualCustomerLevelOverride totalSpent').lean()
+        : null;
+      details.extraCosts.customerChargeDue = loyaltyProfile ? await extraCostChargeDue(plain, loyaltyProfile) : null;
+    } catch (error) {
+      console.error('Failed to compute the extra-cost charge due for booking details:', error);
+      details.extraCosts.customerChargeDue = null;
+    }
+  }
+  return details;
 };
 
 const loadBookingWithDetails = async (bookingId: string) => {
