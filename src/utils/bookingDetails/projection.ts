@@ -815,17 +815,32 @@ const buildPayments = async (params: {
       console.error('Failed to resolve milestone details charge:', error);
     }
   }
+  // Payment rows are upserted per booking, so a later milestone checkout
+  // overwrites an earlier milestone's row. The per-payment discount ledger
+  // keeps one entry per succeeded milestone charge: it supplies the charge of
+  // a paid milestone that lost its row (F1-6: deposit shown as the expected
+  // €4,075.44 instead of the €4,077.27 charged, totals without it).
+  const ledgerEntries: any[] = Array.isArray(booking.__milestoneCharges)
+    ? booking.__milestoneCharges
+    : Array.isArray(booking.paymentDiscountLedger) ? booking.paymentDiscountLedger : [];
+  const ledgerChargeFor = (milestone: any, index: number): any | null => {
+    if (milestone?.status !== 'paid') return null;
+    const entries = ledgerEntries.filter((entry) =>
+      num(entry?.milestoneIndex) === index && num(entry?.totalWithVat) != null);
+    return entries.length > 0 ? entries[entries.length - 1] : null;
+  };
   const milestones = (Array.isArray(booking.milestonePayments) ? booking.milestonePayments : []).map(
     (milestone: any, index: number) => {
       const matchingRows = paymentRows.filter(payment => num(payment.milestoneIndex) === index);
       const settled = matchingRows.find(payment => ['completed', 'partially_refunded', 'refunded'].includes(payment.status));
       const matching = settled || matchingRows.find(payment => ['pending', 'authorized'].includes(payment.status));
+      const ledgerCharge = matching ? null : ledgerChargeFor(milestone, index);
       const planEntry = milestoneChargePlan.find((entry) => entry.index === index);
       return {
         index,
         title: String(milestone.title || ''),
         amount: num(milestone.amount) ?? 0,
-        currency: str(matching?.currency) || str(booking.payment?.currency) || str(quoteCurrency),
+        currency: str(matching?.currency) || str(ledgerCharge?.currency) || str(booking.payment?.currency) || str(quoteCurrency),
         status: milestone.status || 'pending',
         workStatus: milestone.workStatus || 'pending',
         dueCondition: milestone.dueCondition || 'on_start',
@@ -833,7 +848,8 @@ const buildPayments = async (params: {
         startedAt: iso(milestone.startedAt),
         completedAt: iso(milestone.completedAt),
         paidAt: iso(milestone.paidAt),
-        customerChargeTotalWithVat: num((settled || matchingRows.find(payment => payment.status === 'authorized'))?.totalWithVat),
+        customerChargeTotalWithVat: num((settled || matchingRows.find(payment => payment.status === 'authorized'))?.totalWithVat)
+          ?? (ledgerCharge ? num(ledgerCharge.totalWithVat) : null),
         paymentRowPresent: Boolean(matching),
         expectedCustomerCharge: planEntry ? milestoneCustomerCharge(booking, planEntry, paymentRows) : null,
         expectedCustomerNetBeforeDiscount: planEntry?.expectedCustomerGross ?? null,
@@ -951,6 +967,17 @@ const buildPayments = async (params: {
       }
     }
   }
+  // Paid milestones whose row was overwritten: their ledger charge (F1-6).
+  const rowIntents = new Set(paymentRows.map((payment) => str(payment.stripePaymentIntentId)).filter(Boolean));
+  (Array.isArray(booking.milestonePayments) ? booking.milestonePayments : []).forEach((milestone: any, index: number) => {
+    if (paymentRows.some((payment) => num(payment.milestoneIndex) === index)) return;
+    const entry = ledgerChargeFor(milestone, index);
+    if (!entry || (str(entry.paymentIntentId) && rowIntents.has(str(entry.paymentIntentId)))) return;
+    const currency = str(entry.currency) || str(booking.payment?.currency) || str(quoteCurrency);
+    if (!currency) return;
+    if (!byCurrencyMap.has(currency)) byCurrencyMap.set(currency, { charged: 0, refunded: 0, complete: true });
+    byCurrencyMap.get(currency)!.charged += num(entry.totalWithVat) ?? 0;
+  });
   for (const refund of refunds) {
     if (refund.kind !== 'booking' || !refund.cashReturned) continue;
     if (!byCurrencyMap.has(refund.currency)) byCurrencyMap.set(refund.currency, { charged: 0, refunded: 0, complete: true });

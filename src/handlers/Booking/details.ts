@@ -65,9 +65,7 @@ export const buildDetailsForBookingDocument = async (params: {
     Payment.find({ booking: bookingId }).sort({ createdAt: 1 }).lean(),
     CancellationRequest.find({ booking: bookingId }).sort({ createdAt: 1 }).lean(),
     WarrantyClaim.find({ booking: bookingId }).sort({ openedAt: 1 }).lean(),
-    viewerRole === 'customer'
-      ? Booking.findById(bookingId).select('paymentDiscountLedger').lean()
-      : null,
+    Booking.findById(bookingId).select('paymentDiscountLedger').lean(),
     BookingEvent.find({ booking: bookingId }).sort({ at: 1, _id: 1 }).lean(),
   ]);
   const professionalIdFromProject = referenceId(plain?.project?.professionalId);
@@ -96,6 +94,16 @@ export const buildDetailsForBookingDocument = async (params: {
     ...plain,
     ...(!plain.professional && ownerProfiles[0] ? { professional: ownerProfiles[0] } : {}),
     paymentDiscountLedger: viewerRole === 'customer' ? discountHistory?.paymentDiscountLedger : undefined,
+    // Charge per paid milestone for every viewer (no discount detail): the
+    // Payment row of an earlier milestone is overwritten by the next one (F1-6).
+    __milestoneCharges: ((discountHistory as any)?.paymentDiscountLedger || [])
+      .filter((entry: any) => typeof entry?.milestoneIndex === 'number')
+      .map((entry: any) => ({
+        milestoneIndex: entry.milestoneIndex,
+        paymentIntentId: entry.paymentIntentId,
+        currency: entry.currency,
+        totalWithVat: entry.totalWithVat,
+      })),
     __cancellationRequests: adminAccess && !adminAccess.cancellations ? [] : cancellations,
     // Append-only status archive (models/bookingEvent), merged into the activity timeline.
     __bookingEvents: bookingEvents,

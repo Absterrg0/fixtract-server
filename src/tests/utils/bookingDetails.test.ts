@@ -2120,6 +2120,56 @@ describe('reschedule details', () => {
   });
 });
 
+describe('milestone charges after the payment row was overwritten (F1-6)', () => {
+  it('shows each paid milestone at its recorded charge and totals both milestones', async () => {
+    // BK-2026-000060: M1 €4,077.27 (deposit + option), M2 €5,995.98. The
+    // Payment row is upserted per booking, so only M2's row remains.
+    const m2Row = payment({
+      milestoneIndex: 1,
+      status: 'completed',
+      stripePaymentIntentId: 'pi_m2',
+      amount: 4955.36,
+      netAmount: 4955.36,
+      vatAmount: 1040.62,
+      totalWithVat: 5995.98,
+    });
+    const base = booking({
+      milestonePayments: [
+        { title: 'Deposit', amount: 3000, status: 'paid', dueCondition: 'on_start', paidAt: paidTime },
+        { title: 'Cabinets installed', amount: 5000, status: 'paid', dueCondition: 'on_completion', paidAt: paidTime },
+      ],
+      payment: { ...m2Row, milestoneIndex: 1 },
+      __milestoneCharges: [
+        { milestoneIndex: 0, paymentIntentId: 'pi_m1', currency: 'EUR', totalWithVat: 4077.27 },
+        { milestoneIndex: 1, paymentIntentId: 'pi_m2', currency: 'EUR', totalWithVat: 5995.98 },
+      ],
+    });
+    for (const role of ['customer', 'professional', 'admin'] as const) {
+      const details = await buildDetails(role, { booking: base, payments: [m2Row] });
+      expect(details.payments.milestones.map((milestone) => milestone.customerChargeTotalWithVat)).toEqual([4077.27, 5995.98]);
+      expect(details.payments.byCurrency).toEqual([
+        expect.objectContaining({ currency: 'EUR', recordedCharged: 10073.25 }),
+      ]);
+    }
+  });
+
+  it('does not count a milestone twice when its own row survived', async () => {
+    const m1Row = payment({ milestoneIndex: 0, status: 'completed', stripePaymentIntentId: 'pi_m1', totalWithVat: 4077.27 });
+    const base = booking({
+      milestonePayments: [
+        { title: 'Deposit', amount: 3000, status: 'paid', dueCondition: 'on_start', paidAt: paidTime },
+        { title: 'Rest', amount: 5000, status: 'pending', dueCondition: 'on_completion' },
+      ],
+      payment: { ...m1Row },
+      __milestoneCharges: [{ milestoneIndex: 0, paymentIntentId: 'pi_m1', currency: 'EUR', totalWithVat: 4077.27 }],
+    });
+    const details = await buildDetails('customer', { booking: base, payments: [m1Row] });
+    expect(details.payments.milestones[0].customerChargeTotalWithVat).toBe(4077.27);
+    expect(details.payments.milestones[1].customerChargeTotalWithVat).toBeNull();
+    expect(details.payments.byCurrency).toEqual([expect.objectContaining({ recordedCharged: 4077.27 })]);
+  });
+});
+
 describe('day-mode calendar dates (C11-1x)', () => {
   it('projects schedule dates and the first possible start as the Brussels day, not the UTC day', async () => {
     const base = booking({
