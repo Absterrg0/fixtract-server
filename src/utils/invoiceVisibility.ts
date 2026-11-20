@@ -279,8 +279,11 @@ export const sanitizeMilestonesForViewer = (milestones: unknown) => {
 
 export const sanitizeMilestoneForViewer = (milestone: any) => {
   if (!milestone || typeof milestone !== "object") return milestone;
+  // A Mongoose subdocument spreads its internals ($__parent, …), a circular
+  // structure that made every res.json of it throw after the save (FT3-19x).
+  const plain = typeof milestone.toObject === "function" ? milestone.toObject() : milestone;
   const clean: Record<string, any> = {
-    ...milestone,
+    ...plain,
     stripeClientSecret: undefined,
     extraCostClientSecret: undefined,
   };
