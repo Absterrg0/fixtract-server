@@ -80,13 +80,17 @@ export const getProfessionalMetrics = async (
     status: 'completed'
   });
 
-  // Average rating from customer reviews
+  // Average rating from customer reviews. The review form stores three
+  // category scores (communicationLevel / valueOfDelivery / qualityOfService);
+  // there is no `customerReview.rating` field, so match on the stored scores.
   const ratingAgg = await Booking.aggregate([
     {
       $match: {
         professional: new mongoose.Types.ObjectId(professionalId.toString()),
         status: 'completed',
-        'customerReview.rating': { $exists: true }
+        'customerReview.communicationLevel': { $exists: true, $ne: null },
+        'customerReview.valueOfDelivery': { $exists: true, $ne: null },
+        'customerReview.qualityOfService': { $exists: true, $ne: null }
       }
     },
     {
