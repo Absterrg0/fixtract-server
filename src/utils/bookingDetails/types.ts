@@ -376,6 +376,8 @@ export type QuotationVersionDto = {
   milestones: Array<{
     title: string;
     amount: number | null;
+    /** Customer-side milestone total incl. VAT (FT3-19a). */
+    customerTotalWithVat: number | null;
     description: string | null;
     dueCondition: 'on_start' | 'on_milestone_start' | 'on_milestone_completion' | 'custom_date';
     customDueDate: string | null;

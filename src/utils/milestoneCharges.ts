@@ -117,3 +117,39 @@ export const milestoneCustomerCharge = (
     ? Number(totals.vatAmount) / afterDiscount : Number(vatRate) / 100;
   return Math.round((net + Math.round(net * vatRatio * 100) / 100) * 100) / 100;
 };
+
+const roundCents = (value: number): number => Math.round((value + Number.EPSILON) * 100) / 100;
+
+/**
+ * Customer totals (VAT incl.) per quotation milestone, from the version's
+ * recorded customer totals and computed like the milestone checkouts: each
+ * milestone carries its commissioned share less its share of the quote-time
+ * discount, plus VAT; the last milestone takes the remainder so the
+ * milestones add up to the quotation total (FT3-19a). Null when the version
+ * has no recorded customer totals or no milestones. Customer-side money only:
+ * the professional milestone amounts are never exposed through it.
+ */
+export const quoteVersionMilestoneCustomerTotals = (version: any): number[] | null => {
+  const milestones = Array.isArray(version?.milestones) ? version.milestones : [];
+  const totals = version?.customerTotals;
+  const totalWithVat = Number(totals?.totalWithVat);
+  const customerNet = Number(totals?.customerNetAmount);
+  if (!milestones.length || !Number.isFinite(totalWithVat) || !Number.isFinite(customerNet)) return null;
+  const commissionPercent = Number(totals?.commissionPercent) || 0;
+  const grosses = milestones.map((milestone: any) => toMilestoneCustomerGross(Number(milestone?.amount) || 0, commissionPercent));
+  const grossTotal = grosses.reduce((sum: number, value: number) => sum + value, 0);
+  if (!(grossTotal > 0)) return null;
+  const beforeDiscounts = Number(totals?.amountBeforeDiscounts);
+  const discountTotal = Math.max(0, roundCents((Number.isFinite(beforeDiscounts) ? beforeDiscounts : grossTotal) - customerNet));
+  const vatRatio = customerNet > 0 && Number.isFinite(Number(totals?.vatAmount))
+    ? Number(totals.vatAmount) / customerNet
+    : 0;
+  let allocated = 0;
+  return grosses.map((gross: number, index: number) => {
+    if (index === grosses.length - 1) return roundCents(totalWithVat - allocated);
+    const net = roundCents(gross - roundCents(discountTotal * gross / grossTotal));
+    const total = roundCents(net + roundCents(net * vatRatio));
+    allocated = roundCents(allocated + total);
+    return total;
+  });
+};

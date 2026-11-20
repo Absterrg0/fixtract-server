@@ -556,12 +556,34 @@ export const createPaymentIntent = async (
     let discountBreakdown = fullDiscountBreakdown;
     if (fullBookingAmount > 0 && chargeAmount < fullBookingAmount) {
       const ratio = chargeAmount / fullBookingAmount;
-      const proratedLoyalty = Math.round(fullDiscountBreakdown.loyaltyDiscount.amount * ratio * 100) / 100;
-      const proratedRepeat = Math.round(fullDiscountBreakdown.repeatBuyerDiscount.amount * ratio * 100) / 100;
+      // FT3-19a: each milestone rounds its own share, so the shares could
+      // drift a cent from the quoted discount. The last unpaid milestone takes
+      // the remainder of each discount instead, so the milestones add up to
+      // the quotation total.
+      const finalMilestone = milestoneIndex !== null
+        && (booking.milestonePayments as any[]).every((milestone: any, index: number) =>
+          index === milestoneIndex || milestone?.status === 'paid');
+      // The ledger is not selected by default.
+      const ledger = finalMilestone
+        ? ((await Booking.findById(booking._id).select('+paymentDiscountLedger').lean()) as any)?.paymentDiscountLedger || []
+        : [];
+      const earlierLedger = ledger.filter((entry: any) =>
+        typeof entry?.milestoneIndex === 'number' && entry.milestoneIndex !== milestoneIndex);
+      // Only with a recorded share for every earlier milestone; otherwise prorate.
+      const earlierComplete = new Set(earlierLedger.map((entry: any) => entry.milestoneIndex)).size
+        === (booking.milestonePayments as any[]).length - 1;
+      const prorate = (fullAmount: number, ledgerKey: string) => {
+        if (!finalMilestone || !earlierComplete) return Math.round(fullAmount * ratio * 100) / 100;
+        const earlier = earlierLedger.reduce((sum: number, entry: any) => sum + (Number(entry?.[ledgerKey]) || 0), 0);
+        return Math.max(0, Math.round((fullAmount - earlier) * 100) / 100);
+      };
+      const proratedLoyalty = prorate(fullDiscountBreakdown.loyaltyDiscount.amount, 'loyaltyAmount');
+      const proratedRepeat = prorate(fullDiscountBreakdown.repeatBuyerDiscount.amount, 'repeatBuyerAmount');
+      // A discount code can differ per checkout, so it is prorated as before.
       const proratedCode = fullDiscountBreakdown.codeDiscount
         ? Math.round(fullDiscountBreakdown.codeDiscount.amount * ratio * 100) / 100
         : 0;
-      const proratedReferral = Math.round((fullDiscountBreakdown.referralDiscount?.amount || 0) * ratio * 100) / 100;
+      const proratedReferral = prorate(fullDiscountBreakdown.referralDiscount?.amount || 0, 'referralDiscountAmount');
       // FT3 #12: wallet points are cash-like and redeemed per checkout, so
       // they are NOT prorated: the requested points apply to this payment in
       // full, capped at what it can absorb, and only the points actually

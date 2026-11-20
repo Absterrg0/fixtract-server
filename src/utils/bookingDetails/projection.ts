@@ -40,7 +40,7 @@ import {
   resolveExtraCostChargeCommissionPercent,
   type ExtraCostChargeRecord,
 } from '../customerPricing';
-import { buildMilestoneChargePlan, milestoneCustomerCharge } from '../milestoneCharges';
+import { buildMilestoneChargePlan, milestoneCustomerCharge, quoteVersionMilestoneCustomerTotals } from '../milestoneCharges';
 import {
   presignOwnedUrl,
   presignQuestionAnswerUrl,
@@ -1382,9 +1382,12 @@ export const buildBookingDetails = async (params: {
       totalAmount: num(version.totalAmount),
       currency: str(version.currency),
       milestones: Array.isArray(version.milestones)
-        ? version.milestones.map((milestone: any) => ({
+        ? version.milestones.map((milestone: any, milestoneIndex: number) => ({
             title: String(milestone.title || ''),
             amount: num(milestone.amount),
+            // Customer-side total for this milestone (VAT incl.); the
+            // professional `amount` is withheld from customers (FT3-19a).
+            customerTotalWithVat: quoteVersionMilestoneCustomerTotals(version)?.[milestoneIndex] ?? null,
             description: str(milestone.description),
             dueCondition: milestone.dueCondition || 'on_start',
             customDueDate: iso(milestone.customDueDate),
