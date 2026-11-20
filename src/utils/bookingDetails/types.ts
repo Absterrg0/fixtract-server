@@ -121,7 +121,7 @@ export type BookingOverviewDto = {
     totalAmount: number | null;
     currency: string | null;
     validUntil: string | null;
-    firstPossibleStart: string | null;
+  firstPossibleStart: string | null;
     createdAt: string | null;
   } | null;
   payment: {
@@ -387,6 +387,14 @@ export type QuotationVersionDto = {
   preparationDuration: { value: number; unit: 'hours' | 'days' } | null;
   executionDuration: { value: number; unit: 'hours' | 'days' } | null;
   bufferDuration: { value: number; unit: 'hours' | 'days' } | null;
+    /** VAT parameters recorded with this version (FT3-18b); null for older versions. */
+  vatDetermination: {
+    customerType: 'B2B' | 'B2C';
+    article47Class: string | null;
+    vatAddressType: string | null;
+    vatCountry: string | null;
+    reverseCharge: boolean | null;
+  } | null;
   firstPossibleStart: string | null;
   validUntil: string | null;
   createdAt: string | null;

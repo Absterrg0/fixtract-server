@@ -166,6 +166,14 @@ export interface IQuoteVersion {
   customerTotals?: IQuoteCustomerTotals;
   /** Earliest feasible execution start computed server-side at submit/edit; null when unavailable. */
   firstPossibleStart?: Date | null;
+  /** VAT parameters resolved at submit/edit (FT3-18b); absent for older versions. */
+  vatDetermination?: {
+    customerType?: 'B2B' | 'B2C';
+    article47Class?: string | null;
+    vatAddressType?: string;
+    vatCountry?: string;
+    reverseCharge?: boolean;
+  };
   /** Service address as submitted with this version; absent for legacy versions. */
   serviceLocation?: {
     country?: string;
@@ -1054,6 +1062,15 @@ const BookingSchema = new Schema({
     customerTotals: { type: QuoteCustomerTotalsSchema },
     serviceLocation: { type: QuoteServiceLocationSchema },
     firstPossibleStart: { type: Date },
+    vatDetermination: {
+      type: new Schema({
+        customerType: { type: String, enum: ['B2B', 'B2C'] },
+        article47Class: { type: String, default: null },
+        vatAddressType: { type: String },
+        vatCountry: { type: String },
+        reverseCharge: { type: Boolean },
+      }, { _id: false }),
+    },
   }],
   currentQuoteVersion: { type: Number },
   acceptedQuoteVersion: { type: Number, min: 1 },

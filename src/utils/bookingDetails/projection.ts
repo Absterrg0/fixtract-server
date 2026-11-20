@@ -1429,6 +1429,15 @@ export const buildBookingDetails = async (params: {
         ? { value: num(version.bufferDuration.value)!, unit: version.bufferDuration.unit }
         : null,
       firstPossibleStart: dateOnly(version.firstPossibleStart),
+      vatDetermination: version.vatDetermination
+        ? {
+            customerType: version.vatDetermination.customerType === 'B2B' ? 'B2B' as const : 'B2C' as const,
+            article47Class: str(version.vatDetermination.article47Class),
+            vatAddressType: str(version.vatDetermination.vatAddressType),
+            vatCountry: str(version.vatDetermination.vatCountry),
+            reverseCharge: typeof version.vatDetermination.reverseCharge === 'boolean' ? version.vatDetermination.reverseCharge : null,
+          }
+        : null,
       validUntil: iso(version.validUntil),
       createdAt,
       changeNote: str(version.changeNote),

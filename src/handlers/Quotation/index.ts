@@ -258,6 +258,56 @@ const applyAllowedVatRateToLegacyPricingLines = async (
   };
 };
 
+/**
+ * The parameters that determined a quotation's VAT (customer type, Article 47
+ * class, VAT address type, VAT country, reverse charge). Shown to the
+ * professional while quoting and stored on every quotation version so the
+ * quotation page shows them too (FT3-18b). Expects the booking populated with
+ * customer and project as in the quotation handlers.
+ */
+export const resolveQuotationVatDetermination = async (
+  booking: any,
+  serviceCountry?: string,
+  optionCountry?: string,
+) => {
+  const customer = booking.customer as any;
+  const project = booking.project as any;
+  const fallbackCountry = booking.vatDecision?.country
+    || booking.location?.country
+    || customer?.location?.country
+    || project?.distance?.countryCode
+    || '';
+  const projectServiceForDetermination = Array.isArray(project?.services) && project.services.length > 0
+    ? project.services[0]
+    : null;
+  const determinationDecision = await resolveVatDecisionFromConfig({
+    serviceConfigurationId: project?.serviceConfigurationId?.toString(),
+    category: projectServiceForDetermination?.category || project?.category,
+    service: projectServiceForDetermination?.service || project?.service,
+    areaOfWork: projectServiceForDetermination?.areaOfWork || project?.areaOfWork,
+    country: serviceCountry || fallbackCountry,
+    bookingCountry: serviceCountry || booking.location?.country || customer?.location?.country,
+    businessCountry: firstVatCountry(customer?.companyAddress?.country, customer?.location?.country),
+    customerType: customer?.customerType || 'individual',
+    vatNumber: customer?.vatNumber,
+    isVatVerified: customer?.isVatVerified,
+    professionalAnswers: getProfessionalAnswersFromProject(project),
+    propertyNature: booking.vatDecision?.propertyNature,
+  });
+  return describeCustomerVatDetermination({
+    customerType: customer?.customerType || 'individual',
+    propertyNature: determinationDecision.propertyNature,
+    exemptFromBelgianReverseCharge: determinationDecision.exemptFromBelgianReverseCharge,
+    bookingCountry: serviceCountry || booking.location?.country || customer?.location?.country,
+    // Company address only (no generic location fallback): the business
+    // label requires a real company address behind the country.
+    customerBusinessCountry: customer?.companyAddress?.country,
+    hasCompanyAddress: Boolean(parseVatCountryCode(customer?.companyAddress?.country)),
+    vatCountry: determinationDecision.country || optionCountry || fallbackCountry,
+    reverseCharge: determinationDecision.reverseCharge,
+  });
+};
+
 export const getQuotationVatRateOptions = async (req: Request, res: Response) => {
   try {
     const { bookingId } = params(req.params);
@@ -300,35 +350,7 @@ export const getQuotationVatRateOptions = async (req: Request, res: Response) =>
     // Parameters that determined the VAT, so the professional can see why a
     // rate (or reverse charge) applies. Resolved with the same inputs as the
     // allowed options above, so the two can never disagree.
-    const projectServiceForDetermination = Array.isArray(project?.services) && project.services.length > 0
-      ? project.services[0]
-      : null;
-    const determinationDecision = await resolveVatDecisionFromConfig({
-      serviceConfigurationId: project?.serviceConfigurationId?.toString(),
-      category: projectServiceForDetermination?.category || project?.category,
-      service: projectServiceForDetermination?.service || project?.service,
-      areaOfWork: projectServiceForDetermination?.areaOfWork || project?.areaOfWork,
-      country: serviceCountry || fallbackCountry,
-      bookingCountry: serviceCountry || booking.location?.country || customer?.location?.country,
-      businessCountry: firstVatCountry(customer?.companyAddress?.country, customer?.location?.country),
-      customerType: customer?.customerType || 'individual',
-      vatNumber: customer?.vatNumber,
-      isVatVerified: customer?.isVatVerified,
-      professionalAnswers: getProfessionalAnswersFromProject(project),
-      propertyNature: booking.vatDecision?.propertyNature,
-    });
-    const vatDetermination = describeCustomerVatDetermination({
-      customerType: customer?.customerType || 'individual',
-      propertyNature: determinationDecision.propertyNature,
-      exemptFromBelgianReverseCharge: determinationDecision.exemptFromBelgianReverseCharge,
-      bookingCountry: serviceCountry || booking.location?.country || customer?.location?.country,
-      // Company address only (no generic location fallback): the business
-      // label requires a real company address behind the country.
-      customerBusinessCountry: customer?.companyAddress?.country,
-      hasCompanyAddress: Boolean(parseVatCountryCode(customer?.companyAddress?.country)),
-      vatCountry: determinationDecision.country || country,
-      reverseCharge: determinationDecision.reverseCharge,
-    });
+    const vatDetermination = await resolveQuotationVatDetermination(booking, serviceCountry || undefined, country);
 
     return res.json({
       success: true,
@@ -809,8 +831,16 @@ export const submitQuotation = async (req: Request, res: Response) => {
       recordedAt: now,
     });
     const serviceLocation = quoteServiceLocationSnapshot(booking);
+    // FT3-18b: the VAT parameters are part of the recorded quotation.
+    let vatDetermination: any;
+    try {
+      vatDetermination = await resolveQuotationVatDetermination(booking, (serviceLocation as any)?.country || undefined);
+    } catch (determinationError) {
+      console.warn('Quotation VAT determination could not be recorded:', (determinationError as Error)?.message || determinationError);
+    }
 
     const quoteVersion: any = {
+      ...(vatDetermination ? { vatDetermination } : {}),
       version: versionNumber,
       scope,
       warrantyDuration,
@@ -1028,8 +1058,16 @@ export const editQuotation = async (req: Request, res: Response) => {
       recordedAt: now,
     });
     const serviceLocation = quoteServiceLocationSnapshot(booking);
+    // FT3-18b: the VAT parameters are part of the recorded quotation.
+    let vatDetermination: any;
+    try {
+      vatDetermination = await resolveQuotationVatDetermination(booking, (serviceLocation as any)?.country || undefined);
+    } catch (determinationError) {
+      console.warn('Quotation VAT determination could not be recorded:', (determinationError as Error)?.message || determinationError);
+    }
 
     const quoteVersion: any = {
+      ...(vatDetermination ? { vatDetermination } : {}),
       version: newVersionNumber,
       quotationNumber: `${booking.quotationNumber}-v${newVersionNumber}`,
       scope,

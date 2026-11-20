@@ -42,6 +42,10 @@ describe.each([['submit', submitQuotation, 'rfq_accepted'], ['edit', editQuotati
     expect(output.data.booking.quoteVersions.at(-1).customerTotals.commissionPercent).toBe(17);
     expect(JSON.stringify(bookingForViewer(output.data.booking, 'customer'))).not.toMatch(/commissionPercent|commission_percentage/);
     expect(output.data.booking.quoteVersions.at(-1).customerTotals.professionalNetAmount).toBe(100);
+    // FT3-18b: the VAT parameters are recorded with the version.
+    expect(output.data.booking.quoteVersions.at(-1).vatDetermination).toEqual({
+      customerType: 'B2C', article47Class: null, vatAddressType: 'Booking address', vatCountry: 'BE', reverseCharge: false,
+    });
   });
   it.each(['customer', 'unrelated'] as const)('denies %s from submitting/editing and returns no booking data', async role => {
     mocks.find.mockReturnValue(query({ _id: bookingId, status, customer: { _id: customerId }, professional: { _id: professionalId } }));
