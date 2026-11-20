@@ -949,7 +949,7 @@ export async function generateBookingInvoice(
       cost.type === "unit_adjustment" &&
       Number.isFinite(cost.actualUnits) &&
       Number.isFinite(cost.estimatedUnits)
-        ? ` (${cost.estimatedUnits} est. → ${cost.actualUnits}${costUnit ? ` ${costUnit}` : ""} actual)`
+        ? ` (${cost.estimatedUnits} est. -> ${cost.actualUnits}${costUnit ? ` ${costUnit}` : ""} actual)`
         : cost.type === "unit_adjustment" && Number.isFinite(cost.actualUnits)
           ? ` (${cost.actualUnits}${costUnit ? ` ${costUnit}` : ""})`
           : "";
