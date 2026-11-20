@@ -365,8 +365,37 @@ export const resolveProjectScheduleQuantity = (project: any, subprojectIndex: nu
 };
 
 /** Persisted duration overrides are already scaled; missing prep/buffer means zero. */
+const quoteDuration = (value: any): { value: number; unit: 'hours' | 'days' } | undefined => {
+  const numeric = Number(value?.value);
+  return Number.isFinite(numeric) && numeric >= 0 && (value?.unit === 'hours' || value?.unit === 'days')
+    ? { value: numeric, unit: value.unit }
+    : undefined;
+};
+
+/**
+ * Durations agreed in the quotation the customer accepted (or the current
+ * version). A quote booking's RFQ package has no execution of its own, so
+ * these are what the schedule engine must plan, reserve and end with.
+ */
+export const getQuoteScheduleDurationOverride = (booking: any): DurationOverride | undefined => {
+  const versions = Array.isArray(booking?.quoteVersions) ? booking.quoteVersions : [];
+  const wanted = booking?.acceptedQuoteVersion ?? booking?.currentQuoteVersion;
+  const version = versions.find((entry: any) => Number(entry?.version) === Number(wanted))
+    || versions[versions.length - 1];
+  const execution = quoteDuration(version?.executionDuration);
+  if (!execution || execution.value <= 0) return undefined;
+  return {
+    execution,
+    preparation: quoteDuration(version?.preparationDuration) || { value: 0, unit: 'hours' },
+    buffer: quoteDuration(version?.bufferDuration) || { value: 0, unit: 'hours' },
+  } as DurationOverride;
+};
+
 export const getBookingScheduleOptions = (booking: any): { quantity: number; durationOverride?: DurationOverride } => {
   const quantity = Number(booking.scheduleSnapshot?.quantity ?? booking.checkoutSnapshot?.quantity) || 1;
+  // A quotation's agreed durations win: they are what the customer accepted.
+  const quoteOverride = getQuoteScheduleDurationOverride(booking);
+  if (quoteOverride) return { quantity, durationOverride: quoteOverride };
   const snapshot = booking.scheduleSnapshot;
   if (!snapshot?.executionDuration) return { quantity };
   return {

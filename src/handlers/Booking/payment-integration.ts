@@ -23,6 +23,7 @@ import PointTransaction from '../../models/pointTransaction';
 import {
   buildProjectScheduleWindow,
   getBookingScheduleOptions,
+  getQuoteScheduleDurationOverride,
   validateProjectScheduleSelection,
 } from '../../utils/scheduleEngine';
 import { applyReschedulePlanReset } from '../../utils/applyReschedulePlanReset';
@@ -274,7 +275,13 @@ export const buildScheduleUpdatePayload = async ({
       selectedSubprojectIndex: resolvedSubprojectIndex,
     };
 
-    if (isRfqSubproject) {
+    // Quote bookings plan with the accepted quotation's durations, so they
+    // get an execution end, a time zone, a resource plan and calendar
+    // reservations like any other booking (FT3-19y). Only an RFQ without
+    // quoted durations keeps the date-only fallback.
+    const quoteDurationOverride = isRfqSubproject ? getQuoteScheduleDurationOverride(booking) : undefined;
+
+    if (isRfqSubproject && !quoteDurationOverride) {
       const startDate = new Date(scheduledStartDate);
       if (isNaN(startDate.getTime()) || startDate < new Date()) {
         return {
