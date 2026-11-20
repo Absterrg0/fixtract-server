@@ -58,7 +58,7 @@ import {
   buildBookingListOverview,
   selectedPriceModel,
 } from "../../utils/bookingDetails/overviewRows";
-import { loadOverviewRefundLedgers } from "../../utils/paymentRefundLedger";
+import { loadOverviewRefundLedgers, loadSettledMilestoneTotals } from "../../utils/paymentRefundLedger";
 import { countPaymentsByService, countPaymentsByStatus } from "../../utils/paymentFacetCounts";
 import { safeErrorSummary } from "../../utils/safeErrorLog";
 import { snapshotQuestionDefinitions } from '../../utils/bookingDetails/snapshot';
@@ -1575,6 +1575,12 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
     } catch (ledgerError) {
       console.error('Get bookings: refund ledger read failed; overview money left unknown:', safeErrorSummary(ledgerError));
     }
+    let settledMilestoneTotals: Map<string, number> | null = null;
+    try {
+      settledMilestoneTotals = await loadSettledMilestoneTotals(bookings.map((booking) => booking._id as any));
+    } catch (milestoneTotalsError) {
+      console.error('Get bookings: milestone payment ledger read failed; milestone paid price left as recorded:', safeErrorSummary(milestoneTotalsError));
+    }
     const visibleBookings = bookings.map((booking) => {
       const ownerId = referenceId((booking.project as any)?.professionalId);
       const source = !booking.professional && ownerId && projectOwners.has(ownerId)
@@ -1596,6 +1602,7 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
             visible,
             viewerRole,
             refundLedgers?.get(String(booking._id)) ?? OVERVIEW_LEDGER_NOT_LOADED,
+            settledMilestoneTotals?.get(String(booking._id)) ?? null,
           )
         : null;
       const projectOwnerId = referenceId((booking.project as any)?.professionalId);

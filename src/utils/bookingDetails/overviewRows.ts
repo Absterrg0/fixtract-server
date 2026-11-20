@@ -330,6 +330,8 @@ export function buildSharedBookingsRow(
   booking: any,
   viewerRole: "customer" | "professional" | "admin",
   ledger: OverviewRefundLedger = OVERVIEW_LEDGER_NOT_LOADED,
+  /** Sum of every settled milestone charge (see loadSettledMilestoneTotals). */
+  settledMilestoneTotal: number | null = null,
 ): SharedBookingsRow {
   const titles = resolveSnapshotTitles(booking);
   const payment = booking?.payment && typeof booking.payment === "object" ? booking.payment : null;
@@ -337,15 +339,42 @@ export function buildSharedBookingsRow(
   // VAT-inclusive recorded total only. `payment.amount` is the pre-VAT net
   // (createPaymentIntent stores netAmount there), so it is never presented as
   // the paid price; a payment without totalWithVat renders as not recorded.
-  const paidSource = hasRecordedPaidAmount(booking, payment)
+  // Milestone bookings: booking.payment is only the latest checkout, so the
+  // paid price is the sum of all settled milestone charges (FT2-13).
+  const paidSource = settledMilestoneTotal != null && Array.isArray(booking?.milestonePayments)
+    && booking.milestonePayments.length > 0
+    ? settledMilestoneTotal
+    : hasRecordedPaidAmount(booking, payment)
     ? payment?.totalWithVat ?? null
     : null;
   const completedAddition = settledCompletionAddition(payment, ledger);
   const isProSide = viewerRole !== "customer";
-  const payoutAmount = isProSide ? asMoney(payment?.professionalPayout ?? null, currency) : { amount: null, currency: null, source: "not_recorded" as const };
   const bookingRefund = recordedBookingRefund(payment, ledger);
-  const refundAmount = isProSide && bookingRefund != null
-    ? asMoney(bookingRefund, currency)
+  // Payout and refund on the same (professional, excl. VAT) basis, FT2-13:
+  // a customer refund reduces the payout by the same share it takes of the
+  // charge (as on the supplier invoice: 1,400 − 578.51 = 821.49), so
+  // "payout − refund" never mixes the professional net with the customer's
+  // VAT-inclusive refund (was "€3,500 − €4,235").
+  const recordedPayout = typeof payment?.professionalPayout === "number" && Number.isFinite(payment.professionalPayout)
+    ? payment.professionalPayout
+    : null;
+  const chargedTotal = Number(payment?.totalWithVat);
+  const refundShare = bookingRefund != null && Number.isFinite(chargedTotal) && chargedTotal > 0
+    ? Math.min(1, Math.max(0, bookingRefund / chargedTotal))
+    : null;
+  const payoutAfterRefund = recordedPayout != null && refundShare != null
+    ? roundMoney(recordedPayout * (1 - refundShare))
+    : recordedPayout;
+  // The table renders "payout − refund": the recorded payout, then the
+  // professional share of the refund on the same basis.
+  const payoutAmount = isProSide ? asMoney(recordedPayout, currency) : { amount: null, currency: null, source: "not_recorded" as const };
+  // Without a recorded payout there is nothing to mix with: the recorded
+  // refund is shown as before.
+  const professionalRefund = recordedPayout != null && payoutAfterRefund != null && refundShare != null
+    ? roundMoney(recordedPayout - payoutAfterRefund)
+    : recordedPayout == null ? bookingRefund : null;
+  const refundAmount = isProSide && professionalRefund != null
+    ? asMoney(professionalRefund, currency)
     : { amount: null, currency: null, source: "not_recorded" as const };
   return {
     id: asId(booking?._id) || "",
@@ -383,15 +412,22 @@ export function buildSharedBookingsRow(
  * ids or payout facts. The dashboard bookings table treats each present
  * field as authoritative, including `source: "not_recorded"` (unknown).
  */
-export type BookingListOverview = Pick<SharedBookingsRow, "paidPrice" | "completionAddition">;
+export type BookingListOverview = Pick<SharedBookingsRow, "paidPrice" | "completionAddition">
+  & Partial<Pick<SharedBookingsRow, "payoutAmount" | "refundAmount">>;
 
 export function buildBookingListOverview(
   booking: any,
   viewerRole: "customer" | "professional",
   ledger: OverviewRefundLedger,
+  settledMilestoneTotal: number | null = null,
 ): BookingListOverview {
-  const row = buildSharedBookingsRow(booking, viewerRole, ledger);
-  return { paidPrice: row.paidPrice, completionAddition: row.completionAddition };
+  const row = buildSharedBookingsRow(booking, viewerRole, ledger, settledMilestoneTotal);
+  return {
+    paidPrice: row.paidPrice,
+    completionAddition: row.completionAddition,
+    // Pro-only columns; customers never receive payout facts.
+    ...(viewerRole === "professional" ? { payoutAmount: row.payoutAmount, refundAmount: row.refundAmount } : {}),
+  };
 }
 
 /** Price-model tokens the frontend translates (booking details and dashboard tables). */

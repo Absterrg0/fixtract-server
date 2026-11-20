@@ -196,8 +196,12 @@ describeDb('bookings list overview money from the stored Payment ledger (disposa
       expect([...byId.keys()].sort()).toEqual([...expected().keys()].sort());
       for (const [id, overview] of expected()) {
         const row = byId.get(id);
-        // Exactly the computed money fields, nothing else.
-        expect(row.overview).toEqual(overview);
+        // Exactly the computed money fields, nothing else. Professionals also
+        // get their payout/refund columns (FT2-13); customers never do.
+        const { payoutAmount, refundAmount, ...customerMoney } = row.overview;
+        expect(customerMoney).toEqual(overview);
+        if (viewer._id === CUSTOMER) expect(row.overview).toEqual(overview);
+        else expect(payoutAmount && refundAmount).toBeTruthy();
         // No ledger rows, provider ids or notes reach the payload.
         expect(row.payment?.refunds).toBeUndefined();
         expect(JSON.stringify(row)).not.toContain('re_');
