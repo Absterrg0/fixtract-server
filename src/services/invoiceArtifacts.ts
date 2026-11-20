@@ -714,12 +714,19 @@ const getRawPricingLinesForUbl = (
       quoteIncludesSelectedOptions: quoteAmountIncludesSelectedExtras(booking),
     });
     const customerNet = moneyNumber(basis.serviceNet);
-    const scale = supplierNet > 0 ? customerNet / supplierNet : 1;
     // The service line is the remainder of the full (pre-discount) price
     // after the options; the discounts follow as their own allowances.
     // Taking it from the discounted net and grossing all lines up afterwards
     // moved part of the discount onto the options (FT3-25a).
     const fullCustomerNet = Math.round((customerNet + customerServiceDiscountTotal(basis.discount)) * 100) / 100;
+    // Options scale by the commission only: full customer price over the
+    // full supplier price. A recorded payout is net of the professional's
+    // repeat-buyer share; the loyalty discount is not in it, so a discounted
+    // ratio scaled the options down (F1-1: 141.67 instead of 150).
+    const fullSupplierNet = basis.supplierServiceNet != null
+      ? supplierNet + supplierRepeatBuyerDiscount(basis.discount?.repeatBuyerAmount, commissionPercent)
+      : supplierNet;
+    const scale = fullSupplierNet > 0 ? fullCustomerNet / fullSupplierNet : 1;
     baseLinesAtFullPrice = true;
     const scaledOptions = selectedOptions.map((line: UblLine) => ({
       ...line,

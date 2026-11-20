@@ -1265,15 +1265,24 @@ export async function generateBookingInvoice(
           // A VAT breakdown already represents the full customer-facing
           // service net. In that case its pricing lines include the selected
           // options and must not be appended a second time.
+          // Show the pre-discount service price and let the discount lines
+          // carry the reduction, so the printed total is the sum of all lines.
+          const displayTarget = roundInvoiceMoney(customerServiceNet + sign * customerServiceDiscountTotal);
+          // Without source lines, options scale by the commission only (full
+          // customer price over full supplier price). The supplier net is
+          // after the professional's repeat-buyer share but carries no
+          // loyalty discount, so the discounted ratio scaled the options down
+          // once loyalty applied (F1-1: 141.67 / 808.33 instead of 150 / 800).
+          const fullSupplierServiceNet = supplierServiceNet + supplierRepeatDiscount;
+          const optionScale = scaledQuoteLines.length === 0 && !sourceIsCustomerNet && fullSupplierServiceNet > 0
+            ? Math.abs(displayTarget) / fullSupplierServiceNet
+            : customerScale;
           const scaledOptionLines = sourceIsCustomerNet
             ? []
             : optionLines.map((line) => ({
                 ...line,
-                amount: line.amount * customerScale,
+                amount: line.amount * optionScale,
               }));
-          // Show the pre-discount service price and let the discount lines
-          // carry the reduction, so the printed total is the sum of all lines.
-          const displayTarget = roundInvoiceMoney(customerServiceNet + sign * customerServiceDiscountTotal);
           // Without source lines the service line is the remainder of the
           // full (pre-discount) price after the options. Taking it from the
           // discounted net and grossing every line up afterwards would shift
@@ -1290,7 +1299,7 @@ export async function generateBookingInvoice(
                 ) * (sign < 0 ? -1 : 1),
                 vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
                 quantity: hasUnits ? unitQuantity : undefined,
-                unitPrice: hasUnitPrice ? unitPrice * customerScale : undefined,
+                unitPrice: hasUnitPrice ? unitPrice * optionScale : undefined,
                 ...(hasUnits && checkoutUnit ? { unit: checkoutUnit } : {}),
               }];
           const serviceLinesWithOptions = [...serviceLines, ...scaledOptionLines];
