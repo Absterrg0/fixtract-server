@@ -32,8 +32,12 @@ import type {
 } from './types';
 import { actorForId, isActorRecorded, type ActorMap } from './actors';
 import { getCheckoutCommissionPercent } from '../checkoutCommission';
+import { quoteAmountIncludesSelectedExtras } from '../payment';
 import {
   checkoutCustomerTotal,
+  commissionedQuoteAmount,
+  customerUnitPrice,
+  optionsCustomerCharge,
   commissionedExtraCostLines,
   commissionedExtraCostTotal,
   recordedExtraCostCustomerSubtotal,
@@ -173,6 +177,20 @@ const mapScheduleSnapshot = (schedule: any): ScheduleSnapshotDto | null => {
   };
 };
 
+/**
+ * Professional total of a booking without quotation versions: the stored
+ * quote amount plus the selected options when the checkout kept them outside
+ * the quote (C11-1: a €800 package + €150 option showed €800).
+ */
+const legacyQuoteProfessionalTotal = (booking: any): number | null => {
+  const amount = num(booking?.quote?.amount);
+  if (amount == null) return null;
+  if (quoteAmountIncludesSelectedExtras(booking)) return amount;
+  const options = (Array.isArray(booking?.selectedExtraOptions) ? booking.selectedExtraOptions : [])
+    .reduce((sum: number, option: any) => sum + (num(option?.bookedPrice) ?? 0), 0);
+  return roundMoney(amount + options);
+};
+
 /** Adds the customer checkout total for non-professional viewers, with the same arithmetic as checkout. */
 const withCustomerCheckoutTotal = async (
   checkout: CheckoutSnapshotDto | null,
@@ -181,7 +199,23 @@ const withCustomerCheckoutTotal = async (
 ): Promise<CheckoutSnapshotDto | null> => {
   if (!checkout) return checkout;
   if (viewerRole === 'professional') return { ...checkout, customerTotal: null };
-  return { ...checkout, customerTotal: checkoutCustomerTotal(snapshot, await getCheckoutCommissionPercent()) };
+  const commissionPercent = await getCheckoutCommissionPercent();
+  return {
+    ...checkout,
+    customerTotal: checkoutCustomerTotal(snapshot, commissionPercent),
+    // C11-1: customers never receive the professional unit price, subtotal or
+    // option prices; these are their customer-side equivalents (same
+    // arithmetic and commission as the customer total above).
+    customerPrices: {
+      unitPrice: customerUnitPrice(Number(snapshot?.unitAmount) || 0, commissionPercent),
+      baseSubtotal: commissionedQuoteAmount(Number(snapshot?.baseSubtotal) || 0, snapshot, commissionPercent),
+      extraOptionsTotal: optionsCustomerCharge(Number(snapshot?.extraOptionsTotal) || 0, commissionPercent),
+      options: checkout.selectedOptions.map((option) => ({
+        unitPrice: optionsCustomerCharge(Number(option.unitPrice) || 0, commissionPercent),
+        totalPrice: optionsCustomerCharge(Number(option.totalPrice) || 0, commissionPercent),
+      })),
+    },
+  };
 };
 
 const mapCheckoutSnapshot = (snapshot: any): CheckoutSnapshotDto | null => {
@@ -1546,7 +1580,7 @@ export const buildBookingDetails = async (params: {
             }
           : null,
         currency: currentVersion?.currency || quoteCurrency,
-        totalAmountProfessional: currentVersion?.totalAmount ?? num(booking.quote?.amount),
+        totalAmountProfessional: currentVersion?.totalAmount ?? legacyQuoteProfessionalTotal(booking),
         versions: quotationVersions,
         history: [],
         rfqHistory: [],
@@ -1839,7 +1873,7 @@ export const buildBookingDetails = async (params: {
         acceptedVersion: quotation.acceptedVersion?.version ?? null,
         acceptedVersionSource: quotation.acceptedVersion?.source || 'not_recorded',
         status: quotation.status,
-        totalAmount: pinnedVersion?.totalAmount ?? (quotationVersions.length === 0 ? num(booking.quote?.amount) : null),
+        totalAmount: pinnedVersion?.totalAmount ?? (quotationVersions.length === 0 ? legacyQuoteProfessionalTotal(booking) : null),
         currency: pinnedVersion?.currency || (quotationVersions.length === 0 ? quoteCurrency : null),
         validUntil: pinnedVersion?.validUntil || (quotationVersions.length === 0 ? iso(booking.quote?.validUntil) : null),
         firstPossibleStart: pinnedVersion?.firstPossibleStart || null,

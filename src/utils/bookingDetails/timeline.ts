@@ -464,7 +464,11 @@ export const buildBookingActivity = async (context: TimelineContext): Promise<Bo
     markStatusCovered(coveredStatus, 'quoted', version.createdAt);
   }
 
-  if (booking.quote?.submittedAt && versions.length === 0) {
+  // C11-1: a direct booking's checkout is stored as an auto-generated quote
+  // (`checkout_snapshot:*` breakdown lines); nobody submitted a quotation.
+  const isCheckoutSnapshotQuote = Array.isArray(booking.quote?.breakdown)
+    && booking.quote.breakdown.some((line: any) => typeof line?.item === 'string' && line.item.startsWith('checkout_snapshot:'));
+  if (booking.quote?.submittedAt && versions.length === 0 && !isCheckoutSnapshotQuote) {
     const actor = actorForId(booking.quote.submittedBy, actors, viewerRole, { roleHint: 'professional' });
     const amount = finite(booking.quote.amount);
     pushEvent({

@@ -819,9 +819,19 @@ export const resolveDispute = async (req: Request, res: Response) => {
         // This flow owns its resolved 'refunded' state. Only its partial
         // cancellation becomes cancelled; the generic refund core preserves
         // dispute-managed and completed lifecycle states.
+        // C11-1: record the final status too, so the activity does not end
+        // on the transient "Refunded" of a partial dispute refund.
         resolvedBooking = await Booking.findOneAndUpdate({
           _id: resolvedBooking._id, status: 'refunded', 'payment.status': 'partially_refunded',
-        }, { $set: { status: 'cancelled' } }, { new: true })
+        }, {
+          $set: { status: 'cancelled' },
+          $push: { statusHistory: {
+            status: 'cancelled',
+            timestamp: new Date(),
+            updatedBy: adminUser._id,
+            note: 'Partial dispute refund: booking cancelled with the remainder billable',
+          } },
+        }, { new: true })
           || await Booking.findById(resolvedBooking._id) || resolvedBooking;
         await Booking.updateOne(
           { _id: resolvedBooking._id },

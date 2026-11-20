@@ -282,6 +282,13 @@ export type BookingSnapshotDto = {
 export type CheckoutSnapshotDto = {
   /** Customer total of the package and its options (checkout arithmetic, live commission). Null for professionals. */
   customerTotal?: number | null;
+  /** Customer-side equivalents of the professional amounts below (not sent to professionals). */
+  customerPrices?: {
+    unitPrice: number;
+    baseSubtotal: number;
+    extraOptionsTotal: number;
+    options: Array<{ unitPrice: number; totalPrice: number }>;
+  };
   pricingType: 'fixed' | 'unit';
   unitAmount: number;
   quantity: number;

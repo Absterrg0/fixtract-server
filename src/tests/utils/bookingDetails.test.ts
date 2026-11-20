@@ -725,6 +725,34 @@ describe('details privacy', () => {
     expect(details.payments.records[0]).not.toHaveProperty('professionalPayout');
   });
 
+  it('C11-1: a direct booking\'s professional amount includes the options kept outside the quote', async () => {
+    const direct = {
+      quoteVersions: [], currentQuoteVersion: undefined, quotationNumber: undefined,
+      quote: { amount: 800, currency: 'EUR', breakdown: [{ item: 'checkout_snapshot:computed_total', quantity: 1, unitPrice: 950, totalPrice: 950 }] },
+      checkoutSnapshot: { pricingType: 'fixed', unitAmount: 800, quantity: 1, baseSubtotal: 800, extraOptionsTotal: 150, totalAmount: 950, currency: 'EUR',
+        selectedOptions: [{ extraOptionId: 'opt-1', name: 'Premium Paint', unitPrice: 150, quantity: 1, totalPrice: 150 }] },
+      selectedExtraOptions: [{ extraOptionId: 'opt-1', bookedPrice: 150 }],
+    };
+    const professional: any = await buildDetails('professional', { booking: direct });
+    expect(professional.quotation?.totalAmountProfessional ?? professional.overview?.quote?.totalAmount).toBe(950);
+    if (professional.overview?.quote) expect(professional.overview.quote.totalAmount).toBe(950);
+  });
+
+  it('C11-1: gives customers customer-side checkout composition prices that survive the API boundary', async () => {
+    const { quotationForViewer } = await import('../../utils/quotationVisibility');
+    const customer = await buildDetails('customer');
+    const filtered: any = quotationForViewer({ data: customer }, 'customer', false);
+    // 10 % commission: package 100 → 110, option 20 → 22.
+    expect(filtered.data.payments.checkout.customerPrices).toEqual({
+      unitPrice: 110, baseSubtotal: 110, extraOptionsTotal: 22, options: [{ unitPrice: 22, totalPrice: 22 }],
+    });
+    expect(filtered.data.payments.checkout.customerTotal).toBe(132);
+    // The professional amounts themselves stay withheld from customers.
+    expect(filtered.data.payments.checkout).not.toHaveProperty('unitAmount');
+    const professional = await buildDetails('professional');
+    expect(professional.payments.checkout).not.toHaveProperty('customerPrices');
+  });
+
   it('FT3-19d: shows the booking invoices on a milestone booking whose Payment rows carry none', async () => {
     const invoiceFields = {
       invoiceNumber: 'FIX-2026-000009',
@@ -1551,6 +1579,24 @@ describe('activity', () => {
       actorRecorded: true,
       actor: expect.objectContaining({ role: 'professional' }),
     });
+  });
+
+  it('C11-1: no "Quotation submitted" event for a direct booking\'s auto-generated checkout quote', async () => {
+    const direct = booking({
+      statusHistory: [],
+      quoteVersions: [],
+      currentQuoteVersion: undefined,
+      quote: { amount: 800, currency: 'EUR', submittedAt: paidTime, description: 'Auto-generated checkout quote',
+        breakdown: [{ item: 'checkout_snapshot:selected_package_index:0', quantity: 1, unitPrice: 0, totalPrice: 0 },
+          { item: 'Package Base', quantity: 1, unitPrice: 800, totalPrice: 800 }] },
+    });
+    const context = { payments: [payment()], cancellations: [], warrantyClaims: [], actors, viewerRole: 'customer' as const,
+      customerId: String(customerId), professionalId: String(professionalId) };
+    const activity = await buildBookingActivity({ ...context, booking: direct });
+    expect(activity.items.find((item) => item.type === 'quotation_submitted')).toBeUndefined();
+    // A real legacy quote (no checkout markers) still records its submission.
+    const legacy = await buildBookingActivity({ ...context, booking: { ...direct, quote: { ...direct.quote, breakdown: [{ item: 'Work', totalPrice: 800 }] } } });
+    expect(legacy.items.find((item) => item.type === 'quotation_submitted')).toBeDefined();
   });
 
   it('emits a payout amount line for a released payment without replacing recorded totals', async () => {

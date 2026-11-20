@@ -276,5 +276,8 @@ describeDb('dispute completion and partial-refund invoices', () => {
     expect(text).toContain('Refund the grouting part');
     expect(text).toContain('The bathroom tiles were never grouted');
     expect(ubl).toContain('Refund the grouting part — The bathroom tiles were never grouted</cbc:Note>');
+    // C11-1: the history ends on the final status, not the transient "refunded".
+    expect(booking.status).toBe('cancelled');
+    expect(booking.statusHistory.at(-1)).toMatchObject({ status: 'cancelled' });
   }, 30000);
 });
