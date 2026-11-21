@@ -77,13 +77,30 @@ export const requireProfessionalPayout = (payment: {
   professionalPayout?: unknown;
   netAmount?: unknown;
   totalWithVat?: unknown;
+  discount?: {
+    loyaltyAmount?: unknown;
+    pointsDiscountAmount?: unknown;
+    codeDiscountAmount?: unknown;
+    referralDiscountAmount?: unknown;
+  } | null;
 }): number => {
   const payout = Number(payment.professionalPayout);
   if (!Number.isFinite(payout) || payout <= 0) {
     throw new Error('Professional payout is missing or invalid; transfer is blocked until accounting is reconciled.');
   }
   const customerNet = Number(payment.netAmount);
-  if (Number.isFinite(customerNet) && customerNet >= 0 && payout > customerNet + 0.01) {
+  // Loyalty, points, code and referral discounts are funded by the platform
+  // (calculateDiscountedPayouts): they never reduce the professional's payout,
+  // and may exceed the commission (e.g. at 0 % commission) as an explicit
+  // platform cost. The recorded subsidy is therefore part of what may be paid
+  // out on top of the customer's net (item 12: a loyalty-discounted booking
+  // at 0 % commission could never complete).
+  const platformFunded = ['loyaltyAmount', 'pointsDiscountAmount', 'codeDiscountAmount', 'referralDiscountAmount']
+    .reduce((sum, key) => {
+      const value = Number((payment.discount as Record<string, unknown> | null | undefined)?.[key]);
+      return sum + (Number.isFinite(value) && value > 0 ? value : 0);
+    }, 0);
+  if (Number.isFinite(customerNet) && customerNet >= 0 && payout > customerNet + platformFunded + 0.01) {
     throw new Error('Professional payout exceeds the reconciled customer net amount; transfer is blocked until accounting is corrected.');
   }
   const customerTotal = Number(payment.totalWithVat);

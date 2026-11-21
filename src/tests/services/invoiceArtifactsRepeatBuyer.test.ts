@@ -308,3 +308,149 @@ describe("25a — repeat-buyer discount on the supplier self-bill", () => {
     expect(facts.lines.map((line) => line.amount)).toEqual([250]);
   });
 });
+
+describe("25a — repeat-buyer discount on a booking with an extra option (customer invoice)", () => {
+  // Shape of BK-2026-000025 on staging: fixed €800 package + €150 option,
+  // 10 % repeat-buyer discount (95), no VAT breakdown and no quote pricing
+  // lines, recorded payout 855 at 0 % commission.
+  const optionBooking = (commission: number) => {
+    const full = 950 * (1 + commission / 100);
+    const repeat = Math.round(full * 0.1 * 100) / 100;
+    const net = Math.round((full - repeat) * 100) / 100;
+    const vat = Math.round(net * 0.21 * 100) / 100;
+    return {
+      _id: `booking-repeat-option-${commission}`,
+      bookingNumber: "BK-2026-000025",
+      __commissionPercent: commission,
+      quote: { amount: 800, description: "Painting" },
+      quoteVersions: [],
+      checkoutSnapshot: { pricingType: "fixed", unitAmount: 800, quantity: 1, baseSubtotal: 800, extraOptionsTotal: 150, totalAmount: 950 },
+      selectedExtraOptions: [{ extraOptionId: "opt-1", bookedPrice: 150 }],
+      project: { extraOptions: [{ _id: "opt-1", name: "Premium Paint" }] },
+      payment: {
+        currency: "EUR",
+        status: "completed",
+        vatRate: 21,
+        reverseCharge: false,
+        netAmount: net,
+        amount: net,
+        vatAmount: vat,
+        totalWithVat: Math.round((net + vat) * 100) / 100,
+        professionalPayout: Math.round((950 - repeat / (1 + commission / 100)) * 100) / 100,
+        vatBreakdown: [],
+        discount: { repeatBuyerPercentage: 10, repeatBuyerAmount: repeat, totalDiscount: repeat, originalAmount: full },
+      },
+      customer: { customerType: "individual", name: "Customer", location: { country: "BE" } },
+      professional: { name: "Supplier", businessInfo: { vatNumber: "BE0123456848", country: "BE" } },
+    };
+  };
+
+  it.each([0, 10])("commission %s %%: full-price service and option lines, discount on its own line", async (commission) => {
+    const booking = optionBooking(commission);
+    const factor = 1 + commission / 100;
+    const xml = buildUblInvoiceXml(booking, "FIX-2026-000005", new Date("2026-11-20T00:00:00Z"), {
+      selfBilling: false,
+      platform,
+    });
+    const facts = expectCompliantUbl(xml);
+    expect(facts.lines.map((line) => line.amount)).toEqual([
+      Math.round(800 * factor * 100) / 100,
+      Math.round(150 * factor * 100) / 100,
+    ]);
+    expect(facts.allowances).toEqual([
+      expect.objectContaining({ reason: "Repeat buyer discount", amount: booking.payment.discount.repeatBuyerAmount }),
+    ]);
+    expect(facts.taxExclusive).toBe(booking.payment.netAmount);
+    expect(facts.taxInclusive).toBe(booking.payment.totalWithVat);
+
+    const text = await pdfText(booking, "customer");
+    const money = (value: number) => value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).replace(/[.,]/g, "\\$&");
+    // The extracted PDF text keeps a non-latin1 placeholder for the € sign.
+    expect(text).toMatch(new RegExp(`Painting \\(21% VAT\\)\\D?${money(800 * factor)}`));
+    expect(text).toMatch(new RegExp(`Option: Premium Paint \\(21% VAT\\)\\D?${money(150 * factor)}`));
+    expect(text).toMatch(new RegExp(`Repeat buyer discount-\\D?${money(booking.payment.discount.repeatBuyerAmount)}`));
+    expect(text).toMatch(new RegExp(`TOTAL\\D?${money(booking.payment.totalWithVat)}`));
+    expect(text).not.toContain("783.33");
+    expect(text).not.toContain("166.67");
+    expect(text).not.toContain("Payment discount adjustment");
+    expect(text).not.toContain("Platform commission");
+  });
+});
+
+describe("F1-1 — loyalty + repeat-buyer discount on a booking with an extra option (customer invoice)", () => {
+  // BK-2026-000054 on staging: €800 package + €150 option, Gold loyalty 5 %
+  // (47.50) + repeat buyer 10 % (95) at 0 % commission; net 807.50, payout
+  // 855 (the professional absorbs only the repeat-buyer share).
+  const loyaltyBooking = (commission: number) => {
+    const factor = 1 + commission / 100;
+    const full = Math.round(950 * factor * 100) / 100;
+    const repeat = Math.round(full * 0.1 * 100) / 100;
+    const loyalty = Math.round(full * 0.05 * 100) / 100;
+    const net = Math.round((full - repeat - loyalty) * 100) / 100;
+    const vat = Math.round(net * 0.21 * 100) / 100;
+    return {
+      _id: `booking-loyalty-repeat-${commission}`,
+      bookingNumber: "BK-2026-000054",
+      __commissionPercent: commission,
+      quote: { amount: 800, description: "Painting" },
+      quoteVersions: [],
+      checkoutSnapshot: { pricingType: "fixed", unitAmount: 800, quantity: 1, baseSubtotal: 800, extraOptionsTotal: 150, totalAmount: 950 },
+      selectedExtraOptions: [{ extraOptionId: "opt-1", bookedPrice: 150 }],
+      project: { extraOptions: [{ _id: "opt-1", name: "Premium Paint" }] },
+      payment: {
+        currency: "EUR",
+        status: "completed",
+        vatRate: 21,
+        reverseCharge: false,
+        netAmount: net,
+        amount: net,
+        vatAmount: vat,
+        totalWithVat: Math.round((net + vat) * 100) / 100,
+        professionalPayout: Math.round((950 - repeat / factor) * 100) / 100,
+        vatBreakdown: [],
+        discount: {
+          loyaltyAmount: loyalty,
+          repeatBuyerPercentage: 10,
+          repeatBuyerAmount: repeat,
+          totalDiscount: Math.round((loyalty + repeat) * 100) / 100,
+          originalAmount: full,
+        },
+      },
+      customer: { customerType: "individual", name: "Customer", location: { country: "BE" } },
+      professional: { name: "Supplier", businessInfo: { vatNumber: "BE0123456848", country: "BE" } },
+    };
+  };
+
+  it.each([0, 10])("commission %i percent: lines at full price, each discount its own line / allowance", async (commission) => {
+    const booking = loyaltyBooking(commission);
+    const factor = 1 + commission / 100;
+    const xml = buildUblInvoiceXml(booking, "FIX-2026-000012", new Date("2026-11-20T00:00:00Z"), {
+      selfBilling: false,
+      platform,
+    });
+    const facts = expectCompliantUbl(xml);
+    expect(facts.lines.map((line) => line.amount)).toEqual([
+      Math.round(800 * factor * 100) / 100,
+      Math.round(150 * factor * 100) / 100,
+    ]);
+    expect(facts.allowances).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: "Loyalty discount", amount: booking.payment.discount.loyaltyAmount }),
+      expect.objectContaining({ reason: "Repeat buyer discount", amount: booking.payment.discount.repeatBuyerAmount }),
+    ]));
+    expect(facts.allowances).toHaveLength(2);
+    expect(facts.taxExclusive).toBe(booking.payment.netAmount);
+    expect(facts.taxInclusive).toBe(booking.payment.totalWithVat);
+
+    const text = await pdfText(booking, "customer");
+    const money = (value: number) => value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).replace(/[.,]/g, "\\$&");
+    expect(text).toMatch(new RegExp(`Painting \\(21% VAT\\)\\D?${money(800 * factor)}`));
+    expect(text).toMatch(new RegExp(`Option: Premium Paint \\(21% VAT\\)\\D?${money(150 * factor)}`));
+    expect(text).toMatch(new RegExp(`Loyalty discount-\\D?${money(booking.payment.discount.loyaltyAmount)}`));
+    expect(text).toMatch(new RegExp(`Repeat buyer discount-\\D?${money(booking.payment.discount.repeatBuyerAmount)}`));
+    expect(text).toMatch(new RegExp(`TOTAL\\D?${money(booking.payment.totalWithVat)}`));
+    expect(text).not.toContain("808.33");
+    expect(text).not.toContain("141.67");
+    expect(text).not.toContain("Payment discount adjustment");
+    expect(text).not.toContain("Platform commission");
+  });
+});

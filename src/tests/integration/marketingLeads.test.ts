@@ -298,6 +298,22 @@ describeDb('marketing leads admin API', () => {
     });
     expect(await MarketingLead.countDocuments({ status: 'active' })).toBe(4);
 
+    // CA5: re-importing the same file, invalid row included, imported nothing
+    // new; it is "duplicate only", not "Import failed".
+    const third = await importWorkbook([
+      ['Email', 'Country', 'Language', 'Service'],
+      ['person@example.com', 'BE', 'nl', 'plumbing'],
+      ['other@example.com', 'BE', 'English', 'Painting'],
+      ['not-an-email', 'BE', 'nl', 'Plumbing'],
+    ]);
+    expect(third.status).toBe(201);
+    expect(third.body.data.import).toMatchObject({
+      status: 'duplicate_only',
+      importedRows: 0,
+      duplicateRows: 2,
+      failedRows: 1,
+    });
+
     const historyPage = await request('GET', '/api/admin/marketing-lead-imports?limit=10', {
       cookie: superCookie,
     });

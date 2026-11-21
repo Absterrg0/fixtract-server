@@ -7,6 +7,7 @@ const {
   find,
   findById,
   findByIdAndUpdate,
+  findByIdAndDelete,
   findOneAndUpdate,
   create,
 } = vi.hoisted(() => ({
@@ -15,6 +16,7 @@ const {
   find: vi.fn(),
   findById: vi.fn(),
   findByIdAndUpdate: vi.fn(),
+  findByIdAndDelete: vi.fn(),
   findOneAndUpdate: vi.fn(),
   create: vi.fn(),
 }));
@@ -26,6 +28,7 @@ vi.mock('../../../models/siteAnnouncement', () => ({
     find,
     findById,
     findByIdAndUpdate,
+    findByIdAndDelete,
     findOneAndUpdate,
     create,
   },
@@ -226,8 +229,8 @@ describe('admin site announcement handlers', () => {
     );
   });
 
-  it('soft-deletes by deactivating the announcement', async () => {
-    findByIdAndUpdate.mockResolvedValue({ _id: '507f1f77bcf86cd799439011', isActive: false });
+  it('CA6: deletes the announcement (hiding stays the separate active toggle)', async () => {
+    findByIdAndDelete.mockResolvedValue({ _id: '507f1f77bcf86cd799439011' });
     const res = mockRes();
     await deleteSiteAnnouncement(
       { params: { id: '507f1f77bcf86cd799439011' } } as unknown as Request,
@@ -235,11 +238,15 @@ describe('admin site announcement handlers', () => {
       vi.fn(),
     );
 
-    expect(findByIdAndUpdate).toHaveBeenCalledWith(
-      '507f1f77bcf86cd799439011',
-      { isActive: false },
-      { new: true, runValidators: true },
-    );
+    expect(findByIdAndDelete).toHaveBeenCalledWith('507f1f77bcf86cd799439011');
+    expect(findByIdAndUpdate).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({ success: true, data: { deletedId: '507f1f77bcf86cd799439011' } });
+
+    findByIdAndDelete.mockResolvedValue(null);
+    const missing = mockRes();
+    await deleteSiteAnnouncement({ params: { id: '507f1f77bcf86cd799439012' } } as unknown as Request, missing, vi.fn());
+    expect(missing.statusCode).toBe(404);
   });
 });
 

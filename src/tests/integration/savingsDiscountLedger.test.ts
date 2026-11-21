@@ -445,6 +445,29 @@ describeDb('per-payment savings ledger (disposable Mongo)', () => {
     }
   });
 
+  it('FT3-19a: the last milestone takes the discount remainder, so the milestones add up to the quote', async () => {
+    // Q1 on staging: 3,000 + 5,000, Silver 2 % capped at 25. Rounding each
+    // share gave 9.38 + 15.63 = 25.01 and a total one cent below the quote.
+    await User.updateOne({ _id: customerId }, { $set: { manualCustomerLevelOverride: 'Silver' } });
+    const booking = await seedMilestoneBooking();
+    booking.milestonePayments![0].amount = 3000;
+    booking.milestonePayments![1].amount = 5000;
+    booking.quote!.amount = 8000;
+    await booking.save();
+    expect((await createPaymentIntent(String(booking._id), String(customerId), 0, 0)).success).toBe(true);
+    const first = (await Booking.findById(booking._id))!;
+    expect(first.payment!.discount!.loyaltyAmount).toBe(9.38);
+    await recordPaymentDiscountSnapshot(String(booking._id), first.payment!, first.payment!.stripePaymentIntentId);
+    first.milestonePayments![0].status = 'paid';
+    first.payment!.status = 'completed';
+    await first.save();
+    expect((await createPaymentIntent(String(booking._id), String(customerId), 0, 1)).success).toBe(true);
+    const second = (await Booking.findById(booking._id))!;
+    expect(second.payment!.discount!.loyaltyAmount).toBe(15.62);
+    // 2,990.62 + 628.03 = 3,618.65 and 4,984.38 + 1,046.72 = 6,031.10 → 9,649.75.
+    expect(Math.round((first.payment!.totalWithVat! + second.payment!.totalWithVat!) * 100) / 100).toBe(9649.75);
+  });
+
   it.each([true, false])('a losing checkout save preserves a shared active intent: %s', async (sameIntent) => {
     const referral = await seedReferral();
     stripeMocks.intentCancel.mockResolvedValue({ status: 'canceled' });

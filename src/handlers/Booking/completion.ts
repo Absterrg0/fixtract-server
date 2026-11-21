@@ -3,7 +3,6 @@ import mongoose from 'mongoose';
 import { waitUntil } from '@vercel/functions';
 import Booking, { BookingStatus, ExtraCostType } from '../../models/booking';
 import User from '../../models/user';
-import PlatformSettings from '../../models/platformSettings';
 import {
   uploadToS3,
   generateFileName,
@@ -23,8 +22,7 @@ import {
 } from '../../utils/payment';
 import { processReferralCompletion } from '../../utils/referralSystem';
 import { updateProfessionalLevel } from '../../utils/professionalLevelSystem';
-import LoyaltyConfig from '../../models/loyaltyConfig';
-import { getCurrentTier, updateUserLoyalty } from '../../utils/loyaltySystem';
+import { updateUserLoyalty } from '../../utils/loyaltySystem';
 import Payment from '../../models/payment';
 import {
   awardBookingCompletionPoints,
@@ -45,8 +43,10 @@ import {
 } from '../../utils/completionRefund';
 import { DISPUTE_SLA_HOURS } from '../../constants/dispute';
 import { ensureBookingInvoiceArtifacts } from '../../services/invoiceArtifacts';
-import { calculateExtraCostBreakdown } from '../../utils/extraCostAccounting';
-import { commissionedExtraCostTotal } from '../../utils/customerPricing';
+import {
+  computeExtraCostCustomerCharge,
+  getPlatformCommissionPercent,
+} from '../../utils/extraCostCustomerCharge';
 import { getTransferStatus } from '../../utils/paymentSafety';
 import { reconcileExtraCostPayment } from '../../services/extraCostPayment';
 import { isUserFacingError, UserFacingError } from '../../utils/appErrors';
@@ -59,80 +59,7 @@ const ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || proce
 const PROFESSIONAL_COMPLETION_PENDING_STATUS: BookingStatus = 'professional_completed';
 const COMPLETED_BOOKING_STATUS: BookingStatus = 'completed';
 
-const getPlatformCommissionPercent = async () => {
-  try {
-    const platformConfig = await PlatformSettings.getCurrentConfig();
-    return platformConfig.commissionPercent;
-  } catch (configError) {
-    console.warn('Failed to fetch platform commission for extra-cost payment, falling back to env var:', configError);
-    const parsed = Number.parseFloat(process.env.STRIPE_PLATFORM_COMMISSION_PERCENT || '0');
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-};
-
 const roundToTwo = (value: number) => Math.round(value * 100) / 100;
-
-const computeCustomerLoyaltyDiscount = async (customer: any, commissionInclusiveAmount: number) => {
-  if (commissionInclusiveAmount <= 0) return { tier: 'Bronze', percentage: 0, amount: 0 };
-  try {
-    const config = await LoyaltyConfig.getCurrentConfig();
-    if (!config.globalSettings?.isEnabled) return { tier: 'Bronze', percentage: 0, amount: 0 };
-    const minBookingAmount = config.globalSettings.minBookingAmount || 0;
-    if (commissionInclusiveAmount < minBookingAmount) return { tier: 'Bronze', percentage: 0, amount: 0 };
-    const activeTiers = (config.tiers || []).filter((t: any) => t.isActive);
-    if (activeTiers.length === 0) return { tier: 'Bronze', percentage: 0, amount: 0 };
-    const preferredName = customer?.manualCustomerLevelOverride || customer?.loyaltyLevel;
-    const preferred = preferredName ? activeTiers.find((t: any) => t.name === preferredName) : undefined;
-    const tier = preferred || getCurrentTier(activeTiers, customer?.totalSpent || 0);
-    const percentage = tier.discountPercentage || 0;
-    if (percentage <= 0) return { tier: tier.name, percentage: 0, amount: 0 };
-    let amount = roundToTwo(commissionInclusiveAmount * (percentage / 100));
-    if (typeof tier.maxDiscountAmount === 'number' && Number.isFinite(tier.maxDiscountAmount) && amount > tier.maxDiscountAmount) {
-      amount = tier.maxDiscountAmount;
-    }
-    return { tier: tier.name, percentage, amount };
-  } catch (error) {
-    console.error('Loyalty discount calc failed for extra-cost intent:', error);
-    return { tier: 'Bronze', percentage: 0, amount: 0 };
-  }
-};
-
-const computeExtraCostCustomerCharge = async (
-  customer: any,
-  extraCostTotal: number,
-  vatRate = 0,
-  reverseCharge = false,
-  extraCosts?: any[],
-) => {
-  const commissionPercent = await getPlatformCommissionPercent();
-  const subtotalInclCommission = commissionedExtraCostTotal(extraCosts, extraCostTotal, commissionPercent);
-  const loyalty = await computeCustomerLoyaltyDiscount(customer, subtotalInclCommission);
-  const breakdown = calculateExtraCostBreakdown({
-    extraCostNetAmount: extraCostTotal,
-    commissionPercent,
-    customerDiscount: loyalty.amount,
-    customerSubtotal: subtotalInclCommission,
-  });
-  const appliedLoyalty = {
-    ...loyalty,
-    requestedAmount: loyalty.amount,
-    amount: breakdown.customerDiscount,
-  };
-  const customerNetChargeAmount = breakdown.customerChargeAmount;
-  const vatAmount = reverseCharge ? 0 : roundToTwo(customerNetChargeAmount * Math.max(0, vatRate) / 100);
-  const customerChargeAmount = roundToTwo(customerNetChargeAmount + vatAmount);
-  return {
-    commissionPercent,
-    subtotalInclCommission,
-    loyalty: appliedLoyalty,
-    cappedLoyalty: breakdown.customerDiscount,
-    customerNetChargeAmount,
-    vatAmount,
-    customerChargeAmount,
-    platformCommissionAmount: breakdown.platformCommissionAmount,
-    platformFeeAmount: roundToTwo(breakdown.platformCommissionAmount + vatAmount),
-  };
-};
 
 export const professionalCompleteBooking = async (req: Request, res: Response) => {
   let attachmentUrls: string[] = [];
@@ -462,6 +389,232 @@ export const professionalCompleteBooking = async (req: Request, res: Response) =
   }
 };
 
+/**
+ * An extra-cost dispute that an admin resolved (accepted or adjusted to a
+ * positive amount) completes the booking without the customer ever reaching
+ * the extra-cost checkout. That amount is still owed and payable here.
+ */
+export const hasOutstandingResolvedExtraCost = (booking: any): boolean =>
+  booking?.status === COMPLETED_BOOKING_STATUS
+  && booking?.dispute?.type === 'extra_costs'
+  && Boolean(booking?.dispute?.resolvedAt)
+  && booking?.extraCostStatus === 'confirmed'
+  && Number(booking?.extraCostTotal || 0) > 0
+  && booking?.payment?.extraCostPaymentSucceeded !== true
+  && booking?.payment?.extraCostStatus !== 'succeeded';
+
+export class ExtraCostPaymentError extends Error {
+  constructor(public readonly status: number, public readonly code: string, message: string) {
+    super(message);
+    this.name = 'ExtraCostPaymentError';
+  }
+}
+
+/**
+ * Creates (or reuses) the extra-cost PaymentIntent for a booking and persists
+ * the customer charge (net, VAT, loyalty discount) on the booking and payment
+ * rows. Expects `customer`, `professional` and `project` populated.
+ */
+export const prepareExtraCostPaymentIntent = async (booking: any) => {
+  const extraCostTotal = booking.extraCostTotal || 0;
+  const existingExtraCostPiId = booking.payment?.extraCostStripePaymentIntentId;
+  const existingExtraCostSecret = booking.payment?.extraCostClientSecret;
+  // An admin dispute resolution can change the amount after a PaymentIntent
+  // was created; a stale unpaid intent is cancelled and replaced.
+  const storedNet = booking.payment?.extraCostNetAmount;
+  const intentMatchesAmount = storedNet == null || roundToTwo(Number(storedNet)) === roundToTwo(extraCostTotal);
+  if (existingExtraCostPiId && existingExtraCostSecret && !intentMatchesAmount
+    && booking.payment?.extraCostPaymentSucceeded !== true) {
+    try {
+      await stripe.paymentIntents.cancel(existingExtraCostPiId);
+    } catch (cancelError) {
+      console.error(`Failed to cancel stale extra-cost PaymentIntent ${existingExtraCostPiId}:`, cancelError);
+      throw new ExtraCostPaymentError(409, 'EXTRA_COST_PAYMENT_CONFLICT', 'The previous extra-cost payment could not be replaced. Please try again.');
+    }
+  }
+  if (existingExtraCostPiId && existingExtraCostSecret && intentMatchesAmount) {
+    const storedCustomerCharge = booking.payment?.extraCostAmount;
+    const storedCustomerNet = booking.payment?.extraCostCustomerNetAmount;
+    const storedVat = booking.payment?.extraCostVatAmount;
+    const storedDiscount = booking.payment?.extraCostCustomerDiscount;
+    // Amounts are stored VAT-inclusive so the checkout UI can show the same
+    // breakdown and amount that the PaymentIntent will actually charge.
+    return {
+        clientSecret: existingExtraCostSecret,
+        extraCostTotal,
+        customerChargeAmount: storedCustomerCharge,
+        customerNetChargeAmount: storedCustomerNet,
+        vatAmount: storedVat,
+        vatRate: booking.payment?.vatRate ?? 0,
+        loyaltyDiscount: {
+          level: booking.payment?.extraCostLoyaltyTier || (booking.customer as any)?.loyaltyLevel || 'Bronze',
+          percentage: booking.payment?.extraCostLoyaltyPercentage ?? 0,
+          amount: storedDiscount ?? 0,
+        },
+        subtotalInclCommission: roundToTwo(
+          (booking.payment?.extraCostNetAmount ?? extraCostTotal)
+          + (booking.payment?.extraCostPlatformCommission ?? 0)
+          + (storedDiscount ?? 0),
+        ),
+    };
+  }
+
+  let professional = booking.professional as any;
+  if (!professional && booking.project && (booking.project as any).professionalId) {
+    professional = await User.findById((booking.project as any).professionalId);
+  }
+
+  if (!professional?.stripe?.accountId) {
+    throw new ExtraCostPaymentError(400, 'PROFESSIONAL_NO_STRIPE', 'Professional Stripe account not available');
+  }
+
+  const currency = (booking.payment?.currency || 'EUR').toLowerCase();
+  const { commissionPercent, subtotalInclCommission, loyalty, cappedLoyalty, customerNetChargeAmount, customerChargeAmount, vatAmount, platformFeeAmount, platformCommissionAmount } =
+    await computeExtraCostCustomerCharge(
+      booking.customer as any,
+      extraCostTotal,
+      booking.payment?.vatRate,
+      booking.payment?.reverseCharge,
+      (booking as any).extraCosts,
+    );
+  const applicationFeeAmount = convertToStripeAmount(Math.max(0, platformFeeAmount), currency);
+
+  const paymentIntent = await stripe.paymentIntents.create({
+    amount: convertToStripeAmount(customerChargeAmount, currency),
+    currency,
+    payment_method_types: ['card'],
+    capture_method: 'automatic',
+    transfer_data: {
+      destination: professional.stripe.accountId,
+    },
+    ...(applicationFeeAmount > 0 ? { application_fee_amount: applicationFeeAmount } : {}),
+    metadata: {
+      ...buildPaymentMetadata(
+        booking._id.toString(),
+        booking.bookingNumber || '',
+        (booking.customer as any)._id.toString(),
+        professional._id.toString(),
+        professional.stripe.accountId,
+        STRIPE_CONFIG.environment as 'production' | 'test'
+      ),
+      type: 'extra_cost',
+    },
+    description: `Extra costs for Booking #${booking.bookingNumber}`,
+  }, {
+    idempotencyKey: generateIdempotencyKey({
+      bookingId: booking._id.toString(),
+      operation: 'extra-cost-payment-intent',
+      version: `${convertToStripeAmount(customerChargeAmount, currency)}:${booking.extraCosts?.length || 0}`,
+    })
+  });
+
+  booking.set('payment.extraCostStripePaymentIntentId', paymentIntent.id);
+  booking.set('payment.extraCostClientSecret', paymentIntent.client_secret);
+  booking.set('payment.extraCostAmount', customerChargeAmount);
+  booking.set('payment.extraCostCustomerNetAmount', customerNetChargeAmount);
+  booking.set('payment.extraCostVatAmount', vatAmount);
+  booking.set('payment.extraCostPlatformFee', platformFeeAmount);
+  booking.set('payment.extraCostNetAmount', extraCostTotal);
+  booking.set('payment.extraCostCustomerDiscount', cappedLoyalty);
+  // Persist the terms actually applied so a reused PaymentIntent keeps
+  // reporting the same tier and percentage even if the customer levels up.
+  booking.set('payment.extraCostLoyaltyTier', loyalty.tier);
+  booking.set('payment.extraCostLoyaltyPercentage', loyalty.percentage);
+  booking.set('payment.extraCostPlatformCommission', platformCommissionAmount);
+  // Snapshot of the commission this charge used, so later commission changes
+  // never re-price the per-line amounts shown for it.
+  booking.set('payment.extraCostCommissionPercent', commissionPercent);
+  booking.set('payment.extraCostProfessionalPayout', extraCostTotal);
+  booking.set('payment.extraCostStatus', 'pending');
+  booking.set('payment.extraCostPaymentSucceeded', false);
+  booking.set('payment.extraCostTransferStatus', 'pending');
+  try {
+    await withAnonymizationWriteFence([professional._id], async (session) => {
+      await Payment.findOneAndUpdate(
+      { booking: booking._id },
+      {
+        $set: {
+          extraCostAmount: customerChargeAmount,
+          extraCostCustomerNetAmount: customerNetChargeAmount,
+          extraCostVatAmount: vatAmount,
+          extraCostPlatformFee: platformFeeAmount,
+          extraCostNetAmount: extraCostTotal,
+          extraCostCustomerDiscount: cappedLoyalty,
+          extraCostLoyaltyTier: loyalty.tier,
+          extraCostLoyaltyPercentage: loyalty.percentage,
+          extraCostPlatformCommission: platformCommissionAmount,
+          extraCostCommissionPercent: commissionPercent,
+          extraCostProfessionalPayout: extraCostTotal,
+          extraCostStatus: 'pending',
+          extraCostPaymentSucceeded: false,
+          extraCostStripePaymentIntentId: paymentIntent.id,
+          extraCostTransferStatus: 'pending',
+        },
+        $setOnInsert: {
+          booking: booking._id,
+          bookingNumber: booking.bookingNumber,
+          customer: (booking.customer as any)._id,
+          professional: professional._id,
+          currency: currency.toUpperCase(),
+          amount: booking.payment?.amount || 0,
+          status: booking.payment?.status || 'pending',
+        },
+      },
+      { upsert: true, session },
+    );
+    await booking.save(session ? { session } : undefined);
+    });
+  } catch (writeError) {
+    // The PaymentIntent was created before the database transaction. Cancel it
+    // so a failed persistence attempt cannot leave a chargeable orphan.
+    try {
+      await stripe.paymentIntents.cancel(paymentIntent.id);
+    } catch (cancelError) {
+      console.error(`Failed to cancel orphaned extra-cost PaymentIntent ${paymentIntent.id}:`, cancelError);
+    }
+    throw writeError;
+  }
+
+
+  return {
+      clientSecret: paymentIntent.client_secret,
+      extraCostTotal,
+      customerChargeAmount,
+      customerNetChargeAmount,
+      vatAmount,
+      vatRate: booking.payment?.vatRate ?? 0,
+      subtotalInclCommission,
+      loyaltyDiscount: loyalty,
+  };
+};
+
+/**
+ * A Stripe refusal while starting the extra-cost payment is reported to the
+ * customer with a clear message instead of a generic 500 (F1-3). Stripe's own
+ * text can name the connected account, so it is not passed through.
+ */
+export const extraCostProviderError = (error: any): { status: number; error: { code: string; message: string } } | null => {
+  const type = typeof error?.type === 'string' ? error.type : '';
+  if (!type.startsWith('Stripe')) return null;
+  const code = typeof error?.code === 'string' ? error.code : '';
+  if (type === 'StripeCardError') {
+    return { status: 402, error: { code: 'PAYMENT_DECLINED', message: 'Your card was declined. Please use another payment method.' } };
+  }
+  if (code === 'insufficient_capabilities_for_transfer' || code === 'account_invalid') {
+    return {
+      status: 409,
+      error: {
+        code: 'PROFESSIONAL_PAYMENTS_UNAVAILABLE',
+        message: "The professional's payment account cannot receive this payment yet, so the extra costs cannot be paid right now. Please try again later or contact support.",
+      },
+    };
+  }
+  return {
+    status: 502,
+    error: { code: 'PAYMENT_PROVIDER_ERROR', message: 'The payment provider could not start this payment. Please try again later or contact support.' },
+  };
+};
+
 export const createExtraCostPaymentIntent = async (req: Request, res: Response) => {
   try {
     const { bookingId } = req.params;
@@ -493,186 +646,31 @@ export const createExtraCostPaymentIntent = async (req: Request, res: Response) 
       });
     }
 
-    if (booking.status !== 'professional_completed') {
+    if (booking.status !== 'professional_completed' && !hasOutstandingResolvedExtraCost(booking)) {
       return res.status(400).json({
         success: false,
         error: { code: 'INVALID_STATUS', message: `Cannot pay extra costs while booking is "${booking.status}"` }
       });
     }
 
-    const extraCostTotal = booking.extraCostTotal || 0;
-    if (extraCostTotal <= 0) {
+    if ((booking.extraCostTotal || 0) <= 0) {
       return res.status(400).json({
         success: false,
         error: { code: 'NO_EXTRA_COSTS', message: 'No positive extra costs to pay' }
       });
     }
 
-    const existingExtraCostPiId = booking.payment?.extraCostStripePaymentIntentId;
-    const existingExtraCostSecret = booking.payment?.extraCostClientSecret;
-    if (existingExtraCostPiId && existingExtraCostSecret) {
-      const storedCustomerCharge = booking.payment?.extraCostAmount;
-      const storedCustomerNet = booking.payment?.extraCostCustomerNetAmount;
-      const storedVat = booking.payment?.extraCostVatAmount;
-      const storedDiscount = booking.payment?.extraCostCustomerDiscount;
-      // Amounts are stored VAT-inclusive so the checkout UI can show the same
-      // breakdown and amount that the PaymentIntent will actually charge.
-      return res.json({
-        success: true,
-        data: {
-          clientSecret: existingExtraCostSecret,
-          extraCostTotal,
-          customerChargeAmount: storedCustomerCharge,
-          customerNetChargeAmount: storedCustomerNet,
-          vatAmount: storedVat,
-          vatRate: booking.payment?.vatRate ?? 0,
-          loyaltyDiscount: {
-            level: booking.payment?.extraCostLoyaltyTier || (booking.customer as any)?.loyaltyLevel || 'Bronze',
-            percentage: booking.payment?.extraCostLoyaltyPercentage ?? 0,
-            amount: storedDiscount ?? 0,
-          },
-          subtotalInclCommission: roundToTwo(
-            (booking.payment?.extraCostNetAmount ?? extraCostTotal)
-            + (booking.payment?.extraCostPlatformCommission ?? 0)
-            + (storedDiscount ?? 0),
-          ),
-        }
-      });
-    }
-
-    let professional = booking.professional as any;
-    if (!professional && booking.project && (booking.project as any).professionalId) {
-      professional = await User.findById((booking.project as any).professionalId);
-    }
-
-    if (!professional?.stripe?.accountId) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'PROFESSIONAL_NO_STRIPE', message: 'Professional Stripe account not available' }
-      });
-    }
-
-    const currency = (booking.payment?.currency || 'EUR').toLowerCase();
-    const { commissionPercent, subtotalInclCommission, loyalty, cappedLoyalty, customerNetChargeAmount, customerChargeAmount, vatAmount, platformFeeAmount, platformCommissionAmount } =
-      await computeExtraCostCustomerCharge(
-        booking.customer as any,
-        extraCostTotal,
-        booking.payment?.vatRate,
-        booking.payment?.reverseCharge,
-        (booking as any).extraCosts,
-      );
-    const applicationFeeAmount = convertToStripeAmount(Math.max(0, platformFeeAmount), currency);
-
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: convertToStripeAmount(customerChargeAmount, currency),
-      currency,
-      payment_method_types: ['card'],
-      capture_method: 'automatic',
-      transfer_data: {
-        destination: professional.stripe.accountId,
-      },
-      ...(applicationFeeAmount > 0 ? { application_fee_amount: applicationFeeAmount } : {}),
-      metadata: {
-        ...buildPaymentMetadata(
-          booking._id.toString(),
-          booking.bookingNumber || '',
-          (booking.customer as any)._id.toString(),
-          professional._id.toString(),
-          professional.stripe.accountId,
-          STRIPE_CONFIG.environment as 'production' | 'test'
-        ),
-        type: 'extra_cost',
-      },
-      description: `Extra costs for Booking #${booking.bookingNumber}`,
-    }, {
-      idempotencyKey: generateIdempotencyKey({
-        bookingId: booking._id.toString(),
-        operation: 'extra-cost-payment-intent',
-        version: `${convertToStripeAmount(customerChargeAmount, currency)}:${booking.extraCosts?.length || 0}`,
-      })
-    });
-
-    booking.set('payment.extraCostStripePaymentIntentId', paymentIntent.id);
-    booking.set('payment.extraCostClientSecret', paymentIntent.client_secret);
-    booking.set('payment.extraCostAmount', customerChargeAmount);
-    booking.set('payment.extraCostCustomerNetAmount', customerNetChargeAmount);
-    booking.set('payment.extraCostVatAmount', vatAmount);
-    booking.set('payment.extraCostPlatformFee', platformFeeAmount);
-    booking.set('payment.extraCostNetAmount', extraCostTotal);
-    booking.set('payment.extraCostCustomerDiscount', cappedLoyalty);
-    // Persist the terms actually applied so a reused PaymentIntent keeps
-    // reporting the same tier and percentage even if the customer levels up.
-    booking.set('payment.extraCostLoyaltyTier', loyalty.tier);
-    booking.set('payment.extraCostLoyaltyPercentage', loyalty.percentage);
-    booking.set('payment.extraCostPlatformCommission', platformCommissionAmount);
-    // Snapshot of the commission this charge used, so later commission changes
-    // never re-price the per-line amounts shown for it.
-    booking.set('payment.extraCostCommissionPercent', commissionPercent);
-    booking.set('payment.extraCostProfessionalPayout', extraCostTotal);
-    booking.set('payment.extraCostStatus', 'pending');
-    booking.set('payment.extraCostPaymentSucceeded', false);
-    booking.set('payment.extraCostTransferStatus', 'pending');
-    try {
-      await withAnonymizationWriteFence([professional._id], async (session) => {
-        await Payment.findOneAndUpdate(
-        { booking: booking._id },
-        {
-          $set: {
-            extraCostAmount: customerChargeAmount,
-            extraCostCustomerNetAmount: customerNetChargeAmount,
-            extraCostVatAmount: vatAmount,
-            extraCostPlatformFee: platformFeeAmount,
-            extraCostNetAmount: extraCostTotal,
-            extraCostCustomerDiscount: cappedLoyalty,
-            extraCostLoyaltyTier: loyalty.tier,
-            extraCostLoyaltyPercentage: loyalty.percentage,
-            extraCostPlatformCommission: platformCommissionAmount,
-            extraCostCommissionPercent: commissionPercent,
-            extraCostProfessionalPayout: extraCostTotal,
-            extraCostStatus: 'pending',
-            extraCostPaymentSucceeded: false,
-            extraCostStripePaymentIntentId: paymentIntent.id,
-            extraCostTransferStatus: 'pending',
-          },
-          $setOnInsert: {
-            booking: booking._id,
-            bookingNumber: booking.bookingNumber,
-            customer: (booking.customer as any)._id,
-            professional: professional._id,
-            currency: currency.toUpperCase(),
-            amount: booking.payment?.amount || 0,
-            status: booking.payment?.status || 'pending',
-          },
-        },
-        { upsert: true, session },
-      );
-      await booking.save(session ? { session } : undefined);
-      });
-    } catch (writeError) {
-      // The PaymentIntent was created before the database transaction. Cancel it
-      // so a failed persistence attempt cannot leave a chargeable orphan.
-      try {
-        await stripe.paymentIntents.cancel(paymentIntent.id);
-      } catch (cancelError) {
-        console.error(`Failed to cancel orphaned extra-cost PaymentIntent ${paymentIntent.id}:`, cancelError);
-      }
-      throw writeError;
-    }
-
-    return res.json({
-      success: true,
-      data: {
-        clientSecret: paymentIntent.client_secret,
-        extraCostTotal,
-        customerChargeAmount,
-        customerNetChargeAmount,
-        vatAmount,
-        vatRate: booking.payment?.vatRate ?? 0,
-        subtotalInclCommission,
-        loyaltyDiscount: loyalty,
-      }
-    });
+    const data = await prepareExtraCostPaymentIntent(booking);
+    return res.json({ success: true, data });
   } catch (error: any) {
+    if (error instanceof ExtraCostPaymentError) {
+      return res.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+    }
+    const providerError = extraCostProviderError(error);
+    if (providerError) {
+      console.error('Stripe refused the extra cost payment intent:', error?.code || error?.type, error?.message);
+      return res.status(providerError.status).json({ success: false, error: providerError.error });
+    }
     console.error('Error creating extra cost payment intent:', error);
     return res.status(500).json({
       success: false,

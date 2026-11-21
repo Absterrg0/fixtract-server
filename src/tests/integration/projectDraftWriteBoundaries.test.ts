@@ -208,4 +208,22 @@ describeDb('project draft write boundaries (disposable Mongo)', () => {
       });
     });
   }
+
+  // C11-2: a custom RFQ question added while editing a published project is
+  // stored by the draft endpoint (the server keeps the array as sent).
+  it('persists RFQ questions added while editing a published project', async () => {
+    const projectId = await seedProject({ status: 'published', rfqQuestions: [] });
+    const res = response();
+    await createOrUpdateDraft({ user: { id: String(PRO) }, body: { id: String(projectId), rfqQuestions: [
+      { id: 'custom-1', question: 'How old is the current kitchen?', type: 'text', isRequired: true },
+      { id: 'template-2', question: 'Upload photos of the kitchen', type: 'attachment', isRequired: false },
+    ] } } as unknown as Request, res);
+    expect(res.statusCode).toBe(200);
+    const stored: any = await Project.findById(projectId).lean();
+    expect(stored.status).toBe('published');
+    expect(stored.rfqQuestions.map((question: any) => question.question)).toEqual([
+      'How old is the current kitchen?', 'Upload photos of the kitchen',
+    ]);
+  });
 });
+

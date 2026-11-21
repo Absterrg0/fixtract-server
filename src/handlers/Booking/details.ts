@@ -10,6 +10,7 @@ import { resolveBookingViewerRole } from '../../utils/invoiceVisibility';
 import { referenceId } from '../../utils/bookingDetails/attachments';
 import { collectActorIds, loadActorMap } from '../../utils/bookingDetails/actors';
 import { buildBookingDetails } from '../../utils/bookingDetails/projection';
+import { extraCostChargeDue } from '../../utils/extraCostCustomerCharge';
 import type { BookingDetailsDto, DetailsViewerRole } from '../../utils/bookingDetails/types';
 import {
   isAdminUser,
@@ -64,9 +65,7 @@ export const buildDetailsForBookingDocument = async (params: {
     Payment.find({ booking: bookingId }).sort({ createdAt: 1 }).lean(),
     CancellationRequest.find({ booking: bookingId }).sort({ createdAt: 1 }).lean(),
     WarrantyClaim.find({ booking: bookingId }).sort({ openedAt: 1 }).lean(),
-    viewerRole === 'customer'
-      ? Booking.findById(bookingId).select('paymentDiscountLedger').lean()
-      : null,
+    Booking.findById(bookingId).select('paymentDiscountLedger').lean(),
     BookingEvent.find({ booking: bookingId }).sort({ at: 1, _id: 1 }).lean(),
   ]);
   const professionalIdFromProject = referenceId(plain?.project?.professionalId);
@@ -95,12 +94,22 @@ export const buildDetailsForBookingDocument = async (params: {
     ...plain,
     ...(!plain.professional && ownerProfiles[0] ? { professional: ownerProfiles[0] } : {}),
     paymentDiscountLedger: viewerRole === 'customer' ? discountHistory?.paymentDiscountLedger : undefined,
+    // Charge per paid milestone for every viewer (no discount detail): the
+    // Payment row of an earlier milestone is overwritten by the next one (F1-6).
+    __milestoneCharges: ((discountHistory as any)?.paymentDiscountLedger || [])
+      .filter((entry: any) => typeof entry?.milestoneIndex === 'number')
+      .map((entry: any) => ({
+        milestoneIndex: entry.milestoneIndex,
+        paymentIntentId: entry.paymentIntentId,
+        currency: entry.currency,
+        totalWithVat: entry.totalWithVat,
+      })),
     __cancellationRequests: adminAccess && !adminAccess.cancellations ? [] : cancellations,
     // Append-only status archive (models/bookingEvent), merged into the activity timeline.
     __bookingEvents: bookingEvents,
   };
 
-  return buildBookingDetails({
+  const details = await buildBookingDetails({
     booking: bookingForProjection,
     payments,
     cancellations,
@@ -110,6 +119,21 @@ export const buildDetailsForBookingDocument = async (params: {
     viewerRole,
     adminAccess,
   });
+  if (viewerRole === 'customer' && details.extraCosts) {
+    // F1-3: the pay card shows the amount the extra-cost charge will take
+    // (loyalty capped at the commission), the same as the invoice's amount due.
+    try {
+      const customerId = referenceId(plain.customer);
+      const loyaltyProfile = customerId && Number(plain.extraCostTotal || 0) > 0
+        ? await User.findById(customerId).select('loyaltyLevel manualCustomerLevelOverride totalSpent').lean()
+        : null;
+      details.extraCosts.customerChargeDue = loyaltyProfile ? await extraCostChargeDue(plain, loyaltyProfile) : null;
+    } catch (error) {
+      console.error('Failed to compute the extra-cost charge due for booking details:', error);
+      details.extraCosts.customerChargeDue = null;
+    }
+  }
+  return details;
 };
 
 const loadBookingWithDetails = async (bookingId: string) => {

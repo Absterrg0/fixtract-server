@@ -15,10 +15,13 @@ import type { InvoiceViewerRole } from '../utils/invoiceVisibility';
 export const commissionVisibility = (req: Request, res: Response, next: NextFunction) => {
   const json = res.json;
   res.json = function (body: any) {
-    const isAdmin = req.user?.role === 'admin' || (req.user as any)?.isAdmin === true;
+    // The admin router authenticates with `requireAdmin`, which sets
+    // `req.admin` (not `req.user`); that caller is an admin too.
+    const viewer: any = req.user ?? req.admin;
+    const isAdmin = viewer?.role === 'admin' || viewer?.isAdmin === true;
     const role: InvoiceViewerRole = isAdmin
       ? 'admin'
-      : req.user?.role === 'professional' ? 'professional' : 'customer';
+      : viewer?.role === 'professional' ? 'professional' : 'customer';
     const canReadPayments = isAdmin && res.locals?.canReadPayments === true;
     return json.call(this, quotationForViewer(body, role, canReadPayments));
   };

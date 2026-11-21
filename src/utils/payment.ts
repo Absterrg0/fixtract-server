@@ -496,3 +496,18 @@ export default {
   buildPaymentMetadata,
   buildTransferMetadata,
 };
+
+/**
+ * Display name of a selected option: the stored name, else the project's or
+ * the checkout snapshot's option name. Never the raw option id (F1-8: quote
+ * checkouts labelled the option "6b000132fa98d2c30dbce71d").
+ */
+export const selectedOptionLabel = (booking: any, option: any): string => {
+  const id = String(option?.extraOptionId ?? '');
+  const projectOptions = Array.isArray(booking?.project?.extraOptions) ? booking.project.extraOptions : [];
+  const projectOption = projectOptions.find((entry: any, index: number) =>
+    String(entry?._id ?? index) === id || String(index) === id);
+  const snapshotOptions = Array.isArray(booking?.checkoutSnapshot?.selectedOptions) ? booking.checkoutSnapshot.selectedOptions : [];
+  const snapshotOption = snapshotOptions.find((entry: any) => String(entry?.extraOptionId ?? '') === id);
+  return String(option?.name || projectOption?.name || snapshotOption?.name || 'Option');
+};

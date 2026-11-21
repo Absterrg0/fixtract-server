@@ -28,6 +28,7 @@ import {
   markMilestonesCompleted,
 } from '../../utils/bookingHelpers';
 import { auditLog } from '../../utils/auditLogger';
+import { hasOutstandingResolvedExtraCost, prepareExtraCostPaymentIntent } from '../Booking/completion';
 import { getProfessionalDisplayName } from '../../utils/displayName';
 import { presignS3Url } from '../../utils/s3Upload';
 import { buildProjectScheduleWindow, getBookingScheduleOptions } from '../../utils/scheduleEngine';
@@ -818,9 +819,19 @@ export const resolveDispute = async (req: Request, res: Response) => {
         // This flow owns its resolved 'refunded' state. Only its partial
         // cancellation becomes cancelled; the generic refund core preserves
         // dispute-managed and completed lifecycle states.
+        // C11-1: record the final status too, so the activity does not end
+        // on the transient "Refunded" of a partial dispute refund.
         resolvedBooking = await Booking.findOneAndUpdate({
           _id: resolvedBooking._id, status: 'refunded', 'payment.status': 'partially_refunded',
-        }, { $set: { status: 'cancelled' } }, { new: true })
+        }, {
+          $set: { status: 'cancelled' },
+          $push: { statusHistory: {
+            status: 'cancelled',
+            timestamp: new Date(),
+            updatedBy: adminUser._id,
+            note: 'Partial dispute refund: booking cancelled with the remainder billable',
+          } },
+        }, { new: true })
           || await Booking.findById(resolvedBooking._id) || resolvedBooking;
         await Booking.updateOne(
           { _id: resolvedBooking._id },
@@ -956,6 +967,31 @@ export const resolveDispute = async (req: Request, res: Response) => {
         }
       } catch (e) {
         console.error('Post-resolve Stripe step failed:', e);
+      }
+      // An accepted or adjusted extra-cost dispute completes the booking
+      // before the customer ever reached the extra-cost checkout. Prepare that
+      // charge now (same amounts as the regular checkout, loyalty included),
+      // so the invoices state it as due and the customer can pay it from the
+      // booking page.
+      if (isExtraCostsDispute && finalExtraCostAmount > 0) {
+        try {
+          const chargeable = await Booking.findById(resolvedBooking._id)
+            .populate('customer')
+            .populate('professional')
+            .populate('project', 'professionalId title');
+          if (chargeable && hasOutstandingResolvedExtraCost(chargeable)) {
+            await prepareExtraCostPaymentIntent(chargeable);
+            await notify({
+              userId: String((chargeable.customer as any)?._id || chargeable.customer),
+              eventKey: 'customer.completion_extra_payment_due',
+              entityType: 'booking',
+              entityId: String(chargeable._id),
+              context: { bookingId: String(chargeable._id) },
+            });
+          }
+        } catch (chargeError) {
+          console.error('Failed to prepare the resolved extra-cost payment:', chargeError);
+        }
       }
       // An admin-forced completion must leave the same FIX/SUP artifacts as
       // a customer-confirmed one, also when the capture/transfer above threw:

@@ -2,7 +2,6 @@ import { withCommission } from "../customerPricing";
 
 export type ProjectSearchDimensions = {
   services?: string[];
-  geographicArea?: string;
   priceModels?: string[];
   projectTypes?: string[];
   includedItems?: string[];
@@ -94,7 +93,6 @@ export const projectMatchesDimensions = (
   const services = [project?.service, ...(Array.isArray(project?.services) ? project.services.flatMap((item: any) => [item?.name, item?.service, item?.serviceName]) : [])];
   if (filter("services") && !matchProjectValues(dimensions.services, services)) return false;
   if (filter("areasOfWork") && !matchProjectValues(dimensions.areasOfWork, [project?.areaOfWork, ...(project?.services || []).map((item: any) => item?.areaOfWork)])) return false;
-  if (filter("geographicArea") && dimensions.geographicArea && !normalizeSearchValue(project?.distance?.address).includes(normalizeSearchValue(dimensions.geographicArea))) return false;
   if (filter("category") && dimensions.category && !normalizeSearchValue(project?.category).includes(normalizeSearchValue(dimensions.category))) return false;
   return true;
 };

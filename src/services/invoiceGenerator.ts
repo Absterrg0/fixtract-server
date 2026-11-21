@@ -949,7 +949,7 @@ export async function generateBookingInvoice(
       cost.type === "unit_adjustment" &&
       Number.isFinite(cost.actualUnits) &&
       Number.isFinite(cost.estimatedUnits)
-        ? ` (${cost.estimatedUnits} est. → ${cost.actualUnits}${costUnit ? ` ${costUnit}` : ""} actual)`
+        ? ` (${cost.estimatedUnits} est. -> ${cost.actualUnits}${costUnit ? ` ${costUnit}` : ""} actual)`
         : cost.type === "unit_adjustment" && Number.isFinite(cost.actualUnits)
           ? ` (${cost.actualUnits}${costUnit ? ` ${costUnit}` : ""})`
           : "";
@@ -1265,28 +1265,47 @@ export async function generateBookingInvoice(
           // A VAT breakdown already represents the full customer-facing
           // service net. In that case its pricing lines include the selected
           // options and must not be appended a second time.
+          // Show the pre-discount service price and let the discount lines
+          // carry the reduction, so the printed total is the sum of all lines.
+          const displayTarget = roundInvoiceMoney(customerServiceNet + sign * customerServiceDiscountTotal);
+          // Without source lines, options scale by the commission only (full
+          // customer price over full supplier price). The supplier net is
+          // after the professional's repeat-buyer share but carries no
+          // loyalty discount, so the discounted ratio scaled the options down
+          // once loyalty applied (F1-1: 141.67 / 808.33 instead of 150 / 800).
+          const fullSupplierServiceNet = supplierServiceNet + supplierRepeatDiscount;
+          const optionScale = scaledQuoteLines.length === 0 && !sourceIsCustomerNet && fullSupplierServiceNet > 0
+            ? Math.abs(displayTarget) / fullSupplierServiceNet
+            : customerScale;
           const scaledOptionLines = sourceIsCustomerNet
             ? []
             : optionLines.map((line) => ({
                 ...line,
-                amount: line.amount * customerScale,
+                amount: line.amount * optionScale,
               }));
-          const serviceLines = scaledQuoteLines.length > 0
+          // Without source lines the service line is the remainder of the
+          // full (pre-discount) price after the options. Taking it from the
+          // discounted net and grossing every line up afterwards would shift
+          // part of the discount onto the options (FT3-25a: 783.33 + 166.67
+          // instead of 800 + 150).
+          const fallbackServiceLine = scaledQuoteLines.length === 0;
+          const serviceLines = !fallbackServiceLine
             ? scaledQuoteLines
             : [{
                 description: serviceLabel,
                 amount: Math.max(
                   0,
-                  Math.abs(customerServiceNet) - scaledOptionLines.reduce((sum, line) => sum + Math.abs(line.amount), 0),
+                  Math.abs(displayTarget) - scaledOptionLines.reduce((sum, line) => sum + Math.abs(line.amount), 0),
                 ) * (sign < 0 ? -1 : 1),
                 vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
                 quantity: hasUnits ? unitQuantity : undefined,
-                unitPrice: hasUnitPrice ? unitPrice * customerScale : undefined,
+                unitPrice: hasUnitPrice ? unitPrice * optionScale : undefined,
                 ...(hasUnits && checkoutUnit ? { unit: checkoutUnit } : {}),
               }];
           const serviceLinesWithOptions = [...serviceLines, ...scaledOptionLines];
           const serviceLineTotal = serviceLinesWithOptions.reduce((sum, line) => sum + Number(line.amount || 0), 0);
-          const adjustment = Math.round((customerServiceNet - serviceLineTotal) * 100) / 100;
+          const adjustmentTarget = fallbackServiceLine ? displayTarget : customerServiceNet;
+          const adjustment = Math.round((adjustmentTarget - serviceLineTotal) * 100) / 100;
           if (Math.abs(adjustment) >= 0.01) {
             serviceLinesWithOptions.push({
               description: adjustment > 0 ? "Platform commission" : "Payment discount adjustment",
@@ -1294,9 +1313,6 @@ export async function generateBookingInvoice(
               vatRate: reverseCharge ? 0 : booking.payment.vatRate ?? 0,
             });
           }
-          // Show the pre-discount service price and let the discount lines above
-          // carry the reduction, so the printed total is the sum of all lines.
-          const displayTarget = roundInvoiceMoney(customerServiceNet + sign * customerServiceDiscountTotal);
           return [...scaleLineItemsToTotal(serviceLinesWithOptions, displayTarget), ...extraCostLines];
         })(),
     discounts,

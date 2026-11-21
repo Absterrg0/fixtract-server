@@ -3,6 +3,7 @@ import { runWithRequestActor } from '../../utils/requestActor';
 import User, { IUser } from "../../models/user";
 import connecToDatabase from "../../config/db";
 import jwt from 'jsonwebtoken';
+import { attachAdminPaymentsAccess } from "../../middlewares/auth";
 import { sendProfessionalApprovalEmail, sendProfessionalIdChangeApprovalEmail, sendProfessionalIdChangeRejectionEmail, sendProfessionalRejectionEmail, sendProfessionalSuspensionEmail, sendProfessionalReactivationEmail } from "../../utils/emailService";
 import { getProfessionalDisplayName } from "../../utils/displayName";
 import { deleteFromS3, getPresignedUrl, parseS3KeyFromUrl, presignS3Url } from "../../utils/s3Upload";
@@ -113,6 +114,8 @@ export const requireAdmin = async (req: Request, res: Response, next: NextFuncti
     }
 
     req.admin = adminUser;
+    // Payments read decides whether the final JSON boundary keeps amounts.
+    await attachAdminPaymentsAccess(adminUser, res);
     return runWithRequestActor(adminUser, () => next());
   } catch (error: any) {
     console.error('Require admin error:', error);

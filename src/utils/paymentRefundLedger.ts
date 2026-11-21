@@ -140,3 +140,32 @@ export const recordBasePaymentRefund = async (params: {
     return Boolean(retry);
   }
 };
+
+/**
+ * Customer charges (VAT incl.) of every recorded milestone checkout, per
+ * booking, from the per-payment discount ledger. booking.payment only
+ * describes the latest checkout, so a quote booking's paid price would
+ * otherwise show the last milestone alone (FT2-13). Bookings without
+ * milestone ledger entries are absent from the map.
+ */
+export const loadSettledMilestoneTotals = async (
+  bookingIds: Array<Types.ObjectId | string>,
+): Promise<Map<string, number>> => {
+  const ids = [...new Set(bookingIds.map((id) => String(id)))].filter((id) => Types.ObjectId.isValid(id));
+  const totals = new Map<string, number>();
+  if (ids.length === 0) return totals;
+  const { default: Booking } = await import('../models/booking');
+  const rows = await Booking.find({ _id: { $in: ids.map((id) => new Types.ObjectId(id)) }, 'milestonePayments.0': { $exists: true } })
+    .select('_id +paymentDiscountLedger')
+    .lean();
+  for (const row of rows as any[]) {
+    const entries = (row.paymentDiscountLedger || []).filter((entry: any) =>
+      typeof entry?.milestoneIndex === 'number' && Number.isFinite(Number(entry?.totalWithVat)));
+    if (entries.length === 0) continue;
+    const byMilestone = new Map<number, number>();
+    for (const entry of entries) byMilestone.set(entry.milestoneIndex, Number(entry.totalWithVat));
+    const sum = [...byMilestone.values()].reduce((total, value) => total + value, 0);
+    totals.set(String(row._id), Math.round((sum + Number.EPSILON) * 100) / 100);
+  }
+  return totals;
+};

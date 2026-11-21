@@ -32,15 +32,19 @@ import type {
 } from './types';
 import { actorForId, isActorRecorded, type ActorMap } from './actors';
 import { getCheckoutCommissionPercent } from '../checkoutCommission';
+import { quoteAmountIncludesSelectedExtras } from '../payment';
 import {
   checkoutCustomerTotal,
+  commissionedQuoteAmount,
+  customerUnitPrice,
+  optionsCustomerCharge,
   commissionedExtraCostLines,
   commissionedExtraCostTotal,
   recordedExtraCostCustomerSubtotal,
   resolveExtraCostChargeCommissionPercent,
   type ExtraCostChargeRecord,
 } from '../customerPricing';
-import { buildMilestoneChargePlan, milestoneCustomerCharge } from '../milestoneCharges';
+import { buildMilestoneChargePlan, milestoneCustomerCharge, quoteVersionMilestoneCustomerTotals } from '../milestoneCharges';
 import {
   presignOwnedUrl,
   presignQuestionAnswerUrl,
@@ -105,6 +109,35 @@ const dateOnly = (value: unknown): string | null => {
   return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
 };
 
+const UTC_MIDNIGHT_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Calendar day (YYYY-MM-DD) a stored schedule value names, in the booking's
+ * zone. Day-mode starts are stored as the professional's local midnight
+ * (2026-11-22T23:00Z = 23/11 in Brussels); cutting the UTC ISO string showed
+ * them one day early on the booking page (C11-1x). Date-only strings and UTC
+ * midnights (dates stored without a time) keep their own date; with no known
+ * zone the UTC day is kept (previous behaviour).
+ */
+const calendarDateIn = (value: unknown, timeZone: string | null | undefined): string | null => {
+  if (!value) return null;
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return value.trim();
+  const date = value instanceof Date ? value : new Date(value as any);
+  const time = date.getTime();
+  if (Number.isNaN(time)) return null;
+  if (!timeZone || time % UTC_MIDNIGHT_MS === 0) return date.toISOString().slice(0, 10);
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date);
+  } catch {
+    return date.toISOString().slice(0, 10);
+  }
+};
+
 const num = (value: unknown): number | null => {
   const parsed = Number(value);
   return value !== null && value !== '' && Number.isFinite(parsed) ? parsed : null;
@@ -152,13 +185,14 @@ const rejectionReasonFromNote = (note: string): string | null => {
   return value ? value : null;
 };
 
-const mapScheduleSnapshot = (schedule: any): ScheduleSnapshotDto | null => {
+const mapScheduleSnapshot = (schedule: any, timeZone?: string | null): ScheduleSnapshotDto | null => {
   if (!schedule) return null;
+  const zone = isValidIanaTimeZone(schedule.timeZone) ? schedule.timeZone : timeZone;
   return {
-    scheduledStartDate: dateOnly(schedule.scheduledStartDate),
-    scheduledExecutionEndDate: dateOnly(schedule.scheduledExecutionEndDate),
-    scheduledBufferStartDate: dateOnly(schedule.scheduledBufferStartDate),
-    scheduledBufferEndDate: dateOnly(schedule.scheduledBufferEndDate),
+    scheduledStartDate: calendarDateIn(schedule.scheduledStartDate, zone),
+    scheduledExecutionEndDate: calendarDateIn(schedule.scheduledExecutionEndDate, zone),
+    scheduledBufferStartDate: calendarDateIn(schedule.scheduledBufferStartDate, zone),
+    scheduledBufferEndDate: calendarDateIn(schedule.scheduledBufferEndDate, zone),
     scheduledBufferUnit: schedule.scheduledBufferUnit || null,
     scheduledStartTime: str(schedule.scheduledStartTime),
     scheduledEndTime: str(schedule.scheduledEndTime),
@@ -173,6 +207,20 @@ const mapScheduleSnapshot = (schedule: any): ScheduleSnapshotDto | null => {
   };
 };
 
+/**
+ * Professional total of a booking without quotation versions: the stored
+ * quote amount plus the selected options when the checkout kept them outside
+ * the quote (C11-1: a €800 package + €150 option showed €800).
+ */
+const legacyQuoteProfessionalTotal = (booking: any): number | null => {
+  const amount = num(booking?.quote?.amount);
+  if (amount == null) return null;
+  if (quoteAmountIncludesSelectedExtras(booking)) return amount;
+  const options = (Array.isArray(booking?.selectedExtraOptions) ? booking.selectedExtraOptions : [])
+    .reduce((sum: number, option: any) => sum + (num(option?.bookedPrice) ?? 0), 0);
+  return roundMoney(amount + options);
+};
+
 /** Adds the customer checkout total for non-professional viewers, with the same arithmetic as checkout. */
 const withCustomerCheckoutTotal = async (
   checkout: CheckoutSnapshotDto | null,
@@ -181,7 +229,23 @@ const withCustomerCheckoutTotal = async (
 ): Promise<CheckoutSnapshotDto | null> => {
   if (!checkout) return checkout;
   if (viewerRole === 'professional') return { ...checkout, customerTotal: null };
-  return { ...checkout, customerTotal: checkoutCustomerTotal(snapshot, await getCheckoutCommissionPercent()) };
+  const commissionPercent = await getCheckoutCommissionPercent();
+  return {
+    ...checkout,
+    customerTotal: checkoutCustomerTotal(snapshot, commissionPercent),
+    // C11-1: customers never receive the professional unit price, subtotal or
+    // option prices; these are their customer-side equivalents (same
+    // arithmetic and commission as the customer total above).
+    customerPrices: {
+      unitPrice: customerUnitPrice(Number(snapshot?.unitAmount) || 0, commissionPercent),
+      baseSubtotal: commissionedQuoteAmount(Number(snapshot?.baseSubtotal) || 0, snapshot, commissionPercent),
+      extraOptionsTotal: optionsCustomerCharge(Number(snapshot?.extraOptionsTotal) || 0, commissionPercent),
+      options: checkout.selectedOptions.map((option) => ({
+        unitPrice: optionsCustomerCharge(Number(option.unitPrice) || 0, commissionPercent),
+        totalPrice: optionsCustomerCharge(Number(option.totalPrice) || 0, commissionPercent),
+      })),
+    },
+  };
 };
 
 const mapCheckoutSnapshot = (snapshot: any): CheckoutSnapshotDto | null => {
@@ -509,13 +573,31 @@ const buildPayments = async (params: {
   const paymentRows = resolvedPaymentRows.map((row) => row.payment);
 
   const records: PaymentRecordDto[] = [];
+  const hasInvoiceDocuments = (source: any) => Boolean(source && (
+    source.invoiceNumber || source.invoiceUrl || source.supplierInvoiceNumber
+    || source.supplierInvoiceUrl || source.creditNoteNumber || source.creditNoteUrl
+  ));
+  // Invoice artifacts are booking documents: they are written to
+  // booking.payment (and to the non-milestone Payment row only). A milestone
+  // booking's Payment rows never carry them, so the record of the checkout
+  // booking.payment describes shows the booking's documents (FT3-19d).
+  const bookingInvoicePayment = fallbackPayment && hasInvoiceDocuments(fallbackPayment)
+    ? (viewerRole === 'admin'
+      ? filterPaymentForAdminArea(fallbackPayment, canSeeAdminInternals)
+      : sanitizePaymentForViewer(fallbackPayment, viewerRole))
+    : null;
+  const bookingInvoiceIntent = str(fallbackPayment?.stripePaymentIntentId);
+  const anyRowHasInvoice = paymentRows.some((payment) => hasInvoiceDocuments(payment));
   for (const payment of paymentRows) {
     const currency = str(payment.currency) || str(quoteCurrency) || 'EUR';
     const visiblePayment = viewerRole === 'admin'
       ? filterPaymentForAdminArea(payment, canSeeAdminInternals)
       : sanitizePaymentForViewer(payment, viewerRole);
     const invoice = await (async (): Promise<RoleInvoiceDto | null> => {
-      const source = visiblePayment;
+      const source = !anyRowHasInvoice && bookingInvoicePayment
+        && (!bookingInvoiceIntent || str(payment.stripePaymentIntentId) === bookingInvoiceIntent)
+        ? bookingInvoicePayment
+        : visiblePayment;
       if (!source || !(
         source.invoiceNumber || source.invoiceUrl || source.supplierInvoiceNumber
         || source.supplierInvoiceUrl || source.creditNoteNumber || source.creditNoteUrl
@@ -733,17 +815,32 @@ const buildPayments = async (params: {
       console.error('Failed to resolve milestone details charge:', error);
     }
   }
+  // Payment rows are upserted per booking, so a later milestone checkout
+  // overwrites an earlier milestone's row. The per-payment discount ledger
+  // keeps one entry per succeeded milestone charge: it supplies the charge of
+  // a paid milestone that lost its row (F1-6: deposit shown as the expected
+  // €4,075.44 instead of the €4,077.27 charged, totals without it).
+  const ledgerEntries: any[] = Array.isArray(booking.__milestoneCharges)
+    ? booking.__milestoneCharges
+    : Array.isArray(booking.paymentDiscountLedger) ? booking.paymentDiscountLedger : [];
+  const ledgerChargeFor = (milestone: any, index: number): any | null => {
+    if (milestone?.status !== 'paid') return null;
+    const entries = ledgerEntries.filter((entry) =>
+      num(entry?.milestoneIndex) === index && num(entry?.totalWithVat) != null);
+    return entries.length > 0 ? entries[entries.length - 1] : null;
+  };
   const milestones = (Array.isArray(booking.milestonePayments) ? booking.milestonePayments : []).map(
     (milestone: any, index: number) => {
       const matchingRows = paymentRows.filter(payment => num(payment.milestoneIndex) === index);
       const settled = matchingRows.find(payment => ['completed', 'partially_refunded', 'refunded'].includes(payment.status));
       const matching = settled || matchingRows.find(payment => ['pending', 'authorized'].includes(payment.status));
+      const ledgerCharge = matching ? null : ledgerChargeFor(milestone, index);
       const planEntry = milestoneChargePlan.find((entry) => entry.index === index);
       return {
         index,
         title: String(milestone.title || ''),
         amount: num(milestone.amount) ?? 0,
-        currency: str(matching?.currency) || str(booking.payment?.currency) || str(quoteCurrency),
+        currency: str(matching?.currency) || str(ledgerCharge?.currency) || str(booking.payment?.currency) || str(quoteCurrency),
         status: milestone.status || 'pending',
         workStatus: milestone.workStatus || 'pending',
         dueCondition: milestone.dueCondition || 'on_start',
@@ -751,7 +848,8 @@ const buildPayments = async (params: {
         startedAt: iso(milestone.startedAt),
         completedAt: iso(milestone.completedAt),
         paidAt: iso(milestone.paidAt),
-        customerChargeTotalWithVat: num((settled || matchingRows.find(payment => payment.status === 'authorized'))?.totalWithVat),
+        customerChargeTotalWithVat: num((settled || matchingRows.find(payment => payment.status === 'authorized'))?.totalWithVat)
+          ?? (ledgerCharge ? num(ledgerCharge.totalWithVat) : null),
         paymentRowPresent: Boolean(matching),
         expectedCustomerCharge: planEntry ? milestoneCustomerCharge(booking, planEntry, paymentRows) : null,
         expectedCustomerNetBeforeDiscount: planEntry?.expectedCustomerGross ?? null,
@@ -869,6 +967,17 @@ const buildPayments = async (params: {
       }
     }
   }
+  // Paid milestones whose row was overwritten: their ledger charge (F1-6).
+  const rowIntents = new Set(paymentRows.map((payment) => str(payment.stripePaymentIntentId)).filter(Boolean));
+  (Array.isArray(booking.milestonePayments) ? booking.milestonePayments : []).forEach((milestone: any, index: number) => {
+    if (paymentRows.some((payment) => num(payment.milestoneIndex) === index)) return;
+    const entry = ledgerChargeFor(milestone, index);
+    if (!entry || (str(entry.paymentIntentId) && rowIntents.has(str(entry.paymentIntentId)))) return;
+    const currency = str(entry.currency) || str(booking.payment?.currency) || str(quoteCurrency);
+    if (!currency) return;
+    if (!byCurrencyMap.has(currency)) byCurrencyMap.set(currency, { charged: 0, refunded: 0, complete: true });
+    byCurrencyMap.get(currency)!.charged += num(entry.totalWithVat) ?? 0;
+  });
   for (const refund of refunds) {
     if (refund.kind !== 'booking' || !refund.cashReturned) continue;
     if (!byCurrencyMap.has(refund.currency)) byCurrencyMap.set(refund.currency, { charged: 0, refunded: 0, complete: true });
@@ -984,6 +1093,35 @@ export const buildBookingDetails = async (params: {
   const projectId = referenceId(booking.project) || str((booking.bookingSnapshot as any)?.project?.id);
   const captured = booking.bookingSnapshot || null;
   const capturedAt = iso(captured?.capturedAt);
+  // Zone the booking's calendar dates are read in (C11-1x): the recorded
+  // schedule zone, else the professional's zone (quotes before checkout).
+  const calendarTimeZone = [
+    booking.scheduleTimeZone,
+    captured?.schedule?.timeZone,
+    captured?.parties?.professional?.timezone,
+    professional?.businessInfo?.timezone,
+    professional?.timeZone,
+  ].find((zone) => isValidIanaTimeZone(zone)) || null;
+  // Shadows the module helper on purpose: every calendar date of this
+  // booking is projected as its local day, not its UTC day.
+  const dateOnly = (value: unknown): string | null => calendarDateIn(value, calendarTimeZone);
+  // Snapshots captured before C11-1x stored each schedule date as the UTC
+  // day of the instant (23/11 Brussels recorded as 2026-11-22). Such a legacy
+  // value that is exactly the UTC day of the booking's own instant is shown
+  // as that instant's local day; snapshots marked calendarDays 'local' are
+  // already local.
+  const snapshotScheduleDay = (field: string): string | null => {
+    const recorded = captured?.schedule?.[field];
+    const zone = isValidIanaTimeZone(captured?.schedule?.timeZone) ? captured.schedule.timeZone : null;
+    if (captured?.schedule?.calendarDays !== 'local' && zone && typeof recorded === 'string'
+      && /^\d{4}-\d{2}-\d{2}$/.test(recorded) && booking[field]) {
+      const live = booking[field] instanceof Date ? booking[field] : new Date(booking[field]);
+      if (Number.isFinite(live.getTime()) && live.toISOString().slice(0, 10) === recorded) {
+        return calendarDateIn(live, zone);
+      }
+    }
+    return dateOnly(recorded);
+  };
   const quoteCurrency = booking.quote?.currency || booking.quoteVersions?.slice(-1)?.[0]?.currency || null;
   const paymentCurrency = booking.payment?.currency || quoteCurrency || null;
 
@@ -1382,9 +1520,12 @@ export const buildBookingDetails = async (params: {
       totalAmount: num(version.totalAmount),
       currency: str(version.currency),
       milestones: Array.isArray(version.milestones)
-        ? version.milestones.map((milestone: any) => ({
+        ? version.milestones.map((milestone: any, milestoneIndex: number) => ({
             title: String(milestone.title || ''),
             amount: num(milestone.amount),
+            // Customer-side total for this milestone (VAT incl.); the
+            // professional `amount` is withheld from customers (FT3-19a).
+            customerTotalWithVat: quoteVersionMilestoneCustomerTotals(version)?.[milestoneIndex] ?? null,
             description: str(milestone.description),
             dueCondition: milestone.dueCondition || 'on_start',
             customDueDate: iso(milestone.customDueDate),
@@ -1408,6 +1549,15 @@ export const buildBookingDetails = async (params: {
         ? { value: num(version.bufferDuration.value)!, unit: version.bufferDuration.unit }
         : null,
       firstPossibleStart: dateOnly(version.firstPossibleStart),
+      vatDetermination: version.vatDetermination
+        ? {
+            customerType: version.vatDetermination.customerType === 'B2B' ? 'B2B' as const : 'B2C' as const,
+            article47Class: str(version.vatDetermination.article47Class),
+            vatAddressType: str(version.vatDetermination.vatAddressType),
+            vatCountry: str(version.vatDetermination.vatCountry),
+            reverseCharge: typeof version.vatDetermination.reverseCharge === 'boolean' ? version.vatDetermination.reverseCharge : null,
+          }
+        : null,
       validUntil: iso(version.validUntil),
       createdAt,
       changeNote: str(version.changeNote),
@@ -1516,7 +1666,7 @@ export const buildBookingDetails = async (params: {
             }
           : null,
         currency: currentVersion?.currency || quoteCurrency,
-        totalAmountProfessional: currentVersion?.totalAmount ?? num(booking.quote?.amount),
+        totalAmountProfessional: currentVersion?.totalAmount ?? legacyQuoteProfessionalTotal(booking),
         versions: quotationVersions,
         history: [],
         rfqHistory: [],
@@ -1703,8 +1853,8 @@ export const buildBookingDetails = async (params: {
       respondedAt: iso(entry.respondedAt),
       respondedBy,
       responseNote: str(entry.responseNote),
-      previousSchedule: mapScheduleSnapshot(entry.previousSchedule),
-      proposedSchedule: mapScheduleSnapshot(entry.proposedSchedule),
+      previousSchedule: mapScheduleSnapshot(entry.previousSchedule, calendarTimeZone),
+      proposedSchedule: mapScheduleSnapshot(entry.proposedSchedule, calendarTimeZone),
       timeZone,
       timeZoneRecorded: Boolean(timeZone),
     });
@@ -1809,7 +1959,7 @@ export const buildBookingDetails = async (params: {
         acceptedVersion: quotation.acceptedVersion?.version ?? null,
         acceptedVersionSource: quotation.acceptedVersion?.source || 'not_recorded',
         status: quotation.status,
-        totalAmount: pinnedVersion?.totalAmount ?? (quotationVersions.length === 0 ? num(booking.quote?.amount) : null),
+        totalAmount: pinnedVersion?.totalAmount ?? (quotationVersions.length === 0 ? legacyQuoteProfessionalTotal(booking) : null),
         currency: pinnedVersion?.currency || (quotationVersions.length === 0 ? quoteCurrency : null),
         validUntil: pinnedVersion?.validUntil || (quotationVersions.length === 0 ? iso(booking.quote?.validUntil) : null),
         firstPossibleStart: pinnedVersion?.firstPossibleStart || null,
@@ -2073,12 +2223,12 @@ export const buildBookingDetails = async (params: {
     schedule: {
       preferredStartDate: dateOnly(captured?.schedule?.preferredStartDate),
       preferredStartTime: str(captured?.schedule?.preferredStartTime),
-      scheduledStartDate: dateOnly(captured?.schedule?.scheduledStartDate),
+      scheduledStartDate: snapshotScheduleDay('scheduledStartDate'),
       scheduledStartTime: str(captured?.schedule?.scheduledStartTime),
       scheduledEndTime: str(captured?.schedule?.scheduledEndTime),
-      scheduledExecutionEndDate: dateOnly(captured?.schedule?.scheduledExecutionEndDate),
-      scheduledBufferStartDate: dateOnly(captured?.schedule?.scheduledBufferStartDate),
-      scheduledBufferEndDate: dateOnly(captured?.schedule?.scheduledBufferEndDate),
+      scheduledExecutionEndDate: snapshotScheduleDay('scheduledExecutionEndDate'),
+      scheduledBufferStartDate: snapshotScheduleDay('scheduledBufferStartDate'),
+      scheduledBufferEndDate: snapshotScheduleDay('scheduledBufferEndDate'),
       timeZone: isValidIanaTimeZone(captured?.schedule?.timeZone) ? captured.schedule.timeZone : null,
       timeZoneRecorded: isValidIanaTimeZone(captured?.schedule?.timeZone),
     },
@@ -2214,4 +2364,4 @@ export const buildBookingDetails = async (params: {
   return quotationForViewer(details, viewerRole, params.adminAccess?.payments === true);
 };
 
-export { mapCheckoutSnapshot, mapScheduleSnapshot, iso, dateOnly, num, str };
+export { mapCheckoutSnapshot, mapScheduleSnapshot, iso, dateOnly, calendarDateIn, num, str };

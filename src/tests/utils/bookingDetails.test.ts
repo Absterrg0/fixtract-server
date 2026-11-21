@@ -725,6 +725,59 @@ describe('details privacy', () => {
     expect(details.payments.records[0]).not.toHaveProperty('professionalPayout');
   });
 
+  it('C11-1: a direct booking\'s professional amount includes the options kept outside the quote', async () => {
+    const direct = {
+      quoteVersions: [], currentQuoteVersion: undefined, quotationNumber: undefined,
+      quote: { amount: 800, currency: 'EUR', breakdown: [{ item: 'checkout_snapshot:computed_total', quantity: 1, unitPrice: 950, totalPrice: 950 }] },
+      checkoutSnapshot: { pricingType: 'fixed', unitAmount: 800, quantity: 1, baseSubtotal: 800, extraOptionsTotal: 150, totalAmount: 950, currency: 'EUR',
+        selectedOptions: [{ extraOptionId: 'opt-1', name: 'Premium Paint', unitPrice: 150, quantity: 1, totalPrice: 150 }] },
+      selectedExtraOptions: [{ extraOptionId: 'opt-1', bookedPrice: 150 }],
+    };
+    const professional: any = await buildDetails('professional', { booking: direct });
+    expect(professional.quotation?.totalAmountProfessional ?? professional.overview?.quote?.totalAmount).toBe(950);
+    if (professional.overview?.quote) expect(professional.overview.quote.totalAmount).toBe(950);
+  });
+
+  it('C11-1: gives customers customer-side checkout composition prices that survive the API boundary', async () => {
+    const { quotationForViewer } = await import('../../utils/quotationVisibility');
+    const customer = await buildDetails('customer');
+    const filtered: any = quotationForViewer({ data: customer }, 'customer', false);
+    // 10 % commission: package 100 → 110, option 20 → 22.
+    expect(filtered.data.payments.checkout.customerPrices).toEqual({
+      unitPrice: 110, baseSubtotal: 110, extraOptionsTotal: 22, options: [{ unitPrice: 22, totalPrice: 22 }],
+    });
+    expect(filtered.data.payments.checkout.customerTotal).toBe(132);
+    // The professional amounts themselves stay withheld from customers.
+    expect(filtered.data.payments.checkout).not.toHaveProperty('unitAmount');
+    const professional = await buildDetails('professional');
+    expect(professional.payments.checkout).not.toHaveProperty('customerPrices');
+  });
+
+  it('FT3-19d: shows the booking invoices on a milestone booking whose Payment rows carry none', async () => {
+    const invoiceFields = {
+      invoiceNumber: 'FIX-2026-000009',
+      invoiceUrl: 'https://fixera-uploads.s3.us-east-1.amazonaws.com/invoices/FIX-2026-000009.pdf',
+      supplierInvoiceNumber: 'SUP-2026-000006',
+      supplierInvoiceUrl: 'https://fixera-uploads.s3.us-east-1.amazonaws.com/invoices/SUP-2026-000006.pdf',
+    };
+    const milestoneRow = payment({
+      stripePaymentIntentId: 'pi_milestone_2', milestoneIndex: 1,
+      invoiceNumber: undefined, invoiceUrl: undefined, supplierInvoiceNumber: undefined, supplierInvoiceUrl: undefined,
+    });
+    const overrides = {
+      booking: { payment: { ...payment({ stripePaymentIntentId: 'pi_milestone_2', milestoneIndex: 1 }), ...invoiceFields } },
+      payments: [milestoneRow],
+    };
+    const customer = await buildDetails('customer', overrides);
+    expect(customer.payments.records.map((record: any) => record.invoice?.invoiceNumber)).toContain('FIX-2026-000009');
+    const professional = await buildDetails('professional', overrides);
+    expect(professional.payments.records.map((record: any) => record.invoice?.supplierInvoiceNumber)).toContain('SUP-2026-000006');
+    expect(JSON.stringify(professional.payments.records)).not.toContain('FIX-2026-000009');
+    const admin = await buildDetails('admin', overrides);
+    const adminInvoice = admin.payments.records.find((record: any) => record.invoice)?.invoice as any;
+    expect(adminInvoice).toMatchObject({ invoiceNumber: 'FIX-2026-000009', supplierInvoiceNumber: 'SUP-2026-000006' });
+  });
+
   it('gives each party only its own invoice side', async () => {
     const customerDetails = await buildDetails('customer');
     expect(customerDetails.payments.records[0].invoice?.invoiceNumber).toBe('FIX-1');
@@ -1528,6 +1581,24 @@ describe('activity', () => {
     });
   });
 
+  it('C11-1: no "Quotation submitted" event for a direct booking\'s auto-generated checkout quote', async () => {
+    const direct = booking({
+      statusHistory: [],
+      quoteVersions: [],
+      currentQuoteVersion: undefined,
+      quote: { amount: 800, currency: 'EUR', submittedAt: paidTime, description: 'Auto-generated checkout quote',
+        breakdown: [{ item: 'checkout_snapshot:selected_package_index:0', quantity: 1, unitPrice: 0, totalPrice: 0 },
+          { item: 'Package Base', quantity: 1, unitPrice: 800, totalPrice: 800 }] },
+    });
+    const context = { payments: [payment()], cancellations: [], warrantyClaims: [], actors, viewerRole: 'customer' as const,
+      customerId: String(customerId), professionalId: String(professionalId) };
+    const activity = await buildBookingActivity({ ...context, booking: direct });
+    expect(activity.items.find((item) => item.type === 'quotation_submitted')).toBeUndefined();
+    // A real legacy quote (no checkout markers) still records its submission.
+    const legacy = await buildBookingActivity({ ...context, booking: { ...direct, quote: { ...direct.quote, breakdown: [{ item: 'Work', totalPrice: 800 }] } } });
+    expect(legacy.items.find((item) => item.type === 'quotation_submitted')).toBeDefined();
+  });
+
   it('emits a payout amount line for a released payment without replacing recorded totals', async () => {
     const released = payment({
       transferredAt: paidTime,
@@ -2046,6 +2117,118 @@ describe('reschedule details', () => {
     const pendingHistory = await buildDetails('customer', { booking: { ...base, status: 'rescheduling_requested',
       rescheduleHistory: [{ ...base.rescheduleHistory[0], status: 'pending' }] } });
     expect(pendingHistory.reschedules.map(entry => entry.canRespond)).toEqual([false, true]);
+  });
+});
+
+describe('milestone charges after the payment row was overwritten (F1-6)', () => {
+  it('shows each paid milestone at its recorded charge and totals both milestones', async () => {
+    // BK-2026-000060: M1 €4,077.27 (deposit + option), M2 €5,995.98. The
+    // Payment row is upserted per booking, so only M2's row remains.
+    const m2Row = payment({
+      milestoneIndex: 1,
+      status: 'completed',
+      stripePaymentIntentId: 'pi_m2',
+      amount: 4955.36,
+      netAmount: 4955.36,
+      vatAmount: 1040.62,
+      totalWithVat: 5995.98,
+    });
+    const base = booking({
+      milestonePayments: [
+        { title: 'Deposit', amount: 3000, status: 'paid', dueCondition: 'on_start', paidAt: paidTime },
+        { title: 'Cabinets installed', amount: 5000, status: 'paid', dueCondition: 'on_completion', paidAt: paidTime },
+      ],
+      payment: { ...m2Row, milestoneIndex: 1 },
+      __milestoneCharges: [
+        { milestoneIndex: 0, paymentIntentId: 'pi_m1', currency: 'EUR', totalWithVat: 4077.27 },
+        { milestoneIndex: 1, paymentIntentId: 'pi_m2', currency: 'EUR', totalWithVat: 5995.98 },
+      ],
+    });
+    for (const role of ['customer', 'professional', 'admin'] as const) {
+      const details = await buildDetails(role, { booking: base, payments: [m2Row] });
+      expect(details.payments.milestones.map((milestone) => milestone.customerChargeTotalWithVat)).toEqual([4077.27, 5995.98]);
+      expect(details.payments.byCurrency).toEqual([
+        expect.objectContaining({ currency: 'EUR', recordedCharged: 10073.25 }),
+      ]);
+    }
+  });
+
+  it('does not count a milestone twice when its own row survived', async () => {
+    const m1Row = payment({ milestoneIndex: 0, status: 'completed', stripePaymentIntentId: 'pi_m1', totalWithVat: 4077.27 });
+    const base = booking({
+      milestonePayments: [
+        { title: 'Deposit', amount: 3000, status: 'paid', dueCondition: 'on_start', paidAt: paidTime },
+        { title: 'Rest', amount: 5000, status: 'pending', dueCondition: 'on_completion' },
+      ],
+      payment: { ...m1Row },
+      __milestoneCharges: [{ milestoneIndex: 0, paymentIntentId: 'pi_m1', currency: 'EUR', totalWithVat: 4077.27 }],
+    });
+    const details = await buildDetails('customer', { booking: base, payments: [m1Row] });
+    expect(details.payments.milestones[0].customerChargeTotalWithVat).toBe(4077.27);
+    expect(details.payments.milestones[1].customerChargeTotalWithVat).toBeNull();
+    expect(details.payments.byCurrency).toEqual([expect.objectContaining({ recordedCharged: 4077.27 })]);
+  });
+});
+
+describe('day-mode calendar dates (C11-1x)', () => {
+  it('projects schedule dates and the first possible start as the Brussels day, not the UTC day', async () => {
+    const base = booking({
+      scheduleTimeZone: 'Europe/Brussels',
+      // Local midnights in Brussels: 23/11 and 24/11, first start 30/11.
+      scheduledStartDate: new Date('2026-11-22T23:00:00.000Z'),
+      scheduledExecutionEndDate: new Date('2026-11-23T23:00:00.000Z'),
+    });
+    base.quoteVersions = base.quoteVersions.map((version: any) => ({
+      ...version,
+      firstPossibleStart: new Date('2026-11-29T23:00:00.000Z'),
+    }));
+    for (const role of ['customer', 'professional', 'admin'] as const) {
+      const details = await buildDetails(role, { booking: base });
+      expect(details.booking.schedule.scheduledStartDate).toBe('2026-11-23');
+      expect(details.booking.schedule.scheduledExecutionEndDate).toBe('2026-11-24');
+      expect(details.wizard.scheduleSelection.startDate).toBe('2026-11-23');
+      expect(details.quotation?.versions[0]?.firstPossibleStart).toBe('2026-11-30');
+    }
+  });
+
+  it('records the local day in new checkout snapshots and repairs legacy UTC-day snapshots', async () => {
+    const live = {
+      scheduleTimeZone: 'Europe/Brussels',
+      scheduledStartDate: new Date('2026-11-22T23:00:00.000Z'),
+      scheduledExecutionEndDate: new Date('2026-11-24T16:00:00.000Z'),
+    };
+    const snapshot = buildBookingSnapshot({
+      booking: booking(live),
+      project: project(),
+      customer: customer(),
+      professional: professional(),
+      source: 'booking_creation',
+      capturedAt: quoteTime,
+      scheduleTimeZone: 'Europe/Brussels',
+    } as any);
+    expect(snapshot!.schedule).toMatchObject({ scheduledStartDate: '2026-11-23', scheduledExecutionEndDate: '2026-11-24', calendarDays: 'local' });
+    const fresh = await buildDetails('customer', { booking: { ...live, bookingSnapshot: snapshot } });
+    expect(fresh.bookingSnapshot.schedule.scheduledStartDate).toBe('2026-11-23');
+
+    // BK-2026-000054 as stored before the fix: the UTC day of the same instant.
+    const legacy = { ...snapshot, schedule: { scheduledStartDate: '2026-11-22', scheduledExecutionEndDate: '2026-11-24', timeZone: 'Europe/Brussels' } };
+    const repaired = await buildDetails('customer', { booking: { ...live, bookingSnapshot: legacy } });
+    expect(repaired.bookingSnapshot.schedule.scheduledStartDate).toBe('2026-11-23');
+    expect(repaired.bookingSnapshot.schedule.scheduledExecutionEndDate).toBe('2026-11-24');
+    // A legacy value that is not the UTC day of the booking's instant (e.g. rescheduled since) is kept.
+    const moved = await buildDetails('customer', { booking: { ...live, scheduledStartDate: new Date('2026-11-29T23:00:00.000Z'), bookingSnapshot: legacy } });
+    expect(moved.bookingSnapshot.schedule.scheduledStartDate).toBe('2026-11-22');
+  });
+
+  it('uses the professional zone before a schedule zone is recorded and keeps UTC-midnight dates', async () => {
+    const base = booking({
+      scheduleTimeZone: undefined,
+      scheduledStartDate: new Date('2026-12-03T23:00:00.000Z'),
+      rfqData: { serviceType: 'Kitchen', preferredStartDate: new Date('2026-12-04T00:00:00.000Z') },
+    });
+    const details = await buildDetails('customer', { booking: base });
+    expect(details.booking.schedule.scheduledStartDate).toBe('2026-12-04');
+    expect(details.booking.schedule.preferredStartDate).toBe('2026-12-04');
   });
 });
 

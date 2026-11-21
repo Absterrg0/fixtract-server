@@ -121,7 +121,7 @@ export type BookingOverviewDto = {
     totalAmount: number | null;
     currency: string | null;
     validUntil: string | null;
-    firstPossibleStart: string | null;
+  firstPossibleStart: string | null;
     createdAt: string | null;
   } | null;
   payment: {
@@ -282,6 +282,13 @@ export type BookingSnapshotDto = {
 export type CheckoutSnapshotDto = {
   /** Customer total of the package and its options (checkout arithmetic, live commission). Null for professionals. */
   customerTotal?: number | null;
+  /** Customer-side equivalents of the professional amounts below (not sent to professionals). */
+  customerPrices?: {
+    unitPrice: number;
+    baseSubtotal: number;
+    extraOptionsTotal: number;
+    options: Array<{ unitPrice: number; totalPrice: number }>;
+  };
   pricingType: 'fixed' | 'unit';
   unitAmount: number;
   quantity: number;
@@ -376,6 +383,8 @@ export type QuotationVersionDto = {
   milestones: Array<{
     title: string;
     amount: number | null;
+    /** Customer-side milestone total incl. VAT (FT3-19a). */
+    customerTotalWithVat: number | null;
     description: string | null;
     dueCondition: 'on_start' | 'on_milestone_start' | 'on_milestone_completion' | 'custom_date';
     customDueDate: string | null;
@@ -385,6 +394,14 @@ export type QuotationVersionDto = {
   preparationDuration: { value: number; unit: 'hours' | 'days' } | null;
   executionDuration: { value: number; unit: 'hours' | 'days' } | null;
   bufferDuration: { value: number; unit: 'hours' | 'days' } | null;
+    /** VAT parameters recorded with this version (FT3-18b); null for older versions. */
+  vatDetermination: {
+    customerType: 'B2B' | 'B2C';
+    article47Class: string | null;
+    vatAddressType: string | null;
+    vatCountry: string | null;
+    reverseCharge: boolean | null;
+  } | null;
   firstPossibleStart: string | null;
   validUntil: string | null;
   createdAt: string | null;
@@ -641,6 +658,8 @@ export type ExtraCostsDetailsDto = {
   totalProfessionalAmount: number | null;
   /** Customer-side total of the extra costs (commission-inclusive, before discounts). Null for professionals. */
   totalCustomerAmount: number | null;
+  /** Customer view only: what the extra-cost payment will charge while no matching charge exists (F1-3). */
+  customerChargeDue?: { netAmount: number; loyaltyDiscount: number; vatAmount: number; totalAmount: number } | null;
   currency: string | null;
   currencySource: 'payment' | 'quote' | 'not_recorded';
   items: Array<{

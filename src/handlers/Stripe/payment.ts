@@ -27,6 +27,7 @@ import {
   determineBookingCurrency,
   computeGrossBookingAmount,
   quoteAmountIncludesSelectedExtras,
+  selectedOptionLabel,
 } from '../../utils/payment';
 import { getCheckoutCommissionPercent } from '../../utils/checkoutCommission';
 import { buildMilestoneChargePlan } from '../../utils/milestoneCharges';
@@ -226,7 +227,19 @@ const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {
   };
 };
 
-export const getQuotePricingVatCalculation = (booking: any, amount: number, commissionPercent: number) => {
+/**
+ * VAT for a quote checkout from the quotation's pricing lines. For a
+ * milestone checkout (`milestone`), the quote lines are scaled to that
+ * milestone's own share and the selected options are listed only on the
+ * milestone that charges them (F1-8: every milestone listed every line and
+ * the option, split proportionally).
+ */
+export const getQuotePricingVatCalculation = (
+  booking: any,
+  amount: number,
+  commissionPercent: number,
+  milestone?: { baseCustomerGross: number; includesSelectedOptions: boolean } | null,
+) => {
   const quoteVersions = Array.isArray(booking.quoteVersions) ? booking.quoteVersions : [];
   const currentVersion = quoteVersions.find((version: any) => version.version === booking.currentQuoteVersion)
     || quoteVersions[quoteVersions.length - 1];
@@ -259,16 +272,16 @@ export const getQuotePricingVatCalculation = (booking: any, amount: number, comm
       vatCountry: line.vatCountry,
       vatLabel: line.vatLabel,
     })),
-    customerNet,
+    milestone ? milestone.baseCustomerGross : customerNet,
     commissionPercent,
   );
-  if (!quoteAmountIncludesSelectedExtras(booking)) {
+  if (!quoteAmountIncludesSelectedExtras(booking) && (!milestone || milestone.includesSelectedOptions)) {
     const options = (booking.selectedExtraOptions || []).filter((option: any) => Number(option.bookedPrice) > 0);
     const optionRate = Number(booking.vatDecision?.appliedRate ?? booking.payment?.vatRate ?? pricingLines[0].vatRate);
     if (!Number.isFinite(optionRate) || optionRate < 0 || optionRate > 100) return null;
     const optionsTotal = options.reduce((sum: number, option: any) => sum + Number(option.bookedPrice), 0);
     commissionedLines.push(...commissionedPricingLines(options.map((option: any) => ({
-      description: String(option.name || option.extraOptionId || 'Option'),
+      description: selectedOptionLabel(booking, option),
       price: Number(option.bookedPrice), vatRate: optionRate,
       vatCountry: booking.vatDecision?.country,
     })), commissionedQuoteAmount(optionsTotal, undefined, commissionPercent), commissionPercent));
@@ -471,10 +484,12 @@ export const createPaymentIntent = async (
     }
     // Client bug list #19b: options are charged in full with the first
     // milestone via the shared charge plan — never split across milestones.
+    let milestonePlanEntry: ReturnType<typeof buildMilestoneChargePlan>[number] | null = null;
     if (milestoneIndex !== null) {
       const planEntry = buildMilestoneChargePlan(booking, commissionPercent)
         .find((entry) => entry.index === milestoneIndex) || null;
       if (planEntry) chargeAmount = planEntry.expectedCustomerGross;
+      milestonePlanEntry = planEntry;
     }
 
     if (booking.payment?.stripePaymentIntentId && booking.payment?.stripeClientSecret) {
@@ -556,12 +571,34 @@ export const createPaymentIntent = async (
     let discountBreakdown = fullDiscountBreakdown;
     if (fullBookingAmount > 0 && chargeAmount < fullBookingAmount) {
       const ratio = chargeAmount / fullBookingAmount;
-      const proratedLoyalty = Math.round(fullDiscountBreakdown.loyaltyDiscount.amount * ratio * 100) / 100;
-      const proratedRepeat = Math.round(fullDiscountBreakdown.repeatBuyerDiscount.amount * ratio * 100) / 100;
+      // FT3-19a: each milestone rounds its own share, so the shares could
+      // drift a cent from the quoted discount. The last unpaid milestone takes
+      // the remainder of each discount instead, so the milestones add up to
+      // the quotation total.
+      const finalMilestone = milestoneIndex !== null
+        && (booking.milestonePayments as any[]).every((milestone: any, index: number) =>
+          index === milestoneIndex || milestone?.status === 'paid');
+      // The ledger is not selected by default.
+      const ledger = finalMilestone
+        ? ((await Booking.findById(booking._id).select('+paymentDiscountLedger').lean()) as any)?.paymentDiscountLedger || []
+        : [];
+      const earlierLedger = ledger.filter((entry: any) =>
+        typeof entry?.milestoneIndex === 'number' && entry.milestoneIndex !== milestoneIndex);
+      // Only with a recorded share for every earlier milestone; otherwise prorate.
+      const earlierComplete = new Set(earlierLedger.map((entry: any) => entry.milestoneIndex)).size
+        === (booking.milestonePayments as any[]).length - 1;
+      const prorate = (fullAmount: number, ledgerKey: string) => {
+        if (!finalMilestone || !earlierComplete) return Math.round(fullAmount * ratio * 100) / 100;
+        const earlier = earlierLedger.reduce((sum: number, entry: any) => sum + (Number(entry?.[ledgerKey]) || 0), 0);
+        return Math.max(0, Math.round((fullAmount - earlier) * 100) / 100);
+      };
+      const proratedLoyalty = prorate(fullDiscountBreakdown.loyaltyDiscount.amount, 'loyaltyAmount');
+      const proratedRepeat = prorate(fullDiscountBreakdown.repeatBuyerDiscount.amount, 'repeatBuyerAmount');
+      // A discount code can differ per checkout, so it is prorated as before.
       const proratedCode = fullDiscountBreakdown.codeDiscount
         ? Math.round(fullDiscountBreakdown.codeDiscount.amount * ratio * 100) / 100
         : 0;
-      const proratedReferral = Math.round((fullDiscountBreakdown.referralDiscount?.amount || 0) * ratio * 100) / 100;
+      const proratedReferral = prorate(fullDiscountBreakdown.referralDiscount?.amount || 0, 'referralDiscountAmount');
       // FT3 #12: wallet points are cash-like and redeemed per checkout, so
       // they are NOT prorated: the requested points apply to this payment in
       // full, capped at what it can absorb, and only the points actually
@@ -603,7 +640,7 @@ export const createPaymentIntent = async (
     // quotation line metadata.
     const quotePricingVatCalculation = configuredVatDecision?.reverseCharge
       ? null
-      : getQuotePricingVatCalculation(booking, discountedQuoteAmount, commissionPercent);
+      : getQuotePricingVatCalculation(booking, discountedQuoteAmount, commissionPercent, milestonePlanEntry);
     const vatCountry = parseVatCountryCode(
       configuredVatDecision?.country || booking.location?.country || customer.location?.country,
     );

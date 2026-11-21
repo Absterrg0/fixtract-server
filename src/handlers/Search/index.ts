@@ -529,7 +529,6 @@ async function searchProjects(
       : null;
     const dimensions: ProjectSearchDimensions = {
       services,
-      geographicArea,
       priceModels,
       projectTypes,
       includedItems,
@@ -604,7 +603,12 @@ async function searchProjects(
     const customerStateValue = normalizeValue(customerState);
     const customerCityValue = normalizeValue(customerCity);
     const customerAddressValue = normalizeValue(customerAddress);
-    const locationValue = normalizeValue(location);
+    // FT3 #20: the projects Location filter sends the customer's chosen
+    // address as `geographicArea` (with its coordinates). It is the
+    // customer's location, matched against each project's service radius
+    // (or the address fallback below) — never a substring of the project's
+    // own address, which made every picked address return 0 projects.
+    const locationValue = normalizeValue(location) || normalizeValue(geographicArea);
     const hasGeoCoordinates = customerLatValue !== null && customerLonValue !== null;
 
     const hasLocationFilter = Boolean(
@@ -942,7 +946,7 @@ async function searchProjects(
     }
 
     const facetDimensions: Array<[keyof ProjectSearchDimensions, string]> = [
-      ["services", "services"], ["geographicArea", "geographicArea"],
+      ["services", "services"],
       ["priceModels", "priceModels"], ["projectTypes", "projectTypes"],
       ["includedItems", "includedItems"], ["areasOfWork", "areasOfWork"],
       ["priceMin", "price"], ["priceMax", "price"], ["category", "categories"],

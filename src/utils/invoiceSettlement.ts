@@ -8,6 +8,15 @@
  */
 const CAPTURED_PAYMENT_STATUSES = new Set(["completed", "partially_refunded", "refunded"]);
 
+/**
+ * The customer's checkout money has moved: a captured status, or a charge that
+ * succeeded and still waits for the payout ("authorized" with a capture/charge
+ * recorded). The payout to the professional is not the customer's payment.
+ */
+const isCustomerChargeCaptured = (payment: any): boolean =>
+  CAPTURED_PAYMENT_STATUSES.has(String(payment?.status || ""))
+  || (payment?.status === "authorized" && Boolean(payment?.capturedAt || payment?.stripeChargeId));
+
 const hasChargedExtraCosts = (booking: any): boolean =>
   (booking?.extraCosts || []).reduce((sum: number, cost: any) => sum + (Number(cost?.amount) || 0), 0) > 0;
 
@@ -17,7 +26,7 @@ export const isInvoiceSettled = (booking: any, side: "customer" | "supplier"): b
     if (payment.transferStatus !== "succeeded") return false;
     return !hasChargedExtraCosts(booking) || payment.extraCostTransferStatus === "succeeded";
   }
-  if (!CAPTURED_PAYMENT_STATUSES.has(String(payment.status || ""))) return false;
+  if (!isCustomerChargeCaptured(payment)) return false;
   return !hasChargedExtraCosts(booking)
     || payment.extraCostStatus === "succeeded"
     || payment.extraCostPaymentSucceeded === true;
@@ -56,6 +65,6 @@ export const getInvoicePayment = (
   if (Array.isArray(booking?.milestonePayments) && booking.milestonePayments.length > 0) {
     return { paidAmount: 0, settled: false };
   }
-  if (!CAPTURED_PAYMENT_STATUSES.has(String(payment.status || ""))) return { paidAmount: 0, settled: false };
+  if (!isCustomerChargeCaptured(payment)) return { paidAmount: 0, settled: false };
   return { paidAmount: Math.min(total, money(payment.totalWithVat)), settled: false };
 };

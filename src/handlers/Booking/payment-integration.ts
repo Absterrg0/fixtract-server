@@ -23,6 +23,7 @@ import PointTransaction from '../../models/pointTransaction';
 import {
   buildProjectScheduleWindow,
   getBookingScheduleOptions,
+  getQuoteScheduleDurationOverride,
   validateProjectScheduleSelection,
 } from '../../utils/scheduleEngine';
 import { applyReschedulePlanReset } from '../../utils/applyReschedulePlanReset';
@@ -274,7 +275,13 @@ export const buildScheduleUpdatePayload = async ({
       selectedSubprojectIndex: resolvedSubprojectIndex,
     };
 
-    if (isRfqSubproject) {
+    // Quote bookings plan with the accepted quotation's durations, so they
+    // get an execution end, a time zone, a resource plan and calendar
+    // reservations like any other booking (FT3-19y). Only an RFQ without
+    // quoted durations keeps the date-only fallback.
+    const quoteDurationOverride = isRfqSubproject ? getQuoteScheduleDurationOverride(booking) : undefined;
+
+    if (isRfqSubproject && !quoteDurationOverride) {
       const startDate = new Date(scheduledStartDate);
       if (isNaN(startDate.getTime()) || startDate < new Date()) {
         return {
@@ -1232,9 +1239,12 @@ export const setBookingSchedule = async (req: Request, res: Response) => {
       updatedAt: booking.updatedAt,
       'payment.stripePaymentIntentId': booking.payment?.stripePaymentIntentId ?? null,
     };
-    // Accepted quotations and legacy all-in quotes cannot safely be repriced
-    // from today's catalog. Their schedule is editable; options stay agreed.
-    const optionsLocked = Boolean(booking.quoteVersions?.length || quoteAmountIncludesSelectedExtras(booking));
+    // Legacy all-in quotes cannot safely be repriced from today's catalog:
+    // their schedule is editable, their options stay agreed. An accepted
+    // quotation may still get the project's options until the first milestone
+    // is paid (checked above); they are charged in full with that first
+    // milestone (FT3-19b, see buildMilestoneChargePlan).
+    const optionsLocked = quoteAmountIncludesSelectedExtras(booking);
     if (hasExplicitExtraOptions && optionsLocked) {
       const project = booking.project as any;
       const requested = normalizeSelectedExtraOptions(selectedExtraOptions, project);

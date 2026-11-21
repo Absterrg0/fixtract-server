@@ -408,11 +408,43 @@ describe('recorded money on the shared bookings row', () => {
     expect(overview).toEqual({
       paidPrice: { amount: 1210, currency: 'EUR', source: 'recorded' },
       completionAddition: { amount: 0, currency: 'EUR', source: 'recorded' },
+      payoutAmount: { amount: 900, currency: 'EUR', source: 'recorded' },
+      refundAmount: { amount: null, currency: null, source: 'not_recorded' },
     });
+    // Customers get no payout columns at all.
+    expect(Object.keys(buildBookingListOverview({ _id: 'b1', status: 'completed', payment: { totalWithVat: 1210, currency: 'EUR', status: 'completed' } }, 'customer', EMPTY)))
+      .toEqual(['paidPrice', 'completionAddition']);
     // Ledger facts keep only amount/kind/status.
     expect(ledger([{ amount: 5, kind: 'extra_cost', status: 'weird', refundId: 're_y', notes: 'n', refundedBy: 'u' }]))
       .toEqual({ loaded: true, refunds: [{ amount: 5, kind: 'extra_cost', status: 'unknown' }] });
     // An unrecognised status is not money returned.
     expect(settledCompletionAddition({}, ledger([{ amount: 5, kind: 'extra_cost', status: 'weird' }]))).toBeNull();
+  });
+});
+
+describe('FT2-13 — quote bookings and refunded payouts in the bookings overview', () => {
+  const EMPTY = overviewLedgerFromPaymentRows([]);
+  it('shows every settled milestone charge as the paid price, not only the latest', () => {
+    const quote = { _id: 'q1', status: 'completed', milestonePayments: [{ status: 'paid' }, { status: 'paid' }],
+      payment: { totalWithVat: 6031.09, currency: 'EUR', status: 'authorized', milestoneIndex: 1 } };
+    expect(buildSharedBookingsRow(quote, 'customer', EMPTY, 9649.74).paidPrice.amount).toBe(9649.74);
+    // Without the milestone ledger the recorded checkout stays the fallback.
+    expect(buildSharedBookingsRow(quote, 'customer', EMPTY).paidPrice.amount).toBe(6031.09);
+    // A plain booking ignores the milestone total.
+    expect(buildSharedBookingsRow({ ...quote, milestonePayments: [] }, 'customer', EMPTY, 1).paidPrice.amount).toBe(6031.09);
+  });
+
+  it('keeps payout and refund on the professional basis', () => {
+    // BK-26: 3,500 net / 4,235 incl. VAT, refunded in full.
+    const full = buildSharedBookingsRow({ _id: 'b26', status: 'refunded',
+      payment: { totalWithVat: 4235, currency: 'EUR', status: 'refunded', professionalPayout: 3500, refundAmount: 4235 } }, 'professional', EMPTY);
+    expect(full.payoutAmount.amount).toBe(3500);
+    expect(full.refundAmount.amount).toBe(3500);
+    // BK-27: 1,400 net / 1,694 incl. VAT, 700 refunded → payout 821.49 as on SUP-2026-000003.
+    const partial = buildSharedBookingsRow({ _id: 'b27', status: 'cancelled',
+      payment: { totalWithVat: 1694, currency: 'EUR', status: 'partially_refunded', professionalPayout: 1400, refundAmount: 700 } }, 'professional', EMPTY);
+    expect(partial.payoutAmount.amount).toBe(1400);
+    expect(partial.refundAmount.amount).toBe(578.51);
+    expect(Math.round((partial.payoutAmount.amount! - partial.refundAmount.amount!) * 100) / 100).toBe(821.49);
   });
 });

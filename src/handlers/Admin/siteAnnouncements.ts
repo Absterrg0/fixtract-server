@@ -314,23 +314,14 @@ export const deleteSiteAnnouncement = async (
       return res.status(400).json({ success: false, msg: 'Invalid id' });
     }
 
-    const updated = await SiteAnnouncement.findByIdAndUpdate(
-      id,
-      { isActive: false },
-      { new: true, runValidators: true },
-    );
-    if (!updated) {
+    // CA6: DELETE removes the announcement. Hiding it is the separate
+    // PATCH /:id/active toggle ("Live" switch); this used to do the same.
+    const deleted = await SiteAnnouncement.findByIdAndDelete(id);
+    if (!deleted) {
       return res.status(404).json({ success: false, msg: 'Announcement not found' });
     }
 
-    return res.status(200).json({
-      success: true,
-      data: {
-        announcement: normalizeAnnouncementResponse(
-          (updated.toObject?.() ?? updated) as unknown as Record<string, unknown>,
-        ),
-      },
-    });
+    return res.status(200).json({ success: true, data: { deletedId: id } });
   } catch (error: unknown) {
     console.error('Delete site announcement error:', error);
     return res.status(500).json({ success: false, msg: 'Failed to delete announcement' });

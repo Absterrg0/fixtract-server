@@ -162,6 +162,34 @@ describeDb('WS3 final touches (disposable local MongoDB)', () => {
     expect(body.pagination.total).toBeGreaterThanOrEqual(2);
   });
 
+  it('FT3 #20: a picked Location-filter address finds projects whose radius covers it', async () => {
+    const { search } = await import('../../handlers/Search');
+    const response: any = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    // What the projects tab sends after picking a Google suggestion: the full
+    // address as geographicArea, its parsed parts and its coordinates.
+    await search(
+      {
+        query: {
+          type: 'projects',
+          limit: '20',
+          geographicArea: 'Rue de la Loi 16, 1000 Bruxelles, Belgium',
+          customerAddress: 'Rue de la Loi 16',
+          customerCity: 'Bruxelles',
+          customerCountry: 'Belgium',
+          customerLat: '50.8466',
+          customerLon: '4.3683',
+        },
+      } as any,
+      response as any
+    );
+    const body = response.json.mock.calls[0][0];
+    const titles = (body.results || []).map((project: any) => project.title);
+    expect(titles).toContain('WS3 geo 10km same street');
+    expect(titles).toContain('WS3 geo noBorders BE code');
+    // Antwerp's 10 km radius does not reach Brussels.
+    expect(titles).not.toContain('WS3 geo string radius');
+  });
+
   it('exposes company closures through the employee-list calendar source', async () => {
     const jwt = (await import('jsonwebtoken')).default;
     const { getEmployees } = await import('../../handlers/User/employeeManagement');

@@ -11,7 +11,7 @@ vi.mock('../../../utils/bookingDetails/quoteTotals', async importOriginal => ({
   ...await importOriginal<any>(),
   buildQuoteCustomerTotalsWithDiscounts: async () => ({ commissionPercent: 17, professionalNetAmount: 100, customerNetAmount: 117, totalWithVat: 141.57, currency: 'EUR', recordedAt: new Date(), discount: { nested: { commission_percentage: 17 } } }),
 }));
-vi.mock('../../../utils/bookingDetails/quoteFirstStart', () => ({ computeQuoteFirstPossibleStartBounded: async () => null }));
+vi.mock('../../../utils/bookingDetails/quoteFirstStart', () => ({ computeQuoteFirstPossibleStartBounded: async () => null, completeQuoteFirstPossibleStart: async () => null }));
 vi.mock('../../../utils/notifications/notify', () => ({ notify: vi.fn() }));
 vi.mock('../../../handlers/Stripe/payment', () => ({ createPaymentIntent: vi.fn() }));
 vi.mock('../../../utils/support/accountGuard', () => ({ withAnonymizationWriteFence: async (_ids: any, write: any) => write(undefined) }));
@@ -42,6 +42,10 @@ describe.each([['submit', submitQuotation, 'rfq_accepted'], ['edit', editQuotati
     expect(output.data.booking.quoteVersions.at(-1).customerTotals.commissionPercent).toBe(17);
     expect(JSON.stringify(bookingForViewer(output.data.booking, 'customer'))).not.toMatch(/commissionPercent|commission_percentage/);
     expect(output.data.booking.quoteVersions.at(-1).customerTotals.professionalNetAmount).toBe(100);
+    // FT3-18b: the VAT parameters are recorded with the version.
+    expect(output.data.booking.quoteVersions.at(-1).vatDetermination).toEqual({
+      customerType: 'B2C', article47Class: null, vatAddressType: 'Booking address', vatCountry: 'BE', reverseCharge: false,
+    });
   });
   it.each(['customer', 'unrelated'] as const)('denies %s from submitting/editing and returns no booking data', async role => {
     mocks.find.mockReturnValue(query({ _id: bookingId, status, customer: { _id: customerId }, professional: { _id: professionalId } }));
