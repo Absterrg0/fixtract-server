@@ -1,5 +1,6 @@
 import { releaseUnpaidReferralSafely } from '../../utils/releaseUnpaidReferral';
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import { waitUntil } from '@vercel/functions';
 import Booking, { BookingStatus } from '../../models/booking';
 import User from '../../models/user';
@@ -54,6 +55,12 @@ import {
   toBaselineInfo,
   withBaselineClause,
 } from '../../utils/adminDashboardBaselines';
+import {
+  countDisputeManagementWork,
+  ESCALATED_REFUND_REQUEST_FILTER,
+  ESCALATED_WARRANTY_CLAIM_FILTER,
+} from '../../utils/adminWorkCounters';
+import { escapeRegExp } from '../../utils/escapeRegExp';
 
 const presignAttachments = async (urls?: unknown): Promise<string[]> => {
   if (!Array.isArray(urls) || urls.length === 0) return [];
@@ -210,42 +217,110 @@ const transferResolvedExtraCostIfNeeded = async (resolvedBooking: any, finalExtr
   }
 };
 
-// Warranty claims and escalated customer refund requests are their own
-// records with their own admin queues (/admin/warranty-claims,
-// /admin/cancellation-requests). The dispute page previews the active ones so
-// they can be actioned there, but they are never booking disputes: the booking
-// dispute list, its pagination and the analytics totals exclude them, and
-// their own counts are reported separately (`separateQueues`).
-const ACTIVE_WARRANTY_CLAIM_FILTER = { status: { $in: ['open', 'proposal_sent', 'proposal_accepted', 'escalated'] } };
-const ESCALATED_REFUND_REQUEST_FILTER = { requestedRole: 'customer', status: 'escalated' };
+// Escalated customer refund requests and escalated warranty claims are handled
+// in dispute management: they are part of the dispute-management counter (nav
+// badge) and listed on the dispute page. They stay their own records and are
+// actioned through their own endpoints, so the booking-dispute list, its
+// pagination and the booking-dispute totals do not include them; their open
+// counts are reported in `escalations`.
 const WARRANTY_QUEUE_HREF = '/admin/warranty-claims';
 const REFUND_QUEUE_HREF = '/admin/cancellation-requests?status=escalated';
+/** Search terms longer than this are cut (a search box, not a query language). */
+const MAX_DISPUTE_SEARCH_LENGTH = 100;
+/** Upper bound on matched parties/bookings a search expands to. */
+const MAX_DISPUTE_SEARCH_MATCHES = 500;
 
-export const countSeparateDisputeQueues = async () => {
-  const [activeWarrantyClaims, escalatedRefundRequests] = await Promise.all([
-    WarrantyClaim.countDocuments(ACTIVE_WARRANTY_CLAIM_FILTER),
+export const countDisputeEscalations = async () => {
+  const [escalatedWarrantyClaims, escalatedRefundRequests] = await Promise.all([
+    WarrantyClaim.countDocuments(ESCALATED_WARRANTY_CLAIM_FILTER),
     CancellationRequest.countDocuments(ESCALATED_REFUND_REQUEST_FILTER),
   ]);
   return {
-    activeWarrantyClaims,
+    escalatedWarrantyClaims,
     escalatedRefundRequests,
     warrantyClaimsHref: WARRANTY_QUEUE_HREF,
     refundRequestsHref: REFUND_QUEUE_HREF,
   };
 };
 
-const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> => {
+/** Normalised search term, or '' when there is nothing to search for. */
+export const parseDisputeSearch = (value: unknown): string =>
+  typeof value === 'string' ? value.trim().slice(0, MAX_DISPUTE_SEARCH_LENGTH) : '';
+
+/**
+ * Mongo clauses for the dispute-page search. One term matches (case-insensitive,
+ * substring) the booking number, the customer's or professional's name or
+ * email, the dispute reason/description, and, for the escalation rows, the
+ * warranty claim number / reason / description and the refund reason. A
+ * 24-hex term also matches a booking id exactly.
+ */
+export const buildDisputeSearch = async (term: string) => {
+  const regex = { $regex: escapeRegExp(term), $options: 'i' };
+  const objectId = mongoose.Types.ObjectId.isValid(term) && /^[a-f\d]{24}$/i.test(term)
+    ? new mongoose.Types.ObjectId(term)
+    : null;
+
+  const [users, bookings] = await Promise.all([
+    User.find({ $or: [{ name: regex }, { email: regex }, { username: regex }] })
+      .select('_id')
+      .limit(MAX_DISPUTE_SEARCH_MATCHES)
+      .lean(),
+    Booking.find({ $or: [{ bookingNumber: regex }, ...(objectId ? [{ _id: objectId }] : [])] })
+      .select('_id')
+      .limit(MAX_DISPUTE_SEARCH_MATCHES)
+      .lean(),
+  ]);
+  const userIds = users.map((user: any) => user._id);
+  const bookingIds = bookings.map((booking: any) => booking._id);
+
+  return {
+    booking: {
+      $or: [
+        { bookingNumber: regex },
+        ...(objectId ? [{ _id: objectId }] : []),
+        { 'dispute.reason': regex },
+        { 'dispute.description': regex },
+        ...(userIds.length ? [{ customer: { $in: userIds } }, { professional: { $in: userIds } }] : []),
+      ],
+    },
+    warrantyClaim: {
+      $or: [
+        { claimNumber: regex },
+        { description: regex },
+        { reason: regex },
+        { 'escalation.reason': regex },
+        { 'escalation.note': regex },
+        ...(bookingIds.length ? [{ booking: { $in: bookingIds } }] : []),
+        ...(userIds.length ? [{ customer: { $in: userIds } }, { professional: { $in: userIds } }] : []),
+      ],
+    },
+    refundRequest: {
+      $or: [
+        { reason: regex },
+        { reasonCategory: regex },
+        ...(bookingIds.length ? [{ booking: { $in: bookingIds } }] : []),
+        ...(userIds.length ? [{ requestedBy: { $in: userIds } }] : []),
+      ],
+    },
+  };
+};
+
+type DisputeSearch = Awaited<ReturnType<typeof buildDisputeSearch>>;
+const andSearch = (base: Record<string, unknown>, clause?: Record<string, unknown>) =>
+  (clause ? { $and: [base, clause] } : base);
+
+const buildExternalDisputeRows = async (statusFilter?: string, search?: DisputeSearch): Promise<any[]> => {
   if (statusFilter === 'resolved') return [];
 
   const [warrantyClaims, refundRequests] = await Promise.all([
-    WarrantyClaim.find(ACTIVE_WARRANTY_CLAIM_FILTER)
+    WarrantyClaim.find(andSearch(ESCALATED_WARRANTY_CLAIM_FILTER, search?.warrantyClaim) as any)
       .populate({ path: 'booking', select: '_id bookingNumber status payment project warrantyCoverage actualEndDate', populate: { path: 'project', select: 'title category service' } })
       .populate('customer', 'name email isAnonymized deletedAt')
       .populate('professional', 'name email username isAnonymized deletedAt')
-      .sort({ openedAt: -1 })
+      .sort({ 'escalation.escalatedAt': -1, openedAt: -1 })
       .limit(50)
       .lean(),
-    CancellationRequest.find(ESCALATED_REFUND_REQUEST_FILTER)
+    CancellationRequest.find(andSearch(ESCALATED_REFUND_REQUEST_FILTER, search?.refundRequest) as any)
       .populate({ path: 'booking', select: '_id bookingNumber status payment project professional actualStartDate scheduledStartDate cancellation', populate: { path: 'project', select: 'title category service' } })
       .populate('requestedBy', 'name email isAnonymized deletedAt')
       .sort({ escalatedAt: -1 })
@@ -336,12 +411,15 @@ export const getDisputes = async (req: Request, res: Response) => {
     const { status, page = '1', limit = '20' } = req.query;
     const pageNum = Math.max(1, parseInt(page as string) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
+    const searchTerm = parseDisputeSearch(req.query.search);
+    const search = searchTerm ? await buildDisputeSearch(searchTerm) : undefined;
 
-    // Counting-since baseline: the list and its pagination total share one filter.
+    // Counting-since baseline: the list and its pagination total share one filter
+    // (the search narrows both).
     const baseline = await resolveDashboardBaseline(req, 'disputes');
-    const filter = withBaselineClause(
-      buildDisputeFilter(typeof status === 'string' ? status : undefined),
-      baseline.clause,
+    const filter = andSearch(
+      withBaselineClause(buildDisputeFilter(typeof status === 'string' ? status : undefined), baseline.clause),
+      search?.booking,
     ) as any;
 
     const [disputes, total] = await Promise.all([
@@ -359,9 +437,11 @@ export const getDisputes = async (req: Request, res: Response) => {
       Booking.countDocuments(filter),
     ]);
 
-    // Preview of the separate warranty/refund queues, page 1 only. They are not
+    // Escalated warranty claims and refund requests, page 1 only. They are not
     // part of `disputes` or `pagination` (booking disputes only).
-    const externalRows = pageNum === 1 ? await buildExternalDisputeRows(typeof status === 'string' ? status : undefined) : [];
+    const externalRows = pageNum === 1
+      ? await buildExternalDisputeRows(typeof status === 'string' ? status : undefined, search)
+      : [];
 
     await Promise.all(disputes.map((d: any) => presignBookingAttachments(d)));
     await Promise.all(
@@ -387,6 +467,7 @@ export const getDisputes = async (req: Request, res: Response) => {
           total,
           pages: Math.ceil(total / limitNum),
         },
+        search: searchTerm,
         baseline: toBaselineInfo(baseline),
       }
     });
@@ -1129,19 +1210,22 @@ export const getDisputeAnalytics = async (req: Request, res: Response) => {
     // totalOpen / totalResolved / totalDisputes count booking disputes only,
     // with exactly the filters of the Open / Resolved / All list views, plus the
     // same counting-since baseline (open work is never excluded by it).
-    // Warranty claims and refund requests are reported separately and are
-    // never added into these totals.
+    // `counter` is the dispute-management counter (the nav badge): open booking
+    // disputes + escalated refund requests + escalated warranty claims that came
+    // in since the last reset. `escalations` are the open escalations (any age).
     const baseline = await resolveDashboardBaseline(req, 'disputes');
     const [
       totalOpen,
       totalResolved,
       totalDisputes,
-      separateQueues,
+      escalations,
+      counter,
     ] = await Promise.all([
       Booking.countDocuments(withBaselineClause(buildDisputeFilter('open'), baseline.clause) as any),
       Booking.countDocuments(withBaselineClause(buildDisputeFilter('resolved'), baseline.clause) as any),
       Booking.countDocuments(withBaselineClause(buildDisputeFilter(), baseline.clause) as any),
-      countSeparateDisputeQueues(),
+      countDisputeEscalations(),
+      countDisputeManagementWork(baseline.resetAtDate),
     ]);
 
     return res.json({
@@ -1150,7 +1234,8 @@ export const getDisputeAnalytics = async (req: Request, res: Response) => {
         totalOpen,
         totalResolved,
         totalDisputes,
-        separateQueues,
+        escalations,
+        counter: { ...counter, resetAt: baseline.resetAt },
         baseline: toBaselineInfo(baseline),
       }
     });

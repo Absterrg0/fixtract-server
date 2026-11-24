@@ -1,11 +1,12 @@
 import mongoose, { Model, Schema } from 'mongoose';
 
 /**
- * Per-dashboard "counting since" baseline for booking-flow admin dashboards.
+ * Per-dashboard "counting since" baseline for admin dashboards and counters.
  *
  * Resetting a dashboard never deletes or edits source records. It only moves
- * `resetAt` forward, and the dashboard's history and count queries then start
- * from that instant (see src/utils/adminDashboardBaselines.ts for the rule).
+ * `resetAt` forward: the dashboard's counter then counts only work that became
+ * actionable since that instant (src/utils/adminWorkCounters.ts), and booking
+ * dashboards hide finished history from before it (src/utils/adminDashboardBaselines.ts).
  *
  * `AdminDashboardBaseline` holds the current value per dashboard (one document
  * per key). `AdminDashboardBaselineEvent` is the append-only history of resets
@@ -14,12 +15,21 @@ import mongoose, { Model, Schema } from 'mongoose';
 
 export const ADMIN_DASHBOARD_BASELINE_IDS = Object.freeze({
   disputes: 'disputes',
-  warrantyClaims: 'warrantyClaims',
   cancellations: 'cancellations',
+  supportTickets: 'supportTickets',
+  chatReports: 'chatReports',
+  reviewModeration: 'reviewModeration',
   bookingKpis: 'bookingKpis',
 } as const);
 
 export type AdminDashboardBaselineKey = keyof typeof ADMIN_DASHBOARD_BASELINE_IDS;
+
+/**
+ * Dashboards that could be reset before and no longer can. Their old history
+ * events stay valid and listed. `warrantyClaims` had no counter of its own:
+ * escalated warranty claims are counted (and reset) under `disputes`.
+ */
+export const RETIRED_DASHBOARD_BASELINE_KEYS = Object.freeze(['warrantyClaims'] as const);
 
 export interface IAdminDashboardBaseline {
   _id: string;
@@ -61,7 +71,11 @@ export interface IAdminDashboardBaselineEvent {
 
 const baselineEventSchema = new Schema<IAdminDashboardBaselineEvent>(
   {
-    dashboardKey: { type: String, required: true, enum: Object.keys(ADMIN_DASHBOARD_BASELINE_IDS) },
+    dashboardKey: {
+      type: String,
+      required: true,
+      enum: [...Object.keys(ADMIN_DASHBOARD_BASELINE_IDS), ...RETIRED_DASHBOARD_BASELINE_KEYS],
+    },
     action: { type: String, required: true, enum: ['reset', 'undo'] },
     resetAt: { type: Date, default: null },
     previousResetAt: { type: Date, default: null },
