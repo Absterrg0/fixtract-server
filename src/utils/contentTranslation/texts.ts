@@ -79,6 +79,7 @@ export function collectProjectTexts(project: Record<string, any> | null | undefi
     for (const material of list(subproject?.materials)) {
       out.add(material?.name);
       out.add(material?.description);
+      out.add(material?.unit);
     }
     for (const input of list(subproject?.professionalInputs)) {
       // Dropdown answers are catalogue option text; numbers/ranges are skipped.
@@ -115,6 +116,7 @@ export function collectVatQuestionTexts(vatManagement: Record<string, any> | nul
   ]) {
     out.add(question?.question);
     out.add(question?.options);
+    out.add(question?.unit);
   }
   for (const rule of list(vatManagement.logicRules)) out.add(rule?.customText);
   return out.texts;
@@ -140,6 +142,7 @@ export function collectServiceConfigurationTexts(config: Record<string, any> | n
     out.add(field?.label);
     out.add(field?.placeholder);
     out.add(field?.options);
+    out.add(field?.unit);
   }
   for (const option of list(config.extraOptions)) {
     out.add(option?.name);

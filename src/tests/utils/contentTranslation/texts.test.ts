@@ -44,11 +44,12 @@ describe('content translation text selection', () => {
     });
     expect(texts).toEqual([
       'Interior painting for your living room', 'Walls and ceilings', 'Basic', 'Two coats', 'Refurbishment',
-      'Wall preparation', 'Paint', 'Detached house', 'Ceiling', 'Paint the ceiling', 'Access', 'Room accessible',
+      'Wall preparation', 'Paint', 'litre', 'Detached house', 'Ceiling', 'Paint the ceiling', 'Access', 'Room accessible',
       'How long?', 'One day', 'Colour?', 'White', 'Grey', 'Parking?', 'Thanks for booking',
     ]);
     expect(texts).not.toContain('rfq');
     expect(texts).not.toContain('m2');
+    expect(texts).toContain('litre');
     expect(texts).not.toContain('buildingType');
     expect(collectProjectCardTexts({ title: 'A title here', priceModel: 'Total price', subprojects: [{ name: 'Basic' }] }))
       .toEqual(['A title here', 'Total price', 'Basic']);
@@ -64,14 +65,14 @@ describe('content translation text selection', () => {
       extraOptions: [{ name: 'Renders' }],
       conditionsAndWarnings: [{ text: 'Title deeds required' }],
       vatManagement: {
-        reducedVatQuestions: [{ question: 'Older than 10 years?', fieldName: 'age', options: [] }],
+        reducedVatQuestions: [{ question: 'Older than 10 years?', fieldName: 'age', options: [], unit: 'years' }],
         professionalVatQuestions: [{ question: 'Is it movable?', fieldName: 'movable' }],
         logicRules: [{ customText: 'Reduced rate applies' }],
       },
     });
     expect(texts).toEqual([
       'Strip foundations', 'Price per m²', 'New Build', 'Site survey', 'Building type', 'Flat', 'House',
-      'Living area', 'e.g. 120', 'Renders', 'Title deeds required', 'Older than 10 years?', 'Is it movable?',
+      'Living area', 'e.g. 120', 'Renders', 'Title deeds required', 'Older than 10 years?', 'years', 'Is it movable?',
       'Reduced rate applies',
     ]);
     expect(texts).not.toContain('range_m2');
