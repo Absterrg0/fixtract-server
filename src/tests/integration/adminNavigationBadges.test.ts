@@ -131,12 +131,16 @@ async function seedMixedQueues() {
 const EXPECTED_MIXED = {
   professionalApprovals: 2,
   projectApprovals: 1,
-  cancellationRequests: 3,
-  disputes: 1,
+  // Only the pending request made by a professional. Pending customer requests
+  // wait on the professional; the escalated one is dispute management's.
+  cancellationRequests: 1,
+  // BK-OPEN + the escalated customer refund (the warranty claim is not escalated).
+  disputes: 2,
   // T-NEW, T-LEGACY-NO-KIND, T-USER-LAST, M-PENDING, legacy pending meeting
   supportTickets: 5,
   chatReports: 1,
-  reviewModeration: 0,
+  // BK-REVIEW (visible); never reset, so every visible review is still unchecked.
+  reviewModeration: 1,
 };
 
 describeDb('admin navigation badges (disposable MongoDB)', () => {
@@ -168,11 +172,12 @@ describeDb('admin navigation badges (disposable MongoDB)', () => {
     const counts = await computeAdminNavigationBadges(admin('super'));
     expect(counts).toEqual(EXPECTED_MIXED);
 
-    // The dispute badge is the canonical "Open booking disputes" card.
+    // The dispute badge is the dispute page's "Dispute management counter".
     let analytics: any;
     const res: any = { status: () => res, json: (payload: any) => { analytics = payload.data; return res; } };
     await getDisputeAnalytics({ query: {} } as any, res);
-    expect(counts.disputes).toBe(analytics.totalOpen);
+    expect(counts.disputes).toBe(analytics.counter.total);
+    expect(analytics.counter).toMatchObject({ bookingDisputes: 1, escalatedRefundRequests: 1, escalatedWarrantyClaims: 0 });
   });
 
   it('returns only the badges each role may read (role packs, effective access)', async () => {
@@ -187,7 +192,7 @@ describeDb('admin navigation badges (disposable MongoDB)', () => {
     expect(await keysFor(admin('content_creator'))).toEqual([]);
     // A restricted admin's values are the real queue counts, not a role-filtered subset.
     expect(await computeAdminNavigationBadges(admin('care'))).toEqual({
-      cancellationRequests: 3, chatReports: 1, disputes: 1, supportTickets: 5,
+      cancellationRequests: 1, chatReports: 1, disputes: 2, supportTickets: 5,
     });
   });
 
@@ -227,11 +232,11 @@ describeDb('admin navigation badges (disposable MongoDB)', () => {
     expect(await computeAdminNavigationBadges(superAdmin)).toEqual({
       professionalApprovals: 1,
       projectApprovals: 0,
-      cancellationRequests: 2,
+      cancellationRequests: 1,
       disputes: 0,
       supportTickets: 4,
       chatReports: 0,
-      reviewModeration: 0,
+      reviewModeration: 1,
     });
   });
 
@@ -241,7 +246,7 @@ describeDb('admin navigation badges (disposable MongoDB)', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const { statusCode, body } = await call({ admin: admin('care') });
     expect(statusCode).toBe(200);
-    expect(body.data.counts).toEqual({ cancellationRequests: 3, chatReports: null, disputes: 1, supportTickets: 5 });
+    expect(body.data.counts).toEqual({ cancellationRequests: 1, chatReports: null, disputes: 2, supportTickets: 5 });
   });
 
   it('requires an authenticated admin and is not tied to a single queue permission', async () => {

@@ -2,20 +2,17 @@ import { Request, Response } from "express";
 import type { IUser } from "../../models/user";
 import User from "../../models/user";
 import Project from "../../models/project";
-import ChatReport from "../../models/chatReport";
-import SupportTicket from "../../models/supportTicket";
-import MeetingRequest from "../../models/meetingRequest";
-import Booking from "../../models/booking";
-import CancellationRequest, {
-  ADMIN_ACTIONABLE_CANCELLATION_STATUSES,
-} from "../../models/cancellationRequest";
-import { buildDisputeFilter } from "./disputeManagement";
 import {
-  clauseForDashboard,
   loadDashboardBaselines,
-  withBaselineClause,
   type DashboardBaselineMap,
 } from "../../utils/adminDashboardBaselines";
+import {
+  countCancellationRequestWork,
+  countChatReportWork,
+  countDisputeManagementWork,
+  countReviewModerationWork,
+  countSupportWork,
+} from "../../utils/adminWorkCounters";
 import { getEffectiveAccessForUser } from "../../utils/adminRbac/roleAccess";
 import { hasAccessLevel } from "../../utils/adminRbac/rolePermissions";
 import { denyUnlessPermission } from "../../utils/adminRbac/assertPermission";
@@ -24,11 +21,13 @@ import type { AdminAccessArea, AdminPermissionLevels } from "../../utils/adminRb
 /**
  * Admin navigation badges (restructuring DOCX, "Pending/open task counters").
  *
- * Exactly the seven DOCX items carry a badge. Each count is the population the
- * matching admin queue lists as still needing an admin decision; finished rows
- * (resolved, closed, approved, rejected, completed, dismissed, ...) are never
- * counted. Category sums are NOT computed here: the client adds the children
- * it actually shows, so a sum can never include a child the admin cannot see.
+ * Exactly the seven DOCX items carry a badge. Each count is the work that
+ * waits on an admin decision; finished rows (resolved, closed, approved,
+ * rejected, completed, dismissed, ...) are never counted. Where a super admin
+ * reset the counter, only work that became actionable since the reset counts,
+ * so a reset brings the badge to 0 (src/utils/adminWorkCounters.ts). Category
+ * sums are NOT computed here: the client adds the children it actually shows,
+ * so a sum can never include a child the admin cannot see.
  *
  * Authorization mirrors each queue's own list endpoint, per key, from the
  * server-side effective access matrix. Keys the admin may not read are
@@ -57,52 +56,14 @@ export const PENDING_PROFESSIONAL_APPROVAL_FILTER = Object.freeze({
 /** Same population as GET /projects/admin/pending and the approve/reject precondition. */
 export const PENDING_PROJECT_APPROVAL_FILTER = Object.freeze({ status: "pending" });
 
-/** Exactly the statuses the admin approve/deny handlers accept. */
-export const ACTIONABLE_CANCELLATION_FILTER = Object.freeze({
-  status: { $in: ADMIN_ACTIONABLE_CANCELLATION_STATUSES },
-});
-
-/** Only pending reports can be resolved (warn/ban/dismiss); reviewed/dismissed are done. */
-export const PENDING_CHAT_REPORT_FILTER = Object.freeze({ status: "pending" });
-
-/**
- * Support inbox items that wait on an admin:
- * - tickets (including legacy rows without `kind`) that are open/in progress
- *   and whose latest public reply is not an admin reply (an admin reply means
- *   the ticket now waits on the customer/professional);
- * - meeting requests not yet scheduled or declined (`meeting.status: pending`).
- * A meeting's internal ticket status is not a ticket status, so it is ignored.
- */
-export const ACTIONABLE_SUPPORT_TICKET_FILTER = Object.freeze({
-  $or: [
-    {
-      kind: { $ne: "meeting" },
-      status: { $in: ["open", "in_progress"] },
-      $expr: { $ne: [{ $arrayElemAt: [{ $ifNull: ["$replies.authorRole", []] }, -1] }, "admin"] },
-    },
-    { kind: "meeting", "meeting.status": "pending" },
-  ],
-});
-
-/** Historical MeetingRequest rows shown in the same unified support inbox. */
-export const PENDING_LEGACY_MEETING_REQUEST_FILTER = Object.freeze({ status: "pending" });
-
 type BadgeQueue = {
   /** Same authorization as the queue's list endpoint. */
   authorized: (ctx: { admin: IUser; levels: AdminPermissionLevels }) => boolean;
   count: (baselines: DashboardBaselineMap) => Promise<number>;
 };
 
-/**
- * Counting-since clause for a dashboard's current baseline. Badges count only
- * open work, and the baseline rule keeps open work visible, so this clause does
- * not change the number. It is applied anyway so the badge follows the same rule
- * as its queue.
- */
-const badgeBaselineClause = (key: "disputes" | "cancellations", baselines: DashboardBaselineMap) => {
-  const resetAt = baselines.get(key);
-  return resetAt ? clauseForDashboard(key, resetAt) : {};
-};
+const resetAtOf = (baselines: DashboardBaselineMap, key: Parameters<DashboardBaselineMap["get"]>[0]) =>
+  baselines.get(key) ?? null;
 
 const readable = (area: AdminAccessArea) => ({ levels }: { levels: AdminPermissionLevels }) =>
   hasAccessLevel(levels, area, "read");
@@ -119,43 +80,32 @@ export const NAVIGATION_BADGE_QUEUES: Record<AdminNavigationBadgeKey, BadgeQueue
     count: async () => Project.countDocuments(PENDING_PROJECT_APPROVAL_FILTER),
   },
   cancellationRequests: {
+    // Only pending requests made by a professional wait on an admin. Escalated
+    // customer refunds are counted under dispute management.
     authorized: readable("cancellations"),
-    count: async (baselines) => CancellationRequest.countDocuments(
-      withBaselineClause(ACTIONABLE_CANCELLATION_FILTER, badgeBaselineClause("cancellations", baselines)),
-    ),
+    count: async (baselines) => countCancellationRequestWork(resetAtOf(baselines, "cancellations")),
   },
   disputes: {
-    // Canonical open booking disputes: the dispute list's Open view and the
-    // "Open booking disputes" card. Warranty claims and escalated refunds are
-    // separate queues and are never part of this count.
+    // Everything dispute management decides: open booking disputes, escalated
+    // refund requests and escalated warranty claims. Same number as the
+    // dispute page's "Dispute management counter".
     authorized: readable("disputes"),
-    count: async (baselines) => Booking.countDocuments(
-      withBaselineClause(buildDisputeFilter("open"), badgeBaselineClause("disputes", baselines)) as any,
-    ),
+    count: async (baselines) => (await countDisputeManagementWork(resetAtOf(baselines, "disputes"))).total,
   },
   supportTickets: {
     authorized: readable("support"),
-    count: async () => {
-      const [tickets, legacyMeetings] = await Promise.all([
-        SupportTicket.countDocuments(ACTIONABLE_SUPPORT_TICKET_FILTER),
-        MeetingRequest.countDocuments(PENDING_LEGACY_MEETING_REQUEST_FILTER),
-      ]);
-      return tickets + legacyMeetings;
-    },
+    count: async (baselines) => countSupportWork(resetAtOf(baselines, "supportTickets")),
   },
   chatReports: {
     authorized: readable("chat_reports"),
-    count: async () => ChatReport.countDocuments(PENDING_CHAT_REPORT_FILTER),
+    count: async (baselines) => countChatReportWork(resetAtOf(baselines, "chatReports")),
   },
   reviewModeration: {
     authorized: readable("reviews"),
-    // Reviews are published on submission (profanity is rejected up front) and
-    // there is no review report/flag or "awaiting moderation" state. Hidden
-    // reviews were already acted on; visible ones are ordinary published
-    // reviews. No review currently waits on an admin, so the queue is empty by
-    // construction. Counting all visible reviews would turn every published
-    // review into a fake task.
-    count: async () => 0,
+    // Reviews are published on submission, so the moderation work is reading
+    // the new ones: visible reviews submitted since the last reset. A super
+    // admin resets the counter once the reviews have been checked.
+    count: async (baselines) => countReviewModerationWork(resetAtOf(baselines, "reviewModeration")),
   },
 };
 

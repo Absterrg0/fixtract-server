@@ -54,6 +54,11 @@ import {
   toBaselineInfo,
   withBaselineClause,
 } from '../../utils/adminDashboardBaselines';
+import {
+  countDisputeManagementWork,
+  ESCALATED_REFUND_REQUEST_FILTER,
+  ESCALATED_WARRANTY_CLAIM_FILTER,
+} from '../../utils/adminWorkCounters';
 
 const presignAttachments = async (urls?: unknown): Promise<string[]> => {
   if (!Array.isArray(urls) || urls.length === 0) return [];
@@ -210,24 +215,21 @@ const transferResolvedExtraCostIfNeeded = async (resolvedBooking: any, finalExtr
   }
 };
 
-// Warranty claims and escalated customer refund requests are their own
-// records with their own admin queues (/admin/warranty-claims,
-// /admin/cancellation-requests). The dispute page previews the active ones so
-// they can be actioned there, but they are never booking disputes: the booking
-// dispute list, its pagination and the analytics totals exclude them, and
-// their own counts are reported separately (`separateQueues`).
-const ACTIVE_WARRANTY_CLAIM_FILTER = { status: { $in: ['open', 'proposal_sent', 'proposal_accepted', 'escalated'] } };
-const ESCALATED_REFUND_REQUEST_FILTER = { requestedRole: 'customer', status: 'escalated' };
+// Escalated customer refund requests and escalated warranty claims are handled
+// in dispute management: they are part of the dispute-management counter (nav
+// badge) and listed on the dispute page. They stay their own records and are
+// actioned through their own endpoints, so the booking-dispute list, its
+// pagination and the booking-dispute totals do not include them; their open
+// counts are reported in `escalations`.
 const WARRANTY_QUEUE_HREF = '/admin/warranty-claims';
 const REFUND_QUEUE_HREF = '/admin/cancellation-requests?status=escalated';
-
-export const countSeparateDisputeQueues = async () => {
-  const [activeWarrantyClaims, escalatedRefundRequests] = await Promise.all([
-    WarrantyClaim.countDocuments(ACTIVE_WARRANTY_CLAIM_FILTER),
+export const countDisputeEscalations = async () => {
+  const [escalatedWarrantyClaims, escalatedRefundRequests] = await Promise.all([
+    WarrantyClaim.countDocuments(ESCALATED_WARRANTY_CLAIM_FILTER),
     CancellationRequest.countDocuments(ESCALATED_REFUND_REQUEST_FILTER),
   ]);
   return {
-    activeWarrantyClaims,
+    escalatedWarrantyClaims,
     escalatedRefundRequests,
     warrantyClaimsHref: WARRANTY_QUEUE_HREF,
     refundRequestsHref: REFUND_QUEUE_HREF,
@@ -238,11 +240,11 @@ const buildExternalDisputeRows = async (statusFilter?: string): Promise<any[]> =
   if (statusFilter === 'resolved') return [];
 
   const [warrantyClaims, refundRequests] = await Promise.all([
-    WarrantyClaim.find(ACTIVE_WARRANTY_CLAIM_FILTER)
+    WarrantyClaim.find(ESCALATED_WARRANTY_CLAIM_FILTER)
       .populate({ path: 'booking', select: '_id bookingNumber status payment project warrantyCoverage actualEndDate', populate: { path: 'project', select: 'title category service' } })
       .populate('customer', 'name email isAnonymized deletedAt')
       .populate('professional', 'name email username isAnonymized deletedAt')
-      .sort({ openedAt: -1 })
+      .sort({ 'escalation.escalatedAt': -1, openedAt: -1 })
       .limit(50)
       .lean(),
     CancellationRequest.find(ESCALATED_REFUND_REQUEST_FILTER)
@@ -359,9 +361,11 @@ export const getDisputes = async (req: Request, res: Response) => {
       Booking.countDocuments(filter),
     ]);
 
-    // Preview of the separate warranty/refund queues, page 1 only. They are not
+    // Escalated warranty claims and refund requests, page 1 only. They are not
     // part of `disputes` or `pagination` (booking disputes only).
-    const externalRows = pageNum === 1 ? await buildExternalDisputeRows(typeof status === 'string' ? status : undefined) : [];
+    const externalRows = pageNum === 1
+      ? await buildExternalDisputeRows(typeof status === 'string' ? status : undefined)
+      : [];
 
     await Promise.all(disputes.map((d: any) => presignBookingAttachments(d)));
     await Promise.all(
@@ -1129,19 +1133,22 @@ export const getDisputeAnalytics = async (req: Request, res: Response) => {
     // totalOpen / totalResolved / totalDisputes count booking disputes only,
     // with exactly the filters of the Open / Resolved / All list views, plus the
     // same counting-since baseline (open work is never excluded by it).
-    // Warranty claims and refund requests are reported separately and are
-    // never added into these totals.
+    // `counter` is the dispute-management counter (the nav badge): open booking
+    // disputes + escalated refund requests + escalated warranty claims that came
+    // in since the last reset. `escalations` are the open escalations (any age).
     const baseline = await resolveDashboardBaseline(req, 'disputes');
     const [
       totalOpen,
       totalResolved,
       totalDisputes,
-      separateQueues,
+      escalations,
+      counter,
     ] = await Promise.all([
       Booking.countDocuments(withBaselineClause(buildDisputeFilter('open'), baseline.clause) as any),
       Booking.countDocuments(withBaselineClause(buildDisputeFilter('resolved'), baseline.clause) as any),
       Booking.countDocuments(withBaselineClause(buildDisputeFilter(), baseline.clause) as any),
-      countSeparateDisputeQueues(),
+      countDisputeEscalations(),
+      countDisputeManagementWork(baseline.resetAtDate),
     ]);
 
     return res.json({
@@ -1150,7 +1157,8 @@ export const getDisputeAnalytics = async (req: Request, res: Response) => {
         totalOpen,
         totalResolved,
         totalDisputes,
-        separateQueues,
+        escalations,
+        counter: { ...counter, resetAt: baseline.resetAt },
         baseline: toBaselineInfo(baseline),
       }
     });

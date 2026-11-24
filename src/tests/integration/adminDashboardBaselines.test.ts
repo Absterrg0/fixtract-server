@@ -1,8 +1,9 @@
 import mongoose, { Types } from 'mongoose';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Super-admin "Reset dashboards": counting-since baselines for the booking-flow
-// dashboards (disputes, warranty claims, cancellations/refunds, booking KPIs).
+// Super-admin "Reset dashboards": counting-since baselines for the admin
+// counters (disputes, cancellations, support tickets, reported chats, review
+// moderation) and the booking KPIs. A reset brings a counter to 0.
 vi.mock('../../handlers/Stripe/payment', () => ({
   captureAndTransferPayment: vi.fn(),
   executeRefund: vi.fn(),
@@ -14,6 +15,9 @@ vi.mock('../../utils/notifications/notify', () => ({ notify: vi.fn() }));
 import Booking from '../../models/booking';
 import WarrantyClaim from '../../models/warrantyClaim';
 import CancellationRequest from '../../models/cancellationRequest';
+import ChatReport from '../../models/chatReport';
+import SupportTicket from '../../models/supportTicket';
+import MeetingRequest from '../../models/meetingRequest';
 import AuditLog from '../../models/auditLog';
 import {
   AdminDashboardBaseline,
@@ -26,7 +30,6 @@ import {
   disputeBaselineClause,
   isAdminDashboardKey,
   isHistoryAllRequested,
-  warrantyBaselineClause,
   withBaselineClause,
 } from '../../utils/adminDashboardBaselines';
 import {
@@ -47,6 +50,7 @@ const hasDisposableMongo = Boolean(testUri && /test/i.test(testUri));
 const describeDb = hasDisposableMongo ? describe : describe.skip;
 
 const id = () => new Types.ObjectId();
+const ALL_KEYS = ['disputes', 'cancellations', 'supportTickets', 'chatReports', 'reviewModeration', 'bookingKpis'];
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = Date.now();
 /** Reset instant used by the filtering tests: one day ago. */
@@ -85,8 +89,10 @@ const call = async (handler: (req: any, res: any) => Promise<unknown>, req: any)
 };
 
 describe('dashboard baseline rule (pure)', () => {
-  it('recognises only the four booking-flow dashboards', () => {
-    expect(['disputes', 'warrantyClaims', 'cancellations', 'bookingKpis'].every(isAdminDashboardKey)).toBe(true);
+  it('recognises the six resettable dashboards; warranty claims are no longer one', () => {
+    expect(ALL_KEYS.every(isAdminDashboardKey)).toBe(true);
+    // Escalated warranty claims are counted (and reset) under disputes.
+    expect(isAdminDashboardKey('warrantyClaims')).toBe(false);
     expect(isAdminDashboardKey('kpi')).toBe(false);
     expect(isAdminDashboardKey('__proto__')).toBe(false);
     expect(isAdminDashboardKey(undefined)).toBe(false);
@@ -99,20 +105,20 @@ describe('dashboard baseline rule (pure)', () => {
     expect(isHistoryAllRequested({})).toBe(false);
   });
 
-  it('keeps open disputes, warranty claims and cancellations in every clause', () => {
+  it('keeps open disputes and cancellations in every list clause', () => {
     expect(disputeBaselineClause(RESET_AT)).toEqual({
       $or: [{ 'dispute.raisedAt': { $gte: RESET_AT } }, { 'dispute.resolvedAt': null }],
-    });
-    expect(warrantyBaselineClause(RESET_AT)).toEqual({
-      $or: [{ createdAt: { $gte: RESET_AT } }, { status: { $ne: 'closed' } }],
     });
     expect(cancellationBaselineClause(RESET_AT)).toEqual({
       $or: [{ createdAt: { $gte: RESET_AT } }, { status: { $nin: ['approved', 'denied'] } }],
     });
   });
 
-  it('adds no clause for KPIs (they clamp the range instead) and when no baseline is set', () => {
+  it('adds no list clause for KPIs (they clamp the range instead), counter-only dashboards, or no baseline', () => {
     expect(clauseForDashboard('bookingKpis', RESET_AT)).toEqual({});
+    expect(clauseForDashboard('supportTickets', RESET_AT)).toEqual({});
+    expect(clauseForDashboard('chatReports', RESET_AT)).toEqual({});
+    expect(clauseForDashboard('reviewModeration', RESET_AT)).toEqual({});
     const base = { status: 'closed' };
     expect(withBaselineClause(base, {})).toBe(base);
     expect(withBaselineClause(base, disputeBaselineClause(RESET_AT))).toEqual({
@@ -185,6 +191,9 @@ describeDb('dashboard baselines (Mongo)', () => {
       Booking,
       WarrantyClaim,
       CancellationRequest,
+      ChatReport,
+      SupportTicket,
+      MeetingRequest,
       AdminDashboardBaseline,
       AdminDashboardBaselineEvent,
       AuditLog,
@@ -218,10 +227,10 @@ describeDb('dashboard baselines (Mongo)', () => {
   });
 
   describe('reset, read and undo', () => {
-    it('GET lists all four dashboards with no baseline by default', async () => {
+    it('GET lists all six dashboards with no baseline by default', async () => {
       const { statusCode, body } = await call(getDashboardBaselines, makeReq({ admin: superAdmin() }));
       expect(statusCode).toBe(200);
-      expect(body.data.dashboards.map((d: any) => d.key).sort()).toEqual(['bookingKpis', 'cancellations', 'disputes', 'warrantyClaims']);
+      expect(body.data.dashboards.map((d: any) => d.key)).toEqual(ALL_KEYS);
       for (const dashboard of body.data.dashboards) {
         expect(dashboard).toMatchObject({ resetAt: null, resetBy: null, canUndo: false });
       }
@@ -240,7 +249,7 @@ describeDb('dashboard baselines (Mongo)', () => {
       expect(disputes.canUndo).toBe(true);
       expect(body.data.history[0]).toMatchObject({ dashboardKey: 'disputes', action: 'reset', actorName: 'Sara Super', note: 'Clear test bookings' });
       // Other dashboards are untouched.
-      expect(body.data.dashboards.find((d: any) => d.key === 'warrantyClaims').resetAt).toBeNull();
+      expect(body.data.dashboards.find((d: any) => d.key === 'cancellations').resetAt).toBeNull();
     });
 
     it('reset-all sets every dashboard to one shared timestamp and one batch id', async () => {
@@ -252,7 +261,7 @@ describeDb('dashboard baselines (Mongo)', () => {
       const batchIds = new Set(body.data.history.map((event: any) => event.batchId));
       expect(batchIds.size).toBe(1);
       expect(batchIds.has(null)).toBe(false);
-      expect(body.data.history).toHaveLength(4);
+      expect(body.data.history).toHaveLength(ALL_KEYS.length);
     });
 
     it('rejects an unknown dashboard key and an over-long note without writing', async () => {
@@ -404,7 +413,7 @@ describeDb('dashboard baselines (Mongo)', () => {
       ]);
       expect(entries[0]).toMatchObject({ status: 'success', statusCode: 200, actorRole: 'admin' });
       expect(entries[0].details).toMatchObject({ keys: ['disputes'], note: 'audit me' });
-      expect(entries[1].details.keys).toHaveLength(4);
+      expect(entries[1].details.keys).toEqual(ALL_KEYS);
       expect(String(entries[0].actor)).toBe(String(sara._id));
     });
   });
@@ -508,7 +517,7 @@ describeDb('dashboard baselines (Mongo)', () => {
     };
     const bookingNumbersOf = (result: any) => result.body.data.disputes.map((d: any) => d.bookingNumber).sort();
 
-    it('with a baseline: phantoms never appear, recorded open work always does, and the badge agrees with the lists', async () => {
+    it('with a baseline: phantoms never appear, recorded open work always does, and the badge counts only new work', async () => {
       await seedComposed();
       await setBaseline('disputes', RESET_AT);
 
@@ -526,8 +535,11 @@ describeDb('dashboard baselines (Mongo)', () => {
       const analytics = await call(getDisputeAnalytics, makeReq({ admin: superAdmin(), query: {} }));
       expect(analytics.body.data).toMatchObject({ totalOpen: 2, totalResolved: 1, totalDisputes: 2 });
 
+      // The open disputes were raised before the reset (or have no date), so the
+      // counter is 0 while the list still shows them.
       const badges = await computeAdminNavigationBadges(superAdmin());
-      expect(badges.disputes).toBe(analytics.body.data.totalOpen);
+      expect(analytics.body.data.counter).toMatchObject({ total: 0, bookingDisputes: 0 });
+      expect(badges.disputes).toBe(0);
     });
 
     it('history=all widens only the closed side: the old resolved dispute returns, phantoms still never do', async () => {
@@ -555,7 +567,7 @@ describeDb('dashboard baselines (Mongo)', () => {
     });
   });
 
-  describe('warranty claims dashboard', () => {
+  describe('warranty claims (no reset of their own)', () => {
     const seedClaims = async () => {
       const base = { booking: id(), customer: id(), professional: id(), reason: 'defect', description: 'd', evidence: [] };
       await WarrantyClaim.collection.insertMany([
@@ -565,31 +577,31 @@ describeDb('dashboard baselines (Mongo)', () => {
       ]);
     };
 
-    it('hides only closed claims from before the reset; open claims stay', async () => {
-      await seedClaims();
-      await setBaseline('warrantyClaims', RESET_AT);
-      const { body } = await call(listAdminWarrantyClaims, makeReq({ user: superAdmin(), query: {} }));
-      expect(body.data.claims.map((c: any) => c.claimNumber).sort()).toEqual(['WC-NEW-CLOSED', 'WC-OLD-OPEN']);
-      expect(body.data.pagination.total).toBe(2);
-      expect(body.data.baseline).toMatchObject({ key: 'warrantyClaims', applied: true });
+    it('refuses a warranty-claims reset or undo and writes nothing', async () => {
+      const reset = await call(resetDashboardBaseline, makeReq({ method: 'POST', admin: superAdmin(), params: { key: 'warrantyClaims' }, body: {} }));
+      expect(reset.statusCode).toBe(404);
+      const undo = await call(undoDashboardBaseline, makeReq({ method: 'POST', admin: superAdmin(), params: { key: 'warrantyClaims' } }));
+      expect(undo.statusCode).toBe(404);
+      expect(await AdminDashboardBaseline.countDocuments({})).toBe(0);
+      expect(await AdminDashboardBaselineEvent.countDocuments({})).toBe(0);
     });
 
-    it('history=all brings back the old closed claim', async () => {
+    it('a stored warranty baseline from before no longer hides claims, and its history entry stays listed', async () => {
       await seedClaims();
       await setBaseline('warrantyClaims', RESET_AT);
-      const { body } = await call(listAdminWarrantyClaims, makeReq({ user: superAdmin(), query: { history: 'all' } }));
-      expect(body.data.pagination.total).toBe(3);
-    });
+      await AdminDashboardBaselineEvent.create({
+        dashboardKey: 'warrantyClaims', action: 'reset', resetAt: RESET_AT, previousResetAt: null, actorName: 'Sara Super', createdAt: RESET_AT,
+      });
 
-    it('analytics totals count only claims since the reset when no show-all is set', async () => {
-      await seedClaims();
-      await setBaseline('warrantyClaims', RESET_AT);
-      const { body } = await call(getAdminWarrantyAnalytics, makeReq({ user: superAdmin(), query: { lastDays: '30' } }));
-      expect(body.data.summary.totalClaims).toBe(1);
-      expect(body.data.baseline.applied).toBe(true);
+      const list = await call(listAdminWarrantyClaims, makeReq({ user: superAdmin(), query: {} }));
+      expect(list.body.data.pagination.total).toBe(3);
+      expect(list.body.data.baseline).toBeUndefined();
+      const analytics = await call(getAdminWarrantyAnalytics, makeReq({ user: superAdmin(), query: { lastDays: '30' } }));
+      expect(analytics.body.data.summary.totalClaims).toBe(3);
 
-      const all = await call(getAdminWarrantyAnalytics, makeReq({ user: superAdmin(), query: { lastDays: '30', history: 'all' } }));
-      expect(all.body.data.summary.totalClaims).toBe(3);
+      const snapshot = await call(getDashboardBaselines, makeReq({ admin: superAdmin() }));
+      expect(snapshot.body.data.dashboards.map((d: any) => d.key)).not.toContain('warrantyClaims');
+      expect(snapshot.body.data.history).toEqual([expect.objectContaining({ dashboardKey: 'warrantyClaims', action: 'reset' })]);
     });
   });
 
@@ -650,26 +662,105 @@ describeDb('dashboard baselines (Mongo)', () => {
     });
   });
 
-  describe('navigation badges', () => {
-    it('keeps open disputes and pending cancellations counted after a reset, and drops nothing open', async () => {
+  describe('counters after a reset', () => {
+    /** One item per counter that already waits on an admin (arrived before the reset). */
+    const seedOldWork = async () => {
       const customer = id();
-      await Booking.collection.insertMany([
-        { bookingNumber: 'BK-OPEN-OLD', status: 'dispute', customer, professional: id(), project: id(), dispute: { raisedBy: customer, reason: 'x', raisedAt: BEFORE } },
+      await Promise.all([
+        Booking.collection.insertMany([
+          { bookingNumber: 'BK-OPEN-OLD', status: 'dispute', customer, professional: id(), project: id(), dispute: { raisedBy: customer, reason: 'x', raisedAt: BEFORE } },
+          { bookingNumber: 'BK-REVIEW-OLD', status: 'completed', customerReview: { communicationLevel: 5, valueOfDelivery: 5, qualityOfService: 5, comment: 'ok', reviewedAt: BEFORE } },
+        ]),
+        CancellationRequest.collection.insertMany([
+          { booking: id(), requestedBy: id(), requestedRole: 'professional', status: 'pending', reason: 'r', createdAt: BEFORE, updatedAt: BEFORE },
+          { booking: id(), requestedBy: id(), requestedRole: 'customer', status: 'escalated', reason: 'r', createdAt: BEFORE, escalatedAt: BEFORE, updatedAt: BEFORE },
+        ]),
+        WarrantyClaim.collection.insertOne({
+          claimNumber: 'WC-ESC-OLD', booking: id(), customer: id(), professional: id(), status: 'escalated', reason: 'defect',
+          description: 'd', openedAt: BEFORE, createdAt: BEFORE, updatedAt: BEFORE, escalation: { escalatedAt: BEFORE, reason: 'declined' },
+        }),
+        SupportTicket.collection.insertMany([
+          { kind: 'ticket', ticketNumber: 'T-OLD', status: 'open', createdAt: BEFORE, replies: [] },
+          { kind: 'ticket', ticketNumber: 'T-OLD-WAITING', status: 'open', createdAt: BEFORE, replies: [{ authorRole: 'admin', body: 'a', createdAt: BEFORE }] },
+        ]),
+        MeetingRequest.collection.insertOne({ userId: id(), topic: 'legacy', status: 'pending', createdAt: BEFORE }),
+        ChatReport.collection.insertOne({ messageId: id(), conversationId: id(), reportedBy: id(), reason: 'spam', status: 'pending', createdAt: BEFORE }),
       ]);
-      await CancellationRequest.collection.insertMany([
-        { booking: id(), requestedBy: id(), requestedRole: 'customer', status: 'pending', reason: 'r', createdAt: BEFORE, updatedAt: BEFORE },
-        { booking: id(), requestedBy: id(), requestedRole: 'customer', status: 'approved', reason: 'r', createdAt: BEFORE, updatedAt: BEFORE },
-      ]);
-      await setBaseline('disputes', AFTER);
-      await setBaseline('cancellations', AFTER);
-
+    };
+    const COUNTER_KEYS = ['cancellationRequests', 'disputes', 'supportTickets', 'chatReports', 'reviewModeration'] as const;
+    const counters = async () => {
       const counts = await computeAdminNavigationBadges(superAdmin());
-      expect(counts.disputes).toBe(1);
-      expect(counts.cancellationRequests).toBe(1);
+      return Object.fromEntries(COUNTER_KEYS.map((key) => [key, counts[key]]));
+    };
+
+    it('reset all brings every counter to 0 while the lists keep the open items; undo brings them back', async () => {
+      await seedOldWork();
+      expect(await counters()).toEqual({ cancellationRequests: 1, disputes: 3, supportTickets: 2, chatReports: 1, reviewModeration: 1 });
+
+      const sara = superAdmin();
+      const reset = await call(resetAllDashboardBaselines, makeReq({ method: 'POST', admin: sara, body: {} }));
+      expect(reset.statusCode).toBe(200);
+      expect(await counters()).toEqual({ cancellationRequests: 0, disputes: 0, supportTickets: 0, chatReports: 0, reviewModeration: 0 });
+
+      // Non-destructive: the open dispute, the pending cancellation and the escalations are still listed.
+      const disputes = await call(getDisputes, makeReq({ admin: sara, query: {} }));
+      expect(disputes.body.data.disputes.map((d: any) => d.bookingNumber)).toEqual(['BK-OPEN-OLD']);
+      expect(disputes.body.data.externalDisputes.map((d: any) => d.source).sort()).toEqual(['refund', 'warranty']);
+      const cancellations = await call(listCancellationRequests, makeReq({ admin: sara, query: { status: 'pending' } }));
+      expect(cancellations.body.data.total).toBe(1);
+      const analytics = await call(getDisputeAnalytics, makeReq({ admin: sara, query: {} }));
+      expect(analytics.body.data).toMatchObject({ totalOpen: 1, escalations: { escalatedRefundRequests: 1, escalatedWarrantyClaims: 1 } });
+      expect(analytics.body.data.counter).toMatchObject({ total: 0, bookingDisputes: 0, escalatedRefundRequests: 0, escalatedWarrantyClaims: 0 });
+      expect(await Booking.countDocuments({})).toBe(2);
+
+      for (const key of ['cancellations', 'disputes', 'supportTickets', 'chatReports', 'reviewModeration']) {
+        const undo = await call(undoDashboardBaseline, makeReq({ method: 'POST', admin: sara, params: { key } }));
+        expect(undo.statusCode).toBe(200);
+      }
+      expect(await counters()).toEqual({ cancellationRequests: 1, disputes: 3, supportTickets: 2, chatReports: 1, reviewModeration: 1 });
     });
+
+    it('each counter counts work that arrives, or comes back to the admin, after its reset', async () => {
+      await seedOldWork();
+      for (const key of ['cancellations', 'disputes', 'supportTickets', 'chatReports', 'reviewModeration']) {
+        await setBaseline(key, RESET_AT);
+      }
+      expect(await counters()).toEqual({ cancellationRequests: 0, disputes: 0, supportTickets: 0, chatReports: 0, reviewModeration: 0 });
+
+      const customer = id();
+      await Promise.all([
+        Booking.collection.insertMany([
+          { bookingNumber: 'BK-OPEN-NEW', status: 'dispute', customer, professional: id(), project: id(), dispute: { raisedBy: customer, reason: 'y', raisedAt: AFTER } },
+          { bookingNumber: 'BK-REVIEW-NEW', status: 'completed', customerReview: { communicationLevel: 4, valueOfDelivery: 4, qualityOfService: 4, comment: 'fine', reviewedAt: AFTER } },
+          { bookingNumber: 'BK-REVIEW-NEW-HIDDEN', status: 'completed', customerReview: { communicationLevel: 1, valueOfDelivery: 1, qualityOfService: 1, comment: 'x', reviewedAt: AFTER, isHidden: true } },
+        ]),
+        CancellationRequest.collection.insertMany([
+          { booking: id(), requestedBy: id(), requestedRole: 'professional', status: 'pending', reason: 'r', createdAt: AFTER, updatedAt: AFTER },
+          // A customer request waits on the professional: not admin work.
+          { booking: id(), requestedBy: id(), requestedRole: 'customer', status: 'pending', reason: 'r', createdAt: AFTER, updatedAt: AFTER },
+          // Requested before the reset, escalated after: it reaches dispute management now.
+          { booking: id(), requestedBy: id(), requestedRole: 'customer', status: 'escalated', reason: 'r', createdAt: BEFORE, escalatedAt: AFTER, updatedAt: AFTER },
+        ]),
+        WarrantyClaim.collection.insertOne({
+          claimNumber: 'WC-ESC-NEW', booking: id(), customer: id(), professional: id(), status: 'escalated', reason: 'defect',
+          description: 'd', openedAt: BEFORE, createdAt: BEFORE, updatedAt: AFTER, escalation: { escalatedAt: AFTER, reason: 'declined' },
+        }),
+        // The customer answered the admin after the reset: the ticket is admin work again.
+        SupportTicket.collection.updateOne({ ticketNumber: 'T-OLD-WAITING' }, { $push: { replies: { authorRole: 'customer', body: 'b', createdAt: AFTER } } as any }),
+        ChatReport.collection.insertOne({ messageId: id(), conversationId: id(), reportedBy: id(), reason: 'spam', status: 'pending', createdAt: AFTER }),
+      ]);
+
+      expect(await counters()).toEqual({ cancellationRequests: 1, disputes: 3, supportTickets: 1, chatReports: 1, reviewModeration: 1 });
+      const analytics = await call(getDisputeAnalytics, makeReq({ admin: superAdmin(), query: {} }));
+      expect(analytics.body.data.counter).toMatchObject({ total: 3, bookingDisputes: 1, escalatedRefundRequests: 1, escalatedWarrantyClaims: 1 });
+      // Show-all is a list option: it never changes the counter.
+      const showAll = await call(getDisputeAnalytics, makeReq({ admin: superAdmin(), query: { history: 'all' } }));
+      expect(showAll.body.data.counter.total).toBe(3);
+    });
+
     it('a failed baseline read does not take down the badges', async () => {
       await CancellationRequest.collection.insertOne(
-        { booking: id(), requestedBy: id(), requestedRole: 'customer', status: 'pending', reason: 'r', createdAt: BEFORE, updatedAt: BEFORE } as any,
+        { booking: id(), requestedBy: id(), requestedRole: 'professional', status: 'pending', reason: 'r', createdAt: BEFORE, updatedAt: BEFORE } as any,
       );
       vi.spyOn(console, 'error').mockImplementation(() => {});
       const findSpy = vi.spyOn(AdminDashboardBaseline, 'find').mockImplementationOnce(() => {
@@ -686,6 +777,6 @@ describeDb('dashboard baselines (Mongo)', () => {
   it('the disputes and cancellation clauses never hide an open item', () => {
     // Guard: open statuses are never in the excluded set.
     expect(cancellationBaselineClause(RESET_AT).$or[1]).toEqual({ status: { $nin: ['approved', 'denied'] } });
-    expect(warrantyBaselineClause(RESET_AT).$or[1]).toEqual({ status: { $ne: 'closed' } });
+    expect(disputeBaselineClause(RESET_AT).$or[1]).toEqual({ 'dispute.resolvedAt': null });
   });
 });

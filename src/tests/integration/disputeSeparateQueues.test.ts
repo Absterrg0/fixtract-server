@@ -1,8 +1,9 @@
 import mongoose, { Types } from 'mongoose';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Final Touches Part 3 #7: only recorded booking disputes join the overview.
-// Warranty and refund requests are separate queues; no dashboards are reset.
+// Final Touches Part 3 #7: only recorded booking disputes join the booking
+// overview. Escalated warranty claims and escalated refund requests are handled
+// in dispute management (own rows, own counts, part of the dispute counter).
 vi.mock('../../handlers/Stripe/payment', () => ({
   captureAndTransferPayment: vi.fn(),
   executeRefund: vi.fn(),
@@ -64,10 +65,11 @@ describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
     ]);
   });
 
-  it('zero records: zero metrics, zero separate-queue counts and an empty list', async () => {
+  it('zero records: zero metrics, zero escalation counts, a zero counter and an empty list', async () => {
     const a = await analytics();
     expect(a).toMatchObject({ totalOpen: 0, totalResolved: 0, totalDisputes: 0 });
-    expect(a.separateQueues).toMatchObject({ activeWarrantyClaims: 0, escalatedRefundRequests: 0 });
+    expect(a.escalations).toMatchObject({ escalatedWarrantyClaims: 0, escalatedRefundRequests: 0 });
+    expect(a.counter).toEqual({ total: 0, bookingDisputes: 0, escalatedRefundRequests: 0, escalatedWarrantyClaims: 0, resetAt: null });
 
     for (const status of [undefined, 'open', 'resolved']) {
       const data = await list(status ? { status } : {});
@@ -108,7 +110,7 @@ describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
     expect((await list({ status: 'resolved' })).disputes).toEqual([]);
   });
 
-  it('warranty and refund work keeps its own rows, labels, links and counts without touching booking totals', async () => {
+  it('escalated warranty claims and refunds get their own rows and counts and join the dispute counter, not the booking totals', async () => {
     const disputedBooking = new Types.ObjectId();
     const warrantyBooking = new Types.ObjectId();
     const refundBooking = new Types.ObjectId();
@@ -134,15 +136,18 @@ describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
     ] as any[]);
 
     const a = await analytics();
-    // Booking-dispute totals are unchanged by the other queues...
+    // Booking-dispute totals are booking disputes only...
     expect(a).toMatchObject({ totalOpen: 1, totalResolved: 0, totalDisputes: 1 });
-    // ...which are reported under their own names.
-    expect(a.separateQueues).toEqual({
-      activeWarrantyClaims: 2,
+    // ...the escalations are reported under their own names (open warranty
+    // claims that wait on the professional or customer are not escalations)...
+    expect(a.escalations).toEqual({
+      escalatedWarrantyClaims: 1,
       escalatedRefundRequests: 1,
       warrantyClaimsHref: '/admin/warranty-claims',
       refundRequestsHref: '/admin/cancellation-requests?status=escalated',
     });
+    // ...and the dispute-management counter adds all three.
+    expect(a.counter).toMatchObject({ total: 3, bookingDisputes: 1, escalatedRefundRequests: 1, escalatedWarrantyClaims: 1 });
 
     for (const status of [undefined, 'open']) {
       const data = await list(status ? { status } : {});
@@ -150,10 +155,10 @@ describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
       expect(data.pagination).toMatchObject({ total: 1, pages: 1 });
 
       const external = data.externalDisputes;
-      expect(external).toHaveLength(3);
+      expect(external).toHaveLength(2);
       const warranty = external.filter((row: any) => row.source === 'warranty');
       const refund = external.filter((row: any) => row.source === 'refund');
-      expect(warranty.map((row: any) => row.claimNumber).sort()).toEqual(['WC-ESC', 'WC-OPEN']);
+      expect(warranty.map((row: any) => row.claimNumber)).toEqual(['WC-ESC']);
       for (const row of warranty) {
         expect(row).toMatchObject({ readOnly: true, resolveHref: '/admin/warranty-claims', bookingId: String(warrantyBooking) });
         expect(row._id).toMatch(/^warranty:/);
@@ -177,7 +182,7 @@ describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
     expect(resolved.externalDisputes).toEqual([]);
   });
 
-  it('pagination counts booking disputes only; the separate preview is on page 1 and never shifts pages', async () => {
+  it('pagination counts booking disputes only; the escalation rows are on page 1 and never shift pages', async () => {
     const warrantyBooking = new Types.ObjectId();
     await Booking.collection.insertMany([
       { _id: new Types.ObjectId(), bookingNumber: 'BK-D1', status: 'dispute', dispute: recordedDispute(20) },
@@ -187,7 +192,7 @@ describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
     ] as any[]);
     await WarrantyClaim.collection.insertOne({
       claimNumber: 'WC-1', booking: warrantyBooking, customer: new Types.ObjectId(), professional: new Types.ObjectId(),
-      status: 'open', reason: 'defect', description: 'd', openedAt: at(21),
+      status: 'escalated', reason: 'defect', description: 'd', openedAt: at(21),
     } as any);
 
     const page1 = await list({ page: '1', limit: '2' });
@@ -201,7 +206,7 @@ describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
 
     const a = await analytics();
     expect(a.totalDisputes).toBe(3);
-    expect(a.separateQueues.activeWarrantyClaims).toBe(1);
+    expect(a.escalations.escalatedWarrantyClaims).toBe(1);
   });
 
   it('resolved history is available only through the resolved view', async () => {
