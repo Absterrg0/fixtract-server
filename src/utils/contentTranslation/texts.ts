@@ -86,22 +86,27 @@ function addProjectCardFields(
  * card, booking/RFQ wizard).
  *
  * `professionalInputs` hold dropdown answers (catalogue option text) but also
- * free text and numbers. With `inputValues` (the catalogue entry's strings,
- * as the queue passes them) only answers that are catalogue text are
- * collected, so a professional's free-text answer is never sent to the
- * translator. Without it (read paths) every string answer is looked up, which
- * only finds rows that were queued.
+ * free text and numbers. With `dropdownOptions` (the catalogue entry's
+ * dropdown fields, as the queue passes them) an answer is collected only when
+ * its field is a dropdown and the value is one of that field's options, so a
+ * professional's free-text answer is never sent to the translator, even when
+ * it happens to equal some catalogue label. Without it (read paths) every
+ * string answer is looked up, which only finds rows that were queued.
  */
 export function collectProjectTexts(
   project: Record<string, any> | null | undefined,
-  options: { inputValues?: ReadonlySet<string> } = {}
+  options: { dropdownOptions?: ReadonlyMap<string, ReadonlySet<string>> } = {}
 ): string[] {
   const out = new TextCollector();
   if (!project) return out.texts;
-  const inputValue = (value: unknown) => {
-    if (Array.isArray(value)) return value.forEach(inputValue);
+  const inputValue = (fieldName: unknown, value: unknown): void => {
+    if (Array.isArray(value)) return value.forEach((entry) => inputValue(fieldName, entry));
     if (typeof value !== "string") return; // numbers / ranges
-    if (!options.inputValues || options.inputValues.has(value)) out.add(value);
+    if (options.dropdownOptions) {
+      const allowed = typeof fieldName === "string" ? options.dropdownOptions.get(fieldName) : undefined;
+      if (!allowed || !allowed.has(value)) return;
+    }
+    out.add(value);
   };
   addProjectCardFields(out, project, {
     project: () => out.add(project.areaOfWork),
@@ -116,7 +121,7 @@ export function collectProjectTexts(
         out.add(material?.description);
         out.add(material?.unit);
       }
-      for (const input of list(subproject?.professionalInputs)) inputValue(input?.value);
+      for (const input of list(subproject?.professionalInputs)) inputValue(input?.fieldName, input?.value);
     },
   });
   for (const option of list(project.extraOptions)) {
@@ -187,6 +192,28 @@ export function collectServiceConfigurationTexts(config: Record<string, any> | n
 }
 
 /** Strings of a search project card (search page, home carousels). */
+/**
+ * Dropdown fields of a catalogue entry (professional input fields and dynamic
+ * included items): field name -> its option texts.
+ */
+export function collectDropdownOptions(
+  config: Record<string, any> | null | undefined
+): Map<string, Set<string>> {
+  const dropdowns = new Map<string, Set<string>>();
+  if (!config) return dropdowns;
+  const fields = [
+    ...list(config.professionalInputFields),
+    ...list(config.includedItems).map((item) => item?.dynamicField).filter(Boolean),
+  ];
+  for (const field of fields) {
+    if (field?.fieldType !== "dropdown" || typeof field?.fieldName !== "string") continue;
+    const options = dropdowns.get(field.fieldName) ?? new Set<string>();
+    for (const option of list(field.options)) if (typeof option === "string") options.add(option);
+    dropdowns.set(field.fieldName, options);
+  }
+  return dropdowns;
+}
+
 export function collectProjectCardTexts(project: Record<string, any> | null | undefined): string[] {
   const out = new TextCollector();
   if (!project) return out.texts;

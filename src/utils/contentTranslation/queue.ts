@@ -251,6 +251,34 @@ async function resolveAutoLanguages(
       failed += result.modifiedCount ?? 0;
     }
   }
+
+  // Translate each row from the language that is actually stored on it. A
+  // group decision can expire while this drain runs and another drain can
+  // then store a different language for the group; the group update above
+  // then matches nothing, and the in-memory value would be stale.
+  const detected = auto.filter((row) => isContentLocale(row.from));
+  if (detected.length) {
+    const stored = new Map(
+      (
+        (await ContentTranslation.find({ _id: { $in: detected.map((row) => row._id) }, claimId })
+          .select("from")
+          .lean()) as Array<Record<string, any>>
+      ).map((row) => [String(row._id), row.from])
+    );
+    const unresolved: Array<Record<string, any>> = [];
+    for (const row of detected) {
+      const from = stored.get(String(row._id));
+      if (isContentLocale(from)) {
+        row.from = from;
+      } else {
+        // Claim lost, or the language is not stored yet: never translate on a guess.
+        if (stored.has(String(row._id))) unresolved.push({ ...row });
+        row.from = null;
+      }
+    }
+    // Still claimed but undecided: back to pending for the next drain, no attempt charged.
+    await releaseWithError(unresolved, claimId, "language_undecided", false);
+  }
   return failed;
 }
 

@@ -431,6 +431,27 @@ describeDb('catalogue/project content translation (real MongoDB, local translato
     expect((await ContentLanguageDecision.findOne({ group: 'p-new' }).lean())?.language).toBe('nl');
   });
 
+  it('translates from the language stored on the row when another drain decided differently meanwhile', async () => {
+    await enqueueContentTexts([{ text: 'Wij schilderen de gevel', from: 'auto', detectGroup: 'p-race' }], 'project');
+    // This drain reads a French decision; before it writes, the decision
+    // expires and another drain stores Dutch on the group's rows.
+    const spy = vi.spyOn(ContentLanguageDecision, 'find').mockImplementationOnce((() => ({
+      lean: async () => {
+        await ContentTranslation.updateMany({ detectGroup: 'p-race' }, { $set: { from: 'nl' } });
+        return [{ group: 'p-race', language: 'fr' }];
+      },
+    })) as any);
+    try {
+      await drainContentTranslationQueue();
+    } finally {
+      spy.mockRestore();
+    }
+    const row = await ContentTranslation.findOne({ text: 'Wij schilderen de gevel' }).lean();
+    expect(row).toMatchObject({ from: 'nl', status: 'done' });
+    expect(Object.keys(row!.translations || {}).sort()).toEqual(['en', 'fr']);
+    expect(fixture.translate.some((request) => request.from === 'fr')).toBe(false);
+  });
+
   it('a claim stays leased until after the drain deadline', async () => {
     await enqueueContentTexts([{ text: 'Wall preparation', from: 'en' }], 'catalogue');
     let leaseUntil: Date | undefined;

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { detectLanguages } from '../../../utils/cms/azureTranslator';
 import {
+  collectDropdownOptions,
   collectProjectCardTexts,
   collectProjectTexts,
   collectServiceConfigurationTexts,
@@ -51,14 +52,25 @@ describe('content translation text selection', () => {
     expect(texts).not.toContain('m2');
     expect(texts).toContain('litre');
     expect(texts).not.toContain('buildingType');
-    // The queue passes the catalogue strings: free-text answers are dropped.
+    // The queue passes the catalogue's dropdown fields: only answers of a
+    // dropdown field that are one of its options are kept. A text answer that
+    // equals a catalogue label is still free text and is dropped.
+    const dropdownOptions = collectDropdownOptions({
+      professionalInputFields: [
+        { fieldName: 'buildingType', fieldType: 'dropdown', label: 'Building type', options: ['Detached house', 'Flat'] },
+        { fieldName: 'notes', fieldType: 'text', label: 'Notes' },
+      ],
+      includedItems: [{ dynamicField: { fieldName: 'kinds', fieldType: 'dropdown', options: ['Detached house'] } }],
+    });
     const queued = collectProjectTexts(
       { subprojects: [{ professionalInputs: [
         { fieldName: 'buildingType', value: 'Detached house' },
         { fieldName: 'notes', value: 'Call me before you come by' },
+        { fieldName: 'notes', value: 'Building type' },
+        { fieldName: 'buildingType', value: 'Not an option' },
         { fieldName: 'kinds', value: ['Detached house', 'My own words'] },
       ] }] },
-      { inputValues: new Set(['Detached house']) },
+      { dropdownOptions },
     );
     expect(queued).toEqual(['Detached house']);
     expect(collectProjectCardTexts({ title: 'A title here', priceModel: 'Total price', subprojects: [{ name: 'Basic' }] }))

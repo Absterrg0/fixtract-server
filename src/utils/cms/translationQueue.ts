@@ -169,6 +169,11 @@ export async function processCmsTranslationQueue(
           "translationRun.finishedAt": at,
           ...(unfinished ? { "translationRun.requested": true, "translationRun.requestedAt": at } : {}),
         },
+        // A forced re-translation that ran out of time stays forced (merged
+        // with any locales a save forced meanwhile).
+        ...(unfinished && forceLocales.length
+          ? { $addToSet: { "translationRun.forceLocales": { $each: forceLocales } } }
+          : {}),
         $unset: {
           "translationRun.runId": 1,
           "translationRun.leaseUntil": 1,

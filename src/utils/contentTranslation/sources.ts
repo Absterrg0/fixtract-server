@@ -9,7 +9,7 @@ import Project from "../../models/project";
 import ServiceConfiguration from "../../models/serviceConfiguration";
 import { isTranslatorConfigured } from "../cms/azureTranslator";
 import { enqueueContentTexts, scheduleContentTranslationWork } from "./queue";
-import { collectProjectTexts, collectServiceConfigurationTexts } from "./texts";
+import { collectDropdownOptions, collectProjectTexts, collectServiceConfigurationTexts } from "./texts";
 
 type Id = Types.ObjectId | string;
 
@@ -32,23 +32,22 @@ export async function enqueueServiceConfigurationTexts(config: Record<string, an
  */
 export async function enqueueProjectTexts(
   project: Record<string, any>,
-  catalogueTexts?: Set<string>
+  /** The project's catalogue entry when already loaded (null: none); undefined loads it. */
+  catalogueConfig?: Record<string, any> | null
 ): Promise<number> {
-  let catalogue = catalogueTexts;
-  if (!catalogue) {
-    catalogue = new Set<string>();
+  let config = catalogueConfig;
+  if (config === undefined) {
+    config = null;
     const configId = project.serviceConfigurationId;
     if (configId && mongoose.Types.ObjectId.isValid(String(configId))) {
-      const config = await ServiceConfiguration.findById(configId).lean();
-      if (config) {
-        for (const text of collectServiceConfigurationTexts(config as Record<string, any>)) catalogue.add(text);
-      }
+      config = (await ServiceConfiguration.findById(configId).lean()) as Record<string, any> | null;
     }
   }
-  // Free-text professional answers are not queued: only catalogue option text.
-  const texts = collectProjectTexts(project, { inputValues: catalogue });
-  const fromCatalogue = texts.filter((text) => catalogue!.has(text));
-  const own = texts.filter((text) => !catalogue!.has(text));
+  const catalogue = new Set(collectServiceConfigurationTexts(config));
+  // Free-text professional answers are not queued: only dropdown option text.
+  const texts = collectProjectTexts(project, { dropdownOptions: collectDropdownOptions(config) });
+  const fromCatalogue = texts.filter((text) => catalogue.has(text));
+  const own = texts.filter((text) => !catalogue.has(text));
   const added =
     (await enqueueContentTexts(fromCatalogue.map((text) => ({ text, from: "en" })), "catalogue")) +
     (await enqueueContentTexts(
@@ -71,15 +70,12 @@ export function requestProjectContentTranslation(projectId: Id | null | undefine
     const configId = (project as any).serviceConfigurationId;
     // One snapshot of the catalogue entry: queued, and used to classify the
     // project's strings (no second lookup in enqueueProjectTexts).
-    const catalogue = new Set<string>();
+    let config: Record<string, any> | null = null;
     if (configId && mongoose.Types.ObjectId.isValid(String(configId))) {
-      const config = await ServiceConfiguration.findById(configId).lean();
-      if (config) {
-        await enqueueServiceConfigurationTexts(config as Record<string, any>);
-        for (const text of collectServiceConfigurationTexts(config as Record<string, any>)) catalogue.add(text);
-      }
+      config = (await ServiceConfiguration.findById(configId).lean()) as Record<string, any> | null;
+      if (config) await enqueueServiceConfigurationTexts(config);
     }
-    await enqueueProjectTexts(project as Record<string, any>, catalogue);
+    await enqueueProjectTexts(project as Record<string, any>, config);
   });
 }
 
@@ -104,12 +100,12 @@ export interface ContentBackfillSummary {
  */
 export async function backfillContentTranslations(): Promise<ContentBackfillSummary> {
   const summary: ContentBackfillSummary = { serviceConfigurations: 0, projects: 0, queued: 0 };
-  const catalogueById = new Map<string, Set<string>>();
+  const catalogueById = new Map<string, Record<string, any>>();
 
   for await (const config of ServiceConfiguration.find({}).lean().cursor()) {
     summary.serviceConfigurations += 1;
     summary.queued += await enqueueServiceConfigurationTexts(config as Record<string, any>);
-    catalogueById.set(String((config as any)._id), new Set(collectServiceConfigurationTexts(config as any)));
+    catalogueById.set(String((config as any)._id), config as Record<string, any>);
   }
 
   for await (const project of Project.find({ status: { $in: TRANSLATED_PROJECT_STATUSES } })
@@ -117,8 +113,8 @@ export async function backfillContentTranslations(): Promise<ContentBackfillSumm
     .lean()
     .cursor()) {
     summary.projects += 1;
-    const catalogue = catalogueById.get(String((project as any).serviceConfigurationId || "")) ?? new Set<string>();
-    summary.queued += await enqueueProjectTexts(project as Record<string, any>, catalogue);
+    const config = catalogueById.get(String((project as any).serviceConfigurationId || "")) ?? null;
+    summary.queued += await enqueueProjectTexts(project as Record<string, any>, config);
   }
   return summary;
 }
