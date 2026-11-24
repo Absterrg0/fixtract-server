@@ -15,6 +15,7 @@ vi.mock('../../utils/notifications/notify', () => ({ notify: vi.fn() }));
 import Booking from '../../models/booking';
 import WarrantyClaim from '../../models/warrantyClaim';
 import CancellationRequest from '../../models/cancellationRequest';
+import User from '../../models/user';
 import { getDisputeAnalytics, getDisputes } from '../../handlers/Admin/disputeManagement';
 
 const testUri = process.env.FIXERA_TEST_MONGODB_URI;
@@ -62,6 +63,7 @@ describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
       Booking.collection.deleteMany({}),
       WarrantyClaim.collection.deleteMany({}),
       CancellationRequest.collection.deleteMany({}),
+      User.collection.deleteMany({}),
     ]);
   });
 
@@ -223,5 +225,73 @@ describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
     const resolved = await list({ status: 'resolved' });
     expect(resolved.disputes.map((d: any) => d.bookingNumber)).toEqual(['BK-SETTLED']);
     expect(resolved.pagination.total).toBe(a.totalResolved);
+  });
+
+  describe('search', () => {
+    const seedSearch = async () => {
+      const anna = new Types.ObjectId();
+      const bram = new Types.ObjectId();
+      const pro = new Types.ObjectId();
+      await User.collection.insertMany([
+        { _id: anna, name: 'Anna Jansen', email: 'anna@search.test', role: 'customer' },
+        { _id: bram, name: 'Bram Peeters', email: 'bram@search.test', role: 'customer' },
+        { _id: pro, name: 'Pieter Pro', email: 'pieter@pro.test', role: 'professional' },
+      ]);
+      const refundBooking = new Types.ObjectId();
+      const warrantyBooking = new Types.ObjectId();
+      await Booking.collection.insertMany([
+        { _id: new Types.ObjectId(), bookingNumber: 'BK-1001', status: 'dispute', customer: anna, professional: pro, dispute: recordedDispute(20, { reason: 'Leaking roof' }) },
+        { _id: new Types.ObjectId(), bookingNumber: 'BK-2002', status: 'dispute', customer: bram, professional: new Types.ObjectId(), dispute: recordedDispute(19, { reason: 'Wrong paint', description: 'colour mismatch' }) },
+        { _id: new Types.ObjectId(), bookingNumber: 'BK-3003', status: 'completed', customer: bram, dispute: recordedDispute(5, { resolvedAt: at(6) }) },
+        { _id: refundBooking, bookingNumber: 'BK-REF-7', status: 'booked', customer: anna },
+        { _id: warrantyBooking, bookingNumber: 'BK-WAR-8', status: 'completed', customer: bram },
+      ] as any[]);
+      await CancellationRequest.collection.insertOne(
+        { booking: refundBooking, requestedBy: anna, requestedRole: 'customer', status: 'escalated', reason: 'never showed up', createdAt: at(22), escalatedAt: at(22) } as any,
+      );
+      await WarrantyClaim.collection.insertOne({
+        claimNumber: 'WC-SEARCH-1', booking: warrantyBooking, customer: bram, professional: pro, status: 'escalated', reason: 'defect', description: 'door sticks', openedAt: at(21),
+      } as any);
+    };
+    const numbers = (data: any) => data.disputes.map((d: any) => d.bookingNumber).sort();
+    const external = (data: any) => data.externalDisputes.map((row: any) => row.claimNumber || row.bookingNumber).sort();
+
+    it('matches booking number, party name or email and dispute text; the total follows the search', async () => {
+      await seedSearch();
+      const byNumber = await list({ search: 'bk-1001' });
+      expect(numbers(byNumber)).toEqual(['BK-1001']);
+      expect(byNumber.pagination.total).toBe(1);
+      expect(byNumber.search).toBe('bk-1001');
+      expect(external(byNumber)).toEqual([]);
+
+      const byCustomer = await list({ search: 'Anna' });
+      expect(numbers(byCustomer)).toEqual(['BK-1001']);
+      expect(external(byCustomer)).toEqual(['BK-REF-7']);
+
+      const byEmail = await list({ search: 'bram@search' });
+      expect(numbers(byEmail)).toEqual(['BK-2002']);
+      expect(external(byEmail)).toEqual(['WC-SEARCH-1']);
+
+      const byProfessional = await list({ search: 'pieter' });
+      expect(numbers(byProfessional)).toEqual(['BK-1001']);
+      expect(external(byProfessional)).toEqual(['WC-SEARCH-1']);
+
+      expect(numbers(await list({ search: 'colour' }))).toEqual(['BK-2002']);
+      expect(external(await list({ search: 'door sticks' }))).toEqual(['WC-SEARCH-1']);
+      expect(external(await list({ search: 'never showed' }))).toEqual(['BK-REF-7']);
+      expect(external(await list({ search: 'WC-SEARCH' }))).toEqual(['WC-SEARCH-1']);
+    });
+
+    it('keeps the status view, treats the term literally and ignores an empty term', async () => {
+      await seedSearch();
+      expect(numbers(await list({ search: 'bram', status: 'resolved' }))).toEqual(['BK-3003']);
+      expect(numbers(await list({ search: 'bram', status: 'open' }))).toEqual(['BK-2002']);
+      const regexLike = await list({ search: '.*' });
+      expect(regexLike.disputes).toEqual([]);
+      expect(regexLike.externalDisputes).toEqual([]);
+      expect((await list({ search: '   ' })).pagination.total).toBe(2);
+      // Counters and totals are not narrowed by a search.
+      expect((await analytics()).counter.total).toBe(4);
+    });
   });
 });
