@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import Notification from '../../models/notification';
+import { localizeNotificationText, notificationLocaleOf } from '../../i18n/notificationText';
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
@@ -74,6 +75,8 @@ export const listNotifications = async (req: Request, res: Response): Promise<vo
 
     const unreadCount = await Notification.countDocuments({ userId, readAt: null });
 
+    // Stored copy is English; show it in the viewer's language.
+    const locale = notificationLocaleOf(req.headers?.['accept-language']);
     res.status(200).json({
       success: true,
       data: {
@@ -81,8 +84,8 @@ export const listNotifications = async (req: Request, res: Response): Promise<vo
           id: n._id.toString(),
           eventKey: n.eventKey,
           category: n.category,
-          title: n.title,
-          body: n.body,
+          title: localizeNotificationText(n.title, locale),
+          body: localizeNotificationText(n.body, locale),
           clickUrl: n.clickUrl,
           entityType: n.entityType,
           entityId: n.entityId?.toString(),

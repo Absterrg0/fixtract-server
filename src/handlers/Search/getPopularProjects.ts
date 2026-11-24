@@ -7,6 +7,8 @@ import { eligibleProjectOwnerStages } from "./eligibleOwner";
 import { signProjectMediaUrl } from "../../utils/projectMedia";
 import { getCheckoutCommissionPercent } from "../../utils/checkoutCommission";
 import { startingPriceForView, viewerSeesBasePricing } from "../../utils/customerPriceView";
+import { contentLocaleOf, loadContentTranslations } from "../../utils/contentTranslation/localize";
+import { collectProjectCardTexts } from "../../utils/contentTranslation/texts";
 
 /**
  * Get popular published projects for the homepage / service carousels.
@@ -254,7 +256,11 @@ export const getPopularProjects = async (req: Request, res: Response) => {
     });
 
     res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
-    res.json({ projects: results });
+    const contentTranslations = await loadContentTranslations(
+      results.flatMap((project: any) => collectProjectCardTexts(project)),
+      contentLocaleOf(req)
+    );
+    res.json({ projects: results, ...(contentTranslations ? { contentTranslations } : {}) });
   } catch (error) {
     console.error("Failed to fetch popular projects:", { error, query: req.query });
     res.status(500).json({ error: "Failed to fetch popular projects" });

@@ -302,35 +302,18 @@ function attemptTimedOut(timeout: AttemptTimeout): TranslatorError {
     : new TranslatorError("Azure Translator request failed: timeout", undefined, "timeout");
 }
 
-/** One Azure request for one target language. Returns texts in input order. */
-async function requestTranslations(
+/**
+ * One POST to the Translator API (`/translate`, `/detect`). Returns the parsed
+ * JSON array; HTTP failures become classified {@link TranslatorError}s.
+ */
+async function postToTranslator(
+  path: "translate" | "detect",
+  query: URLSearchParams,
   texts: string[],
-  from: string,
-  to: string,
-  html: boolean,
-  timeout: AttemptTimeout = { ms: REQUEST_TIMEOUT_MS, cappedByDeadline: false }
-): Promise<string[]> {
+  timeout: AttemptTimeout
+): Promise<unknown[]> {
   const key = (process.env.AZURE_TRANSLATOR_KEY || "").trim();
   if (!key) throw new TranslatorNotConfiguredError();
-
-  const totalChars = texts.reduce((sum, text) => sum + text.length, 0);
-  if (texts.length > MAX_ELEMENTS_PER_REQUEST) {
-    throw new TranslatorError(
-      `Azure Translator request has ${texts.length} elements (max ${MAX_ELEMENTS_PER_REQUEST})`
-    );
-  }
-  if (totalChars > MAX_CHARS_PER_REQUEST) {
-    throw new TranslatorError(
-      `Azure Translator request has ${totalChars} characters (max ${MAX_CHARS_PER_REQUEST})`
-    );
-  }
-
-  const query = new URLSearchParams({
-    "api-version": "3.0",
-    from,
-    to,
-    textType: html ? "html" : "plain",
-  });
 
   const headers: Record<string, string> = {
     "Ocp-Apim-Subscription-Key": key,
@@ -342,7 +325,7 @@ async function requestTranslations(
   const signal = translatorTiming.timeoutSignal(timeout.ms);
   let response: Response;
   try {
-    response = await fetch(`${translatorEndpoint()}/translate?${query.toString()}`, {
+    response = await fetch(`${translatorEndpoint()}/${path}?${query.toString()}`, {
       method: "POST",
       headers,
       body: JSON.stringify(texts.map((text) => ({ Text: text }))),
@@ -391,13 +374,42 @@ async function requestTranslations(
     throw error;
   }
 
-  const results = parsed as AzureTranslationResult[] | undefined;
-  if (!Array.isArray(results) || results.length !== texts.length) {
+  if (!Array.isArray(parsed) || parsed.length !== texts.length) {
     throw new TranslatorError(
-      `Azure Translator returned ${Array.isArray(results) ? results.length : 0} results for ${texts.length} input text(s)`
+      `Azure Translator returned ${Array.isArray(parsed) ? parsed.length : 0} results for ${texts.length} input text(s)`
+    );
+  }
+  return parsed;
+}
+
+/** One Azure request for one target language. Returns texts in input order. */
+async function requestTranslations(
+  texts: string[],
+  from: string,
+  to: string,
+  html: boolean,
+  timeout: AttemptTimeout = { ms: REQUEST_TIMEOUT_MS, cappedByDeadline: false }
+): Promise<string[]> {
+  const totalChars = texts.reduce((sum, text) => sum + text.length, 0);
+  if (texts.length > MAX_ELEMENTS_PER_REQUEST) {
+    throw new TranslatorError(
+      `Azure Translator request has ${texts.length} elements (max ${MAX_ELEMENTS_PER_REQUEST})`
+    );
+  }
+  if (totalChars > MAX_CHARS_PER_REQUEST) {
+    throw new TranslatorError(
+      `Azure Translator request has ${totalChars} characters (max ${MAX_CHARS_PER_REQUEST})`
     );
   }
 
+  const query = new URLSearchParams({
+    "api-version": "3.0",
+    from,
+    to,
+    textType: html ? "html" : "plain",
+  });
+
+  const results = (await postToTranslator("translate", query, texts, timeout)) as AzureTranslationResult[];
   return results.map((result) => {
     const translated = result?.translations?.[0]?.text;
     if (typeof translated !== "string") {
@@ -408,19 +420,16 @@ async function requestTranslations(
 }
 
 /**
- * {@link requestTranslations} with bounded retries for 429 / 408 / 5xx /
+ * Runs one provider request with bounded retries for 429 / 408 / 5xx /
  * network errors. Honours Retry-After (capped) and the caller's deadline: a
  * wait that would end past the deadline fails fast with `budget_exceeded`, and
  * every attempt's timeout is capped at the budget left, so an attempt started
  * just before the deadline cannot overrun it.
  */
-async function requestWithRetry(
-  texts: string[],
-  from: string,
-  to: string,
-  html: boolean,
+async function withRetry<T>(
+  send: (timeout: AttemptTimeout) => Promise<T>,
   deadline?: number
-): Promise<string[]> {
+): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
     let timeout: AttemptTimeout = { ms: REQUEST_TIMEOUT_MS, cappedByDeadline: false };
     if (deadline !== undefined) {
@@ -435,7 +444,7 @@ async function requestWithRetry(
       if (remaining < REQUEST_TIMEOUT_MS) timeout = { ms: remaining, cappedByDeadline: true };
     }
     try {
-      return await requestTranslations(texts, from, to, html, timeout);
+      return await send(timeout);
     } catch (err) {
       if (!isRetryable(err) || attempt >= MAX_RETRIES) throw err;
       const wait =
@@ -452,6 +461,17 @@ async function requestWithRetry(
       await translatorTiming.sleep(wait);
     }
   }
+}
+
+/** {@link requestTranslations} with {@link withRetry}. */
+async function requestWithRetry(
+  texts: string[],
+  from: string,
+  to: string,
+  html: boolean,
+  deadline?: number
+): Promise<string[]> {
+  return withRetry((timeout) => requestTranslations(texts, from, to, html, timeout), deadline);
 }
 
 /**
@@ -514,5 +534,46 @@ export async function translateTexts(
     output[unit.index] = translatedParts[unitIndex].join("");
   });
 
+  return output;
+}
+
+
+/** Azure /detect limits: 100 elements and 50,000 characters per request. */
+export const MAX_DETECT_ELEMENTS = 100;
+/** Detection only needs a sample; longer texts are cut to this many characters. */
+const DETECT_SAMPLE_CHARS = 1_000;
+
+interface AzureDetectResult {
+  language?: string;
+  score?: number;
+}
+
+/**
+ * Detects the language of each text (Azure `/detect`). Returns the Azure
+ * language code per input (lower-case base code, e.g. "nl"), or "" when the
+ * text is empty or the provider gave no answer. Retries like translateTexts.
+ */
+export async function detectLanguages(
+  texts: string[],
+  opts: { deadline?: number } = {}
+): Promise<string[]> {
+  if (!isTranslatorConfigured()) throw new TranslatorNotConfiguredError();
+  const output = texts.map(() => "");
+  const indexed = texts
+    .map((text, index) => ({ index, text: typeof text === "string" ? text.trim().slice(0, DETECT_SAMPLE_CHARS) : "" }))
+    .filter((entry) => entry.text.length > 0);
+  for (let start = 0; start < indexed.length; start += MAX_DETECT_ELEMENTS) {
+    const batch = indexed.slice(start, start + MAX_DETECT_ELEMENTS);
+    const query = new URLSearchParams({ "api-version": "3.0" });
+    const results = (await withRetry(
+      (timeout) => postToTranslator("detect", query, batch.map((entry) => entry.text), timeout),
+      opts.deadline
+    )) as AzureDetectResult[];
+    batch.forEach((entry, i) => {
+      const language = results[i]?.language;
+      output[entry.index] =
+        typeof language === "string" ? language.trim().toLowerCase().split("-")[0] : "";
+    });
+  }
   return output;
 }

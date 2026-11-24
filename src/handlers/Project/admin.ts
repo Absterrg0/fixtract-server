@@ -15,6 +15,7 @@ import { getProfessionalDisplayName } from '../../utils/displayName';
 import { getPresignedUrl, parseS3KeyFromUrl } from '../../utils/s3Upload';
 import { withSignedProjectMedia } from '../../utils/projectMedia';
 import { denyUnlessPermission } from '../../utils/adminRbac/assertPermission';
+import { requestProjectContentTranslation } from '../../utils/contentTranslation/sources';
 
 // Helper: presign all file URLs (certifications and attachments) for admin viewing
 const presignProjectFiles = async (projectObj: any) => {
@@ -160,6 +161,9 @@ export const approveProject = async (req: Request, res: Response) => {
         if (!project) {
             return res.status(404).json({ error: 'Project not found' });
         }
+
+        // Machine-translate the customer-facing text (after the response).
+        requestProjectContentTranslation(project._id);
 
         // Get professional details for email
         const professional = await User.findById(project.professionalId);
@@ -384,6 +388,8 @@ export const reactivateProject = async (req: Request, res: Response) => {
         if (!project) {
             return res.status(404).json({ error: 'Deactivated project not found' });
         }
+
+        requestProjectContentTranslation(project._id);
 
         // Get professional details for email
         const professional = await User.findById(project.professionalId);

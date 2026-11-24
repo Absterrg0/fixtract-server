@@ -74,6 +74,7 @@ npm run fix:stuck-milestone-quotes        # supports --dry-run
 
 ```bash
 npm run maintenance:backfill-project-geo    # DRY_RUN=1, GOOGLE_MAPS_API_KEY
+npm run maintenance:backfill-translations   # DRY_RUN=1, SCOPE=cms|content, AZURE_TRANSLATOR_KEY
 npm run maintenance:remove-pro-availability
 npm run delete:user -- user@example.com
 ```
@@ -87,5 +88,6 @@ Most scripts accept `MONGODB_URI` or `MONGO_URI`. A few scripts connect via `con
 | `MONGODB_URI` / `MONGO_URI` | All scripts |
 | `INITIAL_ADMIN_EMAIL` / `INITIAL_ADMIN_PASSWORD` / `INITIAL_ADMIN_PHONE` | `seed:admin`, `seed:prod` |
 | `GOOGLE_MAPS_API_KEY` | `maintenance:backfill-project-geo` |
-| `DRY_RUN` | `maintenance:backfill-project-geo` |
+| `DRY_RUN` | `maintenance:backfill-project-geo`, `maintenance:backfill-translations` |
+| `AZURE_TRANSLATOR_KEY` (+ optional `AZURE_TRANSLATOR_REGION`) / `SCOPE` | `maintenance:backfill-translations` |
 | `GEOCODE_DELAY_MS` | `maintenance:backfill-project-geo` |
