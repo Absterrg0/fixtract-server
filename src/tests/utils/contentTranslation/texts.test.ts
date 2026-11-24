@@ -51,6 +51,16 @@ describe('content translation text selection', () => {
     expect(texts).not.toContain('m2');
     expect(texts).toContain('litre');
     expect(texts).not.toContain('buildingType');
+    // The queue passes the catalogue strings: free-text answers are dropped.
+    const queued = collectProjectTexts(
+      { subprojects: [{ professionalInputs: [
+        { fieldName: 'buildingType', value: 'Detached house' },
+        { fieldName: 'notes', value: 'Call me before you come by' },
+        { fieldName: 'kinds', value: ['Detached house', 'My own words'] },
+      ] }] },
+      { inputValues: new Set(['Detached house']) },
+    );
+    expect(queued).toEqual(['Detached house']);
     expect(collectProjectCardTexts({ title: 'A title here', priceModel: 'Total price', subprojects: [{ name: 'Basic' }] }))
       .toEqual(['A title here', 'Total price', 'Basic']);
   });
@@ -98,6 +108,33 @@ describe('detectLanguages (Azure /detect)', () => {
     vi.stubGlobal('fetch', fetchMock);
     expect(await detectLanguages(['Het huis', '', 'La maison'])).toEqual(['nl', '', 'fr']);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('packs requests by 100 elements and 50,000 characters, keeping input order', async () => {
+    process.env.AZURE_TRANSLATOR_KEY = 'unit-test-key';
+    const requests: string[][] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: { body?: string }) => {
+      const texts = (JSON.parse(String(init?.body)) as Array<{ Text: string }>).map((t) => t.Text);
+      requests.push(texts);
+      // Language encodes the sample's position so a mis-mapped result shows.
+      return new Response(JSON.stringify(texts.map((t) => ({ language: `l${t.slice(0, 3)}` }))), { status: 200 });
+    }));
+    const full = (n: number) => Array.from({ length: n }, (_, i) => String(i).padStart(3, '0') + 'x'.repeat(997));
+
+    expect(await detectLanguages(full(50))).toEqual(full(50).map((t) => `l${t.slice(0, 3)}`));
+    expect(requests).toHaveLength(1);
+
+    requests.length = 0;
+    const result = await detectLanguages(full(51));
+    expect(requests.map((r) => r.length)).toEqual([50, 1]);
+    expect(requests.every((r) => r.join('').length <= 50_000)).toBe(true);
+    expect(result).toEqual(full(51).map((t) => `l${t.slice(0, 3)}`));
+
+    requests.length = 0;
+    const short = Array.from({ length: 101 }, (_, i) => `${String(i).padStart(3, '0')} text`);
+    const shortResult = await detectLanguages(short);
+    expect(requests.map((r) => r.length)).toEqual([100, 1]);
+    expect(shortResult[100]).toBe('l100');
   });
 
   it('throws not_configured without a key', async () => {

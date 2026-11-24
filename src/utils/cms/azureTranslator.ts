@@ -540,6 +540,7 @@ export async function translateTexts(
 
 /** Azure /detect limits: 100 elements and 50,000 characters per request. */
 export const MAX_DETECT_ELEMENTS = 100;
+export const MAX_DETECT_CHARS = 50_000;
 /** Detection only needs a sample; longer texts are cut to this many characters. */
 const DETECT_SAMPLE_CHARS = 1_000;
 
@@ -562,8 +563,21 @@ export async function detectLanguages(
   const indexed = texts
     .map((text, index) => ({ index, text: typeof text === "string" ? text.trim().slice(0, DETECT_SAMPLE_CHARS) : "" }))
     .filter((entry) => entry.text.length > 0);
-  for (let start = 0; start < indexed.length; start += MAX_DETECT_ELEMENTS) {
-    const batch = indexed.slice(start, start + MAX_DETECT_ELEMENTS);
+  // Pack by both limits; each entry keeps its input index.
+  const batches: Array<typeof indexed> = [];
+  let current: typeof indexed = [];
+  let chars = 0;
+  for (const entry of indexed) {
+    if (current.length >= MAX_DETECT_ELEMENTS || chars + entry.text.length > MAX_DETECT_CHARS) {
+      batches.push(current);
+      current = [];
+      chars = 0;
+    }
+    current.push(entry);
+    chars += entry.text.length;
+  }
+  if (current.length) batches.push(current);
+  for (const batch of batches) {
     const query = new URLSearchParams({ "api-version": "3.0" });
     const results = (await withRetry(
       (timeout) => postToTranslator("detect", query, batch.map((entry) => entry.text), timeout),

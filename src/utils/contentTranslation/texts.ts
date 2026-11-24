@@ -57,35 +57,68 @@ class TextCollector {
 
 const list = (value: unknown): any[] => (Array.isArray(value) ? value : []);
 
-/** Display strings of one project as customers see it (project page, search card, booking/RFQ wizard). */
-export function collectProjectTexts(project: Record<string, any> | null | undefined): string[] {
-  const out = new TextCollector();
-  if (!project) return out.texts;
+/**
+ * Card fields, shared by the search card and the full project so the read path
+ * never asks for a string the queue did not store. `subproject` adds the extra
+ * fields of the full project per subproject, after the card fields.
+ */
+function addProjectCardFields(
+  out: TextCollector,
+  project: Record<string, any>,
+  extra: { project?: () => void; subproject?: (subproject: any) => void } = {}
+): void {
   out.add(project.title);
   out.add(project.description);
   if (typeof project.priceModel === "string" && !ENUM_PRICE_MODELS.has(project.priceModel.trim().toLowerCase())) {
     out.add(project.priceModel);
   }
-  out.add(project.areaOfWork);
+  extra.project?.();
   for (const subproject of list(project.subprojects)) {
     out.add(subproject?.name);
     out.add(subproject?.description);
     out.add(subproject?.projectType);
-    out.add(subproject?.customProjectType);
-    for (const item of list(subproject?.included)) {
-      out.add(item?.name);
-      out.add(item?.description);
-    }
-    for (const material of list(subproject?.materials)) {
-      out.add(material?.name);
-      out.add(material?.description);
-      out.add(material?.unit);
-    }
-    for (const input of list(subproject?.professionalInputs)) {
-      // Dropdown answers are catalogue option text; numbers/ranges are skipped.
-      if (typeof input?.value === "string" || Array.isArray(input?.value)) out.add(input.value);
-    }
+    extra.subproject?.(subproject);
   }
+}
+
+/**
+ * Display strings of one project as customers see it (project page, search
+ * card, booking/RFQ wizard).
+ *
+ * `professionalInputs` hold dropdown answers (catalogue option text) but also
+ * free text and numbers. With `inputValues` (the catalogue entry's strings,
+ * as the queue passes them) only answers that are catalogue text are
+ * collected, so a professional's free-text answer is never sent to the
+ * translator. Without it (read paths) every string answer is looked up, which
+ * only finds rows that were queued.
+ */
+export function collectProjectTexts(
+  project: Record<string, any> | null | undefined,
+  options: { inputValues?: ReadonlySet<string> } = {}
+): string[] {
+  const out = new TextCollector();
+  if (!project) return out.texts;
+  const inputValue = (value: unknown) => {
+    if (Array.isArray(value)) return value.forEach(inputValue);
+    if (typeof value !== "string") return; // numbers / ranges
+    if (!options.inputValues || options.inputValues.has(value)) out.add(value);
+  };
+  addProjectCardFields(out, project, {
+    project: () => out.add(project.areaOfWork),
+    subproject: (subproject) => {
+      out.add(subproject?.customProjectType);
+      for (const item of list(subproject?.included)) {
+        out.add(item?.name);
+        out.add(item?.description);
+      }
+      for (const material of list(subproject?.materials)) {
+        out.add(material?.name);
+        out.add(material?.description);
+        out.add(material?.unit);
+      }
+      for (const input of list(subproject?.professionalInputs)) inputValue(input?.value);
+    },
+  });
   for (const option of list(project.extraOptions)) {
     out.add(option?.name);
     out.add(option?.description);
@@ -157,15 +190,6 @@ export function collectServiceConfigurationTexts(config: Record<string, any> | n
 export function collectProjectCardTexts(project: Record<string, any> | null | undefined): string[] {
   const out = new TextCollector();
   if (!project) return out.texts;
-  out.add(project.title);
-  out.add(project.description);
-  if (typeof project.priceModel === "string" && !ENUM_PRICE_MODELS.has(project.priceModel.trim().toLowerCase())) {
-    out.add(project.priceModel);
-  }
-  for (const subproject of list(project.subprojects)) {
-    out.add(subproject?.name);
-    out.add(subproject?.description);
-    out.add(subproject?.projectType);
-  }
+  addProjectCardFields(out, project);
   return out.texts;
 }

@@ -30,7 +30,7 @@ import publicRouter from '../../routes/Public';
 import searchRouter from '../../routes/Search';
 import { localizeApiResponses } from '../../i18n/middleware';
 import CmsContent from '../../models/cmsContent';
-import ContentTranslation from '../../models/contentTranslation';
+import ContentTranslation, { ContentLanguageDecision } from '../../models/contentTranslation';
 import Project from '../../models/project';
 import ServiceConfiguration from '../../models/serviceConfiguration';
 import User from '../../models/user';
@@ -61,6 +61,12 @@ const fixture = {
   translate: [] as Array<{ from: string; to: string; texts: string[] }>,
   detect: [] as string[][],
   failStatus: 0,
+  /** Fails only /detect with this status. */
+  failDetectStatus: 0,
+  /** Overrides the detected language of a text. */
+  detectAs: undefined as undefined | ((text: string) => string | undefined),
+  /** Runs before a /translate answer (sees the claimed rows). */
+  beforeTranslate: undefined as undefined | (() => Promise<void>),
 };
 
 const translatorServer = http.createServer((req, res) => {
@@ -78,15 +84,24 @@ const translatorServer = http.createServer((req, res) => {
     if (req.headers['ocp-apim-subscription-key'] !== FIXTURE_KEY) {
       return send(401, { error: { code: 401000, message: 'not authorized' } });
     }
-    if (fixture.failStatus) return send(fixture.failStatus, { error: { code: fixture.failStatus * 1000, message: 'boom' } });
+    // 403001 is Azure's "quota used up" code.
+    if (fixture.failStatus) return send(fixture.failStatus, { error: { code: fixture.failStatus === 403 ? 403001 : fixture.failStatus * 1000, message: 'boom' } });
     if (url.pathname.endsWith('/detect')) {
+      if (fixture.failDetectStatus) {
+        return send(fixture.failDetectStatus, { error: { code: fixture.failDetectStatus * 1000, message: 'boom' } });
+      }
       fixture.detect.push(texts);
-      return send(200, texts.map((text) => ({ language: DUTCH_RE.test(text) ? 'nl' : 'en', score: 1 })));
+      return send(200, texts.map((text) => ({
+        language: fixture.detectAs?.(text) ?? (DUTCH_RE.test(text) ? 'nl' : 'en'),
+        score: 1,
+      })));
     }
     const to = url.searchParams.get('to') || '';
     const from = url.searchParams.get('from') || '';
-    fixture.translate.push({ from, to, texts });
-    send(200, texts.map((text) => ({ translations: [{ to, text: `${to}:${text}` }] })));
+    void (fixture.beforeTranslate?.() ?? Promise.resolve()).then(() => {
+      fixture.translate.push({ from, to, texts });
+      send(200, texts.map((text) => ({ translations: [{ to, text: `${to}:${text}` }] })));
+    });
   });
 });
 
@@ -216,7 +231,7 @@ describeDb('catalogue/project content translation (real MongoDB, local translato
     if (!tAddr || typeof tAddr === 'string') throw new Error('fixture did not bind');
     process.env.AZURE_TRANSLATOR_ENDPOINT = `http://127.0.0.1:${tAddr.port}/`;
 
-    apiServer = app.listen(0);
+    apiServer = app.listen(0, '127.0.0.1');
     await new Promise<void>((resolve) => apiServer.once('listening', resolve));
     const aAddr = apiServer.address();
     if (!aAddr || typeof aAddr === 'string') throw new Error('api did not bind');
@@ -243,6 +258,11 @@ describeDb('catalogue/project content translation (real MongoDB, local translato
     fixture.translate.length = 0;
     fixture.detect.length = 0;
     fixture.failStatus = 0;
+    fixture.failDetectStatus = 0;
+    fixture.detectAs = undefined;
+    fixture.beforeTranslate = undefined;
+    translatorTiming.now = () => Date.now();
+    await ContentLanguageDecision.deleteMany({});
     configureTranslator(true);
   });
 
@@ -328,9 +348,15 @@ describeDb('catalogue/project content translation (real MongoDB, local translato
     await enqueueContentTexts([{ text: 'Ceiling painting', from: 'en' }], 'catalogue');
 
     fixture.failStatus = 401;
-    const refused = await drainContentTranslationQueue();
-    expect(refused.stoppedBy).toBe('auth');
-    expect(await ContentTranslation.countDocuments({ status: 'pending', leaseUntil: null })).toBe(2);
+    // A provider-wide refusal is not the rows' fault: no attempt is charged.
+    for (let i = 0; i < 3; i += 1) {
+      const refused = await drainContentTranslationQueue();
+      expect(refused.stoppedBy).toBe('auth');
+    }
+    expect(await ContentTranslation.countDocuments({ status: 'pending', leaseUntil: null, attempts: 0 })).toBe(2);
+    fixture.failStatus = 403;
+    expect((await drainContentTranslationQueue()).stoppedBy).toBe('quota_exceeded');
+    expect(await ContentTranslation.countDocuments({ status: 'pending', attempts: 0 })).toBe(2);
 
     fixture.failStatus = 400;
     for (let i = 0; i < 3; i += 1) await drainContentTranslationQueue();
@@ -346,6 +372,74 @@ describeDb('catalogue/project content translation (real MongoDB, local translato
     const manual = await ContentTranslation.findOne({ text: 'Empty room required' }).lean();
     expect(manual?.translations?.nl).toBe('Lege kamer vereist');
     expect(manual?.status).toBe('done');
+  });
+
+  it('a detection failure only affects rows that needed detection', async () => {
+    await enqueueContentTexts([{ text: 'Wall preparation', from: 'en' }], 'catalogue');
+    await enqueueContentTexts([{ text: 'Wij schilderen de muren', from: 'auto', detectGroup: 'p-detect-fail' }], 'project');
+
+    fixture.failDetectStatus = 400;
+    const summary = await drainContentTranslationQueue();
+    expect(summary.stoppedBy).toBeUndefined();
+    expect(await ContentTranslation.findOne({ text: 'Wall preparation' }).lean()).toMatchObject({ status: 'done', attempts: 0 });
+    // The drain retries the undetected row until it is parked; the known row
+    // was translated on the first claim and never charged.
+    expect(await ContentTranslation.findOne({ text: 'Wij schilderen de muren' }).lean()).toMatchObject({
+      status: 'failed',
+      from: 'auto',
+      attempts: 3,
+      errorCode: 'provider_error',
+    });
+    expect(summary.failed).toBe(1);
+
+    // Provider-wide stop during detection: known rows are released uncharged.
+    await enqueueContentTexts([{ text: 'Ceiling painting', from: 'en' }], 'catalogue');
+    await enqueueContentTexts([{ text: 'Het schilderen van het plafond', from: 'auto', detectGroup: 'p-auth' }], 'project');
+    fixture.failDetectStatus = 401;
+    expect((await drainContentTranslationQueue()).stoppedBy).toBe('auth');
+    for (const text of ['Ceiling painting', 'Het schilderen van het plafond']) {
+      expect(await ContentTranslation.findOne({ text }).lean()).toMatchObject({ status: 'pending', attempts: 0 });
+    }
+    expect(await ContentTranslation.countDocuments({ claimId: { $exists: true } })).toBe(0);
+  });
+
+  it('counts rows that detection parks as unsupported', async () => {
+    fixture.detectAs = () => 'de';
+    await enqueueContentTexts([{ text: 'Wir streichen die Wände', from: 'auto', detectGroup: 'p-de' }], 'project');
+    const summary = await drainContentTranslationQueue();
+    expect(summary).toMatchObject({ claimed: 1, translated: 0, failed: 1 });
+    expect(await ContentTranslation.findOne({ text: 'Wir streichen die Wände' }).lean()).toMatchObject({
+      status: 'failed',
+      errorCode: 'unsupported_language',
+      from: 'de',
+    });
+  });
+
+  it("uses a project's persisted language decision instead of its own detection", async () => {
+    // Another drain already decided French for this project.
+    await ContentLanguageDecision.create({ group: 'p-decided', language: 'fr' });
+    await enqueueContentTexts([{ text: 'Wij schilderen de muren', from: 'auto', detectGroup: 'p-decided' }], 'project');
+    await drainContentTranslationQueue();
+    expect(fixture.detect).toHaveLength(0);
+    const row = await ContentTranslation.findOne({ text: 'Wij schilderen de muren' }).lean();
+    expect(row).toMatchObject({ from: 'fr', status: 'done' });
+    expect(Object.keys(row!.translations || {}).sort()).toEqual(['en', 'nl']);
+
+    // The first detection of a project is persisted for concurrent drains.
+    await enqueueContentTexts([{ text: 'Het schilderen van de muren', from: 'auto', detectGroup: 'p-new' }], 'project');
+    await drainContentTranslationQueue();
+    expect((await ContentLanguageDecision.findOne({ group: 'p-new' }).lean())?.language).toBe('nl');
+  });
+
+  it('a claim stays leased until after the drain deadline', async () => {
+    await enqueueContentTexts([{ text: 'Wall preparation', from: 'en' }], 'catalogue');
+    let leaseUntil: Date | undefined;
+    fixture.beforeTranslate = async () => {
+      leaseUntil ??= (await ContentTranslation.findOne({ text: 'Wall preparation' }).lean())?.leaseUntil;
+    };
+    const started = Date.now();
+    await drainContentTranslationQueue({ budgetMs: 400_000 });
+    expect(leaseUntil!.getTime()).toBeGreaterThanOrEqual(started + 400_000);
   });
 
   it('public project page: contentTranslations in the request locale, original values unchanged', async () => {
@@ -393,8 +487,10 @@ describeDb('catalogue/project content translation (real MongoDB, local translato
 
   it('read paths never call the provider', async () => {
     const project = await insertProject();
-    await call('GET', `/api/public/projects/${project._id}`, { language: 'nl' });
-    await call('GET', '/api/search?type=projects&limit=10', { language: 'nl' });
+    expect((await call('GET', `/api/public/projects/${project._id}`, { language: 'nl' })).status).toBe(200);
+    const search = await call('GET', '/api/search?type=projects&limit=10', { language: 'nl' });
+    expect(search.status).toBe(200);
+    expect(search.body.results.some((card: any) => card.title === project.title)).toBe(true);
     await waitForContentTranslationJobs();
     expect(fixture.translate).toHaveLength(0);
     expect(fixture.detect).toHaveLength(0);
@@ -510,6 +606,25 @@ describeDb('catalogue/project content translation (real MongoDB, local translato
       const list = await call('GET', '/api/public/cms/blog?locale=nl');
       const slugs = (list.body.data.items as any[]).map((item) => `${item.slug}:${item.locale}`).sort();
       expect(slugs).toEqual(['legacy-a:nl', 'legacy-b:nl']);
+    });
+
+    it('an original whose run ran out of time stays requested for the next drain', async () => {
+      await CmsContent.collection.insertOne(legacyDoc('legacy-budget') as any);
+      expect(await queueCmsTranslationBackfill()).toEqual({ sources: 1, queued: 1 });
+      // After the first provider call, the clock jumps past every deadline.
+      fixture.beforeTranslate = async () => {
+        translatorTiming.now = () => Date.now() + 60 * 60_000;
+      };
+      const first = await processQueuedCmsTranslations();
+      expect(first).toEqual({ processed: 1, remaining: 1 });
+      const source = await CmsContent.findOne({ slug: 'legacy-budget', locale: 'en' }).lean();
+      expect(source?.translationRun?.requested).toBe(true);
+      expect((source?.translationResults as any[]).some((r) => r.errorCode === 'budget_exceeded')).toBe(true);
+
+      fixture.beforeTranslate = undefined;
+      translatorTiming.now = () => Date.now();
+      expect(await processQueuedCmsTranslations()).toEqual({ processed: 1, remaining: 0 });
+      expect((await loadCmsTranslationOverview()).missing).toBe(0);
     });
 
     it('admin overview + backfill endpoint (super admin only; clear message without a key)', async () => {

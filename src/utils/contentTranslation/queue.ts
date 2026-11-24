@@ -8,13 +8,17 @@
  * same pattern as the CMS and announcement queues).
  *
  * Draining:
- * - Rows are claimed in batches with a per-row lease (`claimId/leaseUntil`),
- *   so concurrent drains never translate the same row twice, and a drain that
- *   dies leaves rows that the next drain (any later save, the admin status
- *   read, the backfill, or the maintenance script) picks up again.
+ * - Rows are claimed in batches with a per-row lease (`claimId/leaseUntil`)
+ *   that lasts until the drain's deadline plus a grace period (provider calls
+ *   never run past the deadline), so concurrent drains never translate the
+ *   same row twice, and a drain that dies leaves rows that the next drain
+ *   (any later save, the admin status read, the backfill, or the maintenance
+ *   script) picks up again.
  * - Professional text is queued with `from: "auto"`. Its language is detected
  *   once per project (`detectGroup`) from the longest texts — pros may write
  *   in Dutch or French — and a row is never translated into its own language.
+ *   The first detection of a project is persisted atomically
+ *   (`ContentLanguageDecision`) and every concurrent drain uses that value.
  *   Catalogue text is English (the seeded catalogue).
  * - Writes are conditional on the claim and on `mode != "manual"`, so an admin
  *   override is never replaced.
@@ -25,7 +29,10 @@
 import { randomUUID } from "crypto";
 import { waitUntil } from "@vercel/functions";
 
-import ContentTranslation, { type ContentTranslationOrigin } from "../../models/contentTranslation";
+import ContentTranslation, {
+  ContentLanguageDecision,
+  type ContentTranslationOrigin,
+} from "../../models/contentTranslation";
 import {
   detectLanguages,
   isTranslatorConfigured,
@@ -34,7 +41,10 @@ import {
 } from "../cms/azureTranslator";
 import { CONTENT_LOCALES, contentTextHash, isContentLocale, isTranslatableText } from "./texts";
 
+/** Minimum lease of a claim. */
 export const CONTENT_TRANSLATION_LEASE_MS = 150_000;
+/** Lease beyond the drain deadline, for the writes after the last provider call. */
+export const CONTENT_TRANSLATION_LEASE_GRACE_MS = 60_000;
 /** Time one invocation may spend draining (function maxDuration is 300 s). */
 export const CONTENT_TRANSLATION_BUDGET_MS = 200_000;
 export const CONTENT_TRANSLATION_BATCH_SIZE = 200;
@@ -45,8 +55,12 @@ const DETECT_SAMPLE_CHARS = 1_000;
 
 /** Provider failures that stop the whole drain: nothing else would succeed now. */
 const STOP_CODES = new Set(["not_configured", "auth", "quota_exceeded", "rate_limited", "budget_exceeded", "timeout"]);
-/** Failures that do not count as an attempt of the row (retried by a later drain). */
-const TRANSIENT_CODES = new Set(["rate_limited", "budget_exceeded", "timeout", "not_configured"]);
+/**
+ * Failures that do not count as an attempt of the row (retried by a later
+ * drain). Provider-wide refusals (bad key, used-up quota) say nothing about
+ * the row, so they never park it as failed.
+ */
+const TRANSIENT_CODES = new Set(["rate_limited", "budget_exceeded", "timeout", "not_configured", "auth", "quota_exceeded"]);
 
 export interface QueuedText {
   text: string;
@@ -155,15 +169,37 @@ function detectionSample(texts: string[]): string {
   return sample.slice(0, DETECT_SAMPLE_CHARS);
 }
 
+/** The persisted language of `group`, written by the first drain that detected it. */
+async function decideGroupLanguage(group: string, language: string): Promise<string> {
+  try {
+    const decided = await ContentLanguageDecision.findOneAndUpdate(
+      { group },
+      { $setOnInsert: { group, language, createdAt: new Date() } },
+      { upsert: true, new: true }
+    ).lean();
+    return decided?.language ?? language;
+  } catch (err: any) {
+    // Two first upserts raced on the unique index: the other one won.
+    if (err?.code !== 11000) throw err;
+    const decided = await ContentLanguageDecision.findOne({ group }).lean();
+    return decided?.language ?? language;
+  }
+}
+
 /**
  * Resolves `from: "auto"` rows of the claimed batch: one detection per
- * detectGroup (all queued rows of that group get the result), per-row
- * detection for rows without a group. Unsupported languages are parked as
- * failed. Mutates `rows` in place.
+ * detectGroup (all queued rows of that group get the result; a group already
+ * decided by another drain reuses that decision without a provider call),
+ * per-row detection for rows without a group. Unsupported languages are
+ * parked as failed. Mutates `rows` in place; returns how many rows it failed.
  */
-async function resolveAutoLanguages(rows: Array<Record<string, any>>, claimId: string, deadline: number) {
+async function resolveAutoLanguages(
+  rows: Array<Record<string, any>>,
+  claimId: string,
+  deadline: number
+): Promise<number> {
   const auto = rows.filter((row) => row.from === "auto");
-  if (auto.length === 0) return;
+  if (auto.length === 0) return 0;
 
   const groups = new Map<string, Array<Record<string, any>>>();
   for (const row of auto) {
@@ -171,16 +207,31 @@ async function resolveAutoLanguages(rows: Array<Record<string, any>>, claimId: s
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(row);
   }
-  const keys = Array.from(groups.keys());
-  const samples = keys.map((key) => detectionSample(groups.get(key)!.map((row) => String(row.text))));
-  const languages = await detectLanguages(samples, { deadline });
+  const groupIdOf = (key: string) => (key.startsWith("g:") ? key.slice(2) : undefined);
 
-  for (let i = 0; i < keys.length; i += 1) {
-    const language = languages[i];
-    const group = groups.get(keys[i])!;
+  const languages = new Map<string, string>();
+  const groupIds = Array.from(groups.keys()).map(groupIdOf).filter((id): id is string => Boolean(id));
+  if (groupIds.length) {
+    const decided = await ContentLanguageDecision.find({ group: { $in: groupIds } }).lean();
+    for (const decision of decided) languages.set(`g:${decision.group}`, decision.language);
+  }
+  const toDetect = Array.from(groups.keys()).filter((key) => !languages.has(key));
+  if (toDetect.length) {
+    const samples = toDetect.map((key) => detectionSample(groups.get(key)!.map((row) => String(row.text))));
+    const detected = await detectLanguages(samples, { deadline });
+    for (let i = 0; i < toDetect.length; i += 1) {
+      const groupId = groupIdOf(toDetect[i]);
+      const language = detected[i];
+      languages.set(toDetect[i], groupId && language ? await decideGroupLanguage(groupId, language) : language);
+    }
+  }
+
+  let failed = 0;
+  for (const [key, group] of groups) {
+    const language = languages.get(key);
+    const groupId = groupIdOf(key);
     if (isContentLocale(language)) {
       for (const row of group) row.from = language;
-      const groupId = keys[i].startsWith("g:") ? keys[i].slice(2) : undefined;
       // Every not-yet-detected row of the same project shares the language.
       await ContentTranslation.updateMany(
         groupId
@@ -190,19 +241,28 @@ async function resolveAutoLanguages(rows: Array<Record<string, any>>, claimId: s
       );
     } else {
       for (const row of group) row.from = null;
-      await ContentTranslation.updateMany(
+      const result = await ContentTranslation.updateMany(
         { _id: { $in: group.map((row) => row._id) }, claimId },
         {
           $set: { status: "failed", errorCode: "unsupported_language", ...(language ? { from: language } : {}) },
           $unset: { claimId: 1, leaseUntil: 1 },
         }
       );
+      failed += result.modifiedCount ?? 0;
     }
   }
+  return failed;
 }
 
-/** Claims up to `limit` pending rows whose lease is free. */
-async function claimBatch(limit: number): Promise<{ claimId: string; rows: Array<Record<string, any>> }> {
+/**
+ * Claims up to `limit` pending rows whose lease is free. The lease outlives
+ * the drain's deadline: no provider call of this batch can still be running
+ * when another drain may claim the rows again.
+ */
+async function claimBatch(
+  limit: number,
+  deadline: number
+): Promise<{ claimId: string; rows: Array<Record<string, any>> }> {
   const now = new Date();
   const claimId = randomUUID();
   const free = { $or: [{ leaseUntil: null }, { leaseUntil: { $lte: now } }] };
@@ -214,15 +274,26 @@ async function claimBatch(limit: number): Promise<{ claimId: string; rows: Array
   if (candidates.length === 0) return { claimId, rows: [] };
   await ContentTranslation.updateMany(
     { _id: { $in: candidates.map((row) => row._id) }, status: "pending", ...free },
-    { $set: { claimId, leaseUntil: new Date(now.getTime() + CONTENT_TRANSLATION_LEASE_MS) } }
+    {
+      $set: {
+        claimId,
+        leaseUntil: new Date(
+          Math.max(now.getTime() + CONTENT_TRANSLATION_LEASE_MS, deadline + CONTENT_TRANSLATION_LEASE_GRACE_MS)
+        ),
+      },
+    }
   );
   const rows = (await ContentTranslation.find({ claimId }).lean()) as Array<Record<string, any>>;
   return { claimId, rows };
 }
 
-async function releaseWithError(rows: Array<Record<string, any>>, claimId: string, code: string) {
+async function releaseWithError(
+  rows: Array<Record<string, any>>,
+  claimId: string,
+  code: string,
+  countsAsAttempt = !TRANSIENT_CODES.has(code)
+) {
   if (rows.length === 0) return;
-  const countsAsAttempt = !TRANSIENT_CODES.has(code);
   await ContentTranslation.bulkWrite(
     rows.map((row) => {
       const attempts = Number(row.attempts || 0) + (countsAsAttempt ? 1 : 0);
@@ -250,13 +321,24 @@ async function translateBatch(
   claimId: string,
   deadline: number
 ): Promise<{ translated: number; failed: number; stopCode?: string }> {
+  let failed = 0;
   try {
-    await resolveAutoLanguages(rows, claimId, deadline);
+    failed += await resolveAutoLanguages(rows, claimId, deadline);
   } catch (err) {
     const code = errorCodeOf(err);
     if (!(err instanceof TranslatorError)) console.error("[contentTranslations] detection crashed:", err);
-    await releaseWithError(rows, claimId, code);
-    return { translated: 0, failed: 0, stopCode: STOP_CODES.has(code) ? code : undefined };
+    // Only rows that needed detection carry the failure; rows of a known
+    // language are translated as usual, or (provider-wide stop) released
+    // without an attempt.
+    const undetected = rows.filter((row) => row.from === "auto");
+    await releaseWithError(undetected, claimId, code);
+    if (STOP_CODES.has(code)) {
+      await releaseWithError(rows.filter((row) => isContentLocale(row.from)), claimId, code, false);
+      return { translated: 0, failed, stopCode: code };
+    }
+    if (!TRANSIENT_CODES.has(code)) {
+      failed += undetected.filter((row) => Number(row.attempts || 0) + 1 >= CONTENT_TRANSLATION_MAX_ATTEMPTS).length;
+    }
   }
 
   const workable = rows.filter((row) => isContentLocale(row.from));
@@ -303,7 +385,6 @@ async function translateBatch(
   }
 
   let translated = 0;
-  let failed = 0;
   const now = new Date();
   const operations: any[] = [];
   const errored: Array<Record<string, any>> = [];
@@ -365,7 +446,7 @@ export async function drainContentTranslationQueue(
   const batchSize = options.batchSize ?? CONTENT_TRANSLATION_BATCH_SIZE;
 
   while (Date.now() < deadline) {
-    const { claimId, rows } = await claimBatch(batchSize);
+    const { claimId, rows } = await claimBatch(batchSize, deadline);
     if (rows.length === 0) break;
     summary.claimed += rows.length;
     const outcome = await translateBatch(rows, claimId, deadline);

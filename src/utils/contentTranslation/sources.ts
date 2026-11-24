@@ -45,7 +45,8 @@ export async function enqueueProjectTexts(
       }
     }
   }
-  const texts = collectProjectTexts(project);
+  // Free-text professional answers are not queued: only catalogue option text.
+  const texts = collectProjectTexts(project, { inputValues: catalogue });
   const fromCatalogue = texts.filter((text) => catalogue!.has(text));
   const own = texts.filter((text) => !catalogue!.has(text));
   const added =
@@ -68,11 +69,17 @@ export function requestProjectContentTranslation(projectId: Id | null | undefine
     const project = await Project.findById(projectId).select(PROJECT_TEXT_FIELDS).lean();
     if (!project) return;
     const configId = (project as any).serviceConfigurationId;
+    // One snapshot of the catalogue entry: queued, and used to classify the
+    // project's strings (no second lookup in enqueueProjectTexts).
+    const catalogue = new Set<string>();
     if (configId && mongoose.Types.ObjectId.isValid(String(configId))) {
       const config = await ServiceConfiguration.findById(configId).lean();
-      if (config) await enqueueServiceConfigurationTexts(config as Record<string, any>);
+      if (config) {
+        await enqueueServiceConfigurationTexts(config as Record<string, any>);
+        for (const text of collectServiceConfigurationTexts(config as Record<string, any>)) catalogue.add(text);
+      }
     }
-    await enqueueProjectTexts(project as Record<string, any>);
+    await enqueueProjectTexts(project as Record<string, any>, catalogue);
   });
 }
 

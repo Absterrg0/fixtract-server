@@ -75,7 +75,8 @@ async function main() {
         for (;;) {
           const round = await drainContentTranslationQueue({ budgetMs: ROUND_BUDGET_MS });
           console.log("[content] round:", round);
-          if (round.claimed === 0 || round.stoppedBy) break;
+          // An exhausted round budget is a normal end; only provider refusals stop.
+          if (round.claimed === 0 || (round.stoppedBy && round.stoppedBy !== "budget_exceeded")) break;
         }
         console.log("[content] after:", await contentCounts());
       }

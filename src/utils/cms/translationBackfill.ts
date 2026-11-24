@@ -40,7 +40,7 @@ export async function queueCmsTranslationBackfill(): Promise<CmsBackfillQueueSum
     summary.sources += 1;
     let results;
     try {
-      results = await syncCmsTranslations(doc, { translate: false });
+      results = await syncCmsTranslations(doc, { translate: false, reloadSource: true });
     } catch (err) {
       console.error(`[cmsBackfill] sync failed for ${String(doc._id)}:`, err);
       continue;

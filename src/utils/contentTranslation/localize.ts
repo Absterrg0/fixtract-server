@@ -69,7 +69,8 @@ export async function loadContentTranslations(
     return undefined;
   }
 
-  const result: Record<string, string> = {};
+  // Null prototype: any display string (even "__proto__") is an own key.
+  const result: Record<string, string> = Object.create(null);
   for (const row of rows) {
     if (row.from === locale) continue;
     const translated = row.translations?.[locale];
