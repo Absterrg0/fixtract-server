@@ -20,7 +20,8 @@ import { RECORDED_DISPUTE_FILTER } from './bookingActivity';
  * "Actionable since" per counter:
  * - booking disputes: `dispute.raisedAt`;
  * - escalated refund requests: `escalatedAt` (falls back to `createdAt`);
- * - escalated warranty claims: `escalation.escalatedAt` (falls back to `updatedAt`);
+ * - escalated warranty claims: `escalation.escalatedAt` (no fallback: a note-only
+ *   save must not bring a claim back; every escalation path sets it);
  * - professional cancellation requests: `createdAt`;
  * - support tickets: the latest public reply (the customer/pro reply that put
  *   the ticket back on the admin), else `createdAt`; meetings: `createdAt`;
@@ -113,7 +114,7 @@ export async function countDisputeManagementWork(resetAt: Date | null): Promise<
       since(ESCALATED_REFUND_REQUEST_FILTER, sinceFirstOf(['escalatedAt', 'createdAt'], resetAt)) as any,
     ),
     WarrantyClaim.countDocuments(
-      since(ESCALATED_WARRANTY_CLAIM_FILTER, sinceFirstOf(['escalation.escalatedAt', 'updatedAt'], resetAt)) as any,
+      since(ESCALATED_WARRANTY_CLAIM_FILTER, sinceField('escalation.escalatedAt', resetAt)) as any,
     ),
   ]);
   return {

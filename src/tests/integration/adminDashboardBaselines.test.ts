@@ -40,7 +40,7 @@ import {
 } from '../../handlers/Admin/dashboardBaselines';
 import { getDisputes, getDisputeAnalytics } from '../../handlers/Admin/disputeManagement';
 import { listCancellationRequests } from '../../handlers/Admin/cancellationRequests';
-import { listAdminWarrantyClaims, getAdminWarrantyAnalytics } from '../../handlers/WarrantyClaim';
+import { listAdminWarrantyClaims, getAdminWarrantyAnalytics, adminSetWarrantyStatus } from '../../handlers/WarrantyClaim';
 import { getKpiSummary } from '../../handlers/Admin/kpiDashboard';
 import { computeAdminNavigationBadges } from '../../handlers/Admin/navigationBadges';
 import { enforceAdminRoutePermission } from '../../utils/adminRbac/middleware';
@@ -756,6 +756,26 @@ describeDb('dashboard baselines (Mongo)', () => {
       // Show-all is a list option: it never changes the counter.
       const showAll = await call(getDisputeAnalytics, makeReq({ admin: superAdmin(), query: { history: 'all' } }));
       expect(showAll.body.data.counter.total).toBe(3);
+    });
+
+    it('an escalated warranty claim counts from its escalation time, never from a later save', async () => {
+      await setBaseline('disputes', RESET_AT);
+      const [legacy, open] = [id(), id()];
+      await WarrantyClaim.collection.insertMany([
+        // Escalated before escalatedAt was recorded, saved (note only) after the reset.
+        { _id: legacy, claimNumber: 'WC-LEGACY', booking: id(), customer: id(), professional: id(), status: 'escalated', reason: 'defect', description: 'd', openedAt: BEFORE, createdAt: BEFORE, updatedAt: AFTER },
+        { _id: open, claimNumber: 'WC-OPEN', booking: id(), customer: id(), professional: id(), status: 'open', reason: 'defect', description: 'd', openedAt: BEFORE, createdAt: BEFORE, updatedAt: BEFORE, statusHistory: [] },
+      ] as any[]);
+      const counter = async () => (await call(getDisputeAnalytics, makeReq({ admin: superAdmin(), query: {} }))).body.data.counter;
+      expect((await counter()).escalatedWarrantyClaims).toBe(0);
+
+      // An admin escalation records escalatedAt, so the claim is new work now.
+      const admin = superAdmin();
+      const set = await call(adminSetWarrantyStatus, makeReq({ method: 'POST', user: admin, admin, params: { claimId: String(open) }, body: { status: 'escalated' } }));
+      expect(set.statusCode).toBe(200);
+      const escalated = await WarrantyClaim.findById(open).lean();
+      expect(escalated?.escalation?.escalatedAt).toBeInstanceOf(Date);
+      expect((await counter()).escalatedWarrantyClaims).toBe(1);
     });
 
     it('a failed baseline read does not take down the badges', async () => {

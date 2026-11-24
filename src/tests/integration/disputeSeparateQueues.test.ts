@@ -232,10 +232,12 @@ describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
       const anna = new Types.ObjectId();
       const bram = new Types.ObjectId();
       const pro = new Types.ObjectId();
+      const refundPro = new Types.ObjectId();
       await User.collection.insertMany([
         { _id: anna, name: 'Anna Jansen', email: 'anna@search.test', role: 'customer' },
         { _id: bram, name: 'Bram Peeters', email: 'bram@search.test', role: 'customer' },
         { _id: pro, name: 'Pieter Pro', email: 'pieter@pro.test', role: 'professional' },
+        { _id: refundPro, name: 'Rita Refund', email: 'rita@pro.test', role: 'professional' },
       ]);
       const refundBooking = new Types.ObjectId();
       const warrantyBooking = new Types.ObjectId();
@@ -243,7 +245,7 @@ describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
         { _id: new Types.ObjectId(), bookingNumber: 'BK-1001', status: 'dispute', customer: anna, professional: pro, dispute: recordedDispute(20, { reason: 'Leaking roof' }) },
         { _id: new Types.ObjectId(), bookingNumber: 'BK-2002', status: 'dispute', customer: bram, professional: new Types.ObjectId(), dispute: recordedDispute(19, { reason: 'Wrong paint', description: 'colour mismatch' }) },
         { _id: new Types.ObjectId(), bookingNumber: 'BK-3003', status: 'completed', customer: bram, dispute: recordedDispute(5, { resolvedAt: at(6) }) },
-        { _id: refundBooking, bookingNumber: 'BK-REF-7', status: 'booked', customer: anna },
+        { _id: refundBooking, bookingNumber: 'BK-REF-7', status: 'booked', customer: anna, professional: refundPro },
         { _id: warrantyBooking, bookingNumber: 'BK-WAR-8', status: 'completed', customer: bram },
       ] as any[]);
       await CancellationRequest.collection.insertOne(
@@ -275,6 +277,8 @@ describeDb('admin dispute dashboard read models (disposable MongoDB)', () => {
       const byProfessional = await list({ search: 'pieter' });
       expect(numbers(byProfessional)).toEqual(['BK-1001']);
       expect(external(byProfessional)).toEqual(['WC-SEARCH-1']);
+      // A refund request is found by its booking's professional too.
+      expect(external(await list({ search: 'rita@pro' }))).toEqual(['BK-REF-7']);
 
       expect(numbers(await list({ search: 'colour' }))).toEqual(['BK-2002']);
       expect(external(await list({ search: 'door sticks' }))).toEqual(['WC-SEARCH-1']);

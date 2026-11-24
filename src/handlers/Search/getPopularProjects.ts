@@ -182,6 +182,8 @@ export const getPopularProjects = async (req: Request, res: Response) => {
 
     if (projects.length === 0) {
       res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+      // Card text depends on the request language (contentTranslations).
+      res.vary("Accept-Language");
       return res.json({ projects: [] });
     }
 
@@ -256,6 +258,8 @@ export const getPopularProjects = async (req: Request, res: Response) => {
     });
 
     res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
+    // Card text depends on the request language (contentTranslations).
+    res.vary("Accept-Language");
     const contentTranslations = await loadContentTranslations(
       results.flatMap((project: any) => collectProjectCardTexts(project)),
       contentLocaleOf(req)

@@ -20,6 +20,24 @@ export function localizeNotificationText(text: string, locale: MessageLocale | n
   }
 }
 
+/**
+ * Events whose stored body is text a user wrote (the chat message preview).
+ * It is shown as written, even when it happens to equal catalogued copy
+ * ("Payment confirmed"); this covers notifications stored before the inbox
+ * was localized too, since every notification has its eventKey.
+ */
+export const USER_WRITTEN_BODY_EVENTS: ReadonlySet<string> = new Set(["user.chat_message"]);
+
+/** Body of a stored notification in the viewer's language (user-written bodies unchanged). */
+export function localizeNotificationBody(
+  eventKey: string | undefined,
+  body: string,
+  locale: MessageLocale | null
+): string {
+  if (eventKey && USER_WRITTEN_BODY_EVENTS.has(eventKey)) return body;
+  return localizeNotificationText(body, locale);
+}
+
 /** Locale of the inbox request (Accept-Language sent by the web app). */
 export function notificationLocaleOf(header: unknown): MessageLocale | null {
   return resolveMessageLocale(header);

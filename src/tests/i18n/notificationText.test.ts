@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { localizeNotificationText } from '../../i18n/notificationText';
+import { localizeNotificationBody, localizeNotificationText, USER_WRITTEN_BODY_EVENTS } from '../../i18n/notificationText';
 import { NOTIFICATION_REGISTRY } from '../../utils/notifications/registry';
 
 /**
@@ -30,7 +30,7 @@ const FULL_CONTEXT = {
 };
 
 /** Bodies that are user-written content (chat previews) are shown as written. */
-const USER_CONTENT_BODIES = new Set(['user.chat_message']);
+const USER_CONTENT_BODIES = USER_WRITTEN_BODY_EVENTS;
 
 const render = (eventKey: string, ctx: Record<string, unknown>) => {
   const built = NOTIFICATION_REGISTRY[eventKey].build(ctx as any);
@@ -62,5 +62,12 @@ describe('notification copy is catalogued for the inbox', () => {
     expect(localizeNotificationText('Payment confirmed', 'en')).toBe('Payment confirmed');
     expect(localizeNotificationText('Hello, can you come on Monday?', 'nl')).toBe('Hello, can you come on Monday?');
     expect(localizeNotificationText('Payment confirmed', null)).toBe('Payment confirmed');
+  });
+
+  it('shows a chat message preview as written, even when it equals catalogued copy', () => {
+    expect(localizeNotificationText('Payment confirmed', 'nl')).not.toBe('Payment confirmed');
+    expect(localizeNotificationBody('user.chat_message', 'Payment confirmed', 'nl')).toBe('Payment confirmed');
+    expect(localizeNotificationBody('customer.payment_confirmed', 'Payment confirmed', 'nl'))
+      .toBe(localizeNotificationText('Payment confirmed', 'nl'));
   });
 });

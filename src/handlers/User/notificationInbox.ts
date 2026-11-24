@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import Notification from '../../models/notification';
-import { localizeNotificationText, notificationLocaleOf } from '../../i18n/notificationText';
+import { localizeNotificationBody, localizeNotificationText, notificationLocaleOf } from '../../i18n/notificationText';
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
@@ -85,7 +85,7 @@ export const listNotifications = async (req: Request, res: Response): Promise<vo
           eventKey: n.eventKey,
           category: n.category,
           title: localizeNotificationText(n.title, locale),
-          body: localizeNotificationText(n.body, locale),
+          body: localizeNotificationBody(n.eventKey, n.body, locale),
           clickUrl: n.clickUrl,
           entityType: n.entityType,
           entityId: n.entityId?.toString(),

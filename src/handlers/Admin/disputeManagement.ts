@@ -250,7 +250,8 @@ export const parseDisputeSearch = (value: unknown): string =>
 /**
  * Mongo clauses for the dispute-page search. One term matches (case-insensitive,
  * substring) the booking number, the customer's or professional's name or
- * email, the dispute reason/description, and, for the escalation rows, the
+ * email (for refund requests, also the booking's professional), the dispute
+ * reason/description, and, for the escalation rows, the
  * warranty claim number / reason / description and the refund reason. A
  * 24-hex term also matches a booking id exactly.
  */
@@ -272,6 +273,18 @@ export const buildDisputeSearch = async (term: string) => {
   ]);
   const userIds = users.map((user: any) => user._id);
   const bookingIds = bookings.map((booking: any) => booking._id);
+  // A refund request only names its requester (the customer): resolve the
+  // matching professionals to the bookings of escalated refund requests.
+  const professionalBookingIds = userIds.length
+    ? (
+        await Booking.find({
+          _id: { $in: await CancellationRequest.distinct('booking', ESCALATED_REFUND_REQUEST_FILTER) },
+          professional: { $in: userIds },
+        })
+          .select('_id')
+          .lean()
+      ).map((booking: any) => booking._id)
+    : [];
 
   return {
     booking: {
@@ -299,6 +312,7 @@ export const buildDisputeSearch = async (term: string) => {
         { reason: regex },
         { reasonCategory: regex },
         ...(bookingIds.length ? [{ booking: { $in: bookingIds } }] : []),
+        ...(professionalBookingIds.length ? [{ booking: { $in: professionalBookingIds } }] : []),
         ...(userIds.length ? [{ requestedBy: { $in: userIds } }] : []),
       ],
     },

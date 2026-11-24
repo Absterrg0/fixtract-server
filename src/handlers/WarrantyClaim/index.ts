@@ -2016,6 +2016,16 @@ export const adminSetWarrantyStatus = async (req: Request, res: Response) => {
       }
     }
 
+    if (parsedStatus === "escalated" && claim.status !== "escalated") {
+      // Dispute management counts escalations from `escalation.escalatedAt`.
+      claim.escalation = {
+        escalatedAt: new Date(),
+        escalatedBy: toObjectId(userId),
+        autoEscalated: false,
+        reason: "Escalated by admin",
+        ...(note?.trim() ? { note: note.trim().slice(0, 1000) } : {}),
+      };
+    }
     claim.status = parsedStatus;
     claim.statusHistory.push({
       status: parsedStatus,
