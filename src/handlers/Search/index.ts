@@ -53,6 +53,8 @@ import {
 } from "../../utils/search/projectFilters";
 import { isRelevanceSort, sortProjectsByRelevance } from "../../utils/search/projectRelevance";
 import { CANDIDATE_PROJECTION, toSearchProjectCard, withCardImages } from "../../utils/search/projectCard";
+import { contentLocaleOf, loadContentTranslations } from "../../utils/contentTranslation/localize";
+import { collectProjectCardTexts } from "../../utils/contentTranslation/texts";
 import PlatformSettings from "../../models/platformSettings";
 import LoyaltyConfig from "../../models/loyaltyConfig";
 import { getCurrentTier } from "../../utils/loyaltySystem";
@@ -1216,9 +1218,22 @@ async function searchProjects(
       })
     );
 
+    // Stored translations of the card text and the free-text facet labels in
+    // the request locale; values stay as stored (filters match on them).
+    const contentTranslations = await loadContentTranslations(
+      [
+        ...resultsWithAvailability.flatMap((card: any) => collectProjectCardTexts(card)),
+        ...["projectTypes", "includedItems", "areasOfWork"].flatMap((facet) =>
+          Object.keys(facetResults?.[facet] || {})
+        ),
+      ],
+      contentLocaleOf(res.req)
+    );
+
     res.json({
       results: resultsWithAvailability,
       facets: facetResults,
+      ...(contentTranslations ? { contentTranslations } : {}),
       pagination: {
         total: totalCount,
         page: Math.ceil(skip / limit) + 1,

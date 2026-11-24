@@ -1,0 +1,168 @@
+/**
+ * Which customer-facing strings of a project / service configuration are
+ * machine-translated, and how a string is keyed in the translation memory.
+ *
+ * Only display text is collected. Values the app matches on (pricing types,
+ * VAT field names, units, ids) are never part of it, and responses keep every
+ * original value: translations travel next to them in `contentTranslations`.
+ */
+import { createHash } from "crypto";
+
+export const CONTENT_LOCALES = ["en", "nl", "fr"] as const;
+export type ContentLocale = (typeof CONTENT_LOCALES)[number];
+
+export function isContentLocale(value: unknown): value is ContentLocale {
+  return typeof value === "string" && (CONTENT_LOCALES as readonly string[]).includes(value);
+}
+
+/** Longest stored source text (project description is capped at 1300). */
+export const MAX_CONTENT_TEXT_LENGTH = 5_000;
+
+/** Pricing-model values the frontend already labels from its own messages. */
+const ENUM_PRICE_MODELS = new Set(["fixed", "unit", "rfq", "hour", "day", "meter", "m2", "room"]);
+
+const LETTER_RE = /\p{L}/u;
+const URL_ONLY_RE = /^(https?:\/\/|www\.)\S+$/i;
+
+/** True for text worth translating: has letters, is not a bare URL, not too long. */
+export function isTranslatableText(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const text = value.trim();
+  if (text.length < 2 || text.length > MAX_CONTENT_TEXT_LENGTH) return false;
+  if (!LETTER_RE.test(text)) return false;
+  if (URL_ONLY_RE.test(text)) return false;
+  return true;
+}
+
+/** Translation-memory key of a source string (whitespace-trimmed). */
+export function contentTextHash(text: string): string {
+  return createHash("sha256").update(text.trim()).digest("hex").slice(0, 40);
+}
+
+class TextCollector {
+  private readonly seen = new Set<string>();
+  readonly texts: string[] = [];
+
+  add(value: unknown): void {
+    if (Array.isArray(value)) {
+      for (const item of value) this.add(item);
+      return;
+    }
+    if (!isTranslatableText(value)) return;
+    if (this.seen.has(value)) return;
+    this.seen.add(value);
+    this.texts.push(value);
+  }
+}
+
+const list = (value: unknown): any[] => (Array.isArray(value) ? value : []);
+
+/** Display strings of one project as customers see it (project page, search card, booking/RFQ wizard). */
+export function collectProjectTexts(project: Record<string, any> | null | undefined): string[] {
+  const out = new TextCollector();
+  if (!project) return out.texts;
+  out.add(project.title);
+  out.add(project.description);
+  if (typeof project.priceModel === "string" && !ENUM_PRICE_MODELS.has(project.priceModel.trim().toLowerCase())) {
+    out.add(project.priceModel);
+  }
+  out.add(project.areaOfWork);
+  for (const subproject of list(project.subprojects)) {
+    out.add(subproject?.name);
+    out.add(subproject?.description);
+    out.add(subproject?.projectType);
+    out.add(subproject?.customProjectType);
+    for (const item of list(subproject?.included)) {
+      out.add(item?.name);
+      out.add(item?.description);
+    }
+    for (const material of list(subproject?.materials)) {
+      out.add(material?.name);
+      out.add(material?.description);
+    }
+    for (const input of list(subproject?.professionalInputs)) {
+      // Dropdown answers are catalogue option text; numbers/ranges are skipped.
+      if (typeof input?.value === "string" || Array.isArray(input?.value)) out.add(input.value);
+    }
+  }
+  for (const option of list(project.extraOptions)) {
+    out.add(option?.name);
+    out.add(option?.description);
+  }
+  for (const term of list(project.termsConditions)) {
+    out.add(term?.name);
+    out.add(term?.description);
+  }
+  for (const entry of list(project.faq)) {
+    out.add(entry?.question);
+    out.add(entry?.answer);
+  }
+  for (const question of [...list(project.rfqQuestions), ...list(project.postBookingQuestions)]) {
+    out.add(question?.question);
+    out.add(question?.options);
+  }
+  out.add(project.customConfirmationMessage);
+  return out.texts;
+}
+
+/** Display strings of the VAT questions a customer/professional answers. */
+export function collectVatQuestionTexts(vatManagement: Record<string, any> | null | undefined): string[] {
+  const out = new TextCollector();
+  if (!vatManagement) return out.texts;
+  for (const question of [
+    ...list(vatManagement.reducedVatQuestions),
+    ...list(vatManagement.professionalVatQuestions),
+  ]) {
+    out.add(question?.question);
+    out.add(question?.options);
+  }
+  for (const rule of list(vatManagement.logicRules)) out.add(rule?.customText);
+  return out.texts;
+}
+
+/** Customer-facing strings of one catalogue entry (service configuration). */
+export function collectServiceConfigurationTexts(config: Record<string, any> | null | undefined): string[] {
+  const out = new TextCollector();
+  if (!config) return out.texts;
+  out.add(config.areaOfWork);
+  out.add(config.pricingModel);
+  for (const option of list(config.pricingOptions)) out.add(option?.name);
+  out.add(config.projectTypes);
+  const fields = [
+    ...list(config.professionalInputFields),
+    ...list(config.includedItems).map((item) => item?.dynamicField).filter(Boolean),
+  ];
+  for (const item of list(config.includedItems)) {
+    out.add(item?.name);
+    out.add(item?.description);
+  }
+  for (const field of fields) {
+    out.add(field?.label);
+    out.add(field?.placeholder);
+    out.add(field?.options);
+  }
+  for (const option of list(config.extraOptions)) {
+    out.add(option?.name);
+    out.add(option?.description);
+  }
+  for (const entry of list(config.conditionsAndWarnings)) out.add(entry?.text);
+  out.add(collectVatQuestionTexts(config.vatManagement));
+  return out.texts;
+}
+
+/** Strings of a search project card (search page, home carousels). */
+export function collectProjectCardTexts(project: Record<string, any> | null | undefined): string[] {
+  const out = new TextCollector();
+  if (!project) return out.texts;
+  out.add(project.title);
+  out.add(project.description);
+  if (typeof project.priceModel === "string" && !ENUM_PRICE_MODELS.has(project.priceModel.trim().toLowerCase())) {
+    out.add(project.priceModel);
+  }
+  for (const subproject of list(project.subprojects)) {
+    out.add(subproject?.name);
+    out.add(subproject?.description);
+    out.add(subproject?.projectType);
+  }
+  return out.texts;
+}

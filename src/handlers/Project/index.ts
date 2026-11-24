@@ -50,6 +50,9 @@ import {
   projectTransitionGuard,
   saveProjectWithFence,
 } from "../../utils/projectConditionalSave";
+import { contentLocaleOf, loadContentTranslations } from "../../utils/contentTranslation/localize";
+import { collectProjectTexts, collectVatQuestionTexts } from "../../utils/contentTranslation/texts";
+import { requestProjectContentTranslation } from "../../utils/contentTranslation/sources";
 // import { seedServiceCategories } from '../../scripts/seedProject';
 
 /**
@@ -783,21 +786,29 @@ export const getPublishedProject = async (req: Request, res: Response) => {
       seesBasePricing,
       await getCheckoutCommissionPercent(),
     ));
+    const vatManagement = vatConfig?.vatManagement?.enabled
+      ? {
+          enabled: true,
+          rateRuleGroup: vatConfig.vatManagement.rateRuleGroup,
+          reducedVatQuestions: vatConfig.vatManagement.reducedVatQuestions,
+          professionalVatQuestions: withArticle47ProfessionalQuestion(vatConfig.vatManagement),
+          article47Classification: vatConfig.vatManagement.article47Classification,
+          exemptFromBelgianReverseCharge: vatConfig.vatManagement.exemptFromBelgianReverseCharge,
+        }
+      : undefined;
+    // Stored machine translations of the customer-facing text in the request
+    // locale; original values stay unchanged (see utils/contentTranslation).
+    const contentTranslations = await loadContentTranslations(
+      [...collectProjectTexts(serialized as Record<string, any>), ...collectVatQuestionTexts(vatManagement)],
+      contentLocaleOf(req)
+    );
     res.json({
       success: true,
       project: {
         ...serialized,
-        vatManagement: vatConfig?.vatManagement?.enabled
-          ? {
-              enabled: true,
-              rateRuleGroup: vatConfig.vatManagement.rateRuleGroup,
-              reducedVatQuestions: vatConfig.vatManagement.reducedVatQuestions,
-              professionalVatQuestions: withArticle47ProfessionalQuestion(vatConfig.vatManagement),
-              article47Classification: vatConfig.vatManagement.article47Classification,
-              exemptFromBelgianReverseCharge: vatConfig.vatManagement.exemptFromBelgianReverseCharge,
-            }
-          : undefined,
+        vatManagement,
         professionalStats,
+        ...(contentTranslations ? { contentTranslations } : {}),
       }
     });
   } catch (error) {
@@ -2108,6 +2119,7 @@ export const submitProject = async (req: Request, res: Response) => {
         project.isResubmission = false;
 
         await saveProjectWithFence(project, professionalId, expected);
+        requestProjectContentTranslation(project._id);
         return res.json({
           message: "Changes approved automatically",
           id: project._id,
@@ -2126,6 +2138,7 @@ export const submitProject = async (req: Request, res: Response) => {
       project.approvedBy = undefined;
 
       await saveProjectWithFence(project, professionalId, expected);
+      requestProjectContentTranslation(project._id);
       console.log(`[PROJECT] Resubmission sent to admin for review (type: ${reapprovalType})`);
       return res.json({
         message: "Changes submitted for admin review",
@@ -2146,6 +2159,8 @@ export const submitProject = async (req: Request, res: Response) => {
     }
 
     await saveProjectWithFence(project, professionalId, expected);
+    // Translate while the project waits for approval (after the response).
+    requestProjectContentTranslation(project._id);
 
     const message = isResubmission
       ? "Project resubmitted for approval"
