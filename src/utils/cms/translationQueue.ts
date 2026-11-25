@@ -158,13 +158,22 @@ export async function processCmsTranslationQueue(
     }
 
     const at = new Date();
+    // Locales left unfinished because the time budget ran out stay requested,
+    // so the next drain (and the overview's `queued` count) picks them up.
+    const unfinished = results.some((result) => result.errorCode === "budget_exceeded");
     const released = await CmsContent.updateOne(
       { _id: sourceId, "translationRun.runId": runId },
       {
         $set: {
           translationResults: results.map((result) => ({ ...result, at })),
           "translationRun.finishedAt": at,
+          ...(unfinished ? { "translationRun.requested": true, "translationRun.requestedAt": at } : {}),
         },
+        // A forced re-translation that ran out of time stays forced (merged
+        // with any locales a save forced meanwhile).
+        ...(unfinished && forceLocales.length
+          ? { $addToSet: { "translationRun.forceLocales": { $each: forceLocales } } }
+          : {}),
         $unset: {
           "translationRun.runId": 1,
           "translationRun.leaseUntil": 1,
@@ -181,6 +190,8 @@ export async function processCmsTranslationQueue(
       }
       return;
     }
+    // Out of time: leave the request for the next drain.
+    if (unfinished) return;
   }
 }
 

@@ -6,25 +6,28 @@ import {
 } from '../models/adminDashboardBaseline';
 
 /**
- * "Counting since" baselines for booking-flow admin dashboards.
+ * "Counting since" baselines for admin dashboards.
  *
  * THE RULE (one place, used by every list, count, badge and KPI in scope):
  *
- * 1. Work queues and nav badges. Every item that is still open or pending is
- *    listed and counted, whatever its date. A closed item created before the
- *    baseline is hidden. Only work that is finished can disappear.
- * 2. Each count uses the same filter as the list it describes. The "Open" card
- *    matches the Open list, and "All" matches the All list pagination total.
- * 3. Totals and KPI aggregates with no list behind them (warranty analytics,
- *    booking KPIs) count only items on or after the baseline.
- * 4. `?history=all` turns the baseline off for that one request. Nothing is
- *    deleted or edited: resets only move the baseline forward.
+ * 1. Counters (nav badges and the dispute-management counter) count only work
+ *    that became actionable at or after the reset, so a reset brings them to 0.
+ *    See src/utils/adminWorkCounters.ts.
+ * 2. Work queues (lists). Every item that is still open or pending is listed,
+ *    whatever its date. A closed item created before the baseline is hidden.
+ *    Only work that is finished can disappear from a list.
+ * 3. Totals and KPI aggregates with no list behind them (booking KPIs) count
+ *    only items on or after the baseline.
+ * 4. `?history=all` turns the list baseline off for that one request. Nothing
+ *    is deleted or edited: resets only move the baseline forward.
  *
  * Per dashboard:
- * - disputes:        booking disputes, by `dispute.raisedAt`. Open = no `dispute.resolvedAt`.
- * - warrantyClaims:  warranty claims, by `createdAt`. Open = any status except `closed`.
- * - cancellations:   cancellation and refund requests, by `createdAt`. Final = approved or denied.
- * - bookingKpis:     KPI summary and by-* aggregates. Clamps the requested `from` to the baseline.
+ * - disputes:         booking disputes, by `dispute.raisedAt`. Open = no `dispute.resolvedAt`.
+ *                     Its counter also includes escalated refund requests and
+ *                     escalated warranty claims (handled in dispute management).
+ * - cancellations:    cancellation and refund requests, by `createdAt`. Final = approved or denied.
+ * - supportTickets, chatReports, reviewModeration: counter only (lists unchanged).
+ * - bookingKpis:      KPI summary and by-* aggregates. Clamps the requested `from` to the baseline.
  */
 
 export const ADMIN_DASHBOARD_KEYS = Object.freeze(
@@ -33,8 +36,6 @@ export const ADMIN_DASHBOARD_KEYS = Object.freeze(
 
 /** Cancellation/refund requests that are finished (nothing left for an admin). */
 export const FINAL_CANCELLATION_STATUSES = Object.freeze(['approved', 'denied']);
-/** Warranty claims that are finished. Every other status is still open. */
-export const CLOSED_WARRANTY_STATUS = 'closed';
 
 export const isAdminDashboardKey = (value: unknown): value is AdminDashboardBaselineKey =>
   typeof value === 'string' && (ADMIN_DASHBOARD_KEYS as readonly string[]).includes(value);
@@ -53,10 +54,6 @@ export const disputeBaselineClause = (resetAt: Date): Record<string, unknown> =>
   $or: [{ 'dispute.raisedAt': { $gte: resetAt } }, { 'dispute.resolvedAt': null }],
 });
 
-export const warrantyBaselineClause = (resetAt: Date): Record<string, unknown> => ({
-  $or: [{ createdAt: { $gte: resetAt } }, { status: { $ne: CLOSED_WARRANTY_STATUS } }],
-});
-
 export const cancellationBaselineClause = (resetAt: Date): Record<string, unknown> => ({
   $or: [{ createdAt: { $gte: resetAt } }, { status: { $nin: [...FINAL_CANCELLATION_STATUSES] } }],
 });
@@ -65,10 +62,13 @@ export const clauseForDashboard = (key: AdminDashboardBaselineKey, resetAt: Date
   switch (key) {
     case 'disputes':
       return disputeBaselineClause(resetAt);
-    case 'warrantyClaims':
-      return warrantyBaselineClause(resetAt);
     case 'cancellations':
       return cancellationBaselineClause(resetAt);
+    case 'supportTickets':
+    case 'chatReports':
+    case 'reviewModeration':
+      // Counter-only dashboards: the reset moves the counter, the lists are unchanged.
+      return {};
     case 'bookingKpis':
       // KPIs are range aggregates. They use `clampKpiFrom`, not a clause.
       return {};

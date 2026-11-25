@@ -40,6 +40,14 @@ import {
   getServicesByCategory
 } from "../../handlers/Admin/serviceConfigurationManagement";
 import {
+  getCmsTranslationOverview,
+  getContentTranslationStatus,
+  listContentTranslations,
+  runCmsTranslationBackfill,
+  runContentTranslationBackfill,
+  updateContentTranslation,
+} from "../../handlers/Admin/contentTranslations";
+import {
   getPayments,
   capturePayment,
   generatePaymentInvoice,
@@ -449,6 +457,7 @@ adminRouter.route('/marketing-lead-imports')
 
 // CMS management routes
 adminRouter.route('/cms').get(listCmsContent).post(createCmsContent);
+adminRouter.route('/cms/translation-backfill').get(getCmsTranslationOverview).post(runCmsTranslationBackfill);
 adminRouter.route('/cms/faq-categories').get(listFaqCategories);
 adminRouter.route('/cms/landing-slots').get(listCmsLandingSlots);
 adminRouter.route('/cms/landing-slots/sync').post(syncCmsLandingSlots);
@@ -458,6 +467,12 @@ adminRouter.route('/cms/preview/:type/:slug').get(getCmsPreviewBySlug);
 adminRouter.route('/cms/:id').get(getCmsContentById).put(updateCmsContent).delete(deleteCmsContent);
 adminRouter.route('/cms/:id/translate').post(translateCmsContent);
 adminRouter.route('/cms/:id/translations').get(getCmsTranslationStatus);
+
+// Catalogue + project text machine translation (translation memory)
+adminRouter.route('/content-translations/status').get(getContentTranslationStatus);
+adminRouter.route('/content-translations/backfill').post(runContentTranslationBackfill);
+adminRouter.route('/content-translations').get(listContentTranslations);
+adminRouter.route('/content-translations/:id').put(updateContentTranslation);
 
 // Email logs
 adminRouter.route('/email-logs').get(listEmailLogs);

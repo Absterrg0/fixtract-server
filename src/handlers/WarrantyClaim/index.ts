@@ -34,11 +34,6 @@ import { getProfessionalDisplayName } from "../../utils/displayName";
 import { params } from "../../utils/requestParams";
 import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
 import { UserFacingError } from "../../utils/appErrors";
-import {
-  resolveDashboardBaseline,
-  toBaselineInfo,
-  withBaselineClause,
-} from "../../utils/adminDashboardBaselines";
 import { maskAnonymizedUser, maskWarrantyClaimForAnonymizedParties } from "../../utils/accountAnonymity";
 
 const WARRANTY_ADMIN_NOTIFICATIONS_EMAIL = process.env.ADMIN_NOTIFICATIONS_EMAIL || process.env.FROM_EMAIL || '';
@@ -2021,6 +2016,16 @@ export const adminSetWarrantyStatus = async (req: Request, res: Response) => {
       }
     }
 
+    if (parsedStatus === "escalated" && claim.status !== "escalated") {
+      // Dispute management counts escalations from `escalation.escalatedAt`.
+      claim.escalation = {
+        escalatedAt: new Date(),
+        escalatedBy: toObjectId(userId),
+        autoEscalated: false,
+        reason: "Escalated by admin",
+        ...(note?.trim() ? { note: note.trim().slice(0, 1000) } : {}),
+      };
+    }
     claim.status = parsedStatus;
     claim.statusHistory.push({
       status: parsedStatus,
@@ -2073,20 +2078,15 @@ export const listAdminWarrantyClaims = async (req: Request, res: Response) => {
       };
     }
 
-    // Counting-since baseline: open claims always stay listed; closed claims
-    // created before the reset are hidden unless ?history=all.
-    const baseline = await resolveDashboardBaseline(req, "warrantyClaims");
-    const listFilter = withBaselineClause(query, baseline.clause);
-
     const [claims, total] = await Promise.all([
-      WarrantyClaim.find(listFilter)
+      WarrantyClaim.find(query)
         .populate("booking", "bookingNumber status")
         .populate("customer", "name email isAnonymized deletedAt")
         .populate("professional", "name email businessInfo isAnonymized deletedAt")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNumber),
-      WarrantyClaim.countDocuments(listFilter),
+      WarrantyClaim.countDocuments(query),
     ]);
 
     const presignedClaims = await Promise.all(claims.map((c) => presignClaim(c)));
@@ -2101,7 +2101,6 @@ export const listAdminWarrantyClaims = async (req: Request, res: Response) => {
           total,
           totalPages: Math.ceil(total / limitNumber),
         },
-        baseline: toBaselineInfo(baseline),
       },
     });
   } catch (error: any) {
@@ -2125,14 +2124,9 @@ export const getAdminWarrantyAnalytics = async (req: Request, res: Response) => 
 
     const since = new Date();
     since.setDate(since.getDate() - lastDays);
-    // KPI totals count from the later of the window start and the baseline.
-    const baseline = await resolveDashboardBaseline(req, "warrantyClaims");
-    const countFrom = baseline.applied && baseline.resetAtDate && baseline.resetAtDate > since
-      ? baseline.resetAtDate
-      : since;
 
     const claims = await WarrantyClaim.aggregate([
-      { $match: { createdAt: { $gte: countFrom } } },
+      { $match: { createdAt: { $gte: since } } },
       {
         $group: {
           _id: "$professional",
@@ -2154,7 +2148,7 @@ export const getAdminWarrantyAnalytics = async (req: Request, res: Response) => 
     const resolutionAggregate = await WarrantyClaim.aggregate([
       {
         $match: {
-          createdAt: { $gte: countFrom },
+          createdAt: { $gte: since },
           status: "closed",
           "resolution.resolvedAt": { $exists: true, $ne: null },
         },
@@ -2190,7 +2184,7 @@ export const getAdminWarrantyAnalytics = async (req: Request, res: Response) => 
       {
         $match: {
           status: "completed",
-          updatedAt: { $gte: countFrom },
+          updatedAt: { $gte: since },
           professional: { $exists: true, $ne: null },
         },
       },
@@ -2243,7 +2237,6 @@ export const getAdminWarrantyAnalytics = async (req: Request, res: Response) => 
           lastDays,
           since,
         },
-        baseline: toBaselineInfo(baseline),
         summary: {
           totalClaims,
           totalEscalated,

@@ -5,6 +5,7 @@ import { IUser } from '../../models/user';
 import { toSlug } from '../../utils/slug';
 import { withArticle47ProfessionalQuestion, ARTICLE_47_FIELD_NAME, resolveArticle47Classification, normalizeArticle47Classification, DEFAULT_ARTICLE_47_CLASSIFICATION } from '../../utils/vatManagement';
 import { safeErrorSummary } from '../../utils/safeErrorLog';
+import { requestServiceConfigurationContentTranslation } from '../../utils/contentTranslation/sources';
 
 function respondWithSchemaError(res: Response, error: any, fallbackMessage: string) {
     if (error?.name === 'ValidationError' && error.errors) {
@@ -269,6 +270,8 @@ export const createServiceConfiguration = async (req: Request, res: Response) =>
 
         const admin = (req as Request & { admin?: IUser }).admin;
         await ensureServiceLanding(configuration.service, admin?._id?.toString());
+        // Machine-translate the catalogue text after the response (no-op without a translator key).
+        requestServiceConfigurationContentTranslation(configuration._id);
 
         res.status(201).json({
             success: true,
@@ -323,6 +326,8 @@ export const updateServiceConfiguration = async (req: Request, res: Response) =>
                 message: 'Service configuration not found'
             });
         }
+
+        requestServiceConfigurationContentTranslation(configuration._id);
 
         res.status(200).json({
             success: true,

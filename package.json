@@ -42,6 +42,7 @@
     "fix:solar-service-names": "npx tsx src/scripts/fix/fixSolarServiceNames.ts",
     "fix:stuck-milestone-quotes": "npx tsx src/scripts/fix/migrateStuckMilestoneQuotes.ts",
     "maintenance:backfill-project-geo": "npx tsx src/scripts/maintenance/backfillProjectGeo.ts",
+    "maintenance:backfill-translations": "npx tsx src/scripts/maintenance/backfillTranslations.ts",
     "maintenance:remove-pro-availability": "npx tsx src/scripts/maintenance/removeProfessionalAvailability.ts",
     "delete:user": "npx tsx src/scripts/maintenance/deleteUser.ts"
   },
