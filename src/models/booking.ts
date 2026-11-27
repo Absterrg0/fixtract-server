@@ -403,6 +403,7 @@ export interface IBooking extends Document {
     stripePaymentIntentId?: string;
     stripeClientSecret?: string;
     stripeChargeId?: string;
+    benefitsAppliedIntentId?: string;
     stripeTransferId?: string;
     stripeDestinationPayment?: string;
     transferCurrency?: string;
@@ -1253,6 +1254,9 @@ const BookingSchema = new Schema({
     stripePaymentIntentId: { type: String },
     stripeClientSecret: { type: String },
     stripeChargeId: { type: String },
+    // The intent whose checkout benefits (redeemed points, discount-code
+    // usage) were applied; makes the webhook apply them exactly once.
+    benefitsAppliedIntentId: { type: String },
 
     // Stripe Connect transfer fields
     stripeTransferId: { type: String },

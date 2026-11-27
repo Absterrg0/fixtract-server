@@ -50,6 +50,9 @@ import { recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger
 import { commissionedPricingLines, commissionedQuoteAmount } from '../../utils/customerPricing';
 import { auditLog } from '../../utils/auditLogger';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
+import CheckoutSession from '../../models/checkoutSession';
+import { findOpenCheckoutForCustomer, hydrateCheckoutBooking, persistCheckoutPayment } from '../../utils/checkoutSession';
+import { CHECKOUT_SLOT_UNAVAILABLE_MESSAGE, promoteCheckoutSession } from './checkoutPromotion';
 
 const extractParticipantIds = (booking: any, professionalOverride?: any) => {
   const customerId = (booking.customer as any)?._id || booking.customer;
@@ -160,7 +163,7 @@ const isAmbiguousTransferError = (error: any): boolean => {
   return status >= 500;
 };
 
-const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {}, professionalOverride?: any) => {
+export const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {}, professionalOverride?: any) => {
   const { customerId, professionalId } = extractParticipantIds(booking, professionalOverride);
   const paymentSummary = booking.payment || {};
   const quoteSummary = booking.quote || {};
@@ -361,11 +364,26 @@ export const createPaymentIntent = async (
 ): Promise<CreatePaymentIntentResult> => {
   let createdIntentId: string | undefined;
   let reservationToken: string | undefined;
+  // FT2-4B: an unpaid wizard checkout has no Booking yet; it is priced and
+  // charged from its checkout session under the same id.
+  let isCheckout = false;
   try {
-    const booking = await Booking.findById(bookingId)
+    let booking = await Booking.findById(bookingId)
       .populate('customer')
       .populate('professional')
       .populate('project', 'professionalId title extraOptions');
+
+    if (!booking) {
+      const checkout = await findOpenCheckoutForCustomer(bookingId, userId);
+      if (checkout) {
+        isCheckout = true;
+        booking = await hydrateCheckoutBooking(checkout).populate([
+          { path: 'customer' },
+          { path: 'professional' },
+          { path: 'project', select: 'professionalId title extraOptions' },
+        ]) as any;
+      }
+    }
 
     if (!booking) {
       return { success: false, error: { code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } };
@@ -719,7 +737,9 @@ export const createPaymentIntent = async (
         professional.stripe.accountId,
         STRIPE_CONFIG.environment as 'production' | 'test'
       ),
-      description: `Fixtract Booking #${booking.bookingNumber} - ${projectInfo?.title || 'Service'}`,
+      description: isCheckout
+        ? `Fixtract checkout - ${projectInfo?.title || 'Service'}`
+        : `Fixtract Booking #${booking.bookingNumber} - ${projectInfo?.title || 'Service'}`,
     }, {
       idempotencyKey: buildPaymentIntentIdempotencyKey({
         bookingId: booking._id.toString(),
@@ -745,7 +765,7 @@ export const createPaymentIntent = async (
       reservationToken = paymentIntent.id;
     }
     // Update booking with payment info
-    booking.payment = {
+    const paymentRecord: any = {
       amount: netAmount,
       currency: currency,
       method: 'card',
@@ -785,45 +805,59 @@ export const createPaymentIntent = async (
         },
       }),
     };
-    if (!hasUnpaidMilestones || ['quote_accepted', 'payment_pending'].includes(booking.status)) {
-      booking.status = 'payment_pending';
+    const paymentRowOverrides = {
+      status: 'pending',
+      transferStatus: 'pending',
+      method: 'card',
+      currency,
+      amount: netAmount,
+      netAmount,
+      vatAmount,
+      vatRate: vatCalculation.vatRate,
+      totalWithVat: totalAmount,
+      reverseCharge: vatCalculation.reverseCharge,
+      vatBreakdown: (vatCalculation as any).vatBreakdown,
+      platformCommission,
+      professionalPayout,
+      stripePaymentIntentId: paymentIntent.id,
+      ...(milestoneIndex !== null && { milestoneIndex }),
+      metadata: {
+        environment: STRIPE_CONFIG.environment,
+        projectId: projectInfo?._id?.toString?.(),
+      },
+    };
+
+    if (isCheckout) {
+      // The Payment row is written when the paid checkout is promoted.
+      const persisted = await persistCheckoutPayment(
+        bookingId,
+        expectedWrite['payment.stripePaymentIntentId'],
+        paymentRecord,
+        paymentRowOverrides,
+      );
+      if (!persisted) {
+        const lost = new Error('Checkout changed while creating its payment intent');
+        lost.name = 'DocumentNotFoundError';
+        throw lost;
+      }
+    } else {
+      booking.payment = paymentRecord;
+      if (!hasUnpaidMilestones || ['quote_accepted', 'payment_pending'].includes(booking.status)) {
+        booking.status = 'payment_pending';
+      }
+      booking.$where = expectedWrite;
+      await booking.save();
+
+      // Points deduction is handled in the payment success webhook (handlePaymentIntentSucceeded)
+      // to avoid permanently consuming points if the payment is abandoned or fails.
+      // The booking.payment.discount.pointsRedeemed field tells the webhook how much to deduct.
+
+      await Payment.findOneAndUpdate(
+        { booking: booking._id },
+        buildPaymentUpsertBase(booking, paymentRowOverrides, professional),
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
     }
-    booking.$where = expectedWrite;
-    await booking.save();
-
-    // Points deduction is handled in the payment success webhook (handlePaymentIntentSucceeded)
-    // to avoid permanently consuming points if the payment is abandoned or fails.
-    // The booking.payment.discount.pointsRedeemed field tells the webhook how much to deduct.
-
-    await Payment.findOneAndUpdate(
-      { booking: booking._id },
-      buildPaymentUpsertBase(
-        booking,
-        {
-          status: 'pending',
-          transferStatus: 'pending',
-          method: 'card',
-          currency,
-          amount: netAmount,
-          netAmount,
-          vatAmount,
-          vatRate: vatCalculation.vatRate,
-          totalWithVat: totalAmount,
-          reverseCharge: vatCalculation.reverseCharge,
-          vatBreakdown: (vatCalculation as any).vatBreakdown,
-          platformCommission,
-          professionalPayout,
-          stripePaymentIntentId: paymentIntent.id,
-          ...(milestoneIndex !== null && { milestoneIndex }),
-          metadata: {
-            environment: STRIPE_CONFIG.environment,
-            projectId: projectInfo?._id?.toString?.(),
-          },
-        },
-        professional
-      ),
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
 
     console.log(`✅ Payment Intent created for booking ${booking._id}: ${paymentIntent.id}`);
 
@@ -839,7 +873,10 @@ export const createPaymentIntent = async (
       try {
         // Stripe can return the same idempotent intent to two concurrent
         // callers. A losing save must never cancel the winner's active intent.
-        const latest = await Booking.findById(bookingId).select('payment.stripePaymentIntentId payment.discount.referralReservationToken status').lean();
+        const latest: any = isCheckout
+          ? await CheckoutSession.findById(bookingId).select('payment status').lean()
+            .then((row: any) => row && { ...row, status: row.status === 'open' ? 'payment_pending' : 'cancelled' })
+          : await Booking.findById(bookingId).select('payment.stripePaymentIntentId payment.discount.referralReservationToken status').lean();
         if (latest?.payment?.stripePaymentIntentId !== createdIntentId) {
           const cancelled = await stripe.paymentIntents.cancel(createdIntentId);
           // A winning checkout for this same booking keeps its reservation.
@@ -909,7 +946,43 @@ export const confirmPayment = async (req: Request, res: Response) => {
       });
     }
 
-    const booking = await Booking.findById(bookingId);
+    let booking = await Booking.findById(bookingId);
+    if (!booking) {
+      // FT2-4B: an unpaid wizard checkout becomes a Booking only once Stripe
+      // reports the payment succeeded.
+      const checkout = mongoose.Types.ObjectId.isValid(bookingId)
+        ? await CheckoutSession.findOne({ _id: bookingId, customer: userId, status: { $in: ['open', 'conflict'] } })
+        : null;
+      if (checkout) {
+        if (checkout.status === 'conflict') {
+          return res.status(409).json({
+            success: false,
+            error: { code: 'SLOT_UNAVAILABLE', message: CHECKOUT_SLOT_UNAVAILABLE_MESSAGE },
+          });
+        }
+        if (checkout.payment?.stripePaymentIntentId !== paymentIntentId) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'PAYMENT_INTENT_MISMATCH', message: 'Payment intent does not match this booking' }
+          });
+        }
+        const checkoutIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+        if (checkoutIntent.status !== 'succeeded') {
+          return res.json({
+            success: true,
+            data: { status: checkoutIntent.status, message: 'Payment confirmation received, awaiting webhook' },
+          });
+        }
+        const promotion = await promoteCheckoutSession(bookingId, checkoutIntent);
+        if (promotion.status === 'conflict') {
+          return res.status(409).json({
+            success: false,
+            error: { code: 'SLOT_UNAVAILABLE', message: promotion.message },
+          });
+        }
+        if (promotion.status === 'promoted') booking = promotion.booking as any;
+      }
+    }
     if (!booking) {
       return res.status(404).json({
         success: false,

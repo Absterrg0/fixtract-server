@@ -9,6 +9,9 @@ import mongoose from 'mongoose';
 import Stripe from 'stripe';
 import { stripe, STRIPE_CONFIG } from '../../services/stripe';
 import Booking from '../../models/booking';
+import CheckoutSession from '../../models/checkoutSession';
+import { abandonCheckoutSession } from '../../utils/checkoutSession';
+import { promoteCheckoutSession } from './checkoutPromotion';
 import Payment from '../../models/payment';
 import User from '../../models/user';
 import StripeEvent from '../../models/stripeEvent';
@@ -358,6 +361,96 @@ async function recordSupersededIntentReconciliation(
 /**
  * Handle payment_intent.succeeded event
  */
+/**
+ * Effects of a paid checkout that consume a customer benefit: redeemed wallet
+ * points and discount-code usage. Callers claim them once per intent
+ * (payment.benefitsAppliedIntentId) — either the webhook that flips the
+ * payment to authorized, or the webhook that finds confirmPayment already did
+ * (confirmPayment never applies them).
+ */
+async function applyPaidCheckoutBenefits(booking: any, bookingId: string, now: Date) {
+  const pointsRedeemed = (booking.payment as any)?.discount?.pointsRedeemed;
+  if (pointsRedeemed > 0 && booking.customer) {
+    try {
+      await deductPoints(
+        booking.customer,
+        pointsRedeemed,
+        'redemption',
+        `Points redeemed for booking #${(booking as any).bookingNumber || bookingId}`,
+        { relatedBooking: booking._id }
+      );
+    } catch (pointsError: any) {
+      console.error(`Failed to deduct ${pointsRedeemed} points for booking ${bookingId}:`, pointsError);
+    }
+  }
+
+  const codeId = (booking.payment as any)?.discount?.codeId;
+  const codeAmount = (booking.payment as any)?.discount?.codeDiscountAmount;
+  const codeLabel = (booking.payment as any)?.discount?.codeLabel;
+  if (codeId && codeAmount > 0 && booking.customer) {
+    const session = await mongoose.startSession();
+    try {
+      let limitReached: 'global' | 'perUser' | 'not_found' | null = null;
+      await session.withTransaction(async () => {
+        limitReached = null;
+        const codeDoc = await DiscountCode.findById(codeId).session(session);
+        if (!codeDoc) {
+          limitReached = 'not_found';
+          return;
+        }
+        const perUserLimit = Number(codeDoc.perUserLimit) > 0 ? Number(codeDoc.perUserLimit) : 1;
+        const userUsage = await DiscountCodeUsage.countDocuments(
+          { code: codeId, user: booking.customer },
+          { session }
+        );
+        if (userUsage >= perUserLimit) {
+          limitReached = 'perUser';
+          return;
+        }
+        const incremented = await DiscountCode.findOneAndUpdate(
+          {
+            _id: codeId,
+            $or: [
+              { usageLimit: { $exists: false } },
+              { usageLimit: null },
+              { $expr: { $lt: ['$usageCount', '$usageLimit'] } },
+            ],
+          },
+          { $inc: { usageCount: 1 } },
+          { new: true, session }
+        );
+        if (!incremented) {
+          limitReached = 'global';
+          return;
+        }
+        await DiscountCodeUsage.create([{
+          code: codeId,
+          codeString: codeLabel || '',
+          user: booking.customer,
+          booking: booking._id,
+          amountDiscounted: codeAmount,
+          redeemedAt: now,
+        }], { session });
+      });
+      if (limitReached === 'global') {
+        console.warn(`Discount code ${codeLabel || codeId} usageLimit already reached; skipping usage record for booking ${bookingId}`);
+      } else if (limitReached === 'perUser') {
+        console.warn(`Discount code ${codeLabel || codeId} perUserLimit already reached for customer ${booking.customer}; skipping usage record for booking ${bookingId}`);
+      } else if (limitReached === 'not_found') {
+        console.warn(`Discount code not found for id ${codeId} (label ${codeLabel || 'unknown'}); skipping usage record for booking ${bookingId}`);
+      }
+    } catch (codeError: any) {
+      if (codeError?.code === 11000) {
+        // Duplicate usage for this booking — already recorded by a prior webhook delivery; transaction rolled back, no-op
+      } else {
+        console.error(`Failed to record discount code usage for booking ${bookingId}:`, codeError);
+      }
+    } finally {
+      await session.endSession();
+    }
+  }
+}
+
 async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent, eventId: string) {
   if (paymentIntent.metadata.type === 'extra_cost') {
     await handleExtraCostPaymentSucceeded(paymentIntent);
@@ -366,7 +459,33 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent,
   const bookingId = paymentIntent.metadata.bookingId;
   if (!bookingId) return;
 
-  const booking = await Booking.findById(bookingId);
+  let booking = await Booking.findById(bookingId);
+  if (!booking) {
+    // FT2-4B: a paid wizard checkout becomes its Booking here (or in the
+    // confirm endpoint, whichever runs first). A slot taken meanwhile is
+    // refunded by the promotion and leaves no booking behind.
+    const promotion = await promoteCheckoutSession(bookingId, paymentIntent);
+    if (
+      (promotion.status === 'superseded'
+        || (promotion.status === 'not_found' && paymentIntent.metadata.type === 'booking_payment'))
+      && mongoose.Types.ObjectId.isValid(bookingId)
+    ) {
+      // Money arrived for no current checkout: make it operator-visible.
+      console.error(
+        `[WEBHOOK] payment_intent.succeeded ${paymentIntent.id} matches no booking or current checkout intent for ${bookingId}; not applied`,
+      );
+      await recordSupersededIntentReconciliation(
+        eventId,
+        'payment_intent.succeeded',
+        new mongoose.Types.ObjectId(bookingId),
+        paymentIntent,
+        promotion.status === 'superseded' ? promotion.currentIntentId || '' : '',
+      );
+      return;
+    }
+    if (promotion.status !== 'promoted') return;
+    booking = promotion.booking as any;
+  }
   if (!booking || !booking.payment) return;
 
   try {
@@ -405,6 +524,8 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent,
       if (booking.payment.status === 'pending') {
         updateFields['payment.status'] = 'authorized';
         updateFields['payment.authorizedAt'] = now;
+        // This writer applies the checkout benefits below (claim).
+        updateFields['payment.benefitsAppliedIntentId'] = paymentIntent.id;
         if (booking.status !== 'in_progress' && booking.status !== 'professional_completed' && booking.status !== 'completed') {
           updateFields.status = 'booked';
         }
@@ -478,86 +599,7 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent,
         }
       );
 
-      const pointsRedeemed = (booking.payment as any)?.discount?.pointsRedeemed;
-      if (pointsRedeemed > 0 && booking.customer) {
-        try {
-          await deductPoints(
-            booking.customer,
-            pointsRedeemed,
-            'redemption',
-            `Points redeemed for booking #${(booking as any).bookingNumber || bookingId}`,
-            { relatedBooking: booking._id }
-          );
-        } catch (pointsError: any) {
-          console.error(`Failed to deduct ${pointsRedeemed} points for booking ${bookingId}:`, pointsError);
-        }
-      }
-
-      const codeId = (booking.payment as any)?.discount?.codeId;
-      const codeAmount = (booking.payment as any)?.discount?.codeDiscountAmount;
-      const codeLabel = (booking.payment as any)?.discount?.codeLabel;
-      if (codeId && codeAmount > 0 && booking.customer) {
-        const session = await mongoose.startSession();
-        try {
-          let limitReached: 'global' | 'perUser' | 'not_found' | null = null;
-          await session.withTransaction(async () => {
-            limitReached = null;
-            const codeDoc = await DiscountCode.findById(codeId).session(session);
-            if (!codeDoc) {
-              limitReached = 'not_found';
-              return;
-            }
-            const perUserLimit = Number(codeDoc.perUserLimit) > 0 ? Number(codeDoc.perUserLimit) : 1;
-            const userUsage = await DiscountCodeUsage.countDocuments(
-              { code: codeId, user: booking.customer },
-              { session }
-            );
-            if (userUsage >= perUserLimit) {
-              limitReached = 'perUser';
-              return;
-            }
-            const incremented = await DiscountCode.findOneAndUpdate(
-              {
-                _id: codeId,
-                $or: [
-                  { usageLimit: { $exists: false } },
-                  { usageLimit: null },
-                  { $expr: { $lt: ['$usageCount', '$usageLimit'] } },
-                ],
-              },
-              { $inc: { usageCount: 1 } },
-              { new: true, session }
-            );
-            if (!incremented) {
-              limitReached = 'global';
-              return;
-            }
-            await DiscountCodeUsage.create([{
-              code: codeId,
-              codeString: codeLabel || '',
-              user: booking.customer,
-              booking: booking._id,
-              amountDiscounted: codeAmount,
-              redeemedAt: now,
-            }], { session });
-          });
-          if (limitReached === 'global') {
-            console.warn(`Discount code ${codeLabel || codeId} usageLimit already reached; skipping usage record for booking ${bookingId}`);
-          } else if (limitReached === 'perUser') {
-            console.warn(`Discount code ${codeLabel || codeId} perUserLimit already reached for customer ${booking.customer}; skipping usage record for booking ${bookingId}`);
-          } else if (limitReached === 'not_found') {
-            console.warn(`Discount code not found for id ${codeId} (label ${codeLabel || 'unknown'}); skipping usage record for booking ${bookingId}`);
-          }
-        } catch (codeError: any) {
-          if (codeError?.code === 11000) {
-            // Duplicate usage for this booking — already recorded by a prior webhook delivery; transaction rolled back, no-op
-          } else {
-            console.error(`Failed to record discount code usage for booking ${bookingId}:`, codeError);
-          }
-        } finally {
-          await session.endSession();
-        }
-      }
+      await applyPaidCheckoutBenefits(booking, bookingId, now);
 
       console.log(`Payment authorized via webhook for booking ${bookingId}`);
 
@@ -600,6 +642,26 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent,
           amount: typeof amountPaid === 'number' ? amountPaid : undefined,
           currency,
         });
+      }
+      // confirmPayment flips the status but never applies the checkout
+      // benefits; claim them once for this intent (a no-op when the webhook
+      // that flipped the status already applied them).
+      if (
+        fresh?.payment &&
+        fresh.payment.stripePaymentIntentId === paymentIntent.id &&
+        (fresh.payment.status === 'authorized' || (fresh.payment as any).status === 'completed')
+      ) {
+        const claimed = await Booking.findOneAndUpdate(
+          {
+            _id: booking._id,
+            'payment.stripePaymentIntentId': paymentIntent.id,
+            'payment.status': { $in: ['authorized', 'completed'] },
+            'payment.benefitsAppliedIntentId': { $ne: paymentIntent.id },
+          },
+          { $set: { 'payment.benefitsAppliedIntentId': paymentIntent.id } },
+          { new: true },
+        );
+        if (claimed) await applyPaidCheckoutBenefits(claimed, bookingId, now);
       }
       // Duplicate delivery, Stripe retry or confirmPayment won the race: record
       // the discount snapshot if it is still missing (idempotent).
@@ -794,7 +856,19 @@ async function handlePaymentIntentCanceled(paymentIntent: Stripe.PaymentIntent) 
   if (!bookingId) return;
 
   const booking = await Booking.findById(bookingId);
-  if (!booking || !booking.payment) return;
+  if (!booking) {
+    // FT2-4B: a cancelled checkout intent leaves nothing behind.
+    if (mongoose.Types.ObjectId.isValid(bookingId)) {
+      const checkout = await CheckoutSession.findOne({
+        _id: bookingId,
+        status: 'open',
+        'payment.stripePaymentIntentId': paymentIntent.id,
+      });
+      if (checkout) await abandonCheckoutSession(checkout);
+    }
+    return;
+  }
+  if (!booking.payment) return;
 
   // Superseded-intent events must never release a newer checkout's benefit.
   if (booking.payment.stripePaymentIntentId !== paymentIntent.id) return;
