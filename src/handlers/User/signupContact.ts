@@ -51,7 +51,9 @@ export const updateSignupContact = async (req: Request, res: Response) => {
     }
 
     await connecToDatabase();
-    const user = await User.findById(userId);
+    // verificationCodeExpires is select:false on the schema; the cooldown and the
+    // conditional write below both need the stored value.
+    const user = await User.findById(userId).select("+verificationCodeExpires");
     if (!user) {
       return res.status(404).json({ success: false, msg: "User not found" });
     }

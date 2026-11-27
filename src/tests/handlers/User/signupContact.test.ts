@@ -43,6 +43,28 @@ const call = async (body: Record<string, unknown>, userId: string | null = 'user
 const takenQuery = (result: unknown) => ({ select: () => ({ lean: async () => result }) });
 
 /**
+ * findById stand-in that hides select:false fields like the real schema:
+ * verificationCodeExpires is only returned when explicitly selected.
+ */
+const HIDDEN_FIELDS = ['verificationCodeExpires'];
+function findByIdQuery(load: () => Record<string, any> | null) {
+  const project = (selection: string) => {
+    const doc = load();
+    if (!doc) return doc;
+    const out = { ...doc };
+    for (const field of HIDDEN_FIELDS) {
+      if (!selection.split(/\s+/).includes(`+${field}`)) delete out[field];
+    }
+    return out;
+  };
+  return {
+    select: async (selection: string) => project(selection),
+    then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
+      Promise.resolve().then(() => project('')).then(resolve, reject),
+  };
+}
+
+/**
  * In-memory stand-in for the stored user: findOneAndUpdate applies $set only
  * when every filter field still matches, like MongoDB does.
  */
@@ -85,7 +107,7 @@ describe('updateSignupContact (FT2-6C back from the OTP step)', () => {
       verificationCode: '111111',
     };
     stored = { ...user };
-    userFindById.mockImplementation(async () => ({ ...stored }));
+    userFindById.mockImplementation(() => findByIdQuery(() => ({ ...stored })));
     userFindOne.mockReturnValue(takenQuery(null));
     storedUserWrites(stored);
   });
@@ -123,6 +145,15 @@ describe('updateSignupContact (FT2-6C back from the OTP step)', () => {
     expect(stored.email).not.toBe('other@example.com');
     expect(sendOTPEmail).not.toHaveBeenCalled();
     expect(userFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('changes the email of an account whose signup code is older than the cooldown', async () => {
+    // The real signup flow always leaves a (select:false) code expiry behind.
+    stored.verificationCodeExpires = new Date(Date.now() + 10 * 60 * 1000 - 2 * 60 * 1000);
+    const res = await call({ email: 'second@example.com' });
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(stored.email).toBe('second@example.com');
+    expect(sendOTPEmail).toHaveBeenCalledTimes(1);
   });
 
   it('refuses an email that belongs to another account', async () => {
@@ -174,11 +205,11 @@ describe('updateSignupContact (FT2-6C back from the OTP step)', () => {
   });
 
   it('refuses with 409 when the phone is verified between the read and the write', async () => {
-    userFindById.mockImplementation(async () => {
+    userFindById.mockImplementation(() => findByIdQuery(() => {
       const snapshot = { ...stored };
       stored.isPhoneVerified = true;
       return snapshot;
-    });
+    }));
     const res = await call({ phone: '+32471234567' });
     expect(res.status).toHaveBeenCalledWith(409);
     expect(stored).toMatchObject({ phone: '+32470123456', isPhoneVerified: true });
