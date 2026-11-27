@@ -269,6 +269,7 @@ export const fr: Record<MessageKey, string> = {
   "auth.signup_contact_updated": "Coordonnées mises à jour",
   "auth.signup_contact_update_failed": "Nous n'avons pas pu mettre à jour vos coordonnées. Veuillez réessayer.",
   "auth.signup_contact_email_cooldown": "Veuillez patienter une minute avant de modifier à nouveau votre adresse e-mail",
+  "auth.signup_contact_changed_meanwhile": "Vos coordonnées ont été modifiées entre-temps. Veuillez recharger la page et réessayer.",
   "auth.you_dont_have_permission_do_that": "Vous n'avez pas l'autorisation de faire cela. Un accès {value} est requis.",
   "availability.itemlabel_position_both_start_date_end": "{itemLabel} {position} : une date de début et une date de fin sont obligatoires.",
   "availability.itemlabel_position_start_date_must_before": "{itemLabel} {position} : la date de début doit être antérieure ou égale à la date de fin.",

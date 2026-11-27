@@ -1,14 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { userFindById, userFindOne, sendOTPEmail, twilioCreate } = vi.hoisted(() => ({
+const { userFindById, userFindOne, userFindOneAndUpdate, sendOTPEmail, twilioCreate } = vi.hoisted(() => ({
   userFindById: vi.fn(),
   userFindOne: vi.fn(),
+  userFindOneAndUpdate: vi.fn(),
   sendOTPEmail: vi.fn(),
   twilioCreate: vi.fn(),
 }));
 
 vi.mock('../../../models/user', () => ({
-  default: { findById: userFindById, findOne: userFindOne },
+  default: { findById: userFindById, findOne: userFindOne, findOneAndUpdate: userFindOneAndUpdate },
 }));
 vi.mock('../../../config/db', () => ({ default: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../../utils/emailService', () => ({
@@ -41,8 +42,30 @@ const call = async (body: Record<string, unknown>, userId: string | null = 'user
 
 const takenQuery = (result: unknown) => ({ select: () => ({ lean: async () => result }) });
 
+/**
+ * In-memory stand-in for the stored user: findOneAndUpdate applies $set only
+ * when every filter field still matches, like MongoDB does.
+ */
+function storedUserWrites(stored: Record<string, any>) {
+  userFindOneAndUpdate.mockImplementation((filter: Record<string, any>, update: { $set: Record<string, unknown> }) => ({
+    lean: async () => {
+      const matches = Object.entries(filter).every(([key, value]) => {
+        const actual = stored[key];
+        if (value instanceof Date || actual instanceof Date) {
+          return new Date(actual ?? 0).getTime() === new Date(value ?? 0).getTime() && (actual == null) === (value == null);
+        }
+        return (actual ?? null) === (value ?? null);
+      });
+      if (!matches) return null;
+      Object.assign(stored, update.$set);
+      return { ...stored };
+    },
+  }));
+}
+
 describe('updateSignupContact (FT2-6C back from the OTP step)', () => {
   let user: Record<string, any>;
+  let stored: Record<string, any>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -60,19 +83,22 @@ describe('updateSignupContact (FT2-6C back from the OTP step)', () => {
       isEmailVerified: false,
       isPhoneVerified: false,
       verificationCode: '111111',
-      save: vi.fn().mockResolvedValue(undefined),
     };
-    userFindById.mockResolvedValue(user);
+    stored = { ...user };
+    userFindById.mockImplementation(async () => ({ ...stored }));
     userFindOne.mockReturnValue(takenQuery(null));
+    storedUserWrites(stored);
   });
 
   it('corrects the email of the signed-in unverified account and sends a fresh code', async () => {
     const res = await call({ email: ' Right@Example.com ', phone: '+32470123456' });
     expect(res.status).toHaveBeenCalledWith(200);
-    expect(user.email).toBe('right@example.com');
-    expect(user.verificationCode).toBe('654321');
-    expect(user.verificationCodeExpires).toBeInstanceOf(Date);
-    expect(user.save).toHaveBeenCalledTimes(1);
+    expect(stored.email).toBe('right@example.com');
+    expect(stored.isEmailVerified).toBe(false);
+    expect(stored.verificationCode).toBe('654321');
+    expect(stored.verificationCodeExpires).toBeInstanceOf(Date);
+    expect(userFindOneAndUpdate).toHaveBeenCalledTimes(1);
+    expect(userFindOneAndUpdate.mock.calls[0][0]).toMatchObject({ _id: 'user-1', email: 'typo@exmaple.com', isEmailVerified: false });
     expect(sendOTPEmail).toHaveBeenCalledWith('right@example.com', '654321', 'New Customer');
     // Phone unchanged: no new SMS.
     expect(twilioCreate).not.toHaveBeenCalled();
@@ -80,45 +106,46 @@ describe('updateSignupContact (FT2-6C back from the OTP step)', () => {
   });
 
   it('changes the phone to E.164 and texts a new code, leaving a verified email alone', async () => {
-    user.isEmailVerified = true;
+    stored.isEmailVerified = true;
     const res = await call({ email: 'typo@exmaple.com', phone: '+32 471 23 45 67' });
     expect(res.status).toHaveBeenCalledWith(200);
-    expect(user.phone).toBe('+32471234567');
-    expect(user.isPhoneVerified).toBe(false);
+    expect(stored.phone).toBe('+32471234567');
+    expect(stored.isPhoneVerified).toBe(false);
+    expect(userFindOneAndUpdate.mock.calls[0][0]).toMatchObject({ phone: '+32470123456', isPhoneVerified: false });
     expect(twilioCreate).toHaveBeenCalledWith({ channel: 'sms', to: '+32471234567' });
     expect(sendOTPEmail).not.toHaveBeenCalled();
   });
 
   it('rate-limits repeated email changes so it cannot mail addresses in a loop', async () => {
-    user.verificationCodeExpires = new Date(Date.now() + 10 * 60 * 1000 - 5_000);
+    stored.verificationCodeExpires = new Date(Date.now() + 10 * 60 * 1000 - 5_000);
     const res = await call({ email: 'other@example.com' });
     expect(res.status).toHaveBeenCalledWith(429);
-    expect(user.email).not.toBe('other@example.com');
+    expect(stored.email).not.toBe('other@example.com');
     expect(sendOTPEmail).not.toHaveBeenCalled();
-    expect(user.save).not.toHaveBeenCalled();
+    expect(userFindOneAndUpdate).not.toHaveBeenCalled();
   });
 
   it('refuses an email that belongs to another account', async () => {
     userFindOne.mockReturnValue(takenQuery({ _id: 'other' }));
     const res = await call({ email: 'taken@example.com' });
     expect(res.status).toHaveBeenCalledWith(409);
-    expect(user.save).not.toHaveBeenCalled();
+    expect(userFindOneAndUpdate).not.toHaveBeenCalled();
     expect(userFindOne).toHaveBeenCalledWith({ email: 'taken@example.com', _id: { $ne: 'user-1' } });
   });
 
   it('never changes a channel that is already verified', async () => {
-    user.isEmailVerified = true;
+    stored.isEmailVerified = true;
     const res = await call({ email: 'other@example.com' });
     expect(res.status).toHaveBeenCalledWith(409);
-    expect(user.email).toBe('typo@exmaple.com');
+    expect(stored.email).toBe('typo@exmaple.com');
   });
 
   it('is closed once the account is fully verified, and for staff roles', async () => {
-    user.isEmailVerified = true;
-    user.isPhoneVerified = true;
+    stored.isEmailVerified = true;
+    stored.isPhoneVerified = true;
     expect((await call({ email: 'x@example.com' })).status).toHaveBeenCalledWith(409);
-    user.isEmailVerified = false;
-    user.role = 'admin';
+    stored.isEmailVerified = false;
+    stored.role = 'admin';
     expect((await call({ email: 'x@example.com' })).status).toHaveBeenCalledWith(403);
   });
 
@@ -127,7 +154,35 @@ describe('updateSignupContact (FT2-6C back from the OTP step)', () => {
     expect((await call({})).status).toHaveBeenCalledWith(400);
     expect((await call({ email: 'not-an-email' })).status).toHaveBeenCalledWith(400);
     expect((await call({ phone: '0470123456' })).status).toHaveBeenCalledWith(400);
-    expect(user.save).not.toHaveBeenCalled();
+    expect(userFindOneAndUpdate).not.toHaveBeenCalled();
+  });
+
+  it('refuses with 409 when the email is verified between the read and the write', async () => {
+    // 1. updateSignupContact reads the unverified user; 2. verifyEmailOTP
+    // verifies the old address before the uniqueness check returns; 3. the
+    // contact write must miss instead of moving the verified flag to the new email.
+    userFindOne.mockImplementation(() => {
+      stored.isEmailVerified = true;
+      return takenQuery(null);
+    });
+    const res = await call({ email: 'new@example.com' });
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json.mock.calls[0][0].msg).toBe('Your contact details changed meanwhile. Please reload and try again.');
+    expect(stored).toMatchObject({ email: 'typo@exmaple.com', isEmailVerified: true, verificationCode: '111111' });
+    expect(sendOTPEmail).not.toHaveBeenCalled();
+    expect(twilioCreate).not.toHaveBeenCalled();
+  });
+
+  it('refuses with 409 when the phone is verified between the read and the write', async () => {
+    userFindById.mockImplementation(async () => {
+      const snapshot = { ...stored };
+      stored.isPhoneVerified = true;
+      return snapshot;
+    });
+    const res = await call({ phone: '+32471234567' });
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(stored).toMatchObject({ phone: '+32470123456', isPhoneVerified: true });
+    expect(twilioCreate).not.toHaveBeenCalled();
   });
 
   it('normalizes only valid international numbers', () => {

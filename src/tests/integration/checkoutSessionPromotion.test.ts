@@ -523,6 +523,34 @@ describeDb('FT2-4B wizard checkout sessions (disposable Mongo)', () => {
     expect(await Booking.exists({ _id: checkoutId })).toBeNull();
   });
 
+  it('blocks a replacement when a payment intent is persisted between the read and the delete', async () => {
+    const checkoutId = (await startCheckout()).body.checkout.id;
+    // The customer's payment page creates its intent right after the
+    // replacement request read the (still intent-less) checkout.
+    const realDeleteOne = CheckoutSession.deleteOne.bind(CheckoutSession);
+    let racedIntentId: string | undefined;
+    const deleteSpy = vi.spyOn(CheckoutSession, 'deleteOne').mockImplementationOnce(((filter: any, ...rest: any[]) => {
+      const run = async () => {
+        const intent = await createPaymentIntent(checkoutId, String(customer));
+        expect(intent.success).toBe(true);
+        racedIntentId = intent.paymentIntentId;
+        return realDeleteOne(filter, ...rest);
+      };
+      return run() as any;
+    }) as any);
+
+    const replacement = await startCheckout('2027-01-12');
+    expect(deleteSpy).toHaveBeenCalledTimes(1);
+    expect(replacement.statusCode).toBe(409);
+    expect(replacement.body.code).toBe('PAYMENT_IN_PROGRESS');
+    const original = await CheckoutSession.findById(checkoutId).lean();
+    expect(original?.status).toBe('open');
+    expect(original?.payment?.stripePaymentIntentId).toBe(racedIntentId);
+    expect(await CheckoutSession.countDocuments({})).toBe(1);
+    // The raced intent is still payable: nothing cancelled it.
+    expect(mocks.intentCancel).not.toHaveBeenCalledWith(racedIntentId);
+  });
+
   it('does not start a replacement checkout while the previous payment is in flight', async () => {
     const { checkoutId } = await paidCheckout();
     mocks.intentCancel.mockRejectedValueOnce(Object.assign(new Error('unexpected state'), { code: 'payment_intent_unexpected_state' }));

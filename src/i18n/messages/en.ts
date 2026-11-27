@@ -269,6 +269,7 @@ export const en = {
   "auth.signup_contact_updated": "Contact details updated",
   "auth.signup_contact_update_failed": "We couldn't update your contact details. Please try again.",
   "auth.signup_contact_email_cooldown": "Please wait a minute before changing your email address again",
+  "auth.signup_contact_changed_meanwhile": "Your contact details changed meanwhile. Please reload and try again.",
   "auth.you_dont_have_permission_do_that": "You don't have permission to do that. {value} access is required.",
   "availability.itemlabel_position_both_start_date_end": "{itemLabel} {position}: both a start date and an end date are required.",
   "availability.itemlabel_position_start_date_must_before": "{itemLabel} {position}: the start date must be before or equal to the end date.",

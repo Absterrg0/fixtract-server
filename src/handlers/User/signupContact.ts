@@ -65,6 +65,11 @@ export const updateSignupContact = async (req: Request, res: Response) => {
     let emailChanged = false;
     let phoneChanged = false;
     let emailOtp: string | null = null;
+    // The write is conditional on what was read: a channel verified (or
+    // changed) by a concurrent request since then makes it miss instead of
+    // carrying a stale verification flag over to the new address.
+    const filter: Record<string, unknown> = { _id: user._id };
+    const set: Record<string, unknown> = {};
 
     if (rawEmail !== undefined) {
       const email = rawEmail.toLowerCase().trim();
@@ -86,10 +91,13 @@ export const updateSignupContact = async (req: Request, res: Response) => {
           return res.status(409).json({ success: false, msg: "An account with this email already exists" });
         }
         emailOtp = generateOTP();
-        user.email = email;
-        user.isEmailVerified = false;
-        user.verificationCode = emailOtp;
-        user.verificationCodeExpires = new Date(Date.now() + EMAIL_OTP_TTL_MS);
+        filter.email = user.email;
+        filter.isEmailVerified = false;
+        filter.verificationCodeExpires = user.verificationCodeExpires ?? null;
+        set.email = email;
+        set.isEmailVerified = false;
+        set.verificationCode = emailOtp;
+        set.verificationCodeExpires = new Date(Date.now() + EMAIL_OTP_TTL_MS);
         emailChanged = true;
       }
     }
@@ -103,22 +111,43 @@ export const updateSignupContact = async (req: Request, res: Response) => {
         if (user.isPhoneVerified) {
           return res.status(409).json({ success: false, msg: "Your phone number is already verified. Change it in your profile." });
         }
-        user.phone = phone;
-        user.isPhoneVerified = false;
+        filter.phone = user.phone ?? null;
+        filter.isPhoneVerified = false;
+        set.phone = phone;
+        set.isPhoneVerified = false;
         phoneChanged = true;
       }
     }
 
+    let current = {
+      email: user.email,
+      phone: user.phone,
+      isEmailVerified: user.isEmailVerified,
+      isPhoneVerified: user.isPhoneVerified,
+    };
     if (emailChanged || phoneChanged) {
-      await withAnonymizationWriteFence([String(user._id)], async (session) => {
-        await user.save(session ? { session } : undefined);
-      });
+      const updated = await withAnonymizationWriteFence([String(user._id)], async (session) =>
+        User.findOneAndUpdate(filter, { $set: set }, {
+          new: true,
+          projection: "email phone isEmailVerified isPhoneVerified",
+          ...(session ? { session } : {}),
+        }).lean(),
+      );
+      if (!updated) {
+        return res.status(409).json({ success: false, msg: "Your contact details changed meanwhile. Please reload and try again." });
+      }
+      current = {
+        email: updated.email,
+        phone: updated.phone,
+        isEmailVerified: updated.isEmailVerified,
+        isPhoneVerified: updated.isPhoneVerified,
+      };
     }
 
     let emailOtpSent = false;
     if (emailChanged && emailOtp) {
       try {
-        emailOtpSent = await sendOTPEmail(user.email, emailOtp, user.name);
+        emailOtpSent = await sendOTPEmail(current.email, emailOtp, user.name);
       } catch (error) {
         console.error("Error sending email OTP after signup contact change:", error);
       }
@@ -131,7 +160,7 @@ export const updateSignupContact = async (req: Request, res: Response) => {
         if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_VERIFY_SERVICE_SID) {
           await twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
             .verify.v2.services(TWILIO_VERIFY_SERVICE_SID)
-            .verifications.create({ channel: "sms", to: user.phone });
+            .verifications.create({ channel: "sms", to: current.phone as string });
           phoneOtpSent = true;
         }
       } catch (error) {
@@ -143,10 +172,10 @@ export const updateSignupContact = async (req: Request, res: Response) => {
       success: true,
       msg: "Contact details updated",
       data: {
-        email: user.email,
-        phone: user.phone,
-        isEmailVerified: Boolean(user.isEmailVerified),
-        isPhoneVerified: Boolean(user.isPhoneVerified),
+        email: current.email,
+        phone: current.phone,
+        isEmailVerified: Boolean(current.isEmailVerified),
+        isPhoneVerified: Boolean(current.isPhoneVerified),
         emailChanged,
         phoneChanged,
         emailOtpSent,

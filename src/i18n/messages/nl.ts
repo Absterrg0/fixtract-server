@@ -269,6 +269,7 @@ export const nl: Record<MessageKey, string> = {
   "auth.signup_contact_updated": "Contactgegevens bijgewerkt",
   "auth.signup_contact_update_failed": "We konden je contactgegevens niet bijwerken. Probeer het opnieuw.",
   "auth.signup_contact_email_cooldown": "Wacht een minuut voordat je je e-mailadres opnieuw wijzigt",
+  "auth.signup_contact_changed_meanwhile": "Je contactgegevens zijn intussen gewijzigd. Laad de pagina opnieuw en probeer het nog eens.",
   "auth.you_dont_have_permission_do_that": "Je hebt hiervoor geen toestemming. Toegang als {value} is vereist.",
   "availability.itemlabel_position_both_start_date_end": "{itemLabel} {position}: zowel een startdatum als een einddatum is verplicht.",
   "availability.itemlabel_position_start_date_must_before": "{itemLabel} {position}: de startdatum moet vóór of gelijk aan de einddatum zijn.",

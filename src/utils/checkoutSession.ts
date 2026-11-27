@@ -165,12 +165,22 @@ export const abandonCheckoutSession = async (checkout: ICheckoutSession): Promis
     if (intent && intent.status !== 'canceled') return 'in_flight';
   }
   await releaseReferralReservation(String(checkout._id), checkout.payment?.discount?.referralReservationToken);
-  await CheckoutSession.deleteOne({
+  const deleted = await CheckoutSession.deleteOne({
     _id: checkout._id,
     status: 'open',
     'payment.stripePaymentIntentId': intentId ?? null,
   });
-  return 'abandoned';
+  if (deleted.deletedCount > 0) return 'abandoned';
+  // The session changed after it was read: a new payment intent was
+  // persisted, or a concurrent signal promoted or closed it. Report what it
+  // is now, so a replacement checkout stays blocked while it is payable.
+  // (The referral release above is keyed to the old intent's token, so it
+  // never touches the reservation of the new intent.)
+  const current = await CheckoutSession.findById(checkout._id).select('status').lean();
+  if (!current) return 'abandoned';
+  if (current.status === 'promoted') return 'promoted';
+  if (current.status === 'conflict') return 'conflict';
+  return 'in_flight';
 };
 
 /**
