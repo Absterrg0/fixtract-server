@@ -89,6 +89,15 @@ describe('updateSignupContact (FT2-6C back from the OTP step)', () => {
     expect(sendOTPEmail).not.toHaveBeenCalled();
   });
 
+  it('rate-limits repeated email changes so it cannot mail addresses in a loop', async () => {
+    user.verificationCodeExpires = new Date(Date.now() + 10 * 60 * 1000 - 5_000);
+    const res = await call({ email: 'other@example.com' });
+    expect(res.status).toHaveBeenCalledWith(429);
+    expect(user.email).not.toBe('other@example.com');
+    expect(sendOTPEmail).not.toHaveBeenCalled();
+    expect(user.save).not.toHaveBeenCalled();
+  });
+
   it('refuses an email that belongs to another account', async () => {
     userFindOne.mockReturnValue(takenQuery({ _id: 'other' }));
     const res = await call({ email: 'taken@example.com' });

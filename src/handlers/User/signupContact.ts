@@ -10,6 +10,8 @@ import { withAnonymizationWriteFence } from "../../utils/support/accountGuard";
 const phoneUtil = PhoneNumberUtil.getInstance();
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const EMAIL_OTP_TTL_MS = 10 * 60 * 1000;
+/** Minimum wait between two email changes, so the endpoint can't be used to mail arbitrary addresses in a loop. */
+export const SIGNUP_EMAIL_CHANGE_COOLDOWN_MS = 60 * 1000;
 
 const SIGNUP_CONTACT_ROLES = new Set(["customer", "professional"]);
 
@@ -72,6 +74,12 @@ export const updateSignupContact = async (req: Request, res: Response) => {
       if (email !== user.email) {
         if (user.isEmailVerified) {
           return res.status(409).json({ success: false, msg: "Your email address is already verified. Change it in your profile." });
+        }
+        const lastIssuedAt = user.verificationCodeExpires
+          ? new Date(user.verificationCodeExpires).getTime() - EMAIL_OTP_TTL_MS
+          : 0;
+        if (Date.now() - lastIssuedAt < SIGNUP_EMAIL_CHANGE_COOLDOWN_MS) {
+          return res.status(429).json({ success: false, msg: "Please wait a minute before changing your email address again" });
         }
         const taken = await User.findOne({ email, _id: { $ne: user._id } }).select("_id").lean();
         if (taken) {
