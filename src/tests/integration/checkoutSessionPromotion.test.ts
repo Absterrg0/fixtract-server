@@ -436,6 +436,26 @@ describeDb('FT2-4B wizard checkout sessions (disposable Mongo)', () => {
     expect((await Payment.findOne({ booking: first.checkoutId }).lean())?.status).toBe('completed');
   });
 
+  it('a confirmation that read a pending payment never rolls back a refund that landed meanwhile', async () => {
+    const { checkoutId, intentId } = await paidCheckout();
+    await promoteCheckoutSession(checkoutId, { id: intentId } as any);
+    expect((await Booking.findById(checkoutId).lean())?.payment?.status).toBe('pending');
+    // While confirmation waits on Stripe, the webhook authorizes the payment
+    // and a refund completes.
+    const succeededIntent = { id: intentId, status: 'succeeded', latest_charge: `ch_${intentId}`, currency: 'eur', amount: 12100, metadata: {} };
+    mocks.intentRetrieve.mockImplementationOnce(async () => {
+      await Booking.updateOne({ _id: checkoutId }, { $set: { status: 'refunded', 'payment.status': 'refunded', 'payment.refundedAt': new Date() } });
+      await Payment.updateOne({ booking: checkoutId }, { $set: { status: 'refunded' } }, { upsert: true });
+      return succeededIntent;
+    });
+    await confirmAs(checkoutId, intentId);
+    const booking = await Booking.findById(checkoutId).lean();
+    expect(booking?.status).toBe('refunded');
+    expect(booking?.payment?.status).toBe('refunded');
+    expect((await Payment.findOne({ booking: checkoutId }).lean())?.status).toBe('refunded');
+    expect(await Payment.countDocuments({ booking: checkoutId })).toBe(1);
+  });
+
   it('applies the benefits when confirmation wins after the webhook read the payment pending', async () => {
     await User.updateOne({ _id: customer }, { $set: { points: 30, pointsExpiry: new Date(Date.now() + 90 * DAY_MS) } });
     try {

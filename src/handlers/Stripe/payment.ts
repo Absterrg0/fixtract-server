@@ -163,6 +163,9 @@ const isAmbiguousTransferError = (error: any): boolean => {
   return status >= 500;
 };
 
+/** Payment statuses that a confirmed charge may still move to `authorized`. */
+export const UNSETTLED_PAYMENT_STATUSES = ['pending', 'failed'];
+
 export const buildPaymentUpsertBase = (booking: any, overrides: Record<string, any> = {}, professionalOverride?: any) => {
   const { customerId, professionalId } = extractParticipantIds(booking, professionalOverride);
   const paymentSummary = booking.payment || {};
@@ -1109,7 +1112,15 @@ export const confirmPayment = async (req: Request, res: Response) => {
         updateFields[`milestonePayments.${msIdx}.paidStripePaymentIntentId`] = paymentIntent.id;
       }
 
-      const milestoneFilter: Record<string, any> = { _id: booking._id };
+      // Only a payment that is still unsettled may become authorized here: if
+      // the webhook authorized it and a refund (or dispute) landed while this
+      // request was in flight, a stale write must not roll that back.
+      const unsettledPayment = { $in: UNSETTLED_PAYMENT_STATUSES };
+      const milestoneFilter: Record<string, any> = {
+        _id: booking._id,
+        'payment.stripePaymentIntentId': paymentIntent.id,
+        'payment.status': unsettledPayment,
+      };
       if (typeof msIdx === 'number') {
         milestoneFilter[`milestonePayments.${msIdx}.status`] = { $ne: 'paid' };
       }
@@ -1133,7 +1144,10 @@ export const confirmPayment = async (req: Request, res: Response) => {
         // Another writer (usually the webhook) already flipped the status.
         // Still persist the payment fields without appending a second history row.
         const { status, ...paymentFields } = updateFields;
-        await Booking.findOneAndUpdate({ _id: booking._id }, { $set: paymentFields });
+        await Booking.findOneAndUpdate(
+          { _id: booking._id, 'payment.stripePaymentIntentId': paymentIntent.id, 'payment.status': unsettledPayment },
+          { $set: paymentFields },
+        );
       }
       const refreshed = await Booking.findById(booking._id);
       if (refreshed) {
@@ -1144,17 +1158,20 @@ export const confirmPayment = async (req: Request, res: Response) => {
 
       // Upsert: a promotion that stopped after creating the Booking left no
       // Payment row, and this confirmation is then the one that settles it.
-      await Payment.findOneAndUpdate(
-        { booking: booking._id },
-        buildPaymentUpsertBase(booking, {
-          status: 'authorized',
-          stripePaymentIntentId: paymentIntent.id,
-          stripeChargeId: (paymentIntent.latest_charge as string) || booking.payment!.stripeChargeId,
-          authorizedAt: booking.payment!.authorizedAt || new Date(),
-          capturedAt: booking.payment!.capturedAt || new Date(),
-        }),
-        { upsert: true, new: true, setDefaultsOnInsert: true },
+      // An existing row is only moved forward from an unsettled status (never
+      // over a refund that raced this request); a missing row is inserted.
+      const authorizedRow = {
+        status: 'authorized',
+        stripePaymentIntentId: paymentIntent.id,
+        stripeChargeId: (paymentIntent.latest_charge as string) || booking.payment!.stripeChargeId,
+        authorizedAt: booking.payment!.authorizedAt || new Date(),
+        capturedAt: booking.payment!.capturedAt || new Date(),
+      };
+      await Payment.updateOne(
+        { booking: booking._id, status: unsettledPayment },
+        { $set: Object.fromEntries(Object.entries(authorizedRow).filter(([, value]) => value !== undefined)) },
       );
+      await upsertPaymentRow(booking, {}, authorizedRow);
 
       console.log(`✅ Payment authorized for booking ${booking._id}`);
       await recordDiscountSnapshotSafely(booking, paymentIntent.id);
