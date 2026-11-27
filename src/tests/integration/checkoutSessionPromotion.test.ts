@@ -448,7 +448,8 @@ describeDb('FT2-4B wizard checkout sessions (disposable Mongo)', () => {
       await Payment.updateOne({ booking: checkoutId }, { $set: { status: 'refunded' } }, { upsert: true });
       return succeededIntent;
     });
-    await confirmAs(checkoutId, intentId);
+    const confirmed = await confirmAs(checkoutId, intentId);
+    expect(confirmed.body.data.status).toBe('refunded');
     const booking = await Booking.findById(checkoutId).lean();
     expect(booking?.status).toBe('refunded');
     expect(booking?.payment?.status).toBe('refunded');

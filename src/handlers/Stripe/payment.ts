@@ -1200,12 +1200,16 @@ export const confirmPayment = async (req: Request, res: Response) => {
         console.error(`[PAYMENT CONFIRM] Post-payment notify failed for booking ${booking._id}:`, notifyError?.message || notifyError);
       }
 
+      // Report what is stored: a refund that raced this request wins.
+      const currentPaymentStatus = booking.payment?.status || 'authorized';
       return res.json({
         success: true,
         data: {
-          status: 'authorized',
+          status: currentPaymentStatus,
           bookingId: booking._id,
-          message: 'Payment authorized successfully'
+          message: currentPaymentStatus === 'authorized'
+            ? 'Payment authorized successfully'
+            : `Payment already ${currentPaymentStatus}`
         }
       });
     }
