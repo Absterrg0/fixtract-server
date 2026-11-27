@@ -59,7 +59,7 @@ const takenQuery = (result: unknown) => ({ select: () => ({ lean: async () => re
  * findById stand-in that hides select:false fields like the real schema:
  * verificationCodeExpires is only returned when explicitly selected.
  */
-const HIDDEN_FIELDS = ['verificationCodeExpires'];
+const HIDDEN_FIELDS = ['verificationCodeExpires', 'signupEmailChangedAt'];
 function findByIdQuery(load: () => Record<string, any> | null) {
   const project = (selection: string) => {
     const doc = load();
@@ -166,7 +166,7 @@ describe('updateSignupContact (FT2-6C back from the OTP step to the signup form)
   });
 
   it('rate-limits repeated email changes so it cannot mail addresses in a loop', async () => {
-    stored.verificationCodeExpires = new Date(Date.now() + 10 * 60 * 1000 - 5_000);
+    stored.signupEmailChangedAt = new Date(Date.now() - 5_000);
     const res = await call({ email: 'other@example.com' });
     expect(res.status).toHaveBeenCalledWith(429);
     expect(stored.email).not.toBe('other@example.com');
@@ -174,13 +174,21 @@ describe('updateSignupContact (FT2-6C back from the OTP step to the signup form)
     expect(userFindOneAndUpdate).not.toHaveBeenCalled();
   });
 
-  it('changes the email of an account whose signup code is older than the cooldown', async () => {
-    // The real signup flow always leaves a (select:false) code expiry behind.
-    stored.verificationCodeExpires = new Date(Date.now() + 10 * 60 * 1000 - 2 * 60 * 1000);
+  it('corrects the email right after signup, while the signup code is still fresh', async () => {
+    // Signup just sent a code (select:false expiry), but no edit happened yet.
+    stored.verificationCodeExpires = new Date(Date.now() + 10 * 60 * 1000 - 5_000);
     const res = await call({ email: 'second@example.com' });
     expect(res.status).toHaveBeenCalledWith(200);
     expect(stored.email).toBe('second@example.com');
     expect(sendOTPEmail).toHaveBeenCalledTimes(1);
+    expect(stored.signupEmailChangedAt).toBeInstanceOf(Date);
+  });
+
+  it('allows another email change once the cooldown since the last edit has passed', async () => {
+    stored.signupEmailChangedAt = new Date(Date.now() - 2 * 60 * 1000);
+    const res = await call({ email: 'third@example.com' });
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(stored.email).toBe('third@example.com');
   });
 
   it('refuses an email that belongs to another account', async () => {

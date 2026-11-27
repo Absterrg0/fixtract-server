@@ -172,7 +172,7 @@ export const updateSignupContact = async (req: Request, res: Response) => {
 
     // verificationCodeExpires is select:false on the schema; the cooldown and the
     // conditional write below both need the stored value.
-    const user = await loadSignupUser(req, res, "+verificationCodeExpires");
+    const user = await loadSignupUser(req, res, "+verificationCodeExpires +signupEmailChangedAt");
     if (!user) return;
 
     let emailChanged = false;
@@ -208,10 +208,10 @@ export const updateSignupContact = async (req: Request, res: Response) => {
         if (user.isEmailVerified) {
           return res.status(409).json({ success: false, msg: "Your email address is already verified. Change it in your profile." });
         }
-        const lastIssuedAt = user.verificationCodeExpires
-          ? new Date(user.verificationCodeExpires).getTime() - EMAIL_OTP_TTL_MS
-          : 0;
-        if (Date.now() - lastIssuedAt < SIGNUP_EMAIL_CHANGE_COOLDOWN_MS) {
+        // The cooldown is between two edits from this step: correcting a typo
+        // right after signup (whose code was just sent) must work at once.
+        const lastChangedAt = user.signupEmailChangedAt ? new Date(user.signupEmailChangedAt).getTime() : 0;
+        if (Date.now() - lastChangedAt < SIGNUP_EMAIL_CHANGE_COOLDOWN_MS) {
           return res.status(429).json({ success: false, msg: "Please wait a minute before changing your email address again" });
         }
         const taken = await User.findOne({ email, _id: { $ne: user._id } }).select("_id").lean();
@@ -222,10 +222,12 @@ export const updateSignupContact = async (req: Request, res: Response) => {
         filter.email = user.email;
         filter.isEmailVerified = false;
         filter.verificationCodeExpires = user.verificationCodeExpires ?? null;
+        filter.signupEmailChangedAt = user.signupEmailChangedAt ?? null;
         set.email = email;
         set.isEmailVerified = false;
         set.verificationCode = emailOtp;
         set.verificationCodeExpires = new Date(Date.now() + EMAIL_OTP_TTL_MS);
+        set.signupEmailChangedAt = new Date();
         emailChanged = true;
       }
     }
