@@ -58,6 +58,8 @@ import Booking from '../../models/booking';
 import Payment from '../../models/payment';
 import CalendarReservation from '../../models/calendarReservation';
 import CheckoutSession from '../../models/checkoutSession';
+import DiscountCode from '../../models/discountCode';
+import DiscountCodeUsage from '../../models/discountCodeUsage';
 import PointTransaction from '../../models/pointTransaction';
 import StripeEvent from '../../models/stripeEvent';
 import User from '../../models/user';
@@ -66,6 +68,7 @@ import { ensurePaymentIntent } from '../../handlers/Booking/payment-integration'
 import { confirmPayment, createPaymentIntent } from '../../handlers/Stripe/payment';
 import { handleWebhook } from '../../handlers/Stripe/webhooks';
 import { expireStaleCheckoutSessions } from '../../utils/checkoutSession';
+import { promoteCheckoutSession } from '../../handlers/Stripe/checkoutPromotion';
 import { reserveBookingCalendar } from '../../utils/support/bookingCalendar';
 
 const response = () => {
@@ -134,7 +137,7 @@ describeDb('FT2-4B wizard checkout sessions (disposable Mongo)', () => {
     await CalendarReservation.createCollection();
     await CalendarReservation.createIndexes();
     await mongoose.connection.createCollection('counters');
-    await Promise.all([Payment.syncIndexes(), StripeEvent.syncIndexes(), CheckoutSession.syncIndexes()]);
+    await Promise.all([Payment.syncIndexes(), StripeEvent.syncIndexes(), CheckoutSession.syncIndexes(), PointTransaction.syncIndexes(), DiscountCode.syncIndexes(), DiscountCodeUsage.syncIndexes()]);
   });
 
   afterAll(async () => {
@@ -144,6 +147,7 @@ describeDb('FT2-4B wizard checkout sessions (disposable Mongo)', () => {
   });
 
   beforeEach(async () => {
+    vi.restoreAllMocks();
     vi.clearAllMocks();
     await Promise.all([
       Booking.deleteMany({}),
@@ -152,7 +156,10 @@ describeDb('FT2-4B wizard checkout sessions (disposable Mongo)', () => {
       CalendarReservation.deleteMany({}),
       PointTransaction.deleteMany({}),
       StripeEvent.deleteMany({}),
+      DiscountCode.deleteMany({}),
+      DiscountCodeUsage.deleteMany({}),
     ]);
+    mocks.refundCreate.mockImplementation(async () => ({ id: 're_conflict', status: 'succeeded' }));
     mocks.intentCreate.mockImplementation(async (params: any) => {
       intentCounter += 1;
       const id = `pi_checkout_${intentCounter}`;
@@ -305,5 +312,230 @@ describeDb('FT2-4B wizard checkout sessions (disposable Mongo)', () => {
     await deliver({ id: `evt_${new Types.ObjectId()}`, type: 'payment_intent.canceled', data: { object: { id: intent.paymentIntentId, status: 'canceled', metadata: { bookingId: checkoutId, type: 'booking_payment' } } } });
     expect(await CheckoutSession.exists({ _id: checkoutId })).toBeNull();
     expect(await Booking.countDocuments({})).toBe(0);
+  });
+
+  // --- CodeRabbit round 2: races between confirm, webhook and promotion ---
+
+  const confirmAs = async (bookingId: string, paymentIntentId: string) => {
+    const res = response();
+    await confirmPayment({ body: { bookingId, paymentIntentId }, user: { _id: customer } } as any, res as any);
+    return res;
+  };
+
+  const blockSlot = async (checkoutId: string) => {
+    const session = await CheckoutSession.findById(checkoutId).lean();
+    const blocker = await Booking.create({
+      customer: otherCustomer, professional, project, bookingType: 'project', status: 'booked',
+      location: { type: 'Point', coordinates: [4.35, 50.85], country: 'BE' },
+      rfqData: { serviceType: 'Painting', description: 'Blocker' },
+      vatDecision: { action: 'standard_rate', country: 'BE', standardRate: 21, appliedRate: 21, answers: [] },
+      quote: { amount: 100, currency: 'EUR', description: 'Blocker' },
+      assignedTeamMembers: [professional],
+      scheduledStartDate: session!.bookingData.scheduledStartDate,
+      scheduledExecutionEndDate: session!.bookingData.scheduledExecutionEndDate,
+    });
+    await reserveBookingCalendar(blocker as any);
+    return blocker;
+  };
+
+  const paidCheckout = async (pointsToRedeem = 0) => {
+    const checkoutId = (await startCheckout()).body.checkout.id;
+    if (pointsToRedeem > 0) {
+      const intentRes = response();
+      await ensurePaymentIntent({ params: { bookingId: checkoutId }, body: { pointsToRedeem }, user: { _id: customer } } as any, intentRes as any);
+      expect(intentRes.body.success).toBe(true);
+    }
+    const intent = await createPaymentIntent(checkoutId, String(customer), pointsToRedeem || undefined);
+    expect(intent.success).toBe(true);
+    return { checkoutId, intentId: intent.paymentIntentId! };
+  };
+
+  it('a promotion that lost the race returns the winner booking instead of refunding it', async () => {
+    const { checkoutId, intentId } = await paidCheckout();
+    // The losing attempt read "no booking, session open" before the winner committed.
+    const staleCheckout = await CheckoutSession.findById(checkoutId);
+    expect((await confirmAs(checkoutId, intentId)).body.success).toBe(true);
+    expect(await Booking.exists({ _id: checkoutId })).toBeTruthy();
+
+    vi.spyOn(Booking, 'findById').mockResolvedValueOnce(null as any);
+    vi.spyOn(CheckoutSession, 'findById').mockResolvedValueOnce(staleCheckout as any);
+    // Its availability recheck now counts the winner's own booking as a conflict.
+    const result = await promoteCheckoutSession(checkoutId, { id: intentId, latest_charge: `ch_${intentId}` } as any);
+    expect(result.status).toBe('promoted');
+    expect(mocks.refundCreate).not.toHaveBeenCalled();
+    expect((await CheckoutSession.findById(checkoutId).lean())?.status).toBe('promoted');
+    expect(await Booking.countDocuments({ _id: checkoutId })).toBe(1);
+  });
+
+  it('concurrent confirm and webhook promote once and never refund', async () => {
+    const { checkoutId, intentId } = await paidCheckout();
+    const [confirmed, delivered] = await Promise.all([
+      confirmAs(checkoutId, intentId),
+      deliver(succeeded(checkoutId, intentId)),
+      confirmAs(checkoutId, intentId),
+    ]);
+    expect(confirmed.body.success).toBe(true);
+    expect(delivered.statusCode).toBe(200);
+    expect(await Booking.countDocuments({ _id: checkoutId })).toBe(1);
+    expect(mocks.refundCreate).not.toHaveBeenCalled();
+    expect((await Booking.findById(checkoutId).lean())?.payment?.status).toBe('authorized');
+    expect(await Payment.countDocuments({ booking: checkoutId })).toBe(1);
+  });
+
+  it('a conflict refund that failed is completed by the next signal, and only once', async () => {
+    const { checkoutId, intentId } = await paidCheckout();
+    await blockSlot(checkoutId);
+    mocks.refundCreate.mockRejectedValueOnce(Object.assign(new Error('Stripe unavailable'), { type: 'StripeConnectionError' }));
+    expect((await confirmAs(checkoutId, intentId)).statusCode).toBe(500);
+    let checkout = await CheckoutSession.findById(checkoutId).lean();
+    expect(checkout?.status).toBe('conflict');
+    expect(checkout?.refundedAt).toBeUndefined();
+
+    // Stripe's webhook finishes the refund the crashed attempt missed.
+    await deliver(succeeded(checkoutId, intentId));
+    expect(mocks.refundCreate).toHaveBeenCalledTimes(2);
+    expect(mocks.refundCreate.mock.calls[1][1]).toEqual({ idempotencyKey: `checkout-conflict-refund:${intentId}` });
+    checkout = await CheckoutSession.findById(checkoutId).lean();
+    expect(checkout?.refundedAt).toBeTruthy();
+    await deliver(succeeded(checkoutId, intentId));
+    expect(mocks.refundCreate).toHaveBeenCalledTimes(2);
+    expect(await Booking.exists({ _id: checkoutId })).toBeNull();
+  });
+
+  it('recreates a Payment row a crashed promotion never wrote', async () => {
+    const { checkoutId, intentId } = await paidCheckout();
+    // The promotion stops after the Booking insert.
+    vi.spyOn(Payment, 'findOneAndUpdate').mockRejectedValueOnce(new Error('connection reset'));
+    expect((await confirmAs(checkoutId, intentId)).statusCode).toBe(500);
+    expect((await Booking.findById(checkoutId).lean())?.payment?.status).toBe('pending');
+    expect(await Payment.countDocuments({ booking: checkoutId })).toBe(0);
+
+    // The next confirmation settles the booking and creates the row.
+    const again = await confirmAs(checkoutId, intentId);
+    expect(again.body.data.status).toBe('authorized');
+    const row = await Payment.findOne({ booking: checkoutId }).lean();
+    expect(row).toMatchObject({ status: 'authorized', stripePaymentIntentId: intentId });
+    expect(row?.customer && String(row.customer)).toBe(String(customer));
+  });
+
+  it('the webhook recreates a missing Payment row on either path without rolling a status back', async () => {
+    // Main path: the webhook settles a pending booking whose row is missing.
+    const first = await paidCheckout();
+    await promoteCheckoutSession(first.checkoutId, { id: first.intentId } as any);
+    await Payment.deleteMany({ booking: first.checkoutId });
+    await deliver(succeeded(first.checkoutId, first.intentId));
+    expect(await Payment.findOne({ booking: first.checkoutId }).lean()).toMatchObject({ status: 'authorized', stripePaymentIntentId: first.intentId });
+
+    // Already-authorized path: a later delivery restores a lost row and
+    // leaves an existing one untouched.
+    await Payment.deleteMany({ booking: first.checkoutId });
+    await deliver(succeeded(first.checkoutId, first.intentId));
+    expect(await Payment.findOne({ booking: first.checkoutId }).lean()).toMatchObject({ status: 'authorized', stripePaymentIntentId: first.intentId });
+    await Payment.updateOne({ booking: first.checkoutId }, { $set: { status: 'completed' } });
+    await deliver(succeeded(first.checkoutId, first.intentId));
+    expect((await Payment.findOne({ booking: first.checkoutId }).lean())?.status).toBe('completed');
+  });
+
+  it('applies the benefits when confirmation wins after the webhook read the payment pending', async () => {
+    await User.updateOne({ _id: customer }, { $set: { points: 30, pointsExpiry: new Date(Date.now() + 90 * DAY_MS) } });
+    try {
+      const { checkoutId, intentId } = await paidCheckout(10);
+      await promoteCheckoutSession(checkoutId, { id: intentId } as any);
+      const original = Booking.findOneAndUpdate.bind(Booking);
+      // The webhook has read "pending"; confirmPayment authorizes before its write.
+      vi.spyOn(Booking, 'findOneAndUpdate').mockImplementationOnce((async (...args: any[]) => {
+        expect((await confirmAs(checkoutId, intentId)).body.data.status).toBe('authorized');
+        return (original as any)(...args);
+      }) as any);
+      const delivered = await deliver(succeeded(checkoutId, intentId));
+      expect(delivered.statusCode).toBe(200);
+
+      const booking: any = await Booking.findById(checkoutId).lean();
+      expect(booking.payment.status).toBe('authorized');
+      expect(booking.payment.benefitsAppliedIntentId).toBe(intentId);
+      expect(await PointTransaction.countDocuments({ relatedBooking: booking._id, source: 'redemption' })).toBe(1);
+      expect((await User.findById(customer).lean())?.points).toBe(20);
+      // A duplicate delivery does not deduct again.
+      await deliver(succeeded(checkoutId, intentId));
+      expect((await User.findById(customer).lean())?.points).toBe(20);
+    } finally {
+      await User.updateOne({ _id: customer }, { $set: { points: 0 } });
+    }
+  });
+
+  it('finishes a benefit that failed midway on retry without repeating the one that succeeded', async () => {
+    await User.updateOne({ _id: customer }, { $set: { points: 30, pointsExpiry: new Date(Date.now() + 90 * DAY_MS) } });
+    try {
+      const { checkoutId, intentId } = await paidCheckout(10);
+      await promoteCheckoutSession(checkoutId, { id: intentId } as any);
+      const code = await DiscountCode.create({
+        code: 'SAVE5', type: 'fixed', value: 5, validFrom: new Date(Date.now() - DAY_MS),
+        validUntil: new Date(Date.now() + 30 * DAY_MS), createdBy: professional, usageCount: 0,
+      });
+      await Booking.updateOne({ _id: checkoutId }, {
+        $set: { 'payment.discount.codeId': code._id, 'payment.discount.codeDiscountAmount': 5, 'payment.discount.codeLabel': 'SAVE5' },
+      });
+
+      // Points are deducted, then the discount-code lookup fails transiently.
+      const failingLookup = { session: () => Promise.reject(Object.assign(new Error('socket closed'), { name: 'MongoNetworkError' })) };
+      vi.spyOn(DiscountCode, 'findById').mockReturnValueOnce(failingLookup as any);
+      const event = succeeded(checkoutId, intentId);
+      const failed = await deliver(event);
+      expect(failed.statusCode).toBe(500);
+      let booking: any = await Booking.findById(checkoutId).lean();
+      expect(booking.payment.status).toBe('authorized');
+      expect(booking.payment.pointsAppliedIntentId).toBe(intentId);
+      expect(booking.payment.discountCodeAppliedIntentId).toBeUndefined();
+      expect(booking.payment.benefitsAppliedIntentId).toBeUndefined();
+      expect((await User.findById(customer).lean())?.points).toBe(20);
+      expect(await DiscountCodeUsage.countDocuments({ booking: checkoutId })).toBe(0);
+
+      // Stripe's retry of the same event records the code usage, and only that.
+      expect((await deliver(event)).statusCode).toBe(200);
+      booking = await Booking.findById(checkoutId).lean();
+      expect(booking.payment.discountCodeAppliedIntentId).toBe(intentId);
+      expect(booking.payment.benefitsAppliedIntentId).toBe(intentId);
+      expect((await User.findById(customer).lean())?.points).toBe(20);
+      expect(await PointTransaction.countDocuments({ relatedBooking: booking._id, source: 'redemption' })).toBe(1);
+      expect(await DiscountCodeUsage.countDocuments({ booking: checkoutId })).toBe(1);
+      expect((await DiscountCode.findById(code._id).lean())?.usageCount).toBe(1);
+
+      await deliver(succeeded(checkoutId, intentId));
+      expect((await User.findById(customer).lean())?.points).toBe(20);
+      expect((await DiscountCode.findById(code._id).lean())?.usageCount).toBe(1);
+    } finally {
+      await User.updateOne({ _id: customer }, { $set: { points: 0 } });
+    }
+  });
+
+  it('the back button reports a refunded slot conflict without a success redirect', async () => {
+    const { checkoutId, intentId } = await paidCheckout();
+    await blockSlot(checkoutId);
+    // The intent had already succeeded when the customer went back.
+    mocks.intentCancel.mockRejectedValueOnce(Object.assign(new Error('unexpected state'), { code: 'payment_intent_unexpected_state' }));
+    const back = response();
+    await abandonCheckout({ params: { bookingId: checkoutId }, user: { _id: customer } } as any, back as any, vi.fn());
+    expect(back.statusCode).toBe(200);
+    expect(back.body.data.outcome).toBe('conflict');
+    expect(back.body.data.redirectTo).toBeUndefined();
+    expect(mocks.refundCreate).toHaveBeenCalledTimes(1);
+    expect(mocks.refundCreate.mock.calls[0][0]).toMatchObject({ payment_intent: intentId });
+    expect(await Booking.exists({ _id: checkoutId })).toBeNull();
+  });
+
+  it('does not start a replacement checkout while the previous payment is in flight', async () => {
+    const { checkoutId } = await paidCheckout();
+    mocks.intentCancel.mockRejectedValueOnce(Object.assign(new Error('unexpected state'), { code: 'payment_intent_unexpected_state' }));
+    mocks.intentRetrieve.mockImplementationOnce(async (id: string) => ({ id, status: 'processing' }));
+    const replacement = await startCheckout('2027-01-12');
+    expect(replacement.statusCode).toBe(409);
+    expect(replacement.body.code).toBe('PAYMENT_IN_PROGRESS');
+    expect(await CheckoutSession.countDocuments({})).toBe(1);
+    expect((await CheckoutSession.findById(checkoutId).lean())?.status).toBe('open');
+
+    // Once the previous payment is closed, the replacement goes ahead.
+    const later = await startCheckout('2027-01-12');
+    expect(later.statusCode).toBe(201);
+    expect(await CheckoutSession.exists({ _id: checkoutId })).toBeNull();
   });
 });

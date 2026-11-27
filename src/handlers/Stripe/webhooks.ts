@@ -12,6 +12,7 @@ import Booking from '../../models/booking';
 import CheckoutSession from '../../models/checkoutSession';
 import { abandonCheckoutSession } from '../../utils/checkoutSession';
 import { promoteCheckoutSession } from './checkoutPromotion';
+import { upsertPaymentRow } from './payment';
 import Payment from '../../models/payment';
 import User from '../../models/user';
 import StripeEvent from '../../models/stripeEvent';
@@ -21,6 +22,7 @@ import { recordPaymentDiscountSnapshot } from '../../utils/paymentDiscountLedger
 import { convertFromStripeAmount } from '../../utils/payment';
 import { mapStripeAccountStatus } from '../../utils/stripeAccountStatus';
 import { deductPoints } from '../../utils/pointsSystem';
+import { UserFacingError } from '../../utils/appErrors';
 import { notify } from '../../utils/notifications/notify';
 import { paymentConfirmationAmount } from '../../utils/paymentConfirmationAmount';
 import { notifyBookingPaymentConfirmed } from '../../utils/notifications/bookingPaymentNotify';
@@ -358,99 +360,153 @@ async function recordSupersededIntentReconciliation(
   }
 }
 
+const PAID_PAYMENT_STATUSES = ['authorized', 'completed'];
+
+/** The benefit can never apply (no balance, limit reached, already recorded): retrying will not change that. */
+const isPermanentBenefitFailure = (error: any) =>
+  error instanceof UserFacingError || error?.code === 11000;
+
 /**
- * Handle payment_intent.succeeded event
+ * Settle one checkout-benefit effect for a paid intent. The effect and its
+ * marker (payment.<marker> = intent) commit in one transaction, so it applies
+ * at most once and a crash leaves it either done or retryable. A transient
+ * failure is thrown so the webhook event fails and Stripe retries; a
+ * permanent one is logged and recorded as settled.
  */
+async function settleBenefitEffect(
+  bookingId: mongoose.Types.ObjectId,
+  intentId: string,
+  marker: 'pointsAppliedIntentId' | 'discountCodeAppliedIntentId',
+  label: string,
+  effect: (session: mongoose.ClientSession) => Promise<void>,
+) {
+  const claimFilter = {
+    _id: bookingId,
+    'payment.stripePaymentIntentId': intentId,
+    'payment.status': { $in: PAID_PAYMENT_STATUSES },
+    'payment.benefitsAppliedIntentId': { $ne: intentId },
+    [`payment.${marker}`]: { $ne: intentId },
+  };
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const claimed = await Booking.updateOne(claimFilter, { $set: { [`payment.${marker}`]: intentId } }, { session });
+      if (claimed.modifiedCount !== 1) return; // settled already, or no longer this intent
+      await effect(session);
+    });
+  } catch (error: any) {
+    if (!isPermanentBenefitFailure(error)) throw error;
+    console.warn(`Checkout benefit ${label} not applied for booking ${bookingId}:`, error?.message || error);
+    await Booking.updateOne(claimFilter, { $set: { [`payment.${marker}`]: intentId } });
+  } finally {
+    await session.endSession();
+  }
+}
+
 /**
  * Effects of a paid checkout that consume a customer benefit: redeemed wallet
- * points and discount-code usage. Callers claim them once per intent
- * (payment.benefitsAppliedIntentId) — either the webhook that flips the
- * payment to authorized, or the webhook that finds confirmPayment already did
- * (confirmPayment never applies them).
+ * points and discount-code usage. Every succeeded-intent webhook (whichever
+ * path it takes) calls this; confirmPayment never applies them. Idempotent
+ * and recoverable per effect (see settleBenefitEffect).
  */
-async function applyPaidCheckoutBenefits(booking: any, bookingId: string, now: Date) {
-  const pointsRedeemed = (booking.payment as any)?.discount?.pointsRedeemed;
+async function applyPaidCheckoutBenefits(bookingId: string, intentId: string, now: Date) {
+  const booking: any = await Booking.findById(bookingId).select('customer bookingNumber payment');
+  if (
+    !booking?.payment
+    || booking.payment.stripePaymentIntentId !== intentId
+    || !PAID_PAYMENT_STATUSES.includes(booking.payment.status)
+    || booking.payment.benefitsAppliedIntentId === intentId
+  ) {
+    return;
+  }
+
+  const pointsRedeemed = booking.payment.discount?.pointsRedeemed;
   if (pointsRedeemed > 0 && booking.customer) {
-    try {
+    await settleBenefitEffect(booking._id, intentId, 'pointsAppliedIntentId', 'points', async (session) => {
       await deductPoints(
         booking.customer,
         pointsRedeemed,
         'redemption',
-        `Points redeemed for booking #${(booking as any).bookingNumber || bookingId}`,
-        { relatedBooking: booking._id }
+        `Points redeemed for booking #${booking.bookingNumber || bookingId}`,
+        { relatedBooking: booking._id, session, metadata: { stripePaymentIntentId: intentId } },
       );
-    } catch (pointsError: any) {
-      console.error(`Failed to deduct ${pointsRedeemed} points for booking ${bookingId}:`, pointsError);
-    }
+    });
   }
 
-  const codeId = (booking.payment as any)?.discount?.codeId;
-  const codeAmount = (booking.payment as any)?.discount?.codeDiscountAmount;
-  const codeLabel = (booking.payment as any)?.discount?.codeLabel;
+  const codeId = booking.payment.discount?.codeId;
+  const codeAmount = booking.payment.discount?.codeDiscountAmount;
+  const codeLabel = booking.payment.discount?.codeLabel;
   if (codeId && codeAmount > 0 && booking.customer) {
-    const session = await mongoose.startSession();
-    try {
-      let limitReached: 'global' | 'perUser' | 'not_found' | null = null;
-      await session.withTransaction(async () => {
-        limitReached = null;
-        const codeDoc = await DiscountCode.findById(codeId).session(session);
-        if (!codeDoc) {
-          limitReached = 'not_found';
-          return;
-        }
-        const perUserLimit = Number(codeDoc.perUserLimit) > 0 ? Number(codeDoc.perUserLimit) : 1;
-        const userUsage = await DiscountCodeUsage.countDocuments(
-          { code: codeId, user: booking.customer },
-          { session }
-        );
-        if (userUsage >= perUserLimit) {
-          limitReached = 'perUser';
-          return;
-        }
-        const incremented = await DiscountCode.findOneAndUpdate(
-          {
-            _id: codeId,
-            $or: [
-              { usageLimit: { $exists: false } },
-              { usageLimit: null },
-              { $expr: { $lt: ['$usageCount', '$usageLimit'] } },
-            ],
-          },
-          { $inc: { usageCount: 1 } },
-          { new: true, session }
-        );
-        if (!incremented) {
-          limitReached = 'global';
-          return;
-        }
-        await DiscountCodeUsage.create([{
-          code: codeId,
-          codeString: codeLabel || '',
-          user: booking.customer,
-          booking: booking._id,
-          amountDiscounted: codeAmount,
-          redeemedAt: now,
-        }], { session });
-      });
-      if (limitReached === 'global') {
-        console.warn(`Discount code ${codeLabel || codeId} usageLimit already reached; skipping usage record for booking ${bookingId}`);
-      } else if (limitReached === 'perUser') {
-        console.warn(`Discount code ${codeLabel || codeId} perUserLimit already reached for customer ${booking.customer}; skipping usage record for booking ${bookingId}`);
-      } else if (limitReached === 'not_found') {
+    await settleBenefitEffect(booking._id, intentId, 'discountCodeAppliedIntentId', 'discount code', async (session) => {
+      const codeDoc = await DiscountCode.findById(codeId).session(session);
+      if (!codeDoc) {
         console.warn(`Discount code not found for id ${codeId} (label ${codeLabel || 'unknown'}); skipping usage record for booking ${bookingId}`);
+        return;
       }
-    } catch (codeError: any) {
-      if (codeError?.code === 11000) {
-        // Duplicate usage for this booking — already recorded by a prior webhook delivery; transaction rolled back, no-op
-      } else {
-        console.error(`Failed to record discount code usage for booking ${bookingId}:`, codeError);
+      const perUserLimit = Number(codeDoc.perUserLimit) > 0 ? Number(codeDoc.perUserLimit) : 1;
+      const userUsage = await DiscountCodeUsage.countDocuments({ code: codeId, user: booking.customer }, { session });
+      if (userUsage >= perUserLimit) {
+        console.warn(`Discount code ${codeLabel || codeId} perUserLimit already reached for customer ${booking.customer}; skipping usage record for booking ${bookingId}`);
+        return;
       }
-    } finally {
-      await session.endSession();
-    }
+      const incremented = await DiscountCode.findOneAndUpdate(
+        {
+          _id: codeId,
+          $or: [
+            { usageLimit: { $exists: false } },
+            { usageLimit: null },
+            { $expr: { $lt: ['$usageCount', '$usageLimit'] } },
+          ],
+        },
+        { $inc: { usageCount: 1 } },
+        { new: true, session },
+      );
+      if (!incremented) {
+        console.warn(`Discount code ${codeLabel || codeId} usageLimit already reached; skipping usage record for booking ${bookingId}`);
+        return;
+      }
+      await DiscountCodeUsage.create([{
+        code: codeId,
+        codeString: codeLabel || '',
+        user: booking.customer,
+        booking: booking._id,
+        amountDiscounted: codeAmount,
+        redeemedAt: now,
+      }], { session });
+    });
   }
+
+  await Booking.updateOne(
+    { _id: booking._id, 'payment.stripePaymentIntentId': intentId },
+    { $set: { 'payment.benefitsAppliedIntentId': intentId } },
+  );
 }
 
+/**
+ * Insert the Payment row of a paid booking when an earlier writer (promotion,
+ * confirm or webhook) stopped before it; an existing row is never changed.
+ */
+async function repairPaymentRow(bookingId: string, paymentIntent: Stripe.PaymentIntent) {
+  const booking: any = await Booking.findById(bookingId);
+  if (
+    !booking?.payment
+    || booking.payment.stripePaymentIntentId !== paymentIntent.id
+    || !PAID_PAYMENT_STATUSES.includes(booking.payment.status)
+  ) {
+    return;
+  }
+  await upsertPaymentRow(booking, {}, {
+    status: booking.payment.status,
+    stripePaymentIntentId: paymentIntent.id,
+    stripeChargeId: booking.payment.stripeChargeId || (paymentIntent.latest_charge as string) || undefined,
+    authorizedAt: booking.payment.authorizedAt,
+    capturedAt: booking.payment.capturedAt,
+  });
+}
+
+/**
+ * Handle payment_intent.succeeded event
+ */
 async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent, eventId: string) {
   if (paymentIntent.metadata.type === 'extra_cost') {
     await handleExtraCostPaymentSucceeded(paymentIntent);
@@ -524,8 +580,6 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent,
       if (booking.payment.status === 'pending') {
         updateFields['payment.status'] = 'authorized';
         updateFields['payment.authorizedAt'] = now;
-        // This writer applies the checkout benefits below (claim).
-        updateFields['payment.benefitsAppliedIntentId'] = paymentIntent.id;
         if (booking.status !== 'in_progress' && booking.status !== 'professional_completed' && booking.status !== 'completed') {
           updateFields.status = 'booked';
         }
@@ -584,22 +638,27 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent,
             currency: (paymentIntent.currency || 'EUR').toUpperCase(),
           });
         }
-        // The other writer may have stopped before the ledger write; this is
-        // idempotent and only matches while booking.payment is this intent.
+        // The writer that won (usually confirmPayment) never applies the
+        // checkout benefits and may have stopped before the Payment row or
+        // the ledger write; each step is idempotent.
+        await repairPaymentRow(bookingId, paymentIntent);
+        await applyPaidCheckoutBenefits(bookingId, paymentIntent.id, now);
         await recordPaymentDiscountSnapshot(booking._id, booking.payment, paymentIntent.id, now);
         return;
       }
 
-      await Payment.findOneAndUpdate(
-        { booking: booking._id },
+      // Upsert: a promotion that stopped after creating the Booking left no row.
+      await upsertPaymentRow(
+        updated,
         {
           status: 'authorized',
           authorizedAt: now,
           ...(paymentIntent.latest_charge ? { stripeChargeId: paymentIntent.latest_charge as string } : {}),
-        }
+        },
+        { stripePaymentIntentId: paymentIntent.id },
       );
 
-      await applyPaidCheckoutBenefits(booking, bookingId, now);
+      await applyPaidCheckoutBenefits(bookingId, paymentIntent.id, now);
 
       console.log(`Payment authorized via webhook for booking ${bookingId}`);
 
@@ -644,25 +703,10 @@ async function handlePaymentIntentSucceeded(paymentIntent: Stripe.PaymentIntent,
         });
       }
       // confirmPayment flips the status but never applies the checkout
-      // benefits; claim them once for this intent (a no-op when the webhook
-      // that flipped the status already applied them).
-      if (
-        fresh?.payment &&
-        fresh.payment.stripePaymentIntentId === paymentIntent.id &&
-        (fresh.payment.status === 'authorized' || (fresh.payment as any).status === 'completed')
-      ) {
-        const claimed = await Booking.findOneAndUpdate(
-          {
-            _id: booking._id,
-            'payment.stripePaymentIntentId': paymentIntent.id,
-            'payment.status': { $in: ['authorized', 'completed'] },
-            'payment.benefitsAppliedIntentId': { $ne: paymentIntent.id },
-          },
-          { $set: { 'payment.benefitsAppliedIntentId': paymentIntent.id } },
-          { new: true },
-        );
-        if (claimed) await applyPaidCheckoutBenefits(claimed, bookingId, now);
-      }
+      // benefits, and any earlier writer may have stopped before the Payment
+      // row or a benefit: finish what is missing (each step is idempotent).
+      await repairPaymentRow(bookingId, paymentIntent);
+      await applyPaidCheckoutBenefits(bookingId, paymentIntent.id, now);
       // Duplicate delivery, Stripe retry or confirmPayment won the race: record
       // the discount snapshot if it is still missing (idempotent).
       await recordPaymentDiscountSnapshot(booking._id, booking.payment, paymentIntent.id, now);

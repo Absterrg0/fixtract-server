@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import User from "../../../../models/user";
 import { generateOTP, sendOTPEmail } from "../../../../utils/emailService";
 import { enablePromotionalEmail } from "../../../../utils/marketing/audience";
+import { withAnonymizationWriteFence } from "../../../../utils/support/accountGuard";
 
 // Send OTP to user's email
 export const sendEmailOTP = async (req: Request, res: Response, next: NextFunction) => {
@@ -127,17 +128,35 @@ export const verifyEmailOTP = async (req: Request, res: Response, next: NextFunc
       updates.marketingOptInPending = false;
     }
 
-    const verifiedUser = await User.findByIdAndUpdate(
-      user._id,
-      {
-        $set: updates,
-        // Mongoose strips undefined in updates, so clear the OTP explicitly.
-        $unset: { verificationCode: 1, verificationCodeExpires: 1 },
-      },
-      { new: true },
+    // Write only while the account still holds the address and the code just
+    // checked: a concurrent signup email change (new address, new code) makes
+    // this miss instead of verifying the new address with the old code. The
+    // marketing activation is part of the same conditional write.
+    const verifiedUser = await withAnonymizationWriteFence([String(user._id)], (session) =>
+      User.findOneAndUpdate(
+        {
+          _id: user._id,
+          email: user.email,
+          isEmailVerified: { $ne: true },
+          verificationCode: otp,
+          verificationCodeExpires: { $gt: new Date() },
+        },
+        {
+          $set: updates,
+          // Mongoose strips undefined in updates, so clear the OTP explicitly.
+          $unset: { verificationCode: 1, verificationCodeExpires: 1 },
+        },
+        { new: true, ...(session ? { session } : {}) },
+      ),
     );
+    if (!verifiedUser) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid verification code"
+      });
+    }
 
-    if (activateMarketing && verifiedUser) {
+    if (activateMarketing) {
       try {
         await enablePromotionalEmail(verifiedUser, 'signup');
       } catch (error) {

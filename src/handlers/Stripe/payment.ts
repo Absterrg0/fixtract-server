@@ -231,6 +231,35 @@ export const buildPaymentUpsertBase = (booking: any, overrides: Record<string, a
 };
 
 /**
+ * Write the booking's Payment ledger row: `set` updates an existing row, and a
+ * missing row (a crash between the Booking write and this one) is inserted
+ * whole from the booking with `insert` on top. With an empty `set` an
+ * existing row is never changed, so a late signal can repair a missing row
+ * without rolling back a newer status.
+ */
+export const upsertPaymentRow = async (
+  booking: any,
+  set: Record<string, any>,
+  insert: Record<string, any> = {},
+) => {
+  const setFields = Object.fromEntries(Object.entries(set).filter(([, value]) => value !== undefined));
+  const onInsert: Record<string, any> = buildPaymentUpsertBase(booking, { ...insert, ...setFields });
+  for (const key of [...Object.keys(setFields), 'booking']) delete onInsert[key];
+  const update = {
+    ...(Object.keys(setFields).length ? { $set: setFields } : {}),
+    $setOnInsert: onInsert,
+  };
+  const options = { upsert: true, new: true, setDefaultsOnInsert: true };
+  try {
+    return await Payment.findOneAndUpdate({ booking: booking._id }, update, options);
+  } catch (error: any) {
+    // A concurrent writer inserted the row first: apply `set` to it.
+    if (error?.code !== 11000) throw error;
+    return Payment.findOneAndUpdate({ booking: booking._id }, update, options);
+  }
+};
+
+/**
  * VAT for a quote checkout from the quotation's pricing lines. For a
  * milestone checkout (`milestone`), the quote lines are scaled to that
  * milestone's own share and the selected options are listed only on the
@@ -1014,6 +1043,22 @@ export const confirmPayment = async (req: Request, res: Response) => {
       } catch (notifyError: any) {
         console.error(`[PAYMENT CONFIRM] Post-payment notify failed for booking ${booking._id}:`, notifyError?.message || notifyError);
       }
+      // Restore a Payment row a crashed promotion never wrote; an existing
+      // row is left as it is. The webhook repairs it too, so a failure here
+      // does not fail a payment that succeeded.
+      if (booking.payment.stripePaymentIntentId === paymentIntentId) {
+        try {
+          await upsertPaymentRow(booking, {}, {
+            status: booking.payment.status,
+            stripePaymentIntentId: paymentIntentId,
+            stripeChargeId: booking.payment.stripeChargeId,
+            authorizedAt: booking.payment.authorizedAt,
+            capturedAt: booking.payment.capturedAt,
+          });
+        } catch (rowError: any) {
+          console.error(`[PAYMENT CONFIRM] Payment row repair failed for booking ${booking._id}:`, rowError?.message || rowError);
+        }
+      }
       await recordDiscountSnapshotSafely(booking, paymentIntentId);
       return res.json({
         success: true,
@@ -1097,6 +1142,8 @@ export const confirmPayment = async (req: Request, res: Response) => {
         booking.milestonePayments = refreshed.milestonePayments;
       }
 
+      // Upsert: a promotion that stopped after creating the Booking left no
+      // Payment row, and this confirmation is then the one that settles it.
       await Payment.findOneAndUpdate(
         { booking: booking._id },
         buildPaymentUpsertBase(booking, {
@@ -1105,7 +1152,8 @@ export const confirmPayment = async (req: Request, res: Response) => {
           stripeChargeId: (paymentIntent.latest_charge as string) || booking.payment!.stripeChargeId,
           authorizedAt: booking.payment!.authorizedAt || new Date(),
           capturedAt: booking.payment!.capturedAt || new Date(),
-        })
+        }),
+        { upsert: true, new: true, setDefaultsOnInsert: true },
       );
 
       console.log(`✅ Payment authorized for booking ${booking._id}`);

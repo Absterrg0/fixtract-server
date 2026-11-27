@@ -22,12 +22,16 @@ import { buildPaymentUpsertBase } from './payment';
  * paid-booking effect once (booked status, points, discount-code usage,
  * referral, discount ledger, notifications), guarded by their own filters.
  *
- * Idempotent: the Booking reuses the session id, so a concurrent promotion
- * loses on the duplicate _id and reads the winner's booking.
+ * Idempotent: the Booking reuses the session id and is inserted in the same
+ * transaction that moves the session from open to promoted, so a concurrent
+ * promotion loses (closed session or duplicate _id) and reads the winner's
+ * booking.
  *
  * Double booking: availability is re-checked with a fresh engine run and the
  * calendar keys are reserved in the same transaction as the insert. A slot
- * that was taken meanwhile is refunded in full and no booking is created.
+ * that was taken meanwhile is refunded in full and no booking is created. The
+ * refund first moves the session from open to conflict, which excludes the
+ * promotion transaction, so a payment that backs a Booking is never refunded.
  */
 export type CheckoutPromotionResult =
   | { status: 'promoted'; booking: IBooking }
@@ -44,11 +48,17 @@ const sameInstant = (a: unknown, b: unknown) => {
   return new Date(a as any).getTime() === new Date(b as any).getTime();
 };
 
+const promotedFields = () => ({
+  status: 'promoted',
+  promotedAt: new Date(),
+  purgeAt: new Date(Date.now() + PROMOTED_RETENTION_MS),
+});
+
 const markPromoted = (checkoutId: Types.ObjectId | string) =>
-  CheckoutSession.updateOne(
-    { _id: checkoutId, status: 'open' },
-    { $set: { status: 'promoted', promotedAt: new Date(), purgeAt: new Date(Date.now() + PROMOTED_RETENTION_MS) } },
-  );
+  CheckoutSession.updateOne({ _id: checkoutId, status: 'open' }, { $set: promotedFields() });
+
+/** The promotion transaction found the session no longer open. */
+const CHECKOUT_CLOSED = 'CHECKOUT_CLOSED';
 
 /** A fresh engine run for the paid selection, or the reason it is gone. */
 const recheckAvailability = async (checkout: ICheckoutSession, bookingData: Record<string, any>): Promise<string | null> => {
@@ -106,6 +116,16 @@ const insertPromotedBooking = async (checkout: ICheckoutSession, bookingData: Re
       return await withAnonymizationWriteFence(
         [data.customer, data.professional].filter(Boolean),
         async (session) => {
+          // Close the session in the booking's transaction: this and the
+          // conflict refund (open -> conflict) exclude each other.
+          const closed = await CheckoutSession.updateOne(
+            { _id: checkout._id, status: 'open', 'payment.stripePaymentIntentId': checkout.payment?.stripePaymentIntentId },
+            { $set: promotedFields() },
+            session ? { session } : undefined,
+          );
+          if (closed.matchedCount !== 1) {
+            throw Object.assign(new Error('Checkout session is no longer open'), { code: CHECKOUT_CLOSED });
+          }
           await reserveBookingCalendar(calendarBooking, session);
           const [created] = await Booking.create([data], session ? { session } : undefined);
           return created;
@@ -119,22 +139,25 @@ const insertPromotedBooking = async (checkout: ICheckoutSession, bookingData: Re
   throw new Error('Checkout promotion failed unexpectedly');
 };
 
-const refundConflictedCheckout = async (
+const isAlreadyRefunded = (error: any) =>
+  error?.code === 'charge_already_refunded' || error?.raw?.code === 'charge_already_refunded';
+
+/**
+ * Close a paid checkout whose slot is gone and refund it. Every step is
+ * idempotent and recorded, so a retry after a crash finishes a missed refund:
+ * 1. open -> conflict (only while no promotion committed: the promotion
+ *    transaction needs the session open);
+ * 2. refund (Stripe idempotency key) and release the referral reservation;
+ * 3. refundedAt marks both done, so later signals do not call Stripe again.
+ * Returns the Booking when a concurrent promotion won instead.
+ */
+const settleConflictedCheckout = async (
   checkout: ICheckoutSession,
   paymentIntent: Stripe.PaymentIntent,
   reason: string,
-) => {
-  await stripe.refunds.create(
-    {
-      payment_intent: paymentIntent.id,
-      reason: 'requested_by_customer',
-      metadata: { checkoutSessionId: String(checkout._id), reason: 'checkout_slot_unavailable' },
-    },
-    { idempotencyKey: `checkout-conflict-refund:${paymentIntent.id}` },
-  );
-  await releaseReferralReservation(String(checkout._id), checkout.payment?.discount?.referralReservationToken);
-  await CheckoutSession.updateOne(
-    { _id: checkout._id, status: 'open' },
+): Promise<CheckoutPromotionResult> => {
+  const closed = await CheckoutSession.findOneAndUpdate(
+    { _id: checkout._id, status: 'open', 'payment.stripePaymentIntentId': paymentIntent.id },
     {
       $set: {
         status: 'conflict',
@@ -143,8 +166,37 @@ const refundConflictedCheckout = async (
         purgeAt: new Date(Date.now() + CONFLICT_RETENTION_MS),
       },
     },
+    { new: true },
   );
-  console.warn(`[CHECKOUT] ${checkout._id}: slot taken before payment ${paymentIntent.id} completed; refunded (${reason})`);
+  const current = closed || await CheckoutSession.findById(checkout._id);
+  if (!current || current.status !== 'conflict' || current.payment?.stripePaymentIntentId !== paymentIntent.id) {
+    // A concurrent promotion closed the session with its Booking.
+    const winner = await Booking.findById(checkout._id);
+    if (winner) return { status: 'promoted', booking: winner };
+    if (current?.status === 'open') return { status: 'superseded', currentIntentId: current.payment?.stripePaymentIntentId };
+    return { status: 'not_found' };
+  }
+  if (!current.refundedAt) {
+    try {
+      await stripe.refunds.create(
+        {
+          payment_intent: paymentIntent.id,
+          reason: 'requested_by_customer',
+          metadata: { checkoutSessionId: String(checkout._id), reason: 'checkout_slot_unavailable' },
+        },
+        { idempotencyKey: `checkout-conflict-refund:${paymentIntent.id}` },
+      );
+    } catch (error: any) {
+      if (!isAlreadyRefunded(error)) throw error;
+    }
+    await releaseReferralReservation(String(checkout._id), current.payment?.discount?.referralReservationToken);
+    await CheckoutSession.updateOne(
+      { _id: checkout._id, status: 'conflict', refundedAt: { $exists: false } },
+      { $set: { refundedAt: new Date() } },
+    );
+    console.warn(`[CHECKOUT] ${checkout._id}: slot taken before payment ${paymentIntent.id} completed; refunded (${current.conflictReason || reason})`);
+  }
+  return { status: 'conflict', message: CHECKOUT_SLOT_UNAVAILABLE_MESSAGE };
 };
 
 export const promoteCheckoutSession = async (
@@ -161,10 +213,14 @@ export const promoteCheckoutSession = async (
 
   const checkout = await CheckoutSession.findById(checkoutId);
   if (!checkout) return { status: 'not_found' };
+  const currentIntentId = checkout.payment?.stripePaymentIntentId;
   if (checkout.status === 'conflict') {
+    // A refund an earlier attempt could not finish is completed here.
+    if (currentIntentId === paymentIntent.id && !checkout.refundedAt) {
+      return settleConflictedCheckout(checkout, paymentIntent, checkout.conflictReason || 'unavailable');
+    }
     return { status: 'conflict', message: CHECKOUT_SLOT_UNAVAILABLE_MESSAGE };
   }
-  const currentIntentId = checkout.payment?.stripePaymentIntentId;
   if (currentIntentId !== paymentIntent.id) return { status: 'superseded', currentIntentId };
 
   const bookingData = { ...checkout.bookingData };
@@ -174,9 +230,18 @@ export const promoteCheckoutSession = async (
     try {
       booking = await insertPromotedBooking(checkout, bookingData);
     } catch (error: any) {
-      if (error?.code === 11000 && error.keyPattern?._id) {
+      if ((error?.code === 11000 && error.keyPattern?._id) || error?.code === CHECKOUT_CLOSED) {
+        // A concurrent attempt promoted it (or closed it as a conflict).
         const winner = await Booking.findById(checkoutId);
         if (winner) return { status: 'promoted', booking: winner };
+        const closed = await CheckoutSession.findById(checkoutId);
+        if (closed?.status === 'conflict') {
+          return settleConflictedCheckout(closed, paymentIntent, closed.conflictReason || 'unavailable');
+        }
+        if (closed?.status === 'open') {
+          return { status: 'superseded', currentIntentId: closed.payment?.stripePaymentIntentId };
+        }
+        return { status: 'not_found' };
       }
       if (error?.code === 'SLOT_UNAVAILABLE') {
         conflict = error?.message || 'Selected schedule is no longer available';
@@ -187,8 +252,10 @@ export const promoteCheckoutSession = async (
   }
 
   if (conflict || !booking) {
-    await refundConflictedCheckout(checkout, paymentIntent, conflict || 'unavailable');
-    return { status: 'conflict', message: CHECKOUT_SLOT_UNAVAILABLE_MESSAGE };
+    // The recheck does not exclude this checkout's own Booking, so a conflict
+    // can be the Booking a concurrent attempt just created: the settle step
+    // returns that Booking instead of refunding it.
+    return settleConflictedCheckout(checkout, paymentIntent, conflict || 'unavailable');
   }
 
   // The pending Payment row createPaymentIntent writes for a booking.
@@ -197,8 +264,6 @@ export const promoteCheckoutSession = async (
     buildPaymentUpsertBase(booking, checkout.paymentRow || {}),
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
-  await markPromoted(checkout._id);
-
   // Best effort: give the charge its booking number in the Stripe dashboard.
   try {
     await stripe.paymentIntents.update(paymentIntent.id, {

@@ -67,7 +67,8 @@ import { RECORDED_DISPUTE_FILTER, withoutPhantomBookingActivity } from '../../ut
 import { bookingWithCustomerProjectPrices } from '../../utils/customerPriceView';
 import { getCheckoutCommissionPercent } from '../../utils/checkoutCommission';
 import type { ICheckoutSchedule } from '../../models/checkoutSession';
-import { startCheckoutSession, populateCheckoutBooking, findOpenCheckoutForCustomer, abandonCheckoutSession } from '../../utils/checkoutSession';
+import { CHECKOUT_SLOT_UNAVAILABLE_MESSAGE } from '../Stripe/checkoutPromotion';
+import { startCheckoutSession, populateCheckoutBooking, findOpenCheckoutForCustomer, abandonCheckoutSession, CheckoutPaymentInProgressError } from '../../utils/checkoutSession';
 
 /** When VAT logic returns RFQ, customer may opt in to book at the standard rate instead. */
 const applyProceedAtStandardVatIfRequested = (
@@ -1240,10 +1241,22 @@ export const createBooking = async (req: Request, res: Response, next: NextFunct
           msg: "Please select a start date before continuing to payment",
         });
       }
-      const checkout = await startCheckoutSession({
-        bookingData,
-        schedule: checkoutSchedule,
-      });
+      let checkout;
+      try {
+        checkout = await startCheckoutSession({
+          bookingData,
+          schedule: checkoutSchedule,
+        });
+      } catch (startError) {
+        if (startError instanceof CheckoutPaymentInProgressError) {
+          return res.status(409).json({
+            success: false,
+            code: 'PAYMENT_IN_PROGRESS',
+            msg: startError.message,
+          });
+        }
+        throw startError;
+      }
       const preview = await populateCheckoutBooking(checkout);
       return res.status(201).json({
         success: true,
@@ -1359,11 +1372,14 @@ export const abandonCheckout = async (req: Request, res: Response, next: NextFun
         msg: 'Your payment is still being processed. Please wait a moment.',
       });
     }
+    // 'conflict': the payment had succeeded but its slot was taken, so it was
+    // refunded and no booking exists; the customer goes back to the wizard.
     return res.status(200).json({
       success: true,
       data: {
         outcome,
         ...(outcome === 'promoted' ? { redirectTo: `/bookings/${checkout._id}/payment/success` } : {}),
+        ...(outcome === 'conflict' ? { message: CHECKOUT_SLOT_UNAVAILABLE_MESSAGE } : {}),
       },
     });
   } catch (error) {

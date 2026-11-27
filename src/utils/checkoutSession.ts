@@ -89,6 +89,19 @@ export const persistCheckoutPayment = async (
   return result.matchedCount > 0;
 };
 
+/**
+ * A previous checkout of the customer still has a payment in progress, so a
+ * replacement could let both be paid. createBooking answers 409
+ * PAYMENT_IN_PROGRESS.
+ */
+export class CheckoutPaymentInProgressError extends Error {
+  readonly code = 'PAYMENT_IN_PROGRESS';
+  constructor() {
+    super('Your previous payment is still being processed. Please wait a moment before starting a new booking.');
+    this.name = 'CheckoutPaymentInProgressError';
+  }
+}
+
 export const startCheckoutSession = async (params: {
   bookingData: Record<string, any>;
   schedule: ICheckoutSchedule;
@@ -96,7 +109,10 @@ export const startCheckoutSession = async (params: {
   const { bookingData, schedule } = params;
   // One open checkout per customer: starting a new one (for example after the
   // payment page's back button) supersedes and cleans up the previous ones.
-  await abandonOpenCheckoutsForCustomer(bookingData.customer);
+  // Only once they are closed: a previous payment still in flight could
+  // otherwise book the schedule the customer is replacing.
+  const previous = await abandonOpenCheckoutsForCustomer(bookingData.customer);
+  if (previous.includes('in_flight')) throw new CheckoutPaymentInProgressError();
   const id = new Types.ObjectId();
   bookingData._id = id;
   const now = Date.now();
@@ -113,13 +129,14 @@ export const startCheckoutSession = async (params: {
   });
 };
 
-export type AbandonOutcome = 'abandoned' | 'promoted' | 'in_flight';
+export type AbandonOutcome = 'abandoned' | 'promoted' | 'conflict' | 'in_flight';
 
 /**
  * Close an unpaid session so it leaves nothing behind: cancel its intent,
  * release the referral benefit it reserved and delete it. An intent that
- * already succeeded is promoted instead; one that is still processing is left
- * for its webhook.
+ * already succeeded is promoted instead ('conflict' when its slot was taken
+ * and the payment refunded); one that is still processing is left for its
+ * webhook.
  */
 export const abandonCheckoutSession = async (checkout: ICheckoutSession): Promise<AbandonOutcome> => {
   const intentId: string | undefined = checkout.payment?.stripePaymentIntentId;
@@ -136,8 +153,14 @@ export const abandonCheckoutSession = async (checkout: ICheckoutSession): Promis
     }
     if (intent?.status === 'succeeded') {
       const { promoteCheckoutSession } = await import('../handlers/Stripe/checkoutPromotion');
-      await promoteCheckoutSession(String(checkout._id), intent);
-      return 'promoted';
+      const promotion = await promoteCheckoutSession(String(checkout._id), intent);
+      if (promotion.status === 'promoted') return 'promoted';
+      if (promotion.status === 'conflict') return 'conflict';
+      // Superseded meanwhile by a newer intent of the same session: that
+      // payment is still open.
+      if (promotion.status === 'superseded') return 'in_flight';
+      // not_found: the session is gone (closed by a concurrent signal).
+      return 'abandoned';
     }
     if (intent && intent.status !== 'canceled') return 'in_flight';
   }
@@ -150,27 +173,36 @@ export const abandonCheckoutSession = async (checkout: ICheckoutSession): Promis
   return 'abandoned';
 };
 
-export const abandonOpenCheckoutsForCustomer = async (customerId: unknown) => {
-  if (!customerId) return;
+/**
+ * Close every open checkout of a customer. A checkout that could not be
+ * closed (Stripe or database error) counts as in flight: its intent may still
+ * be payable.
+ */
+export const abandonOpenCheckoutsForCustomer = async (customerId: unknown): Promise<AbandonOutcome[]> => {
+  if (!customerId) return [];
   const open = await CheckoutSession.find({ customer: customerId, status: 'open' });
+  const outcomes: AbandonOutcome[] = [];
   for (const checkout of open) {
     try {
-      await abandonCheckoutSession(checkout);
+      outcomes.push(await abandonCheckoutSession(checkout));
     } catch (error: any) {
       console.error(`[CHECKOUT] Could not close checkout ${checkout._id}:`, error?.message || error);
+      outcomes.push('in_flight');
     }
   }
+  return outcomes;
 };
 
 /** Cron sweep: close every open session past its hold. */
 export const expireStaleCheckoutSessions = async (now = new Date(), limit = 200) => {
   const stale = await CheckoutSession.find({ status: 'open', expiresAt: { $lte: now } }).limit(limit);
-  const result = { checked: stale.length, abandoned: 0, promoted: 0, inFlight: 0, errors: [] as string[] };
+  const result = { checked: stale.length, abandoned: 0, promoted: 0, conflicts: 0, inFlight: 0, errors: [] as string[] };
   for (const checkout of stale) {
     try {
       const outcome = await abandonCheckoutSession(checkout);
       if (outcome === 'abandoned') result.abandoned += 1;
       else if (outcome === 'promoted') result.promoted += 1;
+      else if (outcome === 'conflict') result.conflicts += 1;
       else result.inFlight += 1;
     } catch (error: any) {
       result.errors.push(`${checkout._id}: ${error?.message || error}`);

@@ -46,6 +46,8 @@ export interface ICheckoutSession extends Document {
   promotedAt?: Date;
   conflictAt?: Date;
   conflictReason?: string;
+  /** Set once the conflict refund was issued and the referral released. */
+  refundedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -65,6 +67,7 @@ const CheckoutSessionSchema = new Schema<ICheckoutSession>(
     promotedAt: Date,
     conflictAt: Date,
     conflictReason: String,
+    refundedAt: Date,
   },
   { timestamps: true, minimize: false },
 );
