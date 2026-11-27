@@ -14,6 +14,7 @@ import {
 } from "../../utils/scheduleEngine";
 import { resolveAvailability } from "../../utils/availabilityHelpers";
 import { presignS3Url, uploadToS3, generateFileName } from "../../utils/s3Upload";
+import { signListInvoiceLinks } from "../../utils/bookingDetails/listInvoiceLinks";
 import { resolveSubprojectIndex } from "../../utils/bookingHelpers";
 import { sendCancellationRequestAdminEmail } from "../../utils/emailService";
 import { getProfessionalDisplayName } from "../../utils/displayName";
@@ -1625,9 +1626,15 @@ export const getMyBookings = async (req: Request, res: Response, next: NextFunct
       if (row && typeof row._id === 'string' && row._id) serviceCounts[row._id] = Number(row.count) || 0;
     }
 
+    // Invoice PDFs are private S3 objects: sign the links the table offers
+    // (FT2-13), as the detail endpoint does.
+    const signedBookings = await Promise.all(
+      visibleBookings.map((row) => signListInvoiceLinks(row, presignS3Url)),
+    );
+
     return res.status(200).json({
       success: true,
-      bookings: visibleBookings,
+      bookings: signedBookings,
       distinctServices: distinctServices.filter(Boolean).sort(),
       statusCounts,
       serviceCounts,
