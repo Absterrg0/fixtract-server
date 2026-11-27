@@ -38,10 +38,20 @@ export const sendEmailOTP = async (req: Request, res: Response, next: NextFuncti
     const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Update user with OTP and expiry
-    await User.findByIdAndUpdate(user._id, {
-      verificationCode: otp,
-      verificationCodeExpires: otpExpiry
-    });
+    // Only while the account still has this email unverified: a signup
+    // contact change that landed after the read must not receive a code
+    // that was mailed to the old address.
+    const stored = await User.findOneAndUpdate(
+      { _id: user._id, email: user.email, isEmailVerified: false },
+      { $set: { verificationCode: otp, verificationCodeExpires: otpExpiry } },
+      { new: true }
+    );
+    if (!stored) {
+      return res.status(409).json({
+        success: false,
+        message: "Your contact details changed meanwhile. Please reload and try again."
+      });
+    }
 
     // Send email
     const emailSent = await sendOTPEmail(email, otp, user.name);
@@ -209,10 +219,20 @@ export const resendEmailOTP = async (req: Request, res: Response, next: NextFunc
     const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Update user with new OTP and expiry
-    await User.findByIdAndUpdate(user._id, {
-      verificationCode: otp,
-      verificationCodeExpires: otpExpiry
-    });
+    // Only while the account still has this email unverified: a signup
+    // contact change that landed after the read must not receive a code
+    // that was mailed to the old address.
+    const stored = await User.findOneAndUpdate(
+      { _id: user._id, email: user.email, isEmailVerified: false },
+      { $set: { verificationCode: otp, verificationCodeExpires: otpExpiry } },
+      { new: true }
+    );
+    if (!stored) {
+      return res.status(409).json({
+        success: false,
+        message: "Your contact details changed meanwhile. Please reload and try again."
+      });
+    }
 
     // Send new email
     const emailSent = await sendOTPEmail(email, otp, user.name);
